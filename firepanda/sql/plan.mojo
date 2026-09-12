@@ -334,9 +334,37 @@ The cross join goes above the `FROM` and below everything else, so a subquery
 written in a `WHERE` is always reachable, and one written in a select list is
 reachable when the query does not aggregate. Above an aggregate it is not, since
 an aggregate hands up its keys and its folds rather than everything it read, and
-that is a refusal with the reason in it rather than a binding error. A
-correlated one is refused too, by the scope it lowers against, which is the same
-refusal a correlated `IN` gets and the same dependent join behind it.
+that is a refusal with the reason in it rather than a binding error.
+
+### A correlated subquery that folds is a group under a left join
+
+`SELECT shop, floor FROM shops WHERE floor < (SELECT sum(qty) FROM sales WHERE
+sales.shop = shops.shop)` reads the query around it, so as written it is a
+question asked once per outer row, and once per outer row is the difference
+between a query that finishes and one that does not. The answer for every outer
+row at once is the same fold grouped by the columns the correlation compares,
+joined onto the outer query on those columns, so the subquery runs once however
+many rows the outer query has.
+
+That is the same rewrite the correlated `EXISTS` gets, with an aggregate in the
+middle and a left join at the top instead of a semi join. The subquery's `FROM`
+is lowered into the scope the outer query is using, which puts both sides in
+reach at once, and its `WHERE` is split the way a join condition is: a part with
+one side in and one side out is a key pair and becomes a group key, a part that
+reads the subquery's own tables and nothing else is a filter under the
+aggregate, and a part that reads the outer query any other way is refused.
+
+The join is a left one because an outer row whose group has no rows in it still
+comes out, with a null where the subquery's value goes, and null is what a fold
+over nothing answers in SQL. That is exactly true of a sum, a minimum, a maximum
+and an average, and exactly false of a count, which answers zero. So a count is
+refused here rather than answered wrong. That refusal is the count bug, named
+after the wrong answer decorrelation gives when nobody checks for it, and it
+goes away when the plan can say `coalesce`.
+
+Correlation written anywhere but a `WHERE`, or written as anything but an
+equality, is still refused. Both are the dependent join, which is a pass over
+the plan rather than a rewrite at the point the subquery is lowered.
 
 ### A `CASE` is a chain of conditionals, and the simple form is the same chain
 
@@ -3766,6 +3794,181 @@ def _may_pair(ast: Ast, at: UInt32) raises -> Bool:
     return False
 
 
+def _from_names(ast: Ast, at: UInt32, mut names: List[String]) raises:
+    """The names one table reference puts in reach.
+
+    Read off what is written rather than off a scope, because the question it
+    answers is asked before anything under it has been lowered. An alias wins
+    over the name it is written on, which is SQL's rule and what `_table` and
+    `_subquery` both do, and a subquery with no alias on it puts nothing in
+    reach at all.
+
+    Args:
+        ast: The arenas.
+        at: The table reference.
+        names: The list to add to.
+
+    Raises:
+        If a name part is not there to read.
+    """
+    if at == NO_NODE:
+        return
+    var source = ast.refs[Int(at)]
+    if source.kind == REF_PARENS:
+        _from_names(ast, source.a, names)
+        return
+    if source.kind == REF_JOIN or source.kind == REF_JOIN_USING:
+        _from_names(ast, source.a, names)
+        _from_names(ast, source.b, names)
+        return
+    if ast.length(source.payload) >= 1:
+        names.append(String(ast.text(ast.at(source.payload, 0))))
+        return
+    if source.kind != REF_TABLE:
+        # A subquery or a table function with no alias on it has no name for a
+        # column to be written in front of, so there is nothing to add.
+        return
+    var parts = ast.length(source.children)
+    if parts == 0:
+        return
+    # The last part, because a table written `main.t` is called `t` and the
+    # part in front of it is the schema. Nothing here resolves the schema, and
+    # this is only deciding whether a qualifier is one of the names below.
+    names.append(String(ast.text(ast.at(source.children, parts - 1))))
+
+
+def _qualifiers(ast: Ast, at: UInt32, mut found: List[String]) raises:
+    """Collects the name written in front of every qualified column.
+
+    The same walk `_taken` does, and it stops at a subquery for the same reason:
+    what is written inside one is that query's business and is looked at when
+    that query is lowered.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the names are written.
+
+    Raises:
+        If a name part is not there to read.
+    """
+    if at == NO_NODE:
+        return
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_COLUMN:
+        if ast.length(node.children) == 2:
+            found.append(String(ast.text(ast.at(node.children, 0))))
+        return
+    if (
+        node.kind == EXPR_SUBQUERY
+        or node.kind == EXPR_IN_SUBQUERY
+        or node.kind == EXPR_EXISTS
+        or node.kind == EXPR_QUANTIFIED
+    ):
+        return
+    if node.kind == EXPR_FUNCTION:
+        if node.b != NO_NODE:
+            var window = ast.exprs[Int(node.b)]
+            for key in ast.items(window.children):
+                _qualifiers(ast, key, found)
+        for arg in ast.items(node.children):
+            _qualifiers(ast, arg, found)
+        return
+    if node.kind == EXPR_BINARY:
+        _qualifiers(ast, node.a, found)
+        _qualifiers(ast, node.b, found)
+        return
+    if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
+        _qualifiers(ast, node.a, found)
+        return
+    if node.kind == EXPR_CASE:
+        _qualifiers(ast, node.a, found)
+        _qualifiers(ast, node.b, found)
+        for arm in ast.items(node.children):
+            _qualifiers(ast, arm, found)
+        return
+    if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
+        for part in ast.items(node.children):
+            _qualifiers(ast, part, found)
+        _qualifiers(ast, node.a, found)
+
+
+def _reaches_out(ast: Ast, at: UInt32) raises -> Bool:
+    """Whether a subquery written as a value reads the query around it.
+
+    Read before anything is lowered, the same way `_may_pair` is read, because
+    the choice it decides is which of two shapes to build and the shape has to
+    be picked before the `FROM` under it exists.
+
+    What counts as reading out is a name written in front of a column that the
+    subquery's own `FROM` did not put in reach. That is the only way to write
+    correlation that this lowers, and it is the only way the name can be read
+    without ambiguity anyway: a bare column name that both queries have is the
+    inner one in SQL, so an outer column written bare is a column the subquery
+    already has and means the subquery's own.
+
+    Only the `WHERE` is looked at. Correlation in a select list or a `HAVING` is
+    the dependent join rather than a join on keys, and both are refused where
+    they lower.
+
+    Args:
+        ast: The arenas.
+        at: The subquery's statement.
+
+    Returns:
+        True if it reads a name its own `FROM` does not have.
+
+    Raises:
+        If a name part is not there to read.
+    """
+    var top = ast.stmts[Int(at)]
+    if top.kind != STMT_SELECT:
+        return False
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        return False
+    var clauses = body.children
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction == NO_NODE:
+        return False
+
+    var inside = List[String]()
+    for one in ast.items(ast.slot(clauses, CLAUSE_FROM)):
+        _from_names(ast, one, inside)
+
+    var written = List[String]()
+    _qualifiers(ast, restriction, written)
+    for i in range(len(written)):
+        var name = fold(written[i])
+        var mine = False
+        for j in range(len(inside)):
+            if fold(inside[j]) == name:
+                mine = True
+                break
+        if not mine:
+            return True
+    return False
+
+
+def _counting(exprs: Expressions, at: Int) -> Bool:
+    """Whether a fold answers a number on a group with no rows in it.
+
+    A count does and every other fold here does not, which is the whole of the
+    count bug and the reason this is asked at all. `count` over nothing is zero
+    and `count(DISTINCT x)` over nothing is zero, where a sum, a minimum and an
+    average over nothing are all null.
+
+    Args:
+        exprs: The arena.
+        at: The lowered aggregate.
+
+    Returns:
+        True for a count and a distinct count.
+    """
+    var op = AggKind(UInt8(exprs.nodes[at].op))
+    return op == AggKind.COUNT or op == AggKind.SIZE or op == AggKind.NUNIQUE
+
+
 def _scalar_join(
     ast: Ast,
     at: UInt32,
@@ -3878,6 +4081,261 @@ def _scalar_join(
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
     return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
+
+
+def _folded_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    mut scope: _Scope,
+    left: _From,
+) raises -> Int:
+    """Puts a correlated subquery that folds under the query, decorrelated.
+
+    `SELECT shop, qty FROM stock s WHERE qty > (SELECT avg(qty) FROM sales WHERE
+    shop = s.shop)` asks the subquery once per outer row if it is read as
+    written, and once per outer row is the difference between a query that
+    finishes and one that does not. The answer for every outer row at once is
+    the same fold grouped by the columns the correlation compares, joined onto
+    the outer query on those columns. So the subquery becomes one aggregate and
+    one join however many rows the outer query has.
+
+    That is the same rewrite `_exists_join` does, with the aggregate in the
+    middle and a left join rather than a semi join at the top. The subquery's
+    `FROM` is lowered into the scope the outer query is using, which puts both
+    sides in reach at once, and its `WHERE` is split the way a join condition
+    is. A part with one side out and one side in is a key pair and becomes a
+    group key. A part that reads the subquery's own tables and nothing else is
+    a filter under the aggregate, where it runs once rather than once per outer
+    row. A part that reads the outer query any other way is refused, since it is
+    correlation the key pairs cannot carry.
+
+    The join is a left one because an outer row whose group has no rows in it
+    still comes out, with a null where the subquery's value goes, and null is
+    what SQL says a fold over nothing answers. That is exactly true of a sum, a
+    minimum, a maximum and an average and exactly false of a count, which
+    answers zero. So a count is refused here rather than answered wrong, and
+    that refusal is the count bug named after the wrong answer it gives.
+
+    The aggregate's own columns are renamed on the way out, both the keys and
+    the value, because the query around it may already have a column called
+    anything the subquery wrote. Nothing reads the new names but the join above
+    and the expression this was taken out of, which is told its name here.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        scope: What the outer `FROM` put in reach, added to and put back.
+        left: What the join keeps every row of.
+
+    Returns:
+        The join, which produces what the left side produced, the group keys
+        and the one column the subquery answered.
+
+    Raises:
+        If the subquery is a shape this does not decorrelate, if it does not
+        fold, if it folds a count, or if it reads the outer query any way but
+        through equalities.
+    """
+    var node = ast.exprs[Int(at)]
+    var top = ast.stmts[Int(node.a)]
+    if top.kind != STMT_SELECT:
+        raise Error("a subquery over a statement that is not a SELECT")
+    if top.b != NO_NODE:
+        raise Error(
+            "firepanda decorrelates a subquery that answers one value per outer"
+            " row, and an ORDER BY or a LIMIT on one changes which rows it"
+            " folds rather than being a thing the group under it can carry"
+        )
+    if len(read_ctes(ast, node.a)) != 0:
+        raise Error(
+            "firepanda does not lower a WITH written inside a correlated"
+            " subquery yet, which binds a name for that subquery alone"
+        )
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        raise Error(
+            "firepanda decorrelates a correlated subquery over one SELECT block"
+            " so far, and a VALUES or a set operation inside one is a different"
+            " node"
+        )
+
+    var clauses = body.children
+    if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
+        raise Error("firepanda does not lower a WINDOW clause yet")
+    if (
+        ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0
+        or ast.slot(clauses, CLAUSE_HAVING) != NO_NODE
+    ):
+        raise Error(
+            "firepanda decorrelates a correlated subquery whose fold has no"
+            " GROUP BY written on it, because the group this builds is the"
+            " correlation and a second one beside it answers a row per group"
+            " rather than the one value the query around it reads"
+        )
+
+    var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+    if len(items) != 1:
+        raise Error(
+            String(
+                "a subquery written as a value that hands out ",
+                len(items),
+                " columns, and a value is one column",
+            )
+        )
+    var item = ast.stmts[Int(items[0])]
+    if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+        raise Error(
+            "a star in a subquery written as a value, and a value is one column"
+        )
+    if not _has_aggregate(ast, item.a):
+        raise Error(
+            "firepanda decorrelates a correlated subquery that folds, because a"
+            " fold answers one value per group whatever is in the table and"
+            " anything else answers a row per row, which is the check that"
+            " there is exactly one of them and that is a node nobody has"
+            " written"
+        )
+
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    if from_clause == NO_NODE:
+        raise Error(
+            "a correlated subquery over a SELECT with no FROM, which has"
+            " nothing to read the outer column against"
+        )
+
+    # Lowered into the caller's scope rather than a scope of its own, which is
+    # the whole difference between this and the uncorrelated case: a condition
+    # that reads both sides can only be written where both sides are in reach.
+    var reach = len(scope.names)
+    var merged = len(scope.merged)
+    var right = _from(ast, from_clause, catalog, plan, sources, scope, ctes)
+
+    var conjuncts = List[UInt32]()
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction != NO_NODE:
+        _conjuncts(ast, restriction, conjuncts)
+
+    var outer = List[Int]()
+    var inner = List[Int]()
+    var under = List[Int]()
+    var split = _Walk()
+    for i in range(len(conjuncts)):
+        var one = ast.exprs[Int(conjuncts[i])]
+        if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
+            var a = _lower_expr(ast, one.a, plan, split, scope, False)
+            var b = _lower_expr(ast, one.b, plan, split, scope, False)
+            var first = _side(plan, a, left, right)
+            var second = _side(plan, b, left, right)
+            if first == _LEFT and second == _RIGHT:
+                outer.append(a)
+                inner.append(b)
+                continue
+            if first == _RIGHT and second == _LEFT:
+                outer.append(b)
+                inner.append(a)
+                continue
+            if (
+                first != _LEFT
+                and first != _BOTH
+                and second != _LEFT
+                and (second != _BOTH)
+            ):
+                under.append(plan.exprs.binary(BinaryOp.EQ, a, b))
+                continue
+        else:
+            var whole = _lower_expr(
+                ast, conjuncts[i], plan, split, scope, False
+            )
+            var reads = _side(plan, whole, left, right)
+            if reads != _LEFT and reads != _BOTH:
+                under.append(whole)
+                continue
+        raise Error(
+            "firepanda decorrelates a subquery that reads the query around it"
+            " through equalities and nothing else, and this part of its"
+            " condition reads it another way, which is the dependent join that"
+            " a decorrelation pass removes rather than one this rewrite can"
+        )
+
+    if len(outer) == 0:
+        raise Error(
+            "a subquery written as a value that reads no column of the query"
+            " around it through an equality, so there is nothing for the fold"
+            " to be grouped by and the value is the same one for every row"
+        )
+
+    # Under the aggregate rather than over the join. A condition that reads the
+    # subquery alone is the same answer wherever it is tested, and tested here
+    # it runs once over that table instead of once per pairing.
+    for i in range(len(under)):
+        right.at = plan.filter(right.at, under[i])
+
+    # Lowered against the shared scope with a walk of its own, so that the fold
+    # it finds is this aggregate's and not the outer query's. The expression
+    # that comes back reads the fold's output column, which is what lets
+    # `avg(qty) + 1` be a projection over the aggregate rather than a refusal.
+    var fold_walk = _Walk()
+    var value = _lower_expr(ast, item.a, plan, fold_walk, scope, True)
+    for i in range(len(fold_walk.aggs)):
+        if _counting(plan.exprs, fold_walk.aggs[i]):
+            raise Error(
+                "firepanda does not decorrelate a correlated subquery that"
+                " counts yet. A left join answers null for an outer row whose"
+                " group has no rows in it, which is what a sum or an average"
+                " over nothing answers and is not what a count answers, and a"
+                " count of nothing is zero"
+            )
+
+    # A group key keeps the name of the column it reads, because the physical
+    # group by carries the input field through and refuses a key the plan
+    # renamed. So the renaming is the projection above rather than the
+    # aggregate, and a key that is not a plain column has no name of its own to
+    # keep and takes the invented one here.
+    var by = List[String](capacity=len(inner))
+    var taken = List[String](capacity=len(inner))
+    for i in range(len(inner)):
+        taken.append(String("__by_", i))
+        if plan.exprs.nodes[inner[i]].kind == ExprKind.COLUMN:
+            by.append(String(plan.exprs.nodes[inner[i]].name))
+        else:
+            by.append(String("__by_", i))
+    var produced = by.copy()
+    for i in range(len(fold_walk.agg_names)):
+        produced.append(String(fold_walk.agg_names[i]))
+    var folds = fold_walk.aggs.copy()
+    var folded = plan.aggregate(right.at, inner^, folds^, produced^)
+
+    var called = String("__sub_", len(walk.scalars))
+    var outputs = List[Int](capacity=len(by) + 1)
+    var names = List[String](capacity=len(by) + 1)
+    for i in range(len(by)):
+        outputs.append(plan.exprs.column(String(by[i])))
+        names.append(String(taken[i]))
+    outputs.append(value)
+    names.append(String(called))
+    var one_each = plan.project(folded, outputs^, names^)
+
+    var against = List[Int](capacity=len(taken))
+    for i in range(len(taken)):
+        against.append(plan.exprs.column(String(taken[i])))
+
+    # Back out of reach, for the reason a semi join's right side goes out of
+    # reach: nothing the join hands out is called what the subquery called it.
+    scope.hide(reach, merged)
+    walk.scalars.append(at)
+    walk.scalar_names.append(called^)
+    return plan.join(left.at, one_each, outer^, against^, JoinKind.LEFT)
 
 
 def _mark_join(
@@ -4620,6 +5078,23 @@ def _block(
         for one in items:
             _scalars(ast, ast.stmts[Int(one)].a, found)
     for i in range(len(found)):
+        # A correlated one is a different shape and not a different scope. It
+        # goes to the aggregate and the left join, which answer it for every
+        # outer row at once, and an uncorrelated one goes to the cross join.
+        if _reaches_out(ast, ast.exprs[Int(found[i])].a):
+            var source = _From(at, Schema(copy=schema), origin.copy())
+            at = _folded_join(
+                ast,
+                found[i],
+                catalog,
+                plan,
+                sources,
+                ctes,
+                walk,
+                scope,
+                source^,
+            )
+            continue
         at = _scalar_join(ast, found[i], catalog, plan, sources, ctes, walk, at)
 
     # An `IN` over a subquery goes the same way, as a mark join rather than a
