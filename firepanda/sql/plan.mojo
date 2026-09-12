@@ -27,6 +27,16 @@ alias from the select list and `ORDER BY` can, and why `HAVING` may name an
 aggregate and `WHERE` may not. Writing the lowering in this order is what makes
 those rules fall out rather than be enforced.
 
+The `GROUP BY` is the one clause that gets an alias anyway. It sits under the
+projection, so by the order above it should no more see a select list name than
+the `WHERE` does, and DuckDB and Postgres both let it, so it is a courtesy the
+dialect extends rather than something that falls out. `_aliased_key` is where it
+is extended and the rule is one line: the name goes to the table first and to
+the select list second. What makes it work rather than be a second lowering of
+the same clause is that the alias is the name the key is written into the
+aggregate under, so the projection above reads a column back instead of
+computing the expression again over columns that are no longer there.
+
 ### A query with no table still reads one
 
 `SELECT 1` has no `FROM` and a plan has no node that produces a row out of
@@ -1155,6 +1165,36 @@ struct _Scope(Movable):
                     if self.columns[i][j] == column:
                         return True
                 return False
+        return False
+
+    def holds(self, name: StringSlice) -> Bool:
+        """Whether anything in reach has a column of a given name.
+
+        What a `GROUP BY` asks before it looks at the select list, because the
+        rule is that a table column wins over an alias spelled the same way and
+        the only way to honour that is to ask the table first. Folded on both
+        sides, for the reason `spelled` gives: the query's name arrives folded
+        and a schema keeps whatever spelling it was read with.
+
+        A scan answers out of its spellings and a derived table out of the
+        columns it hands over, which is the same split `find` and `produces`
+        work either side of.
+
+        Args:
+            name: The column name as the query wrote it.
+
+        Returns:
+            True when a relation in reach has a column that folds onto it.
+        """
+        var key = fold(name)
+        for i in range(len(self.spellings)):
+            for j in range(len(self.spellings[i])):
+                if fold(self.spellings[i][j]) == key:
+                    return True
+        for i in range(len(self.columns)):
+            for j in range(len(self.columns[i])):
+                if fold(self.columns[i][j]) == key:
+                    return True
         return False
 
     def hide(mut self, names: Int, merged: Int):
@@ -5638,6 +5678,12 @@ def _block(
 
     var keys = List[Int]()
     var key_names = List[String]()
+    # Which key each select list item reads back instead of being lowered,
+    # which is one for an item a GROUP BY named by its alias and -1 for every
+    # other one. The expression went into the aggregate as that key, so the
+    # projection above reads the column rather than computing the same thing a
+    # second time over columns the aggregate no longer hands out.
+    var reads = List[Int](length=len(items), fill=-1)
     if grouped:
         for entry in ast.items(group_clause):
             var group = ast.stmts[Int(entry)]
@@ -5667,6 +5713,38 @@ def _block(
                     " GROUP BY ALL so far, and GROUPING SETS, CUBE and ROLLUP"
                     " are masks on one aggregate the plan cannot carry yet"
                 )
+            var named = _aliased_key(ast, group.a, items, scope)
+            if named >= 0:
+                var item = ast.stmts[Int(items[named])]
+                if _has_aggregate(ast, item.a):
+                    raise Error(
+                        String(
+                            "a GROUP BY names '",
+                            ast.text(item.payload),
+                            (
+                                "', which the select list wrote for a fold, and"
+                                " a fold is computed over the groups rather"
+                                " than being one of them"
+                            ),
+                        )
+                    )
+                # The key goes in under the name the select list gave it, which
+                # is what the projection above reads it back by, and it goes in
+                # once however many times the GROUP BY names it. A key that is
+                # a plain column keeps the column's own name instead, because a
+                # physical group by hands the key field through as it found it
+                # and has nowhere to rename one, and the projection asks for
+                # whichever of the two this decided.
+                if reads[named] < 0:
+                    var name = String(ast.text(item.payload))
+                    if ast.exprs[Int(item.a)].kind == EXPR_COLUMN:
+                        name = _name_of(ast, item.a, len(key_names), scope)
+                    keys.append(
+                        _lower_expr(ast, item.a, plan, walk, scope, False)
+                    )
+                    key_names.append(name^)
+                    reads[named] = len(keys) - 1
+                continue
             keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
             key_names.append(_name_of(ast, group.a, len(key_names), scope))
 
@@ -5694,6 +5772,10 @@ def _block(
                 outputs,
                 names,
             )
+            continue
+        if reads[i] >= 0:
+            outputs.append(plan.exprs.column(key_names[reads[i]].copy()))
+            names.append(ast.text(item.payload))
             continue
         outputs.append(_lower_expr(ast, item.a, plan, walk, scope, grouped))
         if item.payload != NO_NODE:
@@ -5853,6 +5935,65 @@ def _name_of(ast: Ast, at: UInt32, place: Int, scope: _Scope) raises -> String:
                 return scope.spelled_at(found, written)
         return scope.spelled(written)
     return String("__expr_", place)
+
+
+def _aliased_key(
+    ast: Ast, at: UInt32, items: List[UInt32], scope: _Scope
+) raises -> Int:
+    """Which select list item a `GROUP BY` entry is the alias of, if any.
+
+    `GROUP BY k` where the select list wrote `f(x) AS k` groups by `f(x)`, which
+    is what DuckDB and Postgres both do and is the same courtesy the `ORDER BY`
+    already gets here. The lookup goes to the table first and to the select list
+    second, so a table column called `k` wins and nothing that binds today binds
+    to something else after this.
+
+    Only a bare name can be one. A qualified name names a relation and the
+    relation is what it is looked up in, and anything that is not a name is not
+    an alias of anything, so both are left to be lowered as they were written.
+
+    Args:
+        ast: The arenas.
+        at: The `GROUP BY` entry.
+        items: The select list.
+        scope: What the FROM put in reach, which is asked first.
+
+    Returns:
+        The position in the select list, or -1 when the entry is not an alias
+        of anything, which includes every entry that binds today.
+
+    Raises:
+        If two items are written with the same alias and the entry names it,
+        since then the query does not say which of the two it means.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind != EXPR_COLUMN or ast.length(node.children) != 1:
+        return -1
+    var bare = ast.text(ast.at(node.children, 0))
+    if scope.holds(bare):
+        return -1
+    var key = fold(bare)
+    var found = -1
+    for i in range(len(items)):
+        var item = ast.stmts[Int(items[i])]
+        if item.payload == NO_NODE:
+            continue
+        if fold(ast.text(item.payload)) != key:
+            continue
+        if found >= 0:
+            raise Error(
+                String(
+                    "'",
+                    bare,
+                    (
+                        "' is the alias of two columns of this select list, so"
+                        " a GROUP BY naming it does not say which of them is"
+                        " the key"
+                    ),
+                )
+            )
+        found = i
+    return found
 
 
 def _group_by_all(
