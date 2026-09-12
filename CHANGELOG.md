@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.83] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The ClickBench fix is the one to read. A bare column name is folded down by the tokenizer, which is the dialect's rule, and nothing folded it back, so a frame whose columns are spelled the way a parquet file spells them could only be queried by quoting every name. Through the SQL front end, 1 of the 43 published ClickBench statements ran before it and 25 run after. The rest is parity work on the frame, where `where`, `mask` and `clip` arrive together because they are the same pick asked three ways, and one more thing the SQL layer used to refuse by name.
+
 ### Added: DISTINCT ON
 
 `SELECT DISTINCT ON (shop) shop, qty FROM sales` keeps one whole row per shop, and the row it keeps is the first one the input handed over. It was refused by name, and the refusal said why: a plain `SELECT DISTINCT` lowers to a group by with every column as a key, and there every row of a group is the same row, so which one survives cannot be seen. Here it can, and a group by cannot answer it, because it carries its keys in front of what it reduced, which moves the columns the plan numbered, and because its first skips over a null.
@@ -6393,7 +6399,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.82...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.83...HEAD
+[0.6.83]: https://github.com/tamnd/firepanda/releases/tag/v0.6.83
 [0.6.82]: https://github.com/tamnd/firepanda/releases/tag/v0.6.82
 [0.6.81]: https://github.com/tamnd/firepanda/releases/tag/v0.6.81
 [0.6.80]: https://github.com/tamnd/firepanda/releases/tag/v0.6.80
