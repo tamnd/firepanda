@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a release that hits an index rate limit now says when to try again
+
+An index answers an upload with 429 when too many versions have gone out in too short a time. Until now that was a red job in a workflow nobody was watching, and the tag sat published nowhere with nothing written down about why.
+
+The Release workflow now reads its own failed logs, and when the failure was a rate limit it opens an issue holding the tag, the run that hit it, and the time the window reopens. A new Publish watch workflow reads that time once an hour and comments on the issue when it has passed, then takes the blocked label off so it does not say it twice. It does not republish by itself. Pushing a version to an index is the one thing here that cannot be taken back, so the last step stays a person deciding to take it.
+
 ### Fixed: a query that kept no rows answered a frame nothing could read
 
 `run("SELECT qty FROM sales WHERE qty = 999", catalog)` came back with a frame of no rows, which is right, and then `out[0]` raised `column has 0 chunks, not one; call combine() first`. The sink builds the empty answer from the schema, and a column built that way held no chunks at all, while `DataFrame.__getitem__` is `ChunkedArray.only`, which wants exactly one. So the frame was one nothing could read a column out of, and a predicate that happened to match nothing was a raise rather than an empty answer.
