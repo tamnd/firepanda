@@ -174,6 +174,7 @@ from firepanda.kernel import (
     text_byte_length,
     text_extreme_row,
     text_starts_with,
+    text_pick,
     text_substring,
 )
 from firepanda.kernel.chars import text_character_length
@@ -188,6 +189,7 @@ from firepanda.kernel.scalar import (
     filter_scalar,
     min_scalar,
     sum_scalar,
+    text_pick_scalar,
 )
 from firepanda.version import version
 
@@ -1267,6 +1269,41 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/pick_nulls", "rows", rows, pick_with_nulls)
+
+    # The text form, which is a different kernel and a different cost. The three
+    # above write into an output whose size they knew before they started; this
+    # one has to count the payload first and then fill it, so it is two passes
+    # over the views and a memcpy per wide element on top. ClickBench q39 is the
+    # query that asks for it, and the shape here is q39's: a wide text column
+    # against a column of empty strings, the answer being a group by key.
+    #
+    # `kernel/pick_text_inline` is the same call over elements that fit inside
+    # their own views, where nothing is copied and the counting pass is skipped
+    # outright. The gap between the two rows is what the payload costs.
+    var pick_wide = _string_column(rows, 40, True)
+    var pick_empty = _string_column(rows, 0, False)
+    var pick_short = _string_column(rows, 8, True)
+    var pick_short_other = _string_column(rows, 8, False)
+
+    def pick_text() raises {imm mask, imm pick_wide, imm pick_empty}:
+        var out = text_pick(mask, pick_wide, pick_empty)
+        keep(out)
+
+    harness.record("kernel/pick_text", "rows", rows, pick_text)
+
+    def pick_text_inline() raises {
+        imm mask, imm pick_short, imm pick_short_other
+    }:
+        var out = text_pick(mask, pick_short, pick_short_other)
+        keep(out)
+
+    harness.record("kernel/pick_text_inline", "rows", rows, pick_text_inline)
+
+    def pick_text_twin() raises {imm mask, imm pick_wide, imm pick_empty}:
+        var out = text_pick_scalar(mask, pick_wide, pick_empty)
+        keep(out)
+
+    harness.record("kernel/pick_text_twin", "rows", rows, pick_text_twin)
 
 
 def bench_sort(mut harness: Harness) raises:

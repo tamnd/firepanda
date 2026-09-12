@@ -36,6 +36,15 @@ condition bytes they are packed out of are still in that core's cache. That is
 the same argument `kernel/mask.mojo` makes for repairing in the worker rather
 than in a pass of its own.
 
+Text is the one shape that does not fit any of the above. A text output's
+payload is a mixture of bytes from both sides and the place each element goes is
+a running total of the lengths in front of it, so there is nothing to select in a
+register and nothing anybody can size up front. `text_pick` is therefore two
+passes rather than one, counting each morsel's share of the payload and then
+letting each fill its own stretch of it, which is the shape `text_substring`
+uses and documents. It follows the same null rule as the rest of the file,
+because it reads the same condition bytes.
+
 The last word of a column whose length is not a multiple of sixty four hangs over
 the end, and the bits out there have to be left clear, because `count_ones` walks
 whole words and a bit set past the end is a row that does not exist counted as
@@ -44,14 +53,17 @@ side's cleared tail; `pick_const` does not, since the false side is a constant
 and is always valid. Both mask it anyway.
 """
 
+from std.memory import unsafe_memcpy
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.buffer.buffer import Buffer
 from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strview import VIEW_SIZE, StringView, make_long_at
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.exec import parallel_morsels
+from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.dictionary import (
     check_same_categories,
     dictionary_codes,
@@ -305,13 +317,30 @@ def text_pick(
 ) raises -> StringArray:
     """Returns a text column taking each row from `a` or from `b`.
 
-    Built through a builder on one core, unlike the three above. A text output is
-    a payload whose length nobody knows until the rows have been chosen, and the
-    two pass shape `substr.mojo` uses to get around that, size every morsel's
-    share first and then let each fill its own stretch, is the right answer here
-    too. It is not done yet because no query in front of this needs it, and the
-    place to spend that work first is `filter` and `take`, which run on every
-    query rather than on none of them.
+    The three kernels above write into an output whose size they knew before
+    they started, so each of them is one pass and nothing is shared. A text
+    output is not that. Its payload is a mixture of bytes from both sides and
+    the place each element goes is a running total of the lengths in front of
+    it, so nobody knows where to write until somebody has counted.
+
+    So this is the two pass shape `text_substring` uses. A first pass reads the
+    views of the chosen side and adds up how many payload bytes each morsel
+    needs, an exclusive prefix over one number per morsel turns those into the
+    offset each morsel writes at, and then every morsel fills its own stretch
+    of the payload and its own run of the views with nothing shared and nothing
+    locked. The counting pass follows no pointer into either payload, because
+    an element's length is in its view, so it is a read of sixteen bytes a row
+    in order.
+
+    An element that fits inside its view carries its own bytes, so it is copied
+    across whole and costs the payload nothing. On a column of short text that
+    is every row and the payload comes out empty, which is also why a pair of
+    sides with no payload between them skips the counting pass outright.
+
+    The output's validity is the condition's choice of the two sides' bits, and
+    it is built a word at a time inside the worker that just wrote those rows.
+    Morsel boundaries are multiples of sixty four, so no two workers ever write
+    the same word.
 
     Args:
         cond: The condition. A null in it takes the false side.
@@ -322,7 +351,8 @@ def text_pick(
         A text column of the same length.
 
     Raises:
-        Error: If the three are not all the same length.
+        Error: If the three are not all the same length, or what the morsel
+            runtime raises.
     """
     var n = len(cond)
     if len(a) != n or len(b) != n:
@@ -335,20 +365,104 @@ def text_pick(
             + String(len(b))
         )
 
-    var builder = StringBuilder(capacity=n)
+    var views = Buffer(overwritten=n * VIEW_SIZE)
+    var built = Bitmap(n, all_valid=False)
+    if n == 0:
+        return StringArray(views^, Buffer(0), built^, 0)
+
     var src = cond.unsafe_ptr()
-    for i in range(n):
-        # The values buffer and not the validity, which is the null rule.
-        if src.unsafe_offset(i).unsafe_load():
-            if a.is_valid(i):
-                builder.append(a.unsafe_bytes(i))
+    var a_views = a.views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var b_views = b.views.unsafe_ptr().unsafe_bitcast[StringView]()
+
+    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    # One entry per morsel, holding that morsel's payload bytes on the way in
+    # and the offset it writes them at on the way out.
+    var bases = Array[DType.int64](morsels)
+    var payload_bytes = 0
+
+    if len(a.payload) > 0 or len(b.payload) > 0:
+
+        def size(start: Int, stop: Int) {mut bases, imm}:
+            var wide = 0
+            for i in range(start, stop):
+                # The values buffer and not the validity, which is the null
+                # rule. It is read here as well as in the fill so that the two
+                # passes agree about which side every row came from.
+                if src.unsafe_offset(i).unsafe_load():
+                    if a.is_valid(i):
+                        var view = a_views.unsafe_offset(i)[]
+                        if not view.is_inline():
+                            wide += len(view)
+                elif b.is_valid(i):
+                    var view = b_views.unsafe_offset(i)[]
+                    if not view.is_inline():
+                        wide += len(view)
+            bases.unsafe_mut_ptr().unsafe_offset(
+                start // MORSEL_ROWS
+            ).unsafe_write(Int64(wide))
+
+        parallel_morsels(size, n)
+
+        # An exclusive prefix, in place. One pass over one entry per morsel,
+        # which is eight numbers on a million rows.
+        for k in range(morsels):
+            var here = Int(bases[k])
+            bases[k] = Int64(payload_bytes)
+            payload_bytes += here
+
+    var payload = Buffer(overwritten=payload_bytes if payload_bytes > 0 else 1)
+    var a_bytes = a.payload.unsafe_ptr()
+    var b_bytes = b.payload.unsafe_ptr()
+
+    def fill(start: Int, stop: Int) {mut views, mut payload, mut built, imm}:
+        var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_mut_ptr()
+        var cursor = Int(bases[start // MORSEL_ROWS])
+
+        var word = UInt64(0)
+        for i in range(start, stop):
+            var yes = src.unsafe_offset(i).unsafe_load()
+            if not (a.is_valid(i) if yes else b.is_valid(i)):
+                # The view of the empty string, so that reading a null's bytes
+                # gives an empty span rather than whatever the allocation held.
+                dst.unsafe_offset(i)[] = StringView()
             else:
-                builder.append_null()
-        elif b.is_valid(i):
-            builder.append(b.unsafe_bytes(i))
-        else:
-            builder.append_null()
-    return builder^.finish()
+                var view = a_views.unsafe_offset(
+                    i
+                )[] if yes else b_views.unsafe_offset(i)[]
+                if view.is_inline():
+                    # The bytes are already inside the sixteen, so the view is
+                    # the whole element and copying it is the whole job.
+                    dst.unsafe_offset(i)[] = view
+                else:
+                    var count = len(view)
+                    var from_ = a_bytes.unsafe_offset(
+                        view.offset()
+                    ) if yes else b_bytes.unsafe_offset(view.offset())
+                    unsafe_memcpy(
+                        dest=into.unsafe_offset(cursor),
+                        src=from_,
+                        count=count,
+                    )
+                    dst.unsafe_offset(i)[] = make_long_at(
+                        from_, count, 0, cursor
+                    )
+                    cursor += count
+                word |= UInt64(1) << UInt64(i & 63)
+            if i & 63 == 63:
+                built.unsafe_set_word(i >> 6, word)
+                word = 0
+
+        # Only a range that ends part way through a word has anything left in
+        # the register, and since the morsel size is a multiple of sixty four
+        # that is only ever the last morsel.
+        if stop & 63 != 0:
+            built.unsafe_set_word(stop >> 6, word)
+
+    parallel_morsels(fill, n)
+
+    payload.set_size(payload_bytes)
+    return StringArray(views^, payload^, built^, n)
 
 
 def pick_any(
