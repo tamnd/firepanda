@@ -2245,6 +2245,30 @@ FRAME = Exposed(
             returns="tuple[int, int]",
         ),
         Member(
+            name="size",
+            kind="property",
+            body="self._inner.length() * self._inner.width()",
+            doc="How many cells the frame holds, which is rows times columns.",
+            returns="int",
+        ),
+        Member(
+            name="ndim",
+            kind="property",
+            body="2",
+            doc="The number of axes, which is two for a frame and always two.",
+            returns="int",
+        ),
+        Member(
+            name="empty",
+            kind="property",
+            body="self._inner.length() == 0 or self._inner.width() == 0",
+            doc=(
+                "Whether either axis is empty, so a frame of columns with no"
+                " rows in them is empty."
+            ),
+            returns="bool",
+        ),
+        Member(
             name="index",
             kind="property",
             body="self._inner.labels()",
@@ -2970,6 +2994,20 @@ SERIES = Exposed(
             body="(self._inner.length(),)",
             doc="A tuple of the number of rows, which for a series is one long.",
             returns="tuple[int]",
+        ),
+        Member(
+            name="ndim",
+            kind="property",
+            body="1",
+            doc="The number of axes, which is one for a series and always one.",
+            returns="int",
+        ),
+        Member(
+            name="empty",
+            kind="property",
+            body="self._inner.length() == 0",
+            doc="Whether the series has no rows at all.",
+            returns="bool",
         ),
         Member(
             name="index",

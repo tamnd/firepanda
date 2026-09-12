@@ -3763,6 +3763,48 @@ class DataFrameMixin:
         """
         return self._inner.names()
 
+    @property
+    def axes(self) -> list[Any]:
+        """The row labels and the column labels, in that order.
+
+        The order is the one thing to get right and it is the order `shape`
+        already reads in, rows first and columns second, which is also the
+        order `axis=0` and `axis=1` name them in. A caller who writes
+        `df.axes[1]` is asking for the columns and there is no second reading
+        of it.
+
+        The second entry is a list here where pandas hands back an `Index`,
+        which is the divergence `columns` carries rather than a new one, and
+        this is one more place it shows.
+        """
+        from ._frame import Index
+
+        return [Index._wrap(self._inner.labels()), self._inner.names()]
+
+    @property
+    def dtypes(self) -> Series:
+        """The type of each column, labelled by the name of the column.
+
+        A column of the answers rather than a list of them, because the whole
+        reason to ask a frame of forty columns what it holds is to be able to
+        read the names off beside the types, and a list makes the caller line
+        the two up by hand.
+
+        The values are the strings `dtype` answers rather than the objects
+        pandas answers, which is the divergence `Series.dtype` already has and
+        is not a new one. It is more visible here, because a column of strings
+        and a column of numpy dtypes print almost the same.
+
+        Both names are taken off what comes back. `_labelled` builds a column by
+        making a frame of two and moving one of them into the index, so the
+        column arrives called `values` under an index called `labels`, and
+        neither of those is a name a caller asked for or should read.
+        """
+        from ._frame import Series
+
+        made = _labelled(self._inner.names(), self._inner.dtypes())
+        return Series._wrap(made._inner.relabel(None).renamed_axis(None))
+
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
 
@@ -5696,6 +5738,31 @@ class SeriesMixin:
         from ._frame import Index
 
         return Index._wrap(self._inner.labels())
+
+    @property
+    def axes(self) -> list[Any]:
+        """The row labels, in a list of one.
+
+        A list of one reads like a mistake and is the point: code that walks
+        `obj.axes` works on a frame and on a column without asking which it has,
+        which is the only reason this member exists on a class that has exactly
+        one axis and a member called `index` that answers it.
+        """
+        from ._frame import Index
+
+        return [Index._wrap(self._inner.labels())]
+
+    @property
+    def dtypes(self) -> str:
+        """The type of the values, which is what `dtype` answers.
+
+        The plural name on a thing that has one type is pandas', and it is here
+        for the same reason `axes` is: so that a caller holding either class can
+        ask the same question. It is the same answer `dtype` gives rather than a
+        column of one, because that is what pandas does and a caller who wanted
+        the other shape has `to_frame().dtypes`.
+        """
+        return self._inner.dtype()
 
     def items(self) -> Iterator[tuple[Any, Any]]:
         """Each label with its value.
