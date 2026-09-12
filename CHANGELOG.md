@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: fillna takes every shape of value pandas takes
+
+`DataFrame.fillna` and `Series.fillna` took a value and, on a frame, a dict of column name to value. They take the other two shapes now, which are a column and a frame, and the mapping form on a column, so `s.fillna({"b": 7.0})`, `s.fillna(other)`, `df.fillna(s)` and `df.fillna(other)` all answer what pandas answers.
+
+Which of those line up against the rows is not what it looks like. A column handed to a frame names columns, so its labels are column names and each value is the value for that whole column, and it is the dict written another way. A frame handed to a frame is the one that lines up on both axes, and a cell it does not carry is left missing. A dict or a column handed to a column lines up against the rows. A frame handed to a column is refused in pandas' own words, since there is nothing on a column for a second axis to line up against.
+
+A fallback that carries rows is judged by the rows the fill reads out of it rather than by the rows it holds, which is measurably what pandas does: a fraction sitting against a label whose row is not missing is not an error, and the same fraction against a missing row raises. So the fallback is lined up first, the rows that are not missing are dropped, and the type check runs on what is left. Between two numbers that check turns the cast around and compares, because a strict cast still truncates a fraction and still wraps a number too big for the width.
+
+`Series.reindex` in the core gained a `widen` parameter. True is what it always did and is pandas' answer to a reindex, where a label that was not found widens an integer column to float. False is the alignment a fill needs, where the values are going back into a column whose type nobody changed, so a label that was not found is a gap in the type that is already there.
+
+A fallback whose labels repeat is refused, in the sentence pandas gives when a repeated label is looked up. pandas' own `fillna` answers with the second of them.
+
+### Fixed: a frame skipped a float column whose only gap was a NaN
+
+`DataFrame.fillna` had the NaN disagreement the core's fill had until 0.6.81, and it survived that fix because it never reached the core. The frame's method decides which columns have work in them from the null counts on the schema, which are the cleared validity bits and nothing else, so a frame whose float column held a NaN and no cleared bit was handed straight back, while the same column asked on its own was filled. The counts are still where that question starts, since they are free and they are the whole answer for every type that cannot hold a NaN, and a float column the bits call complete is now asked again before it is skipped.
+
 ## [0.6.81] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

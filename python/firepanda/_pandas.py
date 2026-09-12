@@ -37,6 +37,7 @@ from . import _firepanda
 from .errors import (
     ColumnNotFoundError,
     DTypeError,
+    FirepandaError,
     InvalidArgumentError,
     OutOfBoundsError,
     UnsupportedError,
@@ -1229,18 +1230,7 @@ _NO_FILL_LIMIT = (
     " rows came before it. ffill and bfill take a limit because they walk"
 )
 
-_NO_FILL_MAP = (
-    "a mapping from row labels to values is a fallback column built by lining"
-    " the mapping up against this object's own labels, which is reindex on a"
-    " column made out of the mapping, and document 47 says why that is a"
-    " separate piece of work rather than a branch here"
-)
-
-_NO_FILL_ALIGNED = (
-    "a fallback that carries rows has to be lined up against this object's own"
-    " labels before a single value of it can be used, which is the alignment"
-    " reindex does and document 47 says why it is a separate piece of work"
-)
+_NO_FILL_FRAME = '"value" parameter must be a scalar, dict or Series, but you passed a "DataFrame"'
 
 
 def _holds(printed: str, value: Any) -> bool:
@@ -1352,40 +1342,283 @@ def _category_fallback(column: Any, value: Any) -> Any:
     return one.cat.set_categories(categories, ordered=column.cat.ordered)._inner
 
 
-def _fill_values(value: Any, held: Any, owner: str) -> dict[str, Any]:
-    """Reads the one argument `fillna` has into a value per column.
+def _labelled(labels: list[Any], values: list[Any]) -> Any:
+    """A column carrying the labels it was given, made out of two lists.
 
-    A scalar names every column and a dict names some of them. A key the object
+    A series cannot be built with an index on it, which is written down where
+    the constructor refuses it, so a pair of lists becomes a frame of two
+    columns and one of them is made the index. That is a real operation rather
+    than a trick: the labels go through the same hashing every index goes
+    through, which is what the alignment after this is going to look them up in.
+
+    Args:
+        labels: The row labels, which are the keys of a mapping or the index of
+            a column that came from somewhere else.
+        values: What sits against each one.
+
+    Returns:
+        A series labelled by the first list and holding the second.
+    """
+    from ._frame import DataFrame
+
+    made = DataFrame({"labels": labels, "values": values})
+    return made.set_index("labels")["values"]
+
+
+def _fill_column(printed: str, value: Any, labels: list[Any], missing: Any, column: Any) -> Any:
+    """A fallback that carries rows, as the type and the rows it is going into.
+
+    Three things happen here and the order of them is the whole design. The
+    rows with nothing in them go first, because a fallback row that is missing
+    leaves the target row missing, which is pandas' rule, and because a column
+    with a gap in it cannot be cast to a whole number at all. Then the type is
+    settled, on a column that now has no gaps, so the cast can say what it could
+    not hold. Then the rows are lined up against the rows being filled, which is
+    where the gaps come back, in the type the column already has rather than a
+    wider one.
+
+    That last step is an alignment rather than a reindex, which is the same
+    operation with one decision made the other way. pandas widens a column when
+    a reindex cannot find a label, because the answer to a reindex is a column
+    the caller is about to look at. The answer here is going straight back into
+    a column whose type nobody changed, so a label that was not found is a gap
+    in the type that is already there.
+
+    Args:
+        printed: The type of the column being filled, as `dtype` spells it.
+        value: The fallback, which carries rows and labels of its own.
+        labels: The labels of the rows being filled, in order.
+        missing: Which of those rows are missing, as a column of flags.
+        column: The column being filled, which only a category column is asked
+            for and only a category column needs.
+
+    Returns:
+        The inner series the extension takes, of `len(labels)` rows.
+
+    Raises:
+        DTypeError: If the column cannot hold what the fallback holds in a row
+            the fill is going to take.
+    """
+    held = value if hasattr(value, "_inner") else _labelled(list(value.index), value.tolist())
+    held = held.dropna()
+    try:
+        if printed == "category":
+            inner = _category_column(column, held, labels, missing)
+        else:
+            inner = _cast_fallback(printed, held, labels, missing)
+        return inner.reindex(labels, None, False)
+    except FirepandaError:
+        raise
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _taken(held: Any, labels: list[Any], missing: Any) -> Any:
+    """The rows of a fallback a fill is going to take, and nothing else.
+
+    pandas judges a fallback by the rows it takes out of it rather than by the
+    rows it holds, so a value the column could not hold sitting against a label
+    whose row is not missing is not an error over there and is not one here.
+    Working that out is the alignment run early, on the fallback as it arrived,
+    before anything has been decided about its type.
+
+    Args:
+        held: The fallback, with the rows that hold nothing already gone.
+        labels: The labels of the rows being filled, in order.
+        missing: Which of those rows are missing, as a column of flags.
+
+    Returns:
+        The values that are going to be used, in the type they arrived in.
+    """
+    from ._frame import Series
+
+    lined = held._inner.reindex(labels, None, False)
+    return Series._wrap(lined.filter_rows(missing)).dropna()
+
+
+def _cast_fallback(printed: str, held: Any, labels: list[Any], missing: Any) -> Any:
+    """The fallback column as the type of the column it is going into.
+
+    The kinds are checked above the cast for the reason `_holds` gives, and the
+    one asymmetry is text. A number does not go into a column of words, because
+    pandas answers that by widening the column to object and there is no such
+    type here. Words do go into a column of numbers, because pandas reads them
+    rather than refusing them, and a word that is not a number comes back with
+    the sentence pandas' own reader gives.
+
+    A cast between two numbers is checked rather than trusted. A strict cast
+    here still truncates a fraction and still wraps a number too big for the
+    width, which are the two ways a fill can put a value in a row that is not
+    the value that was offered, so the cast is turned around and compared with
+    what went in. The check runs over the rows that are going to be used and
+    the cast itself over all of them, which is why the cast below is not the
+    strict one: a row nobody is going to read is allowed to be nonsense.
+
+    Args:
+        printed: The type of the column being filled.
+        held: The fallback, with the rows that hold nothing already gone.
+        labels: The labels of the rows being filled, in order.
+        missing: Which of those rows are missing, as a column of flags.
+
+    Returns:
+        The fallback as `printed`.
+
+    Raises:
+        DTypeError: If the kinds do not mix, or if the cast would change a
+            value in a row the fill is going to take.
+    """
+    given = held._inner.dtype()
+    if given == printed:
+        return held._inner
+    if not _mixes(printed, given):
+        raise DTypeError(f"Invalid fill column of dtype '{given}' for dtype '{printed}'")
+    taken = _taken(held, labels, missing)._inner
+    if given == "string":
+        # The strict cast is here for its sentence rather than for its answer,
+        # which is thrown away. It is pandas' own reader refusing a word, and
+        # the word it names is one the fill was going to use.
+        taken.cast(printed, True)
+    elif bool(
+        taken.cast(printed, True).cast(given, True).compare_series(taken, "ne").reduce("max", 0.0)
+    ):
+        raise DTypeError(f"cannot safely cast non-equivalent {given} to {printed}")
+    return held._inner.cast(printed, False)
+
+
+def _mixes(printed: str, given: str) -> bool:
+    """Whether a column of one type can be filled from a column of another.
+
+    Args:
+        printed: The type of the column being filled.
+        given: The type of the fallback.
+
+    Returns:
+        Whether the two can meet.
+    """
+    if _kind(printed) == "number":
+        return _kind(given) in ("number", "text")
+    return _kind(given) == _kind(printed)
+
+
+def _kind(printed: str) -> str:
+    """The family a type belongs to, for the one question a fill asks.
+
+    Widths do not matter here and the cast below settles them, so the whole
+    integer and float vocabulary answers one word. Every other type is its own
+    kind and meets nothing but itself, which is the right answer for dates and
+    for categories and is the conservative answer for anything added later.
+
+    Args:
+        printed: The type as `dtype` spells it.
+
+    Returns:
+        The family name.
+    """
+    if printed in _SIGNED or printed in _UNSIGNED or printed in _FLOATING:
+        return "number"
+    if printed == "string":
+        return "text"
+    return printed
+
+
+def _category_column(column: Any, held: Any, labels: list[Any], missing: Any) -> Any:
+    """A fallback that carries rows, as a category of the column's own list.
+
+    The scalar half of this says why a category column is the one type whose
+    fallback cannot be described by the type's name. A fallback that carries
+    rows has the same problem and one more, because it may be a category
+    already, and two category columns are the same type only when they carry
+    the same list. pandas refuses that pair outright rather than recoding it,
+    and so does this, in pandas' own words.
+
+    A fallback of words is recoded instead, which is what pandas does with one,
+    and a word that is not one of the categories has no code to be given. That
+    is read off the count of gaps rather than by looking at the values, since
+    `set_categories` puts a gap wherever a value fell off the list, and it is
+    counted over the rows the fill is going to take rather than over all of
+    them, for the reason `_taken` gives.
+
+    Args:
+        column: The column being filled.
+        held: The fallback, with the rows that hold nothing already gone.
+        labels: The labels of the rows being filled, in order.
+        missing: Which of those rows are missing, as a column of flags.
+
+    Returns:
+        The inner series, as a category carrying the column's own list.
+
+    Raises:
+        DTypeError: If the two lists differ, if the fallback holds a value the
+            column has no category for, or if it is not words at all.
+    """
+    categories = list(column.cat.categories)
+    printed = held._inner.dtype()
+    if printed == "category":
+        if list(held.cat.categories) != categories:
+            raise DTypeError("Cannot set a Categorical with another, without identical categories")
+        return held._inner
+    if printed != "string":
+        raise DTypeError(f"Invalid fill column of dtype '{printed}' for dtype 'category'")
+    ordered = column.cat.ordered
+    taken = _recategorized(_taken(held, labels, missing), categories, ordered)
+    if taken._inner.null_count():
+        raise DTypeError(
+            "Cannot setitem on a Categorical with a new category, set the categories first"
+        )
+    return _recategorized(held, categories, ordered)._inner
+
+
+def _recategorized(held: Any, categories: list[Any], ordered: bool) -> Any:
+    """A column of words as a category carrying a list that was decided already.
+
+    Args:
+        held: The words.
+        categories: The list the answer is to carry.
+        ordered: Whether that list is ordered.
+
+    Returns:
+        The column as a category, with a gap wherever a word fell off the list.
+    """
+    return held.astype("category").cat.set_categories(categories, ordered=ordered)
+
+
+def _fill_values(value: Any, held: Any) -> dict[str, Any]:
+    """Reads the one argument the frame's `fillna` has into a thing per column.
+
+    A scalar names every column and a dict names some of them. A key the frame
     does not have is dropped rather than complained about, which is pandas'
     rule and is the opposite of what `drop` does with a missing name, and the
     difference is that `drop` was asked to remove something and this was offered
     something to use.
 
+    A column names some of them too, and this is the one shape of this argument
+    that reads backwards the first time. A column handed to a frame's `fillna`
+    is read along the columns rather than down the rows, so its labels are
+    column names and each value is the value for that whole column. It is the
+    dict written another way. A frame is the one that is read down the rows,
+    and each of its columns comes out of here whole.
+
     Args:
         value: What the caller passed.
-        held: The column names, for a frame, or the one name, for a column.
-        owner: The class name, for the message.
+        held: The column names.
 
     Returns:
-        The columns to fill and what to fill each one with, which is empty when
-        there is nothing to do.
-
-    Raises:
-        NotImplementedError: If the value is a mapping onto row labels, or an
-            object rather than a value.
+        The columns to fill and what to fill each one with, which is a value or
+        a column, and which is empty when there is nothing to do.
     """
     names = list(held)
     if value is None:
         return {}
     if isinstance(value, dict):
-        if owner == "Series":
-            raise UnsupportedError(f"a dict value is not supported yet, because {_NO_FILL_MAP}")
         there = set(names)
         return {str(key): what for key, what in value.items() if str(key) in there}
+    if _is_frame(value):
+        there = {str(name) for name in value.columns}
+        return {name: value[name] for name in names if name in there}
     if _is_object(value):
-        raise UnsupportedError(
-            f"a {type(value).__name__} value is not supported yet, because {_NO_FILL_ALIGNED}"
-        )
+        pairs = zip(list(value.index), list(value.tolist()), strict=True)
+        there = set(names)
+        return {str(key): what for key, what in pairs if str(key) in there}
     return dict.fromkeys(names, value)
 
 
@@ -1404,6 +1637,21 @@ def _is_object(value: Any) -> bool:
         Whether it carries rows.
     """
     return any(hasattr(value, what) for what in ("_inner", "iloc", "dtypes"))
+
+
+def _is_frame(value: Any) -> bool:
+    """Whether the fill value is a whole frame rather than one column.
+
+    Duck typed for the reason above it, and on the one thing a frame has that a
+    column does not, which is a list of column names.
+
+    Args:
+        value: What the caller passed.
+
+    Returns:
+        Whether it carries columns.
+    """
+    return _is_object(value) and hasattr(value, "columns")
 
 
 def _transforming_axis(axis: Any, owner: str) -> None:
@@ -2236,9 +2484,16 @@ class DataFrameMixin:
         writes it as a keyword still reaches the same code, and None is read the
         way pandas reads it, which is as nothing to do.
 
+        A frame is the one value here that is read down the rows. Every other
+        shape names columns, including a column, whose labels are column names
+        when it arrives here rather than row labels, which is pandas' rule and
+        is worth reading twice. A frame lines up on both axes, so a cell the
+        frame does not carry is left missing rather than filled.
+
         Args:
-            value: One value for every column, or a dict naming a column and
-                what to put in it. A key the frame does not have is dropped.
+            value: One value for every column, a dict or a column naming a
+                column and what to put in it, or a frame lined up on both axes.
+                A key the frame does not have is dropped.
             axis: Which axis to fill along. Accepted and not read, since with
                 one value per column both answers are the same frame.
             inplace: Refused.
@@ -2250,8 +2505,7 @@ class DataFrameMixin:
         Raises:
             DTypeError: If a column that has something missing cannot hold the
                 value offered for it.
-            NotImplementedError: For `inplace`, for a limit, and for a value
-                that is a mapping onto row labels or an object with rows.
+            NotImplementedError: For `inplace` and for a limit.
         """
         from ._frame import DataFrame, Series
 
@@ -2260,7 +2514,7 @@ class DataFrameMixin:
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
         held = list(self.columns)
-        wanted = _fill_values(value, held, "DataFrame")
+        wanted = _fill_values(value, held)
         # The two facts each column is judged on, its type and whether it has a
         # gap, are read off the schema and the validity bits rather than through
         # square brackets, because square brackets copy the column and this is
@@ -2268,8 +2522,16 @@ class DataFrameMixin:
         types = dict(zip(held, self._inner.dtypes(), strict=True))
         gaps = dict(zip(held, self._inner.null_counts(), strict=True))
         answer = self.copy()
+        labels = None
         for name, one in wanted.items():
-            if gaps[name] == 0:
+            # A NaN is missing to a fill, the way it is to `isna`, and it is not
+            # a cleared validity bit, so the count off the schema is the whole
+            # answer only for a type that cannot hold one. A float column the
+            # bits call complete is asked again, and that question is the one
+            # place here that reads values before it knows there is work.
+            if gaps[name] == 0 and (
+                types[name] not in _FLOATING or answer._inner.column(name).null_count() == 0
+            ):
                 continue
             # A category column is the one type that has to be looked at rather
             # than named, since its fallback has to carry its own list of
@@ -2278,7 +2540,16 @@ class DataFrameMixin:
             looked = None
             if types[name] == "category":
                 looked = Series._wrap(answer._inner.column(name))
-            filled = _fallback(types[name], one, looked)
+            if _is_object(one):
+                # The labels are read once and only when a fallback that
+                # carries rows actually arrives, since a scalar fill never asks
+                # where the rows are. Which rows are missing is a question per
+                # column, so that one is asked per column.
+                labels = self._inner.labels().to_list() if labels is None else labels
+                gone = answer._inner.column(name).transform("isna", 0)
+                filled = _fill_column(types[name], one, labels, gone, looked)
+            else:
+                filled = _fallback(types[name], one, looked)
             try:
                 answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
             except Exception as error:
@@ -3797,12 +4068,18 @@ class SeriesMixin:
 
         The one difference is the dict. On a frame a dict names columns, and on
         a column there are no columns left to name, so pandas reads it as a
-        mapping from row labels to values. That is a fallback column lined up
-        against this column's labels rather than a value, and it is refused here
-        with the sentence saying what would build it.
+        mapping from row labels to values. That is the same shape as a column
+        handed over as the value, and both of them are lined up against this
+        column's own labels and used row by row. A row this column has and the
+        fallback does not is left missing, and a row the fallback has and this
+        column does not is not used at all.
+
+        A frame is the one shape that is refused, in pandas' words, because
+        there is nothing on a column for a second axis to line up against.
 
         Args:
-            value: The value to put in every missing row.
+            value: The value to put in every missing row, or a mapping from row
+                labels to values, or a column to line up and read row by row.
             axis: Accepted and not read, the way every axis on a column is.
             inplace: Refused.
             limit: Refused, after being checked the way pandas checks it.
@@ -3812,9 +4089,8 @@ class SeriesMixin:
 
         Raises:
             DTypeError: If the column has something missing and cannot hold the
-                value.
-            NotImplementedError: For `inplace`, for a limit, and for a value
-                that is a mapping or an object with rows.
+                value, or if the value is a frame.
+            NotImplementedError: For `inplace` and for a limit.
         """
         from ._frame import Series
 
@@ -3822,14 +4098,27 @@ class SeriesMixin:
         _axis_number(axis, "Series", 0, (0,))
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
-        # The name, the type and the count of gaps all come off the boundary
-        # rather than off the properties above them, for the reason the frame's
-        # method gives: these are three facts about the column and none of them
-        # is a reason to build a wrapper around it.
-        wanted = _fill_values(value, [self._inner.label()], "Series")
-        if not wanted or self._inner.null_count() == 0:
+        if _is_frame(value):
+            raise DTypeError(_NO_FILL_FRAME)
+        if isinstance(value, dict):
+            value = _labelled(list(value.keys()), list(value.values())) if value else None
+        # The type and the count of gaps come off the boundary rather than off
+        # the properties above them, for the reason the frame's method gives:
+        # these are two facts about the column and neither of them is a reason
+        # to build a wrapper around it.
+        if value is None or self._inner.null_count() == 0:
             return self.copy()
-        filled = _fallback(self._inner.dtype(), next(iter(wanted.values())), self)
+        printed = self._inner.dtype()
+        if _is_object(value):
+            filled = _fill_column(
+                printed,
+                value,
+                self._inner.labels().to_list(),
+                self._inner.transform("isna", 0),
+                self,
+            )
+        else:
+            filled = _fallback(printed, value, self)
         try:
             return Series._wrap(self._inner.fill_null(filled))
         except Exception as error:
@@ -4225,7 +4514,7 @@ class SeriesMixin:
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
         try:
-            return Series._wrap(self._inner.reindex(index, value))
+            return Series._wrap(self._inner.reindex(index, value, True))
         except Exception as error:
             raise translate(error) from None
 

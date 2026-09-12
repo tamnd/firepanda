@@ -2572,7 +2572,11 @@ SERIES = Exposed(
             mojo="PySeries.reindex",
             name="reindex",
             doc="The series on a set of labels, whether it has them or not.",
-            params=(("labels", "object"), ("fill_value", "object")),
+            params=(
+                ("labels", "object"),
+                ("fill_value", "object"),
+                ("widen", "bool"),
+            ),
             returns="Series",
         ),
         Binding(

@@ -424,6 +424,18 @@ def test_a_fill_value_stops_a_series_widening() raises:
     assert_equal(_numbers_of(got), [1, 0], "and the value is in the row")
 
 
+def test_an_alignment_that_is_not_a_reindex_keeps_the_type() raises:
+    # The widening is pandas' answer to a reindex and it is the default here.
+    # A caller lining one column up against another's labels on the way into a
+    # fill is not asking pandas' question, because the values are going back
+    # into a column whose type nobody changed, so the row nobody found is a gap
+    # in the type that is already there.
+    var got = _counted().reindex(_labels([Int64(10), 99]), None, widen=False)
+    assert_equal(got.dtype(), DType.int64, "the column is what it was")
+    assert_equal(_numbers_of(got), [1, -1], "and the row is still missing")
+    assert_equal(got.null_count(), 1, "one row nobody found")
+
+
 def test_a_fill_value_leaves_a_hole_the_series_already_had() raises:
     # The same rule the frame half is tested for, and the reason the fill is a
     # row rather than a pass over the answer. A null that was in the series
