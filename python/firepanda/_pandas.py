@@ -2342,6 +2342,281 @@ def _frame_thresholds(
     return dict.fromkeys(names, bound)
 
 
+_REPLACE_NEEDS = (
+    "{owner}.replace must specify either 'value', a dict-like 'to_replace', or dict-like 'regex'."
+)
+"""What pandas says when nothing in the call says what to put anywhere."""
+
+_REPLACE_BOTH = "Series.replace cannot specify both a dict-like 'to_replace' and a 'value'"
+"""What pandas says when a mapping of pairs arrives with a value beside it.
+
+The sentence names the series even when the call was on a frame, because the
+frame hands each of its columns to the series method and the column is where the
+two arguments are finally read.
+"""
+
+_REPLACE_DICT_VALUE = "Series.replace cannot use dict-value and non-None to_replace"
+"""What pandas says when the value is a mapping and the thing replaced is one value."""
+
+_REPLACE_VALUE_SHAPE = "value argument must be scalar, dict, or Series"
+"""What pandas says when a mapping of columns arrives with a run of values."""
+
+_REPLACE_REGEX = (
+    "'regex' must be a string or a compiled regular expression or a list or dict"
+    " of strings or regular expressions, you passed a 'bool'"
+)
+"""What pandas says when nothing is named to replace.
+
+Nothing named means the pattern is meant to be read out of `regex`, and the
+default there is a bool, which is not a pattern. It reads as a leak and it is
+the documented way pandas refuses `s.replace(None, 0)`.
+"""
+
+_NO_REGEX = (
+    "regex is not supported yet, because a replacement read as a pattern is the text"
+    " kernel's business and this method is written over comparisons"
+)
+"""Why a pattern is refused here."""
+
+
+def _lengths(wanted: int, given: int) -> str:
+    """What pandas says when the two runs are not the same length.
+
+    Args:
+        wanted: How many values were named to replace.
+        given: How many replacements arrived.
+
+    Returns:
+        The sentence, which ends in a space, because pandas' does and somebody
+        is matching on the whole of it.
+    """
+    return f"Replacement lists must match in length. Expecting {wanted} got {given} "
+
+
+def _run(value: Any) -> list[Any] | None:
+    """A run of replacements as a list, or None if it is not one.
+
+    Args:
+        value: What arrived as the value.
+
+    Returns:
+        The values in order, for a run, a column or a mapping, since pandas
+        counts a mapping's values here rather than reading its keys. None for a
+        single value.
+    """
+    if _is_object(value):
+        return [_plain(one) for one in value.tolist()]
+    if isinstance(value, dict):
+        return [_plain(one) for one in value.values()]
+    if _positional(value):
+        return [_plain(one) for one in value]
+    return None
+
+
+def _keyed(value: Any) -> bool:
+    """Whether a value is a mapping written as a column.
+
+    A column carries a label against every row, so pandas reads one as a mapping
+    of pairs rather than as a run of values, and the labels are the keys. A run
+    of labels on its own is not one, because it carries no values against them.
+
+    Args:
+        value: What the caller passed.
+
+    Returns:
+        Whether it is a column rather than a run or a value.
+    """
+    return _is_object(value) and hasattr(value, "index")
+
+
+def _pairs(mapping: Any) -> list[tuple[Any, Any]]:
+    """A mapping as a list of pairs, whether it is a dictionary or a column.
+
+    Args:
+        mapping: A dictionary or a column carrying its keys as labels.
+
+    Returns:
+        The pairs in the order they are written, since the last of two that
+        match a row is the one that wins.
+    """
+    if _keyed(mapping):
+        keys = [_plain(key) for key in mapping.index]
+        return [(key, _plain(one)) for key, one in zip(keys, mapping.tolist(), strict=True)]
+    return [(_plain(old), _plain(new)) for old, new in mapping.items()]
+
+
+def _replacements(to_replace: Any, value: Any, owner: str) -> list[tuple[Any, Any]]:
+    """The pairs one column is going to be run through, in order.
+
+    Args:
+        to_replace: What the caller named to replace.
+        value: What the caller named to put there, or `NO_DEFAULT`.
+        owner: The class name, for the one sentence that carries it.
+
+    Returns:
+        A list of what to look for and what to put in its place. The order
+        matters on a row two pairs both match, where the last one wins, which is
+        pandas' answer.
+
+    Raises:
+        InvalidArgumentError: For the four shapes pandas refuses by name.
+        TypeError: For nothing named to replace, and for a run of values against
+            a single thing to replace.
+    """
+    if isinstance(to_replace, dict) or _keyed(to_replace):
+        if value is not NO_DEFAULT:
+            raise InvalidArgumentError(_REPLACE_BOTH)
+        return _pairs(to_replace)
+    if to_replace is None:
+        if value is NO_DEFAULT:
+            raise InvalidArgumentError(_REPLACE_NEEDS.format(owner=owner))
+        raise TypeError(_REPLACE_REGEX)
+    if value is NO_DEFAULT:
+        raise InvalidArgumentError(_REPLACE_NEEDS.format(owner=owner))
+    news = _run(value)
+    if _positional(to_replace) or _is_object(to_replace):
+        olds = _run(to_replace) or []
+        if news is None:
+            return [(old, value) for old in olds]
+        if len(news) != len(olds):
+            raise InvalidArgumentError(_lengths(len(olds), len(news)))
+        return list(zip(olds, news, strict=True))
+    if isinstance(value, dict):
+        raise InvalidArgumentError(_REPLACE_DICT_VALUE)
+    if news is not None:
+        raise TypeError(f"Invalid \"to_replace\" type: '{type(to_replace).__name__}'")
+    return [(_plain(to_replace), _plain(value))]
+
+
+def _named(mapping: Any) -> dict[str, Any]:
+    """A mapping of column names, however it was spelled.
+
+    Args:
+        mapping: A dictionary or a column labelled by column name.
+
+    Returns:
+        The same thing as a dictionary with the names spelled as strings.
+    """
+    if _is_object(mapping):
+        return dict(zip([str(key) for key in mapping.index], mapping.tolist(), strict=True))
+    return {str(key): value for key, value in mapping.items()}
+
+
+def _frame_replacements(
+    to_replace: Any, value: Any, names: list[str], owner: str
+) -> dict[str, list[tuple[Any, Any]]]:
+    """The pairs each column of the frame is going to be run through.
+
+    A mapping is read two ways here and which way depends on whether a value
+    arrived beside it. With a value, the keys are column names and what sits
+    against each one is what to replace in that column. Without a value, the keys
+    are the values to replace, unless every one of them has a mapping of its own
+    against it, which is the nested shape and is one set of pairs per column.
+    That is pandas' rule and it is why `df.replace({"a": 2})` does nothing to a
+    frame with a column called `a`: nothing said `a` was a column, so it is a
+    value, and no column holds it.
+
+    A key that is not a column name is ignored rather than refused, which is the
+    same choice pandas makes about a column a frame of bounds does not carry and
+    is the opposite of the choice it makes about a row label.
+
+    Args:
+        to_replace: What the caller named to replace.
+        value: What the caller named to put there, or `NO_DEFAULT`.
+        names: The frame's column names, in order.
+        owner: The class name, for the one sentence that carries it.
+
+    Returns:
+        The pairs for each column, which is an empty list for a column nothing
+        said anything about.
+
+    Raises:
+        InvalidArgumentError: For the shapes pandas refuses by name.
+    """
+    if isinstance(to_replace, dict) or _is_object(to_replace):
+        wanted = _named(to_replace)
+        nested = bool(wanted) and all(isinstance(one, dict) for one in wanted.values())
+        if value is NO_DEFAULT and not nested:
+            return {name: _replacements(to_replace, value, owner) for name in names}
+        if value is not NO_DEFAULT and _run(value) is not None and not isinstance(value, dict):
+            raise TypeError(_REPLACE_VALUE_SHAPE)
+        offered = _named(value) if isinstance(value, dict) or _is_object(value) else None
+        pairs: dict[str, list[tuple[Any, Any]]] = {}
+        for name in names:
+            if name not in wanted:
+                pairs[name] = []
+                continue
+            mine = value if offered is None else offered.get(name, NO_DEFAULT)
+            pairs[name] = _replacements(wanted[name], mine, owner)
+        return pairs
+    if (isinstance(value, dict) or _is_object(value)) and not _run(to_replace):
+        offered = _named(value)
+        return {
+            name: _replacements(to_replace, offered.get(name, NO_DEFAULT), owner)
+            if name in offered
+            else []
+            for name in names
+        }
+    shared = _replacements(to_replace, value, owner)
+    return dict.fromkeys(names, shared)
+
+
+def _matched(inner: Any, old: Any) -> Any:
+    """Which rows hold the value being replaced.
+
+    A value the column cannot hold matches nothing rather than raising, because
+    this is a test of what is in the column rather than a comparison anybody
+    asked for, and pandas answers the column back unchanged when it is handed
+    one. That is the one place in this family where the refusal `clip` raises is
+    caught and read as an answer.
+
+    Args:
+        inner: The inner column, as it arrived rather than as it is becoming.
+        old: The value being looked for, which may be a missing one.
+
+    Returns:
+        A boolean column with no gaps in it, or None when this column could
+        never hold the value at all.
+    """
+    if _nothing(old):
+        return inner.transform("isna", 0)
+    try:
+        flags = inner.binary_value(old, "eq", False)
+    except Exception as error:
+        raised = error if isinstance(error, FirepandaError) else translate(error)
+        if isinstance(raised, DTypeError):
+            return None
+        raise raised from None
+    return _no_gaps(flags)
+
+
+def _replacing(column: Any, old: Any, new: Any, printed: str, labels: list[Any]) -> Any:
+    """One pair against one column, as the pair `pick` takes.
+
+    Args:
+        column: The column being replaced in, as it arrived.
+        old: The value being looked for.
+        new: What its rows are going to hold.
+        printed: The column's type as `dtype` spells it.
+        labels: The labels of the rows, which are counted rather than read.
+
+    Returns:
+        The rows to keep and what the rest of them take, or None when no row
+        holds the value, in which case the column is not touched and the
+        replacement is never asked whether this column could hold it.
+
+    Raises:
+        DTypeError: If the column cannot hold the replacement.
+    """
+    flags = _matched(column._inner, old)
+    if flags is None or not bool(flags.reduce("max", 0.0)):
+        return None
+    kept = flags.unary("invert")
+    if _nothing(new):
+        return kept, column._inner.missing_row()
+    return kept, _fallback(printed, new, column if printed == "category" else None)
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -3460,6 +3735,67 @@ class DataFrameMixin:
                 if bound is None:
                     continue
                 sides = _clipping(column, bound, op, types[name], labels)
+                if sides is None:
+                    continue
+                try:
+                    answer = DataFrame._wrap(answer._inner.pick(name, sides[0], sides[1]))
+                except Exception as error:
+                    raise translate(error) from None
+        return answer
+
+    def replace(
+        self,
+        to_replace: Any = None,
+        value: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        regex: bool = False,
+    ) -> DataFrame:
+        """The frame with some of its values swapped for others.
+
+        A comparison and a pick per pair, which is `where` again with the
+        condition written for you, and document 50 is the long version. Every
+        pair is judged against the frame as it arrived, so a value that has just
+        been replaced is not replaced again by a later pair and a pair of values
+        can be swapped for each other in one call.
+
+        A mapping is read two ways and which way depends on whether a value
+        arrived beside it. With one, its keys are column names. Without one, its
+        keys are the values to replace, unless every one of them has a mapping
+        of its own against it, which is one set of pairs per column.
+
+        Args:
+            to_replace: A value, a run of values, a mapping of pairs, a mapping
+                of column names, or a mapping of column names to mappings.
+            value: What to put in place of it, which is a value, a run of them
+                as long as the run being replaced, or a mapping read by column
+                name.
+            inplace: Refused.
+            regex: Refused, for now.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If a column cannot hold what it is being handed.
+            InvalidArgumentError: If the arguments do not say what to do.
+            NotImplementedError: For `inplace` and for `regex`.
+        """
+        from ._frame import DataFrame, Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        _held_at("regex", regex, False, _NO_REGEX)
+        names = [str(name) for name in self.columns]
+        wanted = _frame_replacements(to_replace, value, names, "DataFrame")
+        labels = self._inner.labels().to_list()
+        types = dict(zip(names, self._inner.dtypes(), strict=True))
+        answer = self.copy()
+        for name in names:
+            if not wanted[name]:
+                continue
+            column = Series._wrap(self._inner.column(name))
+            for old, new in wanted[name]:
+                sides = _replacing(column, old, new, types[name], labels)
                 if sides is None:
                     continue
                 try:
@@ -5218,6 +5554,55 @@ class SeriesMixin:
             # than against what the other bound made of it, which is only
             # visible when the two cross and is pandas' answer when they do.
             sides = _clipping(self, bound, op, printed, labels)
+            if sides is None:
+                continue
+            try:
+                answer = answer.pick(sides[0], sides[1])
+            except Exception as error:
+                raise translate(error) from None
+        return Series._wrap(answer)
+
+    def replace(
+        self,
+        to_replace: Any = None,
+        value: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        regex: bool = False,
+    ) -> Series:
+        """The column with some of its values swapped for others.
+
+        A comparison and a pick per pair, which is `where` again with the
+        condition written for you, and document 50 is the long version. Every
+        pair is judged against the column as it arrived, so a value that has
+        just been replaced is not replaced again by a later pair and a pair of
+        values can be swapped for each other in one call.
+
+        Args:
+            to_replace: A value, a run of values, or a mapping of pairs.
+            value: What to put in place of it, which is a value or a run of them
+                as long as the run being replaced.
+            inplace: Refused.
+            regex: Refused, for now.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the column cannot hold what it is being handed.
+            InvalidArgumentError: If the arguments do not say what to do.
+            NotImplementedError: For `inplace` and for `regex`.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _held_at("regex", regex, False, _NO_REGEX)
+        pairs = _replacements(to_replace, value, "Series")
+        labels = self._inner.labels().to_list()
+        printed = self._inner.dtype()
+        answer = self._inner
+        for old, new in pairs:
+            sides = _replacing(self, old, new, printed, labels)
             if sides is None:
                 continue
             try:
