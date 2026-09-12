@@ -2958,6 +2958,43 @@ def test_a_keyword_trim_that_says_the_set_twice_is_refused() raises:
         _ = _plan("SELECT TRIM(BOTH 'x' FROM g, 'y') FROM t")
 
 
+def test_a_search_is_the_one_call_whatever_it_was_written_as() raises:
+    assert_equal(
+        _plan("SELECT strpos(g, 'a') FROM t"),
+        "PROJECT [instr(g, a) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_names_for_a_search_build_the_same_plan() raises:
+    var want = _plan("SELECT strpos(g, 'a') FROM t")
+    assert_equal(_plan("SELECT instr(g, 'a') FROM t"), want)
+    assert_equal(_plan("SELECT STRPOS(g, 'a') FROM t"), want)
+
+
+def test_the_keyword_spelling_of_a_search_reads_the_other_way() raises:
+    # `POSITION(x IN y)` looks for x in y, and the call takes the haystack
+    # first, so the two are the same search written in opposite orders.
+    assert_equal(
+        _plan("SELECT POSITION('a' IN g) FROM t"),
+        _plan("SELECT strpos(g, 'a') FROM t"),
+    )
+
+
+def test_a_search_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'instr' searches text and argument 0 is"):
+        _ = _plan("SELECT strpos(a, 'x') FROM t")
+
+
+def test_a_search_for_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'instr' searches text and argument 1 is"):
+        _ = _plan("SELECT strpos(g, a) FROM t")
+
+
+def test_a_search_of_one_thing_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'instr' takes 2 arguments and was given 1"):
+        _ = _plan("SELECT strpos(g) FROM t")
+
+
 def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
     assert_equal(
         _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),

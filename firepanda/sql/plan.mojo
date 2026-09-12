@@ -1039,6 +1039,8 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "trim" or name == "ltrim" or name == "rtrim":
         return True
+    if name == "instr" or name == "strpos" or name == "position":
+        return True
     if name == "is_null" or name == "is_not_null" or name == "like":
         return True
     return name == "and" or name == "or" or name == "not"
@@ -2163,6 +2165,12 @@ def _lower_expr(
             # refused as text, which is the right answer until there is a list
             # type to answer about.
             return plan.exprs.call("length", lowered^, True)
+        if name == "strpos" or name == "position":
+            # The three names DuckDB gives the search for a run of characters,
+            # and the plan holds the one its catalog calls the function rather
+            # than the alias. `POSITION` only ever arrives here as a call
+            # because the keyword spelling became one while the query was read.
+            return plan.exprs.call("instr", lowered^, True)
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

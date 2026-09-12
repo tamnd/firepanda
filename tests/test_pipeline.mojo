@@ -41,6 +41,7 @@ from firepanda.exec import (
     Join,
     Length,
     Limit,
+    Locate,
     Match,
     Materialize,
     Node,
@@ -1068,6 +1069,46 @@ def test_a_trim_over_a_column_that_holds_no_text_is_refused() raises:
     var pipeline = Pipeline(spaced_frame())
     with assert_raises(contains="a trim reads text"):
         pipeline.add(Node(Trim(0, "", False, True, True, "nope")))
+
+
+def test_a_locate_counts_from_one_and_says_zero_for_a_miss() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Locate(1, "a", "where")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "the answer was appended")
+    assert_true(out.schema[3].dtype == LogicalType.INT64, "a number out")
+    var got = read_back(out, "where")
+    assert_equal(len(got), 6, "one answer per row")
+    assert_equal(got[0], 0, "ok does not hold an a")
+    assert_equal(got[1], 2, "and fail holds one in second place")
+
+
+def test_a_locate_of_a_run_that_is_the_whole_element_answers_one() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Locate(1, "ok", "where")))
+    var out = pipeline^.run()
+    var got = read_back(out, "where")
+    assert_equal(got[0], 1, "the run starts at the first character")
+    assert_equal(got[1], 0, "and is not in this one at all")
+
+
+def test_a_locate_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Locate(1, "a", "where")))
+    var out = pipeline^.run()
+    assert_equal(out.column("status").as_strings()[1], "fail", "as it was")
+
+
+def test_a_locate_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="is outside a schema of 3 columns"):
+        pipeline.add(Node(Locate(9, "a", "nope")))
+
+
+def test_a_locate_over_a_column_that_holds_no_text_is_refused() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="a search reads text"):
+        pipeline.add(Node(Locate(0, "a", "nope")))
 
 
 def test_a_part_appends_the_field_it_was_asked_for() raises:

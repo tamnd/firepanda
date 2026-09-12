@@ -269,6 +269,7 @@ from firepanda.exec.node import (
     Join,
     Length,
     Limit,
+    Locate,
     Match,
     Node,
     Part,
@@ -561,6 +562,8 @@ def _lower_expr(
         or exprs.nodes[root].name == "rtrim"
     ):
         return _lower_trim(exprs, root, pipe, base, name, memo)
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "instr":
+        return _lower_locate(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "is_null"
@@ -1138,6 +1141,72 @@ def _lower_trim(
     pipe.add(
         Node(Trim(at, set, by_set, called != "rtrim", called != "ltrim", name))
     )
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_locate(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `POSITION`, a `STRPOS` or an `INSTR`.
+
+    The run being looked for is read here rather than per row, for the reason
+    the pattern of a `LIKE` is: it does not change from row to row, and
+    resolving it once means the node carries a string instead of an expression.
+    A search whose needle is itself a column is a different kernel and is
+    refused here rather than lowered into something that would look for the
+    first row's needle in all of them.
+
+    A null needle is refused for the same reason a null pattern is. The answer
+    would be a column of nulls and there is no operator that makes one of those
+    out of nothing yet.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, or the run looked
+            for is not a string written in the query.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 2:
+        raise Error(
+            String(
+                (
+                    "lower: a search reads a column and the characters to look"
+                    " for in it, so two arguments, and was given "
+                ),
+                len(args),
+            )
+        )
+    if exprs.nodes[args[1]].kind != ExprKind.LITERAL:
+        raise Error(
+            "lower: the characters a POSITION looks for have to be written out,"
+            " and argument 1 is an expression, which would mean a new search"
+            " for every row and there is no kernel that does that"
+        )
+    if exprs.nodes[args[1]].value.is_null():
+        raise Error(
+            "lower: a POSITION of a null is null for every row, and there is no"
+            " operator that answers a column of nulls yet"
+        )
+
+    var needle = exprs.nodes[args[1]].value.as_string()
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Locate(at, needle, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

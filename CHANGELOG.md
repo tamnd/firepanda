@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: POSITION, STRPOS and INSTR in SQL
+
+The search for a run of characters inside a column runs now, under all three of the names DuckDB gives it and in both spellings. `POSITION('an' IN word)` and `strpos(word, 'an')` are the same search written in opposite orders, and the keyword form becomes the call form while the query is read, the way `TRIM` and `SUBSTRING` already do.
+
+It counts characters and not bytes, so `strpos('日本語です', '語')` is three rather than seven. It counts from one and answers zero for a row the run is not in, which is SQL's numbering rather than the kernel's: `text_find` answers from zero and says minus one for a miss, because that is what `str.find` does and the pandas accessor calls it directly.
+
+The run being looked for has to be written out in the query. A needle that came from a column would mean a new search per row and there is no kernel for that, which is the line a `LIKE` pattern already draws.
+
 ### Added: TRIM, LTRIM and RTRIM in SQL
 
 `TRIM` was refused by name because the grammar gives it a rule of its own, and being refused by name meant plain `trim(s)` was refused too. All three calls run now, in both spellings: `TRIM(s)`, `TRIM(s, 'xy')`, `TRIM(BOTH 'xy' FROM s)`, `TRIM(LEADING FROM s)` and `TRIM(TRAILING 'xy' FROM s)`, plus `LTRIM` and `RTRIM` as ordinary calls. The keyword form becomes the call form while the query is read, which is what DuckDB's own parser does with it, so nothing downstream carries two shapes.

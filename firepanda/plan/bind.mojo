@@ -459,6 +459,22 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                     )
                 )
         return LogicalType.STRING
+    if name == "instr":
+        if len(args) != 2:
+            raise Error(
+                String("'instr' takes 2 arguments and was given ", len(args))
+            )
+        for i in range(len(args)):
+            if args[i] != LogicalType.STRING and args[i] != LogicalType.NULL:
+                raise Error(
+                    String(
+                        "'instr' searches text and argument ",
+                        i,
+                        " is ",
+                        args[i],
+                    )
+                )
+        return LogicalType.INT64
     if name == "substring":
         if len(args) != 2 and len(args) != 3:
             raise Error(
