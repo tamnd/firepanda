@@ -59,6 +59,16 @@ The one case that gets slower is the column whose keys are nearly all distinct, 
 
 Closes #610, and with it the last of #617.
 
+### Added: an inner join on more than one key pair
+
+`SELECT sales.qty, held FROM sales JOIN stock ON sales.shop = stock.shop AND sales.qty = stock.qty` parsed and planned and then stopped at the physical lowering with "this operator joins on one column and this join has 2 key pairs". It runs now, for an inner join, which is the shape almost every join on a compound key is written in.
+
+The operator still builds its table from one column, and nothing about that changed. What changed is what the lowering does with the pairs the table cannot hold: it builds from the first pair and asks the rest afterwards, one comparison and one filter each, over the paired chunk. That is not a stopgap, it is what an engine does with any join condition its table cannot answer, and it gives the same answer as pairing on the whole key at once because a row survives only if every pair agreed. A pair a key is null on answers null and is dropped, which is what a null key does anyway.
+
+What it costs is the pairs it makes and then throws away, so the pair the table is built from is the pair that decides the price. Nothing here counts rows per value yet, so the first pair written is the one used, and a query whose first pair is its least selective one does more work than it has to. The answer does not depend on the order and there is a test that writes the same join both ways round.
+
+Inner joins only. A left join has to emit the rows that matched nothing, and a filter sitting above the pairing cannot tell those from the rows it is dropping. A semi, anti or mark join keeps no column from the build side, so there is nothing above the pairing to compare against. Those still say so, and the message now says why an inner join is the one kind that does not need the ordinal space that concatenating both sides builds.
+
 ### Added: CASE runs, in every shape SQL writes it
 
 `SELECT CASE WHEN qty > 10 THEN qty ELSE price END FROM sales` parsed, planned and printed, and then stopped at the physical lowering with "there is no operator that computes a conditional expression yet". There is one now, and three refusals in the SQL planner went with it, so every `CASE` firepanda can parse it can also run.

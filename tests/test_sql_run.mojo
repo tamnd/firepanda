@@ -106,6 +106,41 @@ def shops() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def stock() raises -> DataFrame:
+    """Six rows keyed by a shop and a quantity together.
+
+    Here to be joined against the sales frame on both of its key columns at
+    once, so it is built so that neither key on its own gives the right answer.
+    Three rows are a shop and a quantity the sales frame has in the same row.
+    One is a shop and a quantity it has in different rows, which a join on the
+    shop alone would pair and a join on both must not. One is a shop that sells
+    nothing. The last has no quantity at all, which pairs with nothing for the
+    ordinary reason a null key does.
+    """
+    var shop = ChunkedArray(LogicalType.INT64)
+    shop.append(numbers([1, 2, 1, 1, 3, 1]))
+    var counted = Array[DType.int64](6)
+    counted.set_valid(0, 5)
+    counted.set_valid(1, 40)
+    counted.set_valid(2, 12)
+    counted.set_valid(3, 20)
+    counted.set_valid(4, 7)
+    counted.set_null(5)
+    var qty = ChunkedArray(LogicalType.INT64)
+    qty.append(AnyArray(counted^))
+    var held = ChunkedArray(LogicalType.INT64)
+    held.append(numbers([100, 200, 300, 400, 500, 600]))
+    var columns = List[ChunkedArray]()
+    columns.append(shop^)
+    columns.append(qty^)
+    columns.append(held^)
+    var fields = List[Field]()
+    fields.append(Field("shop", LogicalType.INT64))
+    fields.append(Field("qty", LogicalType.INT64))
+    fields.append(Field("held", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def dupes() raises -> DataFrame:
     """One column of bands with a repeat in it.
 
@@ -168,11 +203,12 @@ def gaps() raises -> DataFrame:
 
 
 def session() raises -> Catalog:
-    """A catalog holding the six frames under the names the queries write."""
+    """A catalog holding the seven frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
+    catalog.register("stock", stock())
     catalog.register("dupes", dupes())
     catalog.register("gappy", gappy())
     catalog.register("gaps", gaps())
@@ -2157,6 +2193,69 @@ def test_a_simple_case_whose_arm_is_null_matches_nothing() raises:
         [0, 0, 0, 0, 0, 0],
         "no row matches a null arm",
     )
+
+
+def test_a_join_on_two_keys_pairs_on_both() raises:
+    # The stock frame holds a shop and a quantity the sales frame has in
+    # different rows, and a join on the shop alone would pair it. It does not
+    # appear here, and neither does the row whose quantity is null nor the shop
+    # that sells nothing. Checked against DuckDB.
+    var got = run(
+        (
+            "SELECT sales.qty AS qty, held FROM sales JOIN stock"
+            " ON sales.shop = stock.shop AND sales.qty = stock.qty"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(got, "qty"), [5, 12, 40], "three rows agree on both keys")
+    same(read_back(got, "held"), [100, 300, 200], "and carry their stock")
+
+
+def test_a_join_on_two_keys_may_write_them_in_either_order() raises:
+    # The first pair is the one the table is built from and the rest are asked
+    # afterwards, so which pair is written first decides the plan and must not
+    # decide the answer.
+    var got = run(
+        (
+            "SELECT sales.qty AS qty, held FROM sales JOIN stock"
+            " ON sales.qty = stock.qty AND sales.shop = stock.shop"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(got, "qty"), [5, 12, 40], "the same three rows")
+    same(read_back(got, "held"), [100, 300, 200], "and the same stock")
+
+
+def test_a_join_on_two_keys_may_be_aggregated_over() raises:
+    # A join on two keys is an operator and a filter rather than one operator,
+    # so the thing above it has to see an ordinary chunk. A reduction is the
+    # cheapest way to ask that.
+    same(
+        answer(
+            (
+                "SELECT sum(held) AS total FROM sales JOIN stock"
+                " ON sales.shop = stock.shop AND sales.qty = stock.qty"
+            ),
+            "total",
+        ),
+        [600],
+        "the three matched rows and nothing else",
+    )
+
+
+def test_a_semi_join_on_two_keys_is_refused_for_now() raises:
+    # An inner join keeps both sides' columns, so the rest of the key can be
+    # asked after the pairing. A semi join keeps none of them and cannot.
+    with assert_raises(contains="2 key pairs would need the ordinal space"):
+        _ = run(
+            (
+                "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM stock"
+                " WHERE stock.shop = sales.shop AND stock.qty = sales.qty)"
+            ),
+            session(),
+        )
 
 
 def main() raises:

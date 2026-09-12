@@ -253,6 +253,63 @@ def echoes() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def crates() raises -> DataFrame:
+    """Four rows keyed by a shop and a quantity together, the probe side."""
+    var shop = ChunkedArray(LogicalType.INT64)
+    shop.append(numbers([1, 2, 1, 2]))
+    var qty = ChunkedArray(LogicalType.INT64)
+    qty.append(numbers([5, 20, 3, 40]))
+    var columns = List[ChunkedArray]()
+    columns.append(shop^)
+    columns.append(qty^)
+    var fields = List[Field]()
+    fields.append(Field("shop", LogicalType.INT64))
+    fields.append(Field("qty", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def crated() raises -> DataFrame:
+    """Three rows keyed the same way, the build side.
+
+    The names are the crates frame's names spelt differently, so that a test
+    can say which side a key came from without qualifying anything. Its second
+    row is a shop the crates frame has and a quantity the crates frame has in a
+    different row, so a join on the shop alone pairs it and a join on both
+    keys must not.
+    """
+    var place = ChunkedArray(LogicalType.INT64)
+    place.append(numbers([1, 2, 1]))
+    var many = ChunkedArray(LogicalType.INT64)
+    many.append(numbers([5, 40, 3]))
+    var kept = ChunkedArray(LogicalType.INT64)
+    kept.append(numbers([100, 200, 300]))
+    var columns = List[ChunkedArray]()
+    columns.append(place^)
+    columns.append(many^)
+    columns.append(kept^)
+    var fields = List[Field]()
+    fields.append(Field("place", LogicalType.INT64))
+    fields.append(Field("many", LogicalType.INT64))
+    fields.append(Field("kept", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def crate_frames() raises -> List[DataFrame]:
+    """The crates frame as relation zero and the crated one as relation one."""
+    var frames = List[DataFrame]()
+    frames.append(crates())
+    frames.append(crated())
+    return frames^
+
+
+def crate_schemas() raises -> List[Schema]:
+    """The schema of each of those two, for binding."""
+    var out = List[Schema]()
+    out.append(Schema(copy=crates().schema))
+    out.append(Schema(copy=crated().schema))
+    return out^
+
+
 def two_frames() raises -> List[DataFrame]:
     """The sales frame as relation zero and the tiers frame as relation one."""
     var frames = List[DataFrame]()
@@ -1976,7 +2033,11 @@ def test_a_build_side_that_cannot_be_lowered_says_what_it_was() raises:
         _ = lower(plan, root, two_frames())
 
 
-def test_a_join_on_two_key_pairs_is_refused_by_name() raises:
+def test_a_join_on_two_key_pairs_that_agree_on_nothing_is_empty() raises:
+    # Three sales rows have a quantity one of the bands matches, and none of
+    # the three has the rate that band charges. So the pairing makes three
+    # pairs and the second key drops all three, which is the case where every
+    # chunk the filter sees comes back empty.
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
@@ -1987,9 +2048,10 @@ def test_a_join_on_two_key_pairs_is_refused_by_name() raises:
         [plan.exprs.column("band"), plan.exprs.column("rate")],
         JoinKind.INNER,
     )
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="joins on one column"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+
+    assert_equal(len(out), 0, "no row agrees on both")
+    assert_equal(out.width(), 4, "and the schema is still both sides")
 
 
 def test_a_computed_key_is_refused_by_name() raises:
@@ -2663,6 +2725,57 @@ def test_each_side_of_a_conditional_may_be_an_expression() raises:
         [15, 18, 10, 39, 7, 17, 22, 101, 26, 9],
         "the difference over ten and the sum otherwise",
     )
+
+
+def crate_join(mut plan: Plan, kind: JoinKind) raises -> Int:
+    """A join of the crates frame to the crated one on both of their keys."""
+    var left = plan.scan("crates", List[String](), 0)
+    var right = plan.scan("crated", List[String](), 1)
+    return plan.join(
+        left,
+        right,
+        [plan.exprs.column("shop"), plan.exprs.column("qty")],
+        [plan.exprs.column("place"), plan.exprs.column("many")],
+        kind,
+    )
+
+
+def test_a_join_on_two_keys_asks_the_second_after_pairing() raises:
+    var plan = Plan()
+    var root = crate_join(plan, JoinKind.INNER)
+    var out = run_frames(plan, root, crate_frames())
+
+    assert_equal(out.width(), 5, "both schemas end to end")
+    same(read_back(out, "qty"), [5, 3, 40], "the rows both keys agree on")
+    same(read_back(out, "kept"), [100, 300, 200], "paired with the right row")
+
+
+def test_a_join_on_two_keys_drops_what_one_key_agrees_on() raises:
+    # The same join on the shop alone, which pairs the row the test above
+    # drops. Here so that the test above is known to be about the second key
+    # rather than about a build side that happened to hold nothing else.
+    var plan = Plan()
+    var left = plan.scan("crates", List[String](), 0)
+    var right = plan.scan("crated", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("shop")],
+        [plan.exprs.column("place")],
+        JoinKind.INNER,
+    )
+    var out = run_frames(plan, root, crate_frames())
+
+    same(read_back(out, "qty"), [5, 5, 20, 3, 3, 40], "one key pairs six rows")
+
+
+def test_a_semi_join_on_two_keys_is_refused() raises:
+    var plan = Plan()
+    var root = crate_join(plan, JoinKind.SEMI)
+    _ = bind(plan, root, crate_schemas())
+
+    with assert_raises(contains="2 key pairs would need the ordinal space"):
+        _ = lower(plan, root, crate_frames())
 
 
 def main() raises:
