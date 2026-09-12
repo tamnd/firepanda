@@ -599,6 +599,34 @@ def test_a_union_of_two_values_reads_nothing_at_all() raises:
     )
 
 
+def test_a_union_by_name_stacks_the_columns_that_share_a_name() raises:
+    # The two arms write their columns in opposite orders and the answer is the
+    # left arm's order, so the pairing is by name and not by position.
+    var out = run(
+        (
+            "SELECT shop, qty FROM sales WHERE qty > 25 UNION ALL BY NAME"
+            " SELECT qty, shop FROM sales WHERE qty > 25 ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [30, 30, 40, 40], "qty")
+    same(read_back(out, "shop"), [1, 1, 2, 2], "shop")
+
+
+def test_a_union_by_name_writes_a_null_where_an_arm_has_no_column() raises:
+    # Neither side has the other's column, so the answer is two columns wide
+    # and each row holds a null in the one its arm did not produce.
+    var out = run(
+        (
+            "SELECT qty FROM sales WHERE qty > 25 UNION ALL BY NAME"
+            " SELECT band FROM tiers WHERE band > 90"
+        ),
+        session(),
+    )
+    same(gapped(out, "qty"), [40, 30, -1], "qty")
+    same(gapped(out, "band"), [-1, -1, 99], "band")
+
+
 def test_an_order_by_over_a_union_sorts_the_stack() raises:
     same(
         answer(

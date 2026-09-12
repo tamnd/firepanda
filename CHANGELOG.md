@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: UNION BY NAME
+
+`SELECT shop, qty FROM sales UNION ALL BY NAME SELECT qty, shop FROM sales` was refused with a note saying that lining two arms up by column name is a projection on each arm rather than a different node. It runs now, and it is that projection.
+
+The output columns are the left arm's names in the left arm's order, then the right arm's names the left did not have, in the right arm's order. An arm missing one of them writes a null in its place, at the type the arm that does have the column gave it. That type is why both arms are bound at this point rather than read for their names alone: nothing at run time carries a column of nulls with no type, so a null has to be written down at one, which is the rule the two sides of a `CASE` already got. Names match folded, so `a` and `A` are the same column and the left arm's spelling is what comes out.
+
+An arm that already produces that list, in that order and spelled that way, gets no projection at all. Two arms that agree therefore lower to the exact plan the positional spelling gives, which is worth more than the one node it saves, because it means the two spellings can be compared rather than merely trusted to answer the same.
+
+Neither arm may name a column twice. Position is what tells two columns of the same name apart in an ordinary union, and lining up by name throws position away, so a duplicate is a question with no answer. DuckDB refuses it and the wording here is DuckDB's.
+
+Only a UNION takes the words. DuckDB's grammar hangs them off nothing else, and the reason is worth stating: the two sides of a difference or an intersection have to hold the same rows to be compared, and filling a missing column with nulls would decide that comparison rather than answer it. This grammar does hang them off `EXCEPT`, so that one is refused in the planner with the reason attached, while `INTERSECT BY NAME` has no rule to parse into and stops a step earlier.
+
+Part of #309.
+
 ### Added: the column aliases on a subquery in a FROM
 
 `SELECT worth FROM (SELECT qty * price AS total FROM sales) v(worth)` was refused with a note that the list renames what the subquery produces rather than what it is called. It runs now, and the note was right about what the list is: it lowers to a projection over the statement's root, which renames the columns and leaves everything else where it was. The same list on a CTE has worked since the CTE went in, and this reuses the function that applies it.
