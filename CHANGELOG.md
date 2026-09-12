@@ -19,6 +19,17 @@ The answer is a microsecond timestamp whatever went in, which is DuckDB's rule a
 DuckDB also accepts a handful of field names here and folds each one onto the unit that field lives in, so `date_trunc('dayofweek', ...)` truncates to the day and `date_trunc('epoch', ...)` to the second. Those are refused rather than answered. They read as a truncation to something that is not a length, and a query that writes one is far more likely to have meant a field than to have meant this. Everything else is refused by name with the thirteen units listed back.
 
 One thing fixed on the way. `date_part('YEAR', d)` was accepted while the plan was built and then failed in the engine, because the field name was only folded to lower case on the path the keyword spelling takes and the operator looks it up in a table that holds it in lower case only. Both spellings fold now, and so does the unit of a `DATE_TRUNC`.
+### Added: a conjunction or disjunction over any number of masks in one pass
+
+A predicate built out of several comparisons has until now been a chain of pairwise `logical_and` calls, and every link in the chain writes a whole intermediate column for the next link to read back. Five predicates anded together writes four of those. Nobody asked for any of them, and on six million rows they cost more than the comparisons did: four writes and eight reads of a byte a row, against the one write and five reads the answer actually needs. `conjoin` and `disjoin` take a list of boolean columns and make one pass, accumulating in a register.
+
+Measured on a thirty two thread desktop over six million rows, which is sf1 lineitem, medians of seven runs after a warm up. Without nulls: two masks 1.15 ms against 1.05, three 1.44 against 0.87, five 3.31 against 1.70, eight 6.33 against 2.60, twelve 9.21 against 3.36. So 1.94x at five masks, which is the shape of TPC-H q6, and 2.74x at twelve, which is the shape of q19. With a null every thousand rows the gain is larger, 2.46x at five and 3.25x at twelve, because the chain pays the three valued repair once per link and this pays it once. The disjunction behaves the same way, 14.69 ms against 3.65 at twelve masks.
+
+The three valued rule generalises the way the pairwise one already worked. Under an and a single present false decides the row whatever the nulls beside it hold, and under an or a single present true does, so the repair walks only the validity words the intersection leaves unset, and within those words only the rows a null reaches, and it stops at the first column holding the decisive value. A column with no nulls in it pays nothing beyond the bitmap intersection, same as before.
+
+One column is handed straight back as a copy and two go to the existing pairwise implementation, so nothing already on that path changes shape or cost. The n-ary answer is tested against the pairwise chain row by row rather than against a fresh scalar loop, since the pairwise form is the thing already pinned to the truth table and agreeing with it is the stronger claim.
+
+This is a kernel and nothing in the plan layer reaches it yet. Flattening an and chain in a plan into one call is the next step and is where a SQL query would start to see it.
 
 ### Added: EXTRACT, date_part and datepart
 
