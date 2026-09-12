@@ -292,14 +292,23 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the ten that exist.
+    """Returns what a named function answers, for the eleven that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of ten entries instead. When the registry arrives this function
-    becomes a lookup in it and the table goes away. Ten is well past where a
-    chain of comparisons should have stopped, and the registry is the thing to
-    build here rather than the eleventh entry.
+    table of eleven entries instead. When the registry arrives this function
+    becomes a lookup in it and the table goes away.
+
+    `length` is the eleventh, and the note that used to be here said the tenth
+    should be the registry instead. It is written out anyway, because the
+    registry it should be a row of is not a thing to invent here.
+    `sql/registry.mojo` already holds DuckDB's own catalog, 802 overloads of it,
+    and this name's signature is in there along with the other ten. What is
+    missing is the binder that resolves a call against it and turns the answer
+    into a `LogicalType`, which is #308 and is a milestone stage rather than an
+    afternoon. So the rule for the twelfth is the rule this one followed: write
+    it out if it is holding up a query somebody is running, and do not build
+    half a catalog next to a whole one.
 
     `like` is here with them because a pattern match is not a binary operation
     either. Its right side is a pattern rather than an operand, and the node
@@ -329,6 +338,12 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     gives back a timestamp at midnight and not a date. Its unit is read the way
     `date_part` reads its field, which is to say not here.
 
+    `length` answers a whole number too, and it is the character count rather
+    than the byte count, which is what DuckDB answers under that name and under
+    `strlen` and `len`. The three names have all become this one by the time a
+    plan holds the call. A null argument types as a whole number and answers
+    null per row, the way every other function here treats one.
+
     Args:
         name: The function name.
         args: What each argument binds to.
@@ -337,7 +352,8 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the ten, or an argument has the wrong type.
+        If the name is not one of the eleven, or an argument has the wrong
+        type.
     """
     if name == "date_trunc":
         if len(args) != 2:
@@ -404,6 +420,19 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                         " is "
                     ),
                     args[1],
+                )
+            )
+        return LogicalType.INT64
+    if name == "length":
+        if len(args) != 1:
+            raise Error(
+                String("'length' takes 1 argument and was given ", len(args))
+            )
+        if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
+            raise Error(
+                String(
+                    "'length' counts the characters of text and argument 0 is ",
+                    args[0],
                 )
             )
         return LogicalType.INT64

@@ -121,7 +121,10 @@ from firepanda.kernel.binary import (
     resolve_constant,
 )
 from firepanda.kernel.cast import cast_any
-from firepanda.kernel.chars import text_character_substring
+from firepanda.kernel.chars import (
+    text_character_length,
+    text_character_substring,
+)
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import LogicOp, logic_any, logic_type
@@ -1862,6 +1865,101 @@ struct Cut(Movable):
         var made = text_character_substring(
             chunk.columns[self.at].strings(), self.start, self.length
         )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Length(Movable):
+    """Appends a column holding how many characters each element holds.
+
+    This is SQL's `STRLEN`, and `LENGTH` and `LEN`, which are DuckDB's other two
+    names for it. Characters and not bytes, the way `Cut` counts characters, so
+    a column of text that is not ASCII answers what somebody reading the strings
+    would count rather than what the payload measures.
+
+    It is a node rather than another code on `Apply` because the four operations
+    that share `Apply` all answer the type they were given and this one does not:
+    it reads text and answers a whole number. That is also the one thing to know
+    about it before adding the next one argument text function. `upper`, `lower`
+    and `trim` each answer the type they read, so all three of those belong on a
+    node together and none of them belongs here.
+
+    A null element gives a null answer, which is what DuckDB answers and what the
+    kernel already does, so nothing here repairs anything.
+    """
+
+    var at: Int
+    """The position of the column being measured."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, name: String):
+        """Constructs a length over a column.
+
+        Args:
+            at: The position of the column being measured.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a whole number column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one int64 field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column that does
+            not hold text.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "length: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype != LogicalType.STRING:
+            raise Error(
+                "length: a character count reads text and column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+            )
+        out.append(Field(self.name, LogicalType.INT64, out[self.at].nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Counts the characters and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not text.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "length: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = text_character_length(chunk.columns[self.at].strings())
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -5144,6 +5242,7 @@ comptime Node = Variant[
     Apply,
     Match,
     Cut,
+    Length,
     Part,
     Truncate,
     Presence,
@@ -5201,6 +5300,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Match].bind(input^)
     if node.isa[Cut]():
         return node[Cut].bind(input^)
+    if node.isa[Length]():
+        return node[Length].bind(input^)
     if node.isa[Part]():
         return node[Part].bind(input^)
     if node.isa[Truncate]():
@@ -5342,7 +5443,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Part`, `Truncate`, `Presence`, `Fill`,
+        `Apply`, `Match`, `Cut`, `Length`, `Part`, `Truncate`, `Presence`,
+        `Fill`,
         `Choose`, `Constant`, `Cast` and `Join`.
     """
     return (
@@ -5354,6 +5456,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Cut]()
+        or node.isa[Length]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Presence]()
@@ -5406,6 +5509,11 @@ def node_computes_per_row(node: Node) -> Bool:
     `Cut` says no for a different reason: it builds a text column, and the
     payload offset every row writes at is a running total of the ones before it,
     which is the serial thing `StringBuilder` exists to do.
+
+    `Length` says no for a third reason. Counting characters is a compare and an
+    add per byte of payload, so it is memory bound rather than waiting on
+    arithmetic, and its kernel already spreads itself over the cores, so handing
+    the chunks out as well would be paying for two sets of tasks to do one pass.
 
     `Part` and `Truncate` say yes. Turning a day number into a year, or a year
     back into a day number, is a run of multiplies and shifts per row and not a
@@ -5506,6 +5614,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
+    if node.isa[Length]():
+        return node[Length].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():
@@ -5577,6 +5687,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
+    if node.isa[Length]():
+        return node[Length].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():

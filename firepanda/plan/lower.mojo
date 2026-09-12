@@ -267,6 +267,7 @@ from firepanda.exec.node import (
     Group,
     GroupAgg,
     Join,
+    Length,
     Limit,
     Match,
     Node,
@@ -551,6 +552,8 @@ def _lower_expr(
         return _lower_part(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and exprs.nodes[root].name == "date_trunc":
         return _lower_truncate(exprs, root, pipe, base, name, memo)
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "length":
+        return _lower_length(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "is_null"
@@ -993,6 +996,49 @@ def _lower_truncate(
     var unit = trunc_unit_named(exprs.nodes[args[0]].value.as_string())
     var at = _lower_expr(exprs, args[1], pipe, base, name, memo, reuse=True)
     pipe.add(Node(Truncate(at, unit, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_length(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `STRLEN`.
+
+    The shortest of these. There is nothing to read at plan time, because a
+    character count has no specifier and no window, so the argument is lowered
+    wherever it lands and a `Length` reads the column it landed in.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 1:
+        raise Error(
+            String(
+                "lower: a character count reads one column and was given ",
+                len(args),
+                " arguments",
+            )
+        )
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Length(at, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

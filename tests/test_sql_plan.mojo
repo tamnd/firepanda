@@ -2655,6 +2655,30 @@ def test_a_substring_of_a_number_is_refused_while_it_binds() raises:
         _ = _plan("SELECT substring(a, 1, 2) FROM t")
 
 
+def test_a_character_count_is_the_one_call_whatever_it_was_written_as() raises:
+    assert_equal(
+        _plan("SELECT strlen(g) FROM t"),
+        "PROJECT [length(g) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_three_names_for_a_character_count_build_the_same_plan() raises:
+    var want = _plan("SELECT strlen(g) FROM t")
+    assert_equal(_plan("SELECT length(g) FROM t"), want)
+    assert_equal(_plan("SELECT len(g) FROM t"), want)
+    assert_equal(_plan("SELECT STRLEN(g) FROM t"), want)
+
+
+def test_a_character_count_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'length' counts the characters of text"):
+        _ = _plan("SELECT strlen(a) FROM t")
+
+
+def test_a_character_count_of_two_things_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'length' takes 1 argument and was given 2"):
+        _ = _plan("SELECT strlen(g, g) FROM t")
+
+
 def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
     assert_equal(
         _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),
