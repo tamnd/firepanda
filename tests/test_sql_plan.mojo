@@ -369,7 +369,7 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="one row by construction"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
     with assert_raises(contains="written as a value"):
-        _ = _plan("SELECT EXISTS (SELECT b FROM u) FROM t")
+        _ = _plan("SELECT a FROM t WHERE a > ANY (SELECT b FROM u)")
     with assert_raises(contains="TRY_CAST"):
         _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
 
@@ -1184,12 +1184,67 @@ def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
         )
 
 
-def test_an_exists_written_anywhere_but_a_top_level_and_is_refused() raises:
-    # An `IN` written there is the mark join and this is the same boolean per
-    # row, but a mark join is given a pair of keys and an `EXISTS` is not
-    # written with one. It gets there through `count(*) > 0` instead.
-    with assert_raises(contains="written as a value"):
-        _ = _plan("SELECT a FROM t WHERE a > 1 OR EXISTS (SELECT k FROM u)")
+def test_an_exists_written_under_an_or_is_counted_under_a_cross_join() raises:
+    # An `IN` written there is the mark join, and this is the same boolean per
+    # row without the pair of keys that join is given. Counting the subquery's
+    # rows answers it instead, and the comparison goes under the cross join so
+    # that it is done once rather than once per outer row.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a > 1 OR EXISTS (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER or(a > 1, __has_0)\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__rows > 0 as __has_0]\n"
+            "        AGGREGATE [] -> [count(1)]\n"
+            "          PROJECT [k]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_an_exists_in_a_select_list_is_the_same_count() raises:
+    assert_equal(
+        _plan("SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t"),
+        (
+            "PROJECT [a, __has_0 as any_u]\n"
+            "  JOIN cross []\n"
+            "    SCAN t []\n"
+            "    PROJECT [__rows > 0 as __has_0]\n"
+            "      AGGREGATE [] -> [count(1)]\n"
+            "        PROJECT [k]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_a_not_exists_over_a_table_is_that_negated() raises:
+    # The `NOT` stays where it was written and reads the column the counting
+    # answered, the way a `NOT IN` reads the mark join's column.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE NOT EXISTS (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER not(__has_0)\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__rows > 0 as __has_0]\n"
+            "        AGGREGATE [] -> [count(1)]\n"
+            "          PROJECT [k]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_an_exists_written_over_an_aggregate_says_why_it_is_refused() raises:
+    # The cross join goes above the FROM and below everything else, so the
+    # column it wrote is under the aggregate rather than over it.
+    with assert_raises(contains="written somewhere else"):
+        _ = _plan(
+            "SELECT count(a) AS n FROM t GROUP BY g HAVING"
+            " EXISTS (SELECT k FROM u)"
+        )
 
 
 def test_a_subquery_that_answers_one_value_is_a_cross_join() raises:
@@ -1345,38 +1400,90 @@ def test_the_subquery_of_an_exists_is_out_of_reach_above_it() raises:
         )
 
 
-def test_an_exists_that_reads_no_outer_column_is_refused() raises:
+def test_an_exists_that_reads_no_outer_column_is_counted() raises:
     # It asks whether the table has any row at all, which every outer row gets
-    # the same answer to, and that is a mark join rather than a semi join.
-    with assert_raises(contains="mark join"):
-        _ = _plan(
-            "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k > 3)"
-        )
+    # the same answer to, so it is a value rather than a semi join. Which of the
+    # two it is has to be settled before the FROM under it is lowered, and a
+    # subquery whose WHERE holds no equality has no key pair to give whatever
+    # its names turn out to mean.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k > 3)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER __has_0\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__rows > 0 as __has_0]\n"
+            "        AGGREGATE [] -> [count(1)]\n"
+            "          PROJECT [1 as __expr_0]\n"
+            "            FILTER k > 3\n"
+            "              SCAN u []\n"
+        ),
+    )
 
 
 def test_a_correlation_that_is_not_an_equality_is_refused() raises:
+    # No equality in the subquery's WHERE means no key pair whatever the names
+    # mean, so this goes to the value form and the scope there is what refuses
+    # it. The message says which shape that is.
     with assert_raises(contains="dependent join"):
         _ = _plan(
             "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.b > t.b)"
         )
 
 
-def test_an_exists_over_an_aggregate_is_refused() raises:
-    # An aggregate with no group by answers one row over no rows, so an EXISTS
-    # over one is true where the subquery found nothing.
-    with assert_raises(contains="does not aggregate"):
+def test_an_exists_over_an_aggregate_runs_when_it_reads_no_outer_column() raises:
+    # An aggregate with no GROUP BY answers one row over no rows, so an EXISTS
+    # over one is true even where the subquery found nothing. The semi join has
+    # no way to say that and the counting needs no way, since it counts the one
+    # row the fold hands out.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE EXISTS (SELECT sum(k) FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER __has_0\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__rows > 0 as __has_0]\n"
+            "        AGGREGATE [] -> [count(1)]\n"
+            "          PROJECT [__agg_0 as __expr_0]\n"
+            "            AGGREGATE [] -> [sum(k)]\n"
+            "              SCAN u []\n"
+        ),
+    )
+
+
+def test_a_correlated_exists_over_an_aggregate_is_refused() raises:
+    with assert_raises(contains="dependent join"):
         _ = _plan(
             "SELECT a FROM t WHERE EXISTS"
             " (SELECT sum(k) FROM u WHERE u.b = t.b)"
         )
 
 
-def test_an_exists_with_a_limit_on_it_is_refused() raises:
-    with assert_raises(contains="one SELECT block"):
+def test_a_correlated_exists_with_a_limit_on_it_is_refused() raises:
+    with assert_raises(contains="dependent join"):
         _ = _plan(
             "SELECT a FROM t WHERE EXISTS"
             " (SELECT 1 FROM u WHERE u.b = t.b LIMIT 1)"
         )
+
+
+def test_an_exists_with_a_limit_on_it_counts_what_the_limit_left() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE EXISTS (SELECT k FROM u LIMIT 0)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER __has_0\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__rows > 0 as __has_0]\n"
+            "        AGGREGATE [] -> [count(1)]\n"
+            "          LIMIT 0\n"
+            "            PROJECT [k]\n"
+            "              SCAN u []\n"
+        ),
+    )
 
 
 def test_an_exists_beside_a_plain_condition_keeps_both() raises:

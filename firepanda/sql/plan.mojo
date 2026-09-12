@@ -212,15 +212,39 @@ which is what puts both sides of the join in reach at once, and then splits its
 `WHERE` the way a join condition is split. A part with one side out and one side
 in is a key pair. A part that reads the subquery's own tables and nothing else
 is a filter under the join, where it runs once rather than once per outer row.
-A part that reads the outer query any other way is refused, and so is an
-`EXISTS` that reads no outer column at all, which asks whether a table has any
-row and is a mark join rather than a semi join.
+A part that reads the outer query any other way is refused, which is the
+dependent join a decorrelation pass removes rather than one this rewrite can.
+
+An `EXISTS` that reads no outer column at all does not come here. It asks
+whether a table has any row, which is the same answer for every outer row, and
+that is the value form below. Which of the two an `EXISTS` is has to be decided
+before its `FROM` is lowered, so it is decided off what is written: a subquery
+with no equality at the top level of its `WHERE` has no key pair to give
+whatever its names turn out to mean, and so it is a value.
 
 The subquery's select list is not lowered, because `EXISTS` asks whether there
 is a row rather than what is in it. DuckDB does bind it and so refuses a name in
 there that no table has, and here that name goes unread. Its rows also have to
 be the rows of one block over one `FROM`, so an aggregate, a `LIMIT`, a set
-operation and a `WITH` inside one are each refused by name.
+operation and a `WITH` inside one are none of them this join. Each of those goes
+to the value form instead, which lowers the subquery as a whole statement and so
+has no trouble with any of them.
+
+### An uncorrelated `EXISTS` is a count under a cross join
+
+Written anywhere but the `AND` of a `WHERE`, and written there without a key
+pair to give, an `EXISTS` is a value: the same boolean on every row, because
+whether the subquery has a row in it does not depend on which outer row asks.
+So it takes the shape below, the cross join onto one row, and the row is
+`count(*) > 0`. That fold has no `GROUP BY` and so is one row whatever the
+subquery read, including nothing, which is what makes the shape work at all. The
+comparison sits under the cross join so that it is done once rather than once
+per outer row.
+
+There is no mark join in this and there is no null in it either. An `IN` has to
+be three valued because it compares values and a null compares to nothing;
+`EXISTS` counts rows without looking in them, so it is true or false and a
+`NOT EXISTS` is the plain opposite of it.
 
 ### A subquery that answers one value is a cross join onto one row
 
@@ -238,13 +262,6 @@ row whatever is in the tables, including nothing, where a fold answers a null. A
 answers no rows where SQL says the subquery is null, so it is refused rather
 than read as one.
 
-The fold over nothing is the one place firepanda does not yet answer what SQL
-says. A fold with no `GROUP BY` over an empty input hands out no rows here
-rather than one row of null, so the cross join sees a right side of no rows and
-refuses by name. That is a gap in the aggregate rather than in this rewrite, and
-the refusal is the safe end of it, since the alternative is quietly dropping
-every row of the query around it.
-
 The cross join goes above the `FROM` and below everything else, so a subquery
 written in a `WHERE` is always reachable, and one written in a select list is
 reachable when the query does not aggregate. Above an aggregate it is not, since
@@ -256,9 +273,10 @@ refusal a correlated `IN` gets and the same dependent join behind it.
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. An `EXISTS`, an `IN` and a quantified comparison
-written where a value goes are refused, because each answers a boolean per row
-and that is a mark join. So are the column aliases on a derived table and a
+and the joins over them. A quantified comparison written where a value goes is
+refused: it answers a boolean per row the way an `EXISTS` and an `IN` do, and
+`ANY` and `ALL` each carry a comparison that neither the mark join nor the
+counting above is given. So are the column aliases on a derived table and a
 `LATERAL` one.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
@@ -963,6 +981,13 @@ struct _Walk(Movable):
     var mark_names: List[String]
     """What the boolean column each of those produced is called."""
 
+    var asked: List[UInt32]
+    """The `EXISTS` written as a value a cross join has already been built for,
+    as they are written in the SQL arena."""
+
+    var asked_names: List[String]
+    """What the boolean column each of those produced is called."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -974,6 +999,8 @@ struct _Walk(Movable):
         self.scalar_names = List[String]()
         self.marks = List[UInt32]()
         self.mark_names = List[String]()
+        self.asked = List[UInt32]()
+        self.asked_names = List[String]()
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -1002,6 +1029,21 @@ struct _Walk(Movable):
         """
         for i in range(len(self.marks)):
             if self.marks[i] == at:
+                return i
+        return -1
+
+    def _asked(self, at: UInt32) -> Int:
+        """Where an `EXISTS`'s answer landed, if a cross join was built for it.
+
+        Args:
+            at: The `EXISTS`, in the SQL arena.
+
+        Returns:
+            Its position among the ones taken out, or -1 if this is not one of
+            them and so is an `EXISTS` the lowering still refuses.
+        """
+        for i in range(len(self.asked)):
+            if self.asked[i] == at:
                 return i
         return -1
 
@@ -1279,14 +1321,29 @@ def _lower_expr(
             " an aggregate hands up its keys and its folds rather than"
             " everything it read"
         )
-    if node.kind == EXPR_EXISTS or node.kind == EXPR_QUANTIFIED:
+    if node.kind == EXPR_EXISTS:
+        var place = walk._asked(at)
+        if place >= 0:
+            # The counting under the cross join answered it, so what is left
+            # here is reading the column. There is no null to worry about the
+            # way there is with an `IN`, because a count of rows is a number
+            # whatever is in them and `EXISTS` is true or false and never null.
+            return plan.exprs.column(String(walk.asked_names[place]))
         raise Error(
-            "firepanda does not lower an EXISTS or a quantified comparison"
-            " written as a value yet. Each of those answers a boolean per row,"
-            " which is the mark join an IN over a subquery already goes to, and"
-            " neither has the pair of keys that join is given. A correlated"
-            " EXISTS does lower where a WHERE is the AND of one and other"
-            " things, because there it is a semi join rather than a value"
+            "firepanda lowers an EXISTS written as a value where it is written"
+            " in a WHERE, or in the select list of a query that does not"
+            " aggregate, and this one is written somewhere else. The answer is"
+            " a column cross joined on above the FROM, which is under the"
+            " aggregate, and an aggregate hands up its keys and its folds"
+            " rather than everything it read"
+        )
+    if node.kind == EXPR_QUANTIFIED:
+        raise Error(
+            "firepanda does not lower a quantified comparison written as a"
+            " value yet. It answers a boolean per row, which is where an"
+            " EXISTS and an IN over a subquery both already go, but ANY and"
+            " ALL each have a comparison in them and neither the mark join nor"
+            " the counting an EXISTS goes through is given one"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -1646,8 +1703,9 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
         ast: The arenas.
         at: The expression.
         kind: The expression kind to collect, which is `EXPR_SUBQUERY` for the
-            ones a cross join answers and `EXPR_IN_SUBQUERY` for the ones a
-            mark join does.
+            ones a cross join onto one value answers, `EXPR_IN_SUBQUERY` for the
+            ones a mark join does, and `EXPR_EXISTS` for the ones a count under
+            a cross join does.
         found: The list to add to, in the order the subqueries are written.
     """
     if at == NO_NODE:
@@ -1656,7 +1714,11 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
     if node.kind == kind:
         found.append(at)
         return
-    if node.kind == EXPR_SUBQUERY or node.kind == EXPR_IN_SUBQUERY:
+    if (
+        node.kind == EXPR_SUBQUERY
+        or node.kind == EXPR_IN_SUBQUERY
+        or node.kind == EXPR_EXISTS
+    ):
         # A subquery of the other shape is still a subquery, and what is written
         # inside one is lowered when that query is rather than out here.
         return
@@ -1715,6 +1777,22 @@ def _marks(ast: Ast, at: UInt32, mut found: List[UInt32]):
         found: The list to add to, in the order the subqueries are written.
     """
     _taken(ast, at, EXPR_IN_SUBQUERY, found)
+
+
+def _askings(ast: Ast, at: UInt32, mut found: List[UInt32]):
+    """Collects every `EXISTS` written as a value inside one expression.
+
+    A quantified comparison is not collected. It answers the same boolean per
+    row, and what it is asking is whether a comparison holds against some or
+    every row rather than whether there was a row at all, so counting the rows
+    is not the answer to it.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the subqueries are written.
+    """
+    _taken(ast, at, EXPR_EXISTS, found)
 
 
 comptime _NEITHER = -2
@@ -3110,13 +3188,19 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
     answer for it, so it goes to the mark join too and the `NOT` over the
     column the mark join wrote is what makes it right.
 
+    An `EXISTS` is claimed only when `_may_pair` says the semi join could have a
+    key pair to join on. One that could not is uncorrelated, since correlation
+    written anywhere but an equality in the subquery's `WHERE` is refused rather
+    than lowered, and an uncorrelated `EXISTS` is the same answer for every row.
+    That is the value form and it is counted under a cross join instead.
+
     Args:
         ast: The arenas.
         at: One part of the `WHERE`.
 
     Returns:
         The `EXPR_IN_SUBQUERY` or the `EXPR_EXISTS`, or `NO_NODE` if this part
-        is neither and so is an ordinary condition.
+        is neither and so is an ordinary condition or a value.
 
     Raises:
         If the text of an operator is not there to read.
@@ -3125,11 +3209,78 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
     if node.kind == EXPR_IN_SUBQUERY:
         return NO_NODE if node.payload == 1 else at
     if node.kind == EXPR_EXISTS:
-        return at
+        return at if _may_pair(ast, node.a) else NO_NODE
     if node.kind == EXPR_UNARY and ast.text(node.payload) == "NOT":
-        if ast.exprs[Int(node.a)].kind == EXPR_EXISTS:
-            return node.a
+        var inner = ast.exprs[Int(node.a)]
+        if inner.kind == EXPR_EXISTS:
+            return node.a if _may_pair(ast, inner.a) else NO_NODE
     return NO_NODE
+
+
+def _may_pair(ast: Ast, at: UInt32) raises -> Bool:
+    """Whether an `EXISTS`'s subquery could give the semi join a key pair.
+
+    Read before anything is lowered, and read off what is written rather than
+    off what the names turn out to mean, because the choice it decides has to be
+    made before the `FROM` under it exists.
+
+    A key pair comes from an equality in the subquery's `WHERE` with one side in
+    and one side out. So a subquery with no `WHERE`, or with one holding no
+    equality at the top level of its `AND`, has no pair to give whatever its
+    names mean, and it is therefore uncorrelated: correlation written any other
+    way is refused rather than lowered. Those go to the value form, which counts
+    the subquery's rows under a cross join.
+
+    The shapes the semi join refuses outright answer False here as well, which
+    sends them to the value form too. Each of them is a subquery the value form
+    lowers correctly: an aggregate with no `GROUP BY` is one row and so an
+    `EXISTS` over it is true, a `LIMIT` changes how many rows there are and the
+    counting sees the change, and a set operation or a `VALUES` is a statement
+    like any other there.
+
+    What is left ambiguous is an equality that reads neither side of the join,
+    like `WHERE u.k = 3`. That is claimed and then refused by the semi join for
+    reading no outer column, which is what it did before this and is a query
+    nobody writes.
+
+    Args:
+        ast: The arenas.
+        at: The subquery's statement.
+
+    Returns:
+        True if the semi join should be given it, False if it is a value.
+    """
+    var top = ast.stmts[Int(at)]
+    if top.kind != STMT_SELECT or top.b != NO_NODE:
+        return False
+    if len(read_ctes(ast, at)) != 0:
+        return False
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        return False
+
+    var clauses = body.children
+    if ast.slot(clauses, CLAUSE_FROM) == NO_NODE:
+        return False
+    if (
+        ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0
+        or ast.slot(clauses, CLAUSE_HAVING) != NO_NODE
+    ):
+        return False
+    for item in ast.items(ast.slot(clauses, CLAUSE_PROJECTION)):
+        if _has_aggregate(ast, ast.stmts[Int(item)].a):
+            return False
+
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction == NO_NODE:
+        return False
+    var parts = List[UInt32]()
+    _conjuncts(ast, restriction, parts)
+    for i in range(len(parts)):
+        var one = ast.exprs[Int(parts[i])]
+        if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
+            return True
+    return False
 
 
 def _scalar_join(
@@ -3324,6 +3475,121 @@ def _mark_join(
     walk.marks.append(at)
     walk.mark_names.append(String(called))
     return plan.join(left, root, keys^, others^, JoinKind.MARK, called^)
+
+
+def _exists_value(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    left: Int,
+) raises -> Int:
+    """Puts an `EXISTS` written as a value under the query, as a count.
+
+    An `EXISTS` written where a `WHERE` is the `AND` of it and other things is a
+    semi join, because there the question is which rows to keep. Written
+    anywhere else it is a value, and an uncorrelated one is the same value on
+    every row, because whether the subquery has a row in it does not depend on
+    which outer row is asking.
+
+    So it is the same shape a subquery answering one value gets: the subquery is
+    a plan of its own, one row is worked out from it, and that row is cross
+    joined on above the `FROM`. The row here is `count(*) > 0`, which is a fold
+    with no `GROUP BY` and so is one row whatever the subquery read, including
+    nothing. The comparison sits under the cross join rather than over it so
+    that it is done once rather than once per outer row.
+
+    There is no mark join in this and there is no null either. An `IN` has to be
+    three valued because it compares values and a null compares to nothing, and
+    `EXISTS` counts rows without looking in them, so it is true or false and a
+    `NOT EXISTS` is the plain opposite. That is why this is the cross join
+    rather than the mark join, even though both answer a boolean per row.
+
+    A correlated one is not taken, and it is refused by where it lowers rather
+    than by a check: the subquery gets a scope of its own, so an outer name
+    written inside it is a name nothing in that query has. Those are the ones
+    the semi join above is for, and the ones that are correlated and not written
+    in a `WHERE` are the dependent join.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_EXISTS`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        left: What the cross join is put over.
+
+    Returns:
+        The cross join, which produces what the left side produced and the one
+        boolean column the counting answered.
+
+    Raises:
+        If the subquery does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var inner = _Scope()
+    var root: Int
+    try:
+        root = _statement(ast, node.a, catalog, plan, sources, inner, ctes)
+    except failed:
+        # The scope is the refusal a correlated one gets, and a name nothing in
+        # the subquery has is what that looks like from in here. Saying so
+        # beside what went wrong costs nothing and is the difference between a
+        # message about a missing table and a message about the shape of the
+        # query.
+        raise Error(
+            String(
+                "an EXISTS written as a value did not lower: ",
+                failed,
+                (
+                    ". It is lowered against a scope of its own, so a name it"
+                    " takes from the query around it is a name nothing in it"
+                    " has, and a correlated EXISTS written anywhere but the AND"
+                    " of a WHERE, or written there over a shape the semi join"
+                    " does not take, is the dependent join"
+                ),
+            )
+        )
+
+    # The select list is not read, as the semi join does not read it either. What
+    # is counted is a one, which is what `count(*)` lowers to everywhere else,
+    # and counting a constant is counting rows.
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var counted = List[Int]()
+    counted.append(plan.exprs.aggregate(AggKind.COUNT, one))
+    var under = List[String]()
+    under.append(String("__rows"))
+    var folded = plan.aggregate(root, List[Int](), counted^, under^)
+
+    # Named rather than positioned, for the reason the subquery answering one
+    # value is: the query around it may already have a column called anything,
+    # and nothing reads this name but the expression the `EXISTS` was taken out
+    # of.
+    var called = String("__has_", len(walk.asked))
+    # A negation written on the node rather than in a `NOT` above it, which is
+    # the other spelling the parser can hand over, is the other comparison. A
+    # `NOT` above it is left where it is and read as an ordinary `NOT`.
+    var against = BinaryOp.EQ if node.b == 1 else BinaryOp.GT
+    var found = List[Int]()
+    found.append(
+        plan.exprs.binary(
+            against,
+            plan.exprs.column("__rows"),
+            plan.exprs.literal(Value(Int64(0))),
+        )
+    )
+    var renamed = List[String]()
+    renamed.append(String(called))
+    var one_row = plan.project(folded, found^, renamed^)
+    walk.asked.append(at)
+    walk.asked_names.append(called^)
+    return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
 
 
 def _exists_join(
@@ -3649,6 +3915,26 @@ def _block(
     for i in range(len(asking)):
         at = _mark_join(
             ast, asking[i], catalog, plan, sources, ctes, walk, scope, at
+        )
+
+    # An `EXISTS` written as a value goes the same way again, and back to the
+    # cross join, because whether the subquery has a row in it is one answer for
+    # the whole query rather than one per outer row. The ones the `WHERE` is the
+    # `AND` of are left alone here too, for the same reason: a semi join is the
+    # cheaper answer and a correlated one only has that answer.
+    var wanting = List[UInt32]()
+    if restriction != NO_NODE:
+        var parts = List[UInt32]()
+        _conjuncts(ast, restriction, parts)
+        for i in range(len(parts)):
+            if _asks(ast, parts[i]) == NO_NODE:
+                _askings(ast, parts[i], wanting)
+    if not grouped:
+        for one in items:
+            _askings(ast, ast.stmts[Int(one)].a, wanting)
+    for i in range(len(wanting)):
+        at = _exists_value(
+            ast, wanting[i], catalog, plan, sources, ctes, walk, at
         )
 
     if restriction != NO_NODE:
