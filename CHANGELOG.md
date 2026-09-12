@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a function name that goes nowhere says which kind of nowhere it is
+
+`SELECT upper(name) FROM t`, `SELECT mean(x) FROM t` and `SELECT lenght(name) FROM t` all came back with the same sentence, `there is no function named 'upper' yet`. That sentence is right for one of the three. `upper` is a kernel nobody has written, `mean` is a real function DuckDB runs, and `lenght` is a typo for `length`.
+
+The tier 1 function catalog generated from DuckDB has been sitting in `firepanda/sql/registry.mojo` with its own tests and no caller. It has one now. Every function name in a statement is read against it before anything is lowered, and the three cases get three sentences. A name the catalog carries is a missing kernel or a missing fold, and the message says which. A name the catalog does not carry is not called missing, because tier 1 is a subset of DuckDB's catalog and not the whole of it, and `mean` and `levenshtein` are both real functions that are not in the table. That sentence says what firepanda has and leaves DuckDB out of it. Either way, a near name gets a `Did you mean` line, on the same threshold the table name suggestion uses: an edit distance below half the shorter name, so a typo gets a suggestion and a word that resembles nothing gets none.
+
+A call with an `OVER` on it is left alone. `row_number` is a window function rather than a kernel anybody is waiting on, and the window lowering already refuses it by name with the more useful sentence.
+
+Nothing that ran before stops running. Every query this changes was already refused and is refused still, with a better sentence.
+
 ## [0.7.1] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

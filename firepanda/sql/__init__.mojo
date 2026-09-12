@@ -90,7 +90,11 @@ caller of the engine. It lowers a bound `SELECT` into the same
 `firepanda.plan.Plan` the dataframe API builds, bottom up in the order the
 clauses run in, and the rule it works under is that no plan node may have only a
 SQL constructor. A shape SQL can express and the plan cannot is a gap to close
-in the plan rather than a private node to add here.
+in the plan rather than a private node to add here. It is also the first caller
+of `registry.mojo`: every function name in a statement is read against the
+catalog before anything is lowered, so a kernel firepanda has not written, a
+name the tier 1 table does not carry and a typo are three different sentences
+rather than one.
 
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`

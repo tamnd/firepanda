@@ -2783,6 +2783,57 @@ def test_a_period_worked_out_per_row_is_refused() raises:
         _ = _plan("SELECT date_trunc(g, d) FROM w, t")
 
 
+def test_a_function_the_catalog_has_is_a_kernel_that_is_missing() raises:
+    with assert_raises(contains="no kernel for the function upper yet"):
+        _ = _plan("SELECT upper(g) FROM t")
+
+
+def test_an_aggregate_the_catalog_has_is_a_fold_that_is_missing() raises:
+    with assert_raises(contains="no fold for the aggregate bit_and yet"):
+        _ = _plan("SELECT bit_and(a) FROM t")
+
+
+def test_a_name_the_catalog_does_not_have_is_not_called_missing() raises:
+    # `levenshtein` is a real DuckDB function that the tier 1 table does not
+    # carry, so the sentence says what firepanda has and nothing about DuckDB.
+    with assert_raises(contains="there is no function named levenshtein here"):
+        _ = _plan("SELECT levenshtein(g, g) FROM t")
+
+
+def test_a_misspelled_name_gets_the_one_it_is_a_typo_for() raises:
+    with assert_raises(contains='Did you mean "length"?'):
+        _ = _plan("SELECT lenght(g) FROM t")
+
+
+def test_a_name_that_resembles_nothing_is_refused_without_a_guess() raises:
+    var caught = String()
+    try:
+        _ = _plan("SELECT zzzzzzqq(g) FROM t")
+    except e:
+        caught = String(e)
+    assert_true(
+        "there is no function named zzzzzzqq here" in caught,
+        "it says the name back",
+    )
+    assert_true("Did you mean" not in caught, "and guesses nothing")
+
+
+def test_a_fold_the_catalog_does_not_carry_is_still_folded() raises:
+    # `mean` is not in the tier 1 table and DuckDB runs it, so the catalog
+    # check has to let it past rather than read absence as a missing name.
+    assert_equal(
+        _plan("SELECT mean(a) FROM t"),
+        _plan("SELECT avg(a) FROM t"),
+    )
+
+
+def test_a_function_name_is_read_without_regard_to_case() raises:
+    # The name comes back in lower case whatever it was written in, because the
+    # arena holds it folded and the catalog is looked up by the folded name.
+    with assert_raises(contains="no kernel for the function upper yet"):
+        _ = _plan("SELECT UPPER(g) FROM t")
+
+
 def test_a_coalesce_is_a_call_of_its_own() raises:
     assert_equal(
         _plan("SELECT coalesce(a, b) FROM t"),
