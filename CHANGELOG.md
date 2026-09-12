@@ -27,6 +27,15 @@ The Release workflow now reads its own failed logs, and when the failure was a r
 `run("SELECT qty FROM sales WHERE qty = 999", catalog)` came back with a frame of no rows, which is right, and then `out[0]` raised `column has 0 chunks, not one; call combine() first`. The sink builds the empty answer from the schema, and a column built that way held no chunks at all, while `DataFrame.__getitem__` is `ChunkedArray.only`, which wants exactly one. So the frame was one nothing could read a column out of, and a predicate that happened to match nothing was a raise rather than an empty answer.
 
 The columns of that frame each hold one chunk of no rows now. It is built from the chunk rather than appended to, because `append` drops a chunk of no rows on purpose, to stop two chunks from starting at the same row and a row position from naming either, and here there is no second chunk and no row to name one with.
+### Added: replace
+
+`DataFrame.replace` and `Series.replace` swap some values for others, with the pandas 3.0 signature, which has no `limit` and no `method`. On a column the thing replaced is a value, a run of values, a mapping of pairs, or a column read as a mapping because it carries a label against every row. On a frame a mapping means column names when a value arrives beside it and means values when nothing does, unless every entry in it is a mapping of its own, which is one set of pairs per column. `inplace` is refused as everywhere and `regex` is refused with a sentence saying why.
+
+The comment that closed the clip slice said this one would need the per value mapping kernel that the label half of `rename` is waiting on. It does not. Every pair is a comparison and a pick, which is the kernel document 48 already added, so `replace` is `where` run once per pair with the condition written for the caller. Document 50 section 7 says where a hash table would actually start to win and why the count of pairs people really pass is not there.
+
+Two pandas answers fall out of one line rather than out of a rule. Every pair is judged against the column as it arrived, so `[1, 2]` going to `[2, 3]` does not send the ones on to three, and `[1, 2]` going to `[2, 1]` swaps the two values for each other in a single call. When two pairs both match a row the last one wins, because its pick is applied last.
+
+A value the column could never hold matches no rows rather than being refused, so `df.replace("zz", 9)` on a frame of numbers is the frame, which means this is the one place a refusal about types is caught and read as an answer. A missing value named for replacement is `isna` rather than a comparison, since nothing equals a missing value, which makes that call `fillna` and is pandas' answer too. The one divergence is the one `where`, `clip` and `fillna` already have: a replacement the column cannot hold is refused here and widens the column over there.
 
 ## [0.6.83] - 2026-09-12
 
