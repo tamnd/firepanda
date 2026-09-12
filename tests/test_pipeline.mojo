@@ -39,6 +39,7 @@ from firepanda.exec import (
     Group,
     GroupAgg,
     Join,
+    Length,
     Limit,
     Match,
     Materialize,
@@ -943,6 +944,38 @@ def test_a_cut_over_a_column_that_is_not_text_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="a substring reads text"):
         pipeline.add(Node(Cut(0, 1, 2, "nope")))
+
+
+def test_a_length_counts_the_characters_of_every_row() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Length(1, "wide")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "the answer was appended")
+    assert_true(out.schema[3].dtype == LogicalType.INT64, "a number out")
+    var got = read_back(out, "wide")
+    assert_equal(len(got), 6, "one answer per row")
+    assert_equal(got[0], 2, "ok")
+    assert_equal(got[1], 4, "fail")
+    assert_equal(got[5], 2, "and the last row")
+
+
+def test_a_length_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Length(1, "wide")))
+    var out = pipeline^.run()
+    assert_equal(out.column("status").as_strings()[1], "fail", "as it was")
+
+
+def test_a_length_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="is outside a schema of 3 columns"):
+        pipeline.add(Node(Length(9, "nope")))
+
+
+def test_a_length_over_a_column_that_holds_no_text_is_refused() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="a character count reads text"):
+        pipeline.add(Node(Length(0, "nope")))
 
 
 def test_a_part_appends_the_field_it_was_asked_for() raises:

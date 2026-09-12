@@ -53,7 +53,7 @@ from .node import (
     GroupAgg,
 )
 from .node import Join, Limit, Match, Materialize, Node, NodeStatus, Project
-from .node import Cut, Fill, Part, Presence, Reduce, Truncate
+from .node import Cut, Fill, Length, Part, Presence, Reduce, Truncate
 from .node import Sort, Unique, Window
 from .node import node_apply, node_bind, node_computes_per_row
 from .node import node_ends_early, node_finish, node_is_breaker

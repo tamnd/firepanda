@@ -217,8 +217,8 @@ def gaps() raises -> DataFrame:
 def words() raises -> DataFrame:
     """Seven pieces of text and a number saying which row each one is.
 
-    The only frame here with a string column in it, which is what a `LIKE` needs
-    and what nothing else in this file was written for. The rows are picked so
+    The frame a `LIKE` needs, and nothing else in this file was written for it.
+    Every row is ASCII, which is what `glyphs` is for. The rows are picked so
     that each of the four searches keeps a different set: two share a prefix,
     two share a suffix, one holds a run in the middle, one holds two runs in
     order, one is empty and one is null.
@@ -299,10 +299,42 @@ def visits() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def glyphs() raises -> DataFrame:
+    """Five pieces of text whose character count is not their byte count.
+
+    Rows two and three are five characters each and six and fifteen bytes, which
+    is the pair that separates a character count from a byte count. The other
+    three are the cases a count written the easy way gets wrong: a row of plain
+    ASCII, a row with nothing in it, and a row with nothing known about it.
+    """
+    var text = StringBuilder(capacity=5)
+    text.append(String("abc").as_bytes())
+    text.append(String("héllo").as_bytes())
+    text.append(String("日本語です").as_bytes())
+    text.append(String("").as_bytes())
+    text.append_null()
+    var word = ChunkedArray(LogicalType.STRING)
+    word.append(AnyArray(text^.finish()))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4, 5]))
+    var g = ChunkedArray(LogicalType.INT64)
+    g.append(numbers([1, 1, 2, 2, 1]))
+    var columns = List[ChunkedArray]()
+    columns.append(word^)
+    columns.append(n^)
+    columns.append(g^)
+    var fields = List[Field]()
+    fields.append(Field("word", LogicalType.STRING, True))
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("g", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the nine frames under the names the queries write."""
+    """A catalog holding the eleven frames the queries write by name."""
     var catalog = Catalog()
     catalog.register("words", words())
+    catalog.register("glyphs", glyphs())
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
@@ -1300,6 +1332,50 @@ def test_a_minus_over_a_null_is_a_null() raises:
         [-14, -14, -1, -19, -1, -11],
         "down",
     )
+
+
+def test_a_character_count_counts_characters_rather_than_bytes() raises:
+    # Rows two and three are both five characters long and are six and fifteen
+    # bytes, so a count that measured the payload would answer them differently.
+    same(
+        answer("SELECT STRLEN(word) AS c FROM glyphs WHERE n < 5", "c"),
+        [3, 5, 5, 0],
+        "c",
+    )
+
+
+def test_the_three_names_for_a_character_count_answer_the_same() raises:
+    var one = answer("SELECT STRLEN(word) AS c FROM glyphs WHERE n = 3", "c")
+    var two = answer("SELECT LENGTH(word) AS c FROM glyphs WHERE n = 3", "c")
+    var three = answer("SELECT LEN(word) AS c FROM glyphs WHERE n = 3", "c")
+    same(one, [5], "strlen")
+    same(two, [5], "length")
+    same(three, [5], "len")
+
+
+def test_a_row_with_nothing_known_about_it_has_no_length() raises:
+    # DuckDB answers null rather than zero, and the two are different things to
+    # anything that folds the column afterwards.
+    var out = run("SELECT STRLEN(word) AS c FROM glyphs WHERE n = 5", session())
+    var col = out.column("c").as_typed[DType.int64]()
+    assert_equal(len(col), 1, "one row")
+    assert_true(not col.is_valid(0), "and nothing in it")
+
+
+def test_a_character_count_folds_the_way_q27_folds_one() raises:
+    # The shape ClickBench q27 is: a length worked out per row and folded per
+    # group, with the group key read back beside it.
+    var out = run(
+        "SELECT g, SUM(STRLEN(word)) AS s FROM glyphs GROUP BY g ORDER BY g",
+        session(),
+    )
+    same(read_back(out, "g"), [1, 2], "g")
+    same(read_back(out, "s"), [8, 5], "s")
+
+
+def test_a_character_count_of_a_number_says_so() raises:
+    with assert_raises(contains="'length' counts the characters of text"):
+        _ = run("SELECT STRLEN(n) FROM glyphs", session())
 
 
 def test_a_like_with_a_percent_at_the_end_is_a_prefix() raises:

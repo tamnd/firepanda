@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: STRLEN, and the two other names DuckDB gives it
+
+`SELECT AVG(STRLEN(URL)) FROM hits GROUP BY CounterID` is what two ClickBench statements are built around and it was refused. `LENGTH` and `LEN` are DuckDB's other two names for the same function and all three run now. The kernel has been in `firepanda/kernel/chars.mojo` since the string layer was written, so this is the same shape as the last few entries: the plumbing from a query down to a kernel that was already there and already tested.
+
+It counts characters and not bytes, which is what DuckDB counts under all three names. The difference is invisible on a column of ASCII and is the whole answer on anything else, so the tests measure a row of five accented characters in six bytes and a row of five Japanese characters in fifteen, and both answer five. A row with nothing in it is zero and a row with nothing known about it is null rather than zero, which is DuckDB's answer and is a different thing to anything that folds the column afterwards.
+
+The operator is a new one, `Length`, rather than another code on the node that already applies an operation to one column. The four operations sharing that node all answer the type they were handed and this one does not, since it reads text and answers a whole number. That is also the thing to know before the next one of these: `upper`, `lower` and `trim` each answer the type they read, so those three belong on a node together and none of them belongs on this one.
+
+This is the eleventh entry in the chain of comparisons that types a call while the plan binds, and the note above that chain has said for the last two entries that the next one should be a registry instead. It is written out anyway, and the reason is now in the code where the note was: `firepanda/sql/registry.mojo` already holds DuckDB's own catalog, 802 overloads of it, including this name's signature and the other ten. What is missing is not a table but the binder that resolves a call against that table and turns the answer into a plan type, which is a milestone stage. Building a second smaller table beside the real one would have made that stage harder rather than easier.
+
+q27 of the ClickBench suite should run through the planner route now. q28 stays refused, because it also wants `REGEXP_REPLACE`.
+
 ### Added: DATE_TRUNC
 
 `SELECT date_trunc('month', o_orderdate), sum(o_totalprice) FROM orders GROUP BY 1` is the shape of nearly every report anybody writes, and it was refused. `datetrunc` was too. This is the third of the three function gaps that sat on top of kernels that already existed, except that this one turned out to need a kernel after all.
