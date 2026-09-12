@@ -325,6 +325,22 @@ struct ChunkedArray(Copyable, Movable, Sized):
         """
         return self.nulls
 
+    def nbytes(self) -> Int:
+        """Returns the bytes every chunk's buffers occupy, added up.
+
+        Added up rather than read off one chunk, because the chunks are what a
+        Parquet file's row groups and a concat's inputs leave behind and there
+        is no reason for them to be the same size. A column that arrived as ten
+        row groups weighs what all ten weigh.
+
+        Returns:
+            The size in bytes.
+        """
+        var out = 0
+        for i in range(len(self.chunks)):
+            out += self.chunks[i].nbytes()
+        return out
+
     def only(ref self) raises -> ref[self.chunks[0]] AnyArray:
         """Returns the single chunk of a column that has exactly one.
 

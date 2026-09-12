@@ -3805,6 +3805,52 @@ class DataFrameMixin:
         made = _labelled(self._inner.names(), self._inner.dtypes())
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
+    def memory_usage(self, index: bool = True, deep: bool = False) -> Series:
+        """How many bytes each column weighs, labelled by column name.
+
+        The index comes first and is called `Index`, which is pandas' name for
+        it and is a string sitting in the same labels as the column names, so a
+        frame with a column actually called `Index` produces two rows with the
+        same label. pandas has that too and it is left alone, because a caller
+        reading `usage["Index"]` on such a frame has a question that has no
+        right answer.
+
+        `index=False` drops that first row and nothing else. It does not change
+        any other number, since a column does not get larger or smaller
+        depending on whether the labels beside it were counted.
+
+        `deep` is accepted and changes nothing. In pandas it means to go and
+        measure the Python objects an object column points at rather than the
+        pointers, and there are no object columns here, so every number this
+        answers is already the deep one. Refusing the parameter would make a
+        caller who passed it think something was unavailable, when what is
+        unavailable is the shallow answer.
+
+        The numbers are Arrow buffers and pandas' are numpy arrays, which is
+        `nbytes` divergence and is registered as one. It shows up here more than
+        it does on a column, because a frame is where somebody adds the numbers
+        up and compares the total against a file size.
+
+        Args:
+            index: Whether to count the row labels as a row of the answer.
+            deep: Accepted for compatibility. Every number here is already the
+                deep one.
+
+        Returns:
+            A column of byte counts, labelled by column name.
+        """
+        from ._frame import Series
+
+        _flag("index", index)
+        _flag("deep", deep)
+        labels: list[Any] = list(self._inner.names())
+        counts: list[Any] = list(self._inner.column_nbytes())
+        if index:
+            labels.insert(0, "Index")
+            counts.insert(0, self.index.nbytes)
+        made = _labelled(labels, counts)
+        return Series._wrap(made._inner.relabel(None).renamed_axis(None))
+
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
 
@@ -5763,6 +5809,36 @@ class SeriesMixin:
         the other shape has `to_frame().dtypes`.
         """
         return self._inner.dtype()
+
+    def memory_usage(self, index: bool = True, deep: bool = False) -> int:
+        """How many bytes the column weighs, one number rather than a column.
+
+        The frame's version answers a column because a frame has several things
+        to report and this has one, and the two names being the same is pandas'
+        and is the right call: a caller adding up the memory of whatever they
+        are holding writes one line for both classes.
+
+        `index=True` is the default and adds the labels, which is the opposite
+        of what a reader expects from the name, so it is worth being plain: the
+        default answer for a column includes its index and `nbytes` does not.
+        That is why both exist.
+
+        `deep` is accepted and changes nothing, for the reason the frame's
+        version gives.
+
+        Args:
+            index: Whether to add the bytes the row labels occupy.
+            deep: Accepted for compatibility. The number here is already deep.
+
+        Returns:
+            The size in bytes.
+        """
+        _flag("index", index)
+        _flag("deep", deep)
+        out: int = self._inner.nbytes()
+        if index:
+            out += self.index.nbytes
+        return out
 
     def items(self) -> Iterator[tuple[Any, Any]]:
         """Each label with its value.

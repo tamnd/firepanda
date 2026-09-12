@@ -306,6 +306,29 @@ def test_empty_chunked_column() raises:
     assert_equal(column.null_count(), 0)
 
 
+def test_a_chunked_column_weighs_what_all_its_chunks_weigh() raises:
+    # Added up rather than read off one chunk, because the chunks are what a
+    # Parquet file's row groups and a concat's inputs leave behind and nothing
+    # makes them the same size. Every column a Python caller can build here has
+    # exactly one chunk, so this is the only place the rule can be checked, and
+    # it is checked with chunks of different lengths so that reading one of them
+    # and multiplying by the count would not pass.
+    var first = Array[DType.int64](3)
+    var second = Array[DType.int64](9)
+    var one = AnyArray(first^)
+    var two = AnyArray(second^)
+    var expected = one.nbytes() + two.nbytes()
+    var column = ChunkedArray(one^)
+    column.append(two^)
+    assert_equal(column.num_chunks(), 2)
+    assert_equal(column.nbytes(), expected)
+
+
+def test_an_empty_chunked_column_weighs_nothing() raises:
+    var column = ChunkedArray(logical_for(DType.int64))
+    assert_equal(column.nbytes(), 0)
+
+
 def test_chunked_locate_walks_a_column_of_many_chunks() raises:
     # `locate` binary searches a prefix sum rather than adding lengths up again,
     # so the shape worth testing is one where the answer differs per chunk and

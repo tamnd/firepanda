@@ -1880,6 +1880,12 @@ FRAME = Exposed(
             returns="list[int]",
         ),
         Binding(
+            mojo="PyDataFrame.column_nbytes",
+            name="column_nbytes",
+            doc="The bytes each column's buffers occupy, in order.",
+            returns="list[int]",
+        ),
+        Binding(
             mojo="PyDataFrame.set_index",
             name="set_index",
             doc="The frame with one column moved into the row labels.",
@@ -2604,6 +2610,12 @@ SERIES = Exposed(
             returns="int",
         ),
         Binding(
+            mojo="PySeries.nbytes",
+            name="nbytes",
+            doc="The bytes the column's buffers occupy.",
+            returns="int",
+        ),
+        Binding(
             mojo="PySeries.head",
             name="head",
             doc="The first n rows.",
@@ -3008,6 +3020,16 @@ SERIES = Exposed(
             body="self._inner.length() == 0",
             doc="Whether the series has no rows at all.",
             returns="bool",
+        ),
+        Member(
+            name="nbytes",
+            kind="property",
+            body="self._inner.nbytes()",
+            doc=(
+                "The bytes the column's buffers occupy, which is what the data"
+                " weighs rather than what a numpy array holding it would."
+            ),
+            returns="int",
         ),
         Member(
             name="index",

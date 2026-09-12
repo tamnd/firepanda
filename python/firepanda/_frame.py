@@ -2890,6 +2890,16 @@ class Series(SeriesMixin):
             raise translate(error) from None
 
     @property
+    def nbytes(self) -> int:
+        """The bytes the column's buffers occupy, which is what the data weighs rather than
+        what a numpy array holding it would.
+        """
+        try:
+            return self._inner.nbytes()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
     def index(self) -> Index:
         """The row labels of the series."""
         try:
