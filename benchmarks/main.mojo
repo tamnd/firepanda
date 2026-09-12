@@ -2041,11 +2041,12 @@ def bench_hash(mut harness: Harness) raises:
     `factorize_skewed` and `factorize_skewed_tail` are the only rows here whose
     keys are not uniform. They are addresses, from `firepanda/testing/skew.mojo`,
     which means the high bits of every key are drawn from a set of eight and the
-    frequencies have a head. That is what ClickBench q31 groups a hundred million
-    rows by and it is a shape nothing else in this file produces. The
-    distribution measurement is in `benchmarks/probe_lengths.mojo` and says the
-    probe lengths are the same as on a uniform key, so what these two rows are
-    watching for is a change to that answer rather than a gap that is there now.
+    frequencies have a head. `ClientIP` is one of the two keys ClickBench q31 and
+    q32 group a hundred million rows by and it is a shape nothing else in this
+    file produces. The distribution measurement is in
+    `benchmarks/probe_lengths.mojo` and says the probe lengths are the same as on
+    a uniform key, so what these two rows are watching for is a change to that
+    answer rather than a gap that is there now.
 
     Args:
         harness: The harness.
@@ -3752,7 +3753,7 @@ def bench_group(mut harness: Harness) raises:
     costs shows up here and not on the narrow row, where a hundred groups sit in
     L1 whatever the probe does.
 
-    `group/frame_nearly_unique_key` is the shape ClickBench q31 has and nothing
+    `group/frame_nearly_unique_key` is the shape ClickBench q32 has and nothing
     else here does, a key whose group count is most of its row count, so the
     answer is nearly as large as the input. Read it against
     `group/frame_one_key`: same rows, same reduction, a thousand groups instead
@@ -4398,7 +4399,7 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/frame_one_key", "rows", rows, frame_one)
 
-    # ClickBench q31's shape, which nothing else in this file has: a key whose
+    # ClickBench q32's shape, which nothing else in this file has: a key whose
     # group count is most of its row count, so the answer is nearly as large as
     # the input. Against `group/frame_one_key`, which is the same rows and the
     # same reduction over a key with a thousand values, it says what a group by

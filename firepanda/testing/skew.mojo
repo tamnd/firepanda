@@ -3,8 +3,9 @@
 Everything this repository generates is uniform. `Rng.next_below` draws every
 value with the same probability, every benchmark column is either a cycle or a
 uniform draw, and every number we have tuned the hash table against came from one
-of those. Real group by keys are not like that, and the query that says so is
-ClickBench q31, which groups a hundred million rows by `ClientIP`.
+of those. Real group by keys are not like that, and the queries that say so are
+ClickBench q31 and q32, which group a hundred million rows by `WatchID` and
+`ClientIP`.
 
 Two things are wrong with a uniform key and they are independent.
 
