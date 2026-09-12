@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.82] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+`fillna` is the release. It took a value and a dict and it now takes the other two shapes pandas takes, a column and a frame, with the alignment rules that go with each of them, and the frame's version stopped skipping a float column whose only gap was a NaN. The other entry changes no behaviour at all and is here because of what it found: the hash table, which has only ever been measured on uniform keys, is fine on a key shaped like a real address, and the group by time that looked like it belonged to the table belongs to building the answer.
+
 ### Added: fillna takes every shape of value pandas takes
 
 `DataFrame.fillna` and `Series.fillna` took a value and, on a frame, a dict of column name to value. They take the other two shapes now, which are a column and a frame, and the mapping form on a column, so `s.fillna({"b": 7.0})`, `s.fillna(other)`, `df.fillna(s)` and `df.fillna(other)` all answer what pandas answers.
@@ -6350,7 +6356,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.81...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.82...HEAD
+[0.6.82]: https://github.com/tamnd/firepanda/releases/tag/v0.6.82
 [0.6.81]: https://github.com/tamnd/firepanda/releases/tag/v0.6.81
 [0.6.80]: https://github.com/tamnd/firepanda/releases/tag/v0.6.80
 [0.6.79]: https://github.com/tamnd/firepanda/releases/tag/v0.6.79
