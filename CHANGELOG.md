@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the qualified star, and EXCLUDE, REPLACE and RENAME on either kind
+
+`SELECT * FROM t` was the only star firepanda ran. `SELECT t.* FROM t JOIN u ON t.a = u.k` was refused as needing the bindings rather than one schema, and any of the three modifiers was refused with a note that `firepanda/sql/star.mojo` was all three of them and nothing had wired it in. All four run now.
+
+The qualified one turned out to need nothing new. Every column a star stands for already carried the relation it came from, because binding needs that to tell two sources with the same column name apart, so keeping one relation's columns is a test on a number that was already there. It is refused in one place, which is a subquery in the `FROM`: a derived table is not a relation and its columns arrive with no number on them, so there is nothing to tell them from the columns of the source next to them. That message says so rather than reporting a missing table.
+
+The modifiers apply in the order the grammar forces them to be written, exclude then replace then rename. A bare name applies to every column that has it, so `EXCLUDE (b)` over a join where both sides have a `b` drops both, and `REPLACE` puts its expression where the column stood and keeps the column's name. Every rule and every refusal comes from `star.mojo`, which is what the binder already used, so the two stages that expand a star do not disagree about what the query said. That includes the two places DuckDB is wrong, a `REPLACE` matching twice losing a column and a duplicate `RENAME` entry being blamed on the `EXCLUDE` list, both reproduced on the argument that a query which binds here and fails there is worse than one that is wrong the same way in both.
+
+A modifier is never qualified. A dotted name in one is refused while the AST is built, since the node has nowhere to put the two halves, so nothing at this stage has a qualifier to match.
+
 ### Changed: a conditional over text is built on every core instead of one
 
 `text_pick` is what `CASE WHEN c THEN one_text_column ELSE another END` runs, and it built its answer through a `StringBuilder` on one thread while the three numeric forms beside it ran on every core. Its own docstring said so and said the work was waiting on a query that needed it. ClickBench q39 is that query: `CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src`, grouped by the answer, over a hundred million rows of `Referer`.

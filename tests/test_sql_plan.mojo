@@ -131,6 +131,119 @@ def test_a_star_is_every_column_the_scan_has() raises:
     )
 
 
+def test_a_qualified_star_keeps_one_side_of_a_join() raises:
+    # Which relation a column came from is the number the star already carried,
+    # so keeping one side is a filter over that number rather than anything new.
+    assert_equal(
+        _plan("SELECT t.* FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, b, g, f]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT u.* FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [b, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_a_qualified_star_may_name_an_alias() raises:
+    assert_equal(
+        _plan("SELECT l.* FROM t AS l"), "PROJECT [a, b, g, f]\n  SCAN t []\n"
+    )
+
+
+def test_a_qualified_star_naming_nothing_in_the_from_is_refused() raises:
+    with assert_raises(contains="nothing in this query is called 'nosuch'"):
+        _ = _plan("SELECT nosuch.* FROM t")
+
+
+def test_a_qualified_star_over_a_subquery_is_refused() raises:
+    # A derived table is not a relation, so its columns come through with no
+    # number on them and there is nothing to keep them apart by.
+    with assert_raises(contains="is not a relation"):
+        _ = _plan("SELECT v.* FROM (SELECT a FROM t) v")
+
+
+def test_an_exclude_drops_the_columns_it_names() raises:
+    assert_equal(
+        _plan("SELECT * EXCLUDE (b, f) FROM t"),
+        "PROJECT [a, g]\n  SCAN t []\n",
+    )
+
+
+def test_an_exclude_naming_a_column_twice_over_a_join_drops_both() raises:
+    # DuckDB's rule, and the reason a bare modifier name is not a column
+    # reference: a name two sources both have is not ambiguous here, it is two
+    # columns and the modifier applies to each of them.
+    assert_equal(
+        _plan("SELECT * EXCLUDE (b) FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, g, f, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_a_replace_stands_an_expression_in_for_a_column() raises:
+    # The column keeps its place and its name and the expression is what the
+    # projection computes there.
+    assert_equal(
+        _plan("SELECT * REPLACE (a + 1 AS a) FROM t"),
+        "PROJECT [a + 1 as a, b, g, f]\n  SCAN t []\n",
+    )
+
+
+def test_a_rename_changes_what_the_output_calls_a_column() raises:
+    assert_equal(
+        _plan("SELECT * RENAME (a AS z) FROM t"),
+        "PROJECT [a as z, b, g, f]\n  SCAN t []\n",
+    )
+
+
+def test_the_three_modifiers_apply_in_the_order_they_are_written() raises:
+    assert_equal(
+        _plan(
+            "SELECT * EXCLUDE (g) REPLACE (b * 2 AS b) RENAME (a AS z) FROM t"
+        ),
+        "PROJECT [a as z, b * 2 as b, f]\n  SCAN t []\n",
+    )
+
+
+def test_a_modifier_naming_no_column_is_refused_the_way_duckdb_does() raises:
+    with assert_raises(contains='Column "zz" in EXCLUDE list not found'):
+        _ = _plan("SELECT * EXCLUDE (zz) FROM t")
+    with assert_raises(contains='Column "zz" in REPLACE list not found'):
+        _ = _plan("SELECT * REPLACE (1 AS zz) FROM t")
+    # A RENAME naming nothing is not an error, which is DuckDB's again and is
+    # the one modifier that lets a typo through.
+    assert_equal(
+        _plan("SELECT * RENAME (zz AS q) FROM t"),
+        "PROJECT [a, b, g, f]\n  SCAN t []\n",
+    )
+
+
+def test_two_modifiers_naming_the_same_column_are_refused() raises:
+    with assert_raises(contains="cannot occur in both EXCLUDE and REPLACE"):
+        _ = _plan("SELECT * EXCLUDE (a) REPLACE (1 AS a) FROM t")
+    with assert_raises(contains='Duplicate entry "a" in EXCLUDE list'):
+        _ = _plan("SELECT * EXCLUDE (a, a) FROM t")
+
+
+def test_a_star_that_excludes_everything_leaves_no_select_list() raises:
+    with assert_raises(contains="SELECT list is empty after resolving"):
+        _ = _plan("SELECT * EXCLUDE (a, b, g, f) FROM t")
+
+
 def test_a_where_sits_under_the_projection_and_not_over_it() raises:
     # The order is the whole point. A WHERE that landed above the projection
     # could name an alias the select list invented, which DuckDB refuses, and

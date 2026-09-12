@@ -135,6 +135,22 @@ projection over the statement's root, applied as the prefix rule that
 A recursive CTE is refused by name. The fixed point it asks for is a node that
 runs its own input until no new rows come out, and the plan has no such node.
 
+### A star stands for the columns the FROM produces, minus what was hung off it
+
+A bare `*` is one output per column in FROM order, each carrying the relation it
+came from so that binding can tell two sources with the same column name apart.
+`t.*` is the same list with the columns of every other relation dropped, which
+works because that number is exactly what says where a column came from. The
+three modifiers are applied in the order the grammar forces them to be written,
+exclude then replace then rename, and `firepanda/sql/star.mojo` holds the rules
+for what a modifier may name and the wording of every refusal, so the binder and
+this stage do not disagree about what the query said.
+
+`v.*` where `v` is a subquery in the `FROM` is refused. A derived table is not a
+relation, so its columns arrive with no number on them and there is nothing here
+to tell them from the columns of the source beside them. A modifier is never
+qualified, because a dotted name in one is refused while the AST is built.
+
 ### A `USING` or a `NATURAL` join names its keys by column name
 
 Both are one equality per named column, and `NATURAL` is `USING` over every
@@ -418,6 +434,15 @@ from .ast import (
 )
 from .catalog import Catalog, KIND_FRAME, fold
 from .cte import NOT_A_CTE, aliased, read_ctes
+from .star import (
+    NOT_REPLACED,
+    Renaming,
+    Replacement,
+    Target,
+    check,
+    empty_select_list,
+    not_in_from,
+)
 from .types import engine_type, parse_type
 
 
@@ -4493,13 +4518,30 @@ def _block(
                     "a star in a SELECT with no FROM, and there is nothing for"
                     " it to stand for"
                 )
-            _expand(ast, item.a, schema, origin, plan, outputs, names)
+            _expand(
+                ast,
+                item.a,
+                schema,
+                origin,
+                plan,
+                walk,
+                scope,
+                grouped,
+                outputs,
+                names,
+            )
             continue
         outputs.append(_lower_expr(ast, item.a, plan, walk, scope, grouped))
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
             names.append(_name_of(ast, item.a, i))
+
+    # A star whose EXCLUDE names every column it stood for leaves nothing, and
+    # a select list of nothing is not a query. DuckDB's wording, since this is
+    # the same thing it refuses.
+    if len(outputs) == 0:
+        raise Error(empty_select_list())
 
     var predicate = -1
     if having != NO_NODE:
@@ -4617,15 +4659,26 @@ def _expand(
     schema: Schema,
     origin: List[Int],
     mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
     mut outputs: List[Int],
     mut names: List[String],
 ) raises:
-    """Expands a `*` into one output per column of the scan.
+    """Expands a `*` into one output per column the FROM produces.
 
-    Only a bare star with no modifiers on it. `firepanda/sql/star.mojo` is the
-    whole of `EXCLUDE`, `REPLACE` and `RENAME` and it works against a bind
-    context rather than a schema, so wiring it in is its own change and not one
-    to do halfway here.
+    A qualified star keeps the columns of one relation and drops the rest, and
+    the three modifiers are applied in the order the grammar forces them to be
+    written: exclude, then replace, then rename. The rules for what a modifier
+    may name and what happens when two of them name the same column are in
+    `firepanda/sql/star.mojo`, which is also where the wording of every refusal
+    here comes from, so the two stages that expand a star do not disagree about
+    what the query said.
+
+    What this does not take is a qualified star in front of a subquery's name.
+    A derived table is not a relation and its columns come through with no
+    number on them, so there is nothing here to keep them apart from the
+    columns of the source beside them.
 
     Args:
         ast: The arenas.
@@ -4633,43 +4686,140 @@ def _expand(
         schema: What the FROM produces.
         origin: Which relation each of those columns came from.
         plan: Where the lowered expressions go.
+        walk: The aggregates found so far, for a `REPLACE` that holds one.
+        scope: What the FROM put in reach, for the qualifier.
+        grouped: Whether the statement has a `GROUP BY`.
         outputs: Where the expressions go.
         names: Where their names go.
 
     Raises:
-        If the star is qualified or carries a modifier.
+        If the qualifier names nothing in the FROM or names a subquery, if a
+        modifier names a column the star does not stand for, or if two
+        modifiers name the same column.
     """
     var node = ast.exprs[Int(at)]
-    if ast.length(node.children) != 0:
-        raise Error(
-            "firepanda lowers a bare star so far, and a qualified one needs the"
-            " bindings rather than one schema"
-        )
-    if (
-        ast.length(node.a) != 0
-        or ast.length(node.b) != 0
-        or ast.length(node.payload) != 0
-    ):
-        raise Error(
-            "firepanda does not lower EXCLUDE, REPLACE or RENAME on a star yet,"
-            " although firepanda/sql/star.mojo is all three of them"
-        )
-    for i in range(len(schema)):
-        # Every column that came from a table says which one. A join of two
-        # tables that share a column name puts both of them in the star and an
-        # unqualified reference to either would be refused, and a USING join
-        # hands out one of a pair while the node below it still produces both,
-        # so in neither case is the name on its own enough. Which position it
-        # is remains binding's to work out, and that is the one thing this
-        # stage cannot know. A column a projection computed has no relation to
-        # name and goes on as it is.
-        if origin[i] == UNBOUND:
-            outputs.append(plan.exprs.column(String(schema[i].name)))
-        else:
-            outputs.append(
-                plan.exprs.column_of(origin[i], String(schema[i].name))
+
+    # Every modifier name is one identifier. A dotted one is refused while the
+    # AST is built, since the node has nowhere to put the two halves, so
+    # nothing here has a qualifier to match and every `Target` is written bare.
+    var excluded = List[Target]()
+    for i in range(ast.length(node.a)):
+        excluded.append(Target("", ast.text(ast.at(node.a, i))))
+    var replaced = List[Replacement]()
+    var i = 0
+    while i + 1 < ast.length(node.b):
+        replaced.append(
+            Replacement(
+                Target("", ast.text(ast.at(node.b, i))), ast.at(node.b, i + 1)
             )
-        names.append(String(schema[i].name))
+        )
+        i += 2
+    var renamed = List[Renaming]()
+    i = 0
+    while i + 1 < ast.length(node.payload):
+        renamed.append(
+            Renaming(
+                Target("", ast.text(ast.at(node.payload, i))),
+                ast.text(ast.at(node.payload, i + 1)),
+            )
+        )
+        i += 2
+    check(excluded, replaced, renamed)
+
+    var qualified = False
+    var only = 0
+    var parts = ast.length(node.children)
+    if parts != 0:
+        if parts != 1:
+            raise Error(
+                "firepanda reads a star as a name and a star so far, and a"
+                " third part is a schema, which needs the catalog to tell from"
+                " a table"
+            )
+        var qualifier = String(ast.text(ast.at(node.children, 0)))
+        var found = scope.find(qualifier)
+        if found == NOT_IN_REACH:
+            raise Error(
+                String(
+                    "nothing in this query is called '",
+                    qualifier,
+                    "', and the FROM brought ",
+                    scope.written(),
+                )
+            )
+        if found == DERIVED:
+            raise Error(
+                String(
+                    "firepanda does not lower '",
+                    qualifier,
+                    (
+                        ".*' yet, because a subquery in a FROM is not a"
+                        " relation and its columns arrive with no number"
+                        " saying which source they came from"
+                    ),
+                )
+            )
+        qualified = True
+        only = found
+
+    var used_exclude = List[Bool](length=len(excluded), fill=False)
+    var used_replace = List[Bool](length=len(replaced), fill=False)
+    for at_column in range(len(schema)):
+        if qualified and origin[at_column] != only:
+            continue
+        var column = String(schema[at_column].name)
+
+        var dropped = False
+        for entry in range(len(excluded)):
+            if excluded[entry].matches("", column):
+                used_exclude[entry] = True
+                dropped = True
+        if dropped:
+            continue
+
+        # A REPLACE that matches twice replaces the first column and drops the
+        # second one, which is DuckDB losing a column without saying so and is
+        # reproduced rather than fixed, for the reason star.mojo gives.
+        var stood = NOT_REPLACED
+        var taken = False
+        for entry in range(len(replaced)):
+            if not replaced[entry].target.matches("", column):
+                continue
+            if used_replace[entry]:
+                taken = True
+                break
+            used_replace[entry] = True
+            stood = replaced[entry].node
+        if taken:
+            continue
+
+        var called = String(column)
+        for entry in renamed:
+            if entry.target.matches("", column):
+                called = String(entry.name)
+
+        if stood != NOT_REPLACED:
+            outputs.append(_lower_expr(ast, stood, plan, walk, scope, grouped))
+        elif origin[at_column] == UNBOUND:
+            # Every column that came from a table says which one. A join of two
+            # tables that share a column name puts both of them in the star and
+            # an unqualified reference to either would be refused, and a USING
+            # join hands out one of a pair while the node below it still
+            # produces both, so in neither case is the name on its own enough.
+            # Which position it is remains binding's to work out, and that is
+            # the one thing this stage cannot know. A column a projection
+            # computed has no relation to name and goes on as it is.
+            outputs.append(plan.exprs.column(column^))
+        else:
+            outputs.append(plan.exprs.column_of(origin[at_column], column^))
+        names.append(called^)
+
+    for entry in range(len(excluded)):
+        if not used_exclude[entry]:
+            raise Error(not_in_from("EXCLUDE", excluded[entry]))
+    for entry in range(len(replaced)):
+        if not used_replace[entry]:
+            raise Error(not_in_from("REPLACE", replaced[entry].target))
 
 
 def _modifiers(
