@@ -471,7 +471,9 @@ def test_a_product_over_a_long_column_agrees_with_a_short_one() raises:
 def test_any_and_all_read_a_value_as_true_when_it_is_not_zero() raises:
     var mixed = ints([0, 1, 0])
     assert_true(
-        reduce_any(AnyArray(mixed.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+        reduce_any(AnyArray(mixed.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
     )
     assert_false(
         reduce_any(AnyArray(mixed^), AggKind.ALL).as_typed[DType.bool]()[0]
@@ -479,7 +481,9 @@ def test_any_and_all_read_a_value_as_true_when_it_is_not_zero() raises:
 
     var zeros = ints([0, 0, 0])
     assert_false(
-        reduce_any(AnyArray(zeros.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+        reduce_any(AnyArray(zeros.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
     )
     assert_false(
         reduce_any(AnyArray(zeros^), AggKind.ALL).as_typed[DType.bool]()[0]
@@ -489,7 +493,9 @@ def test_any_and_all_read_a_value_as_true_when_it_is_not_zero() raises:
 def test_a_column_with_no_values_answers_the_identity_of_the_operator() raises:
     var empty = Array[DType.int64](0)
     assert_false(
-        reduce_any(AnyArray(empty.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+        reduce_any(AnyArray(empty.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
     )
     # True, and not because anything in the column was true. An `all` over
     # nothing is the identity of and, the same way an `any` over nothing is the
@@ -502,7 +508,9 @@ def test_a_column_with_no_values_answers_the_identity_of_the_operator() raises:
     blank.set_null(0)
     blank.set_null(1)
     assert_false(
-        reduce_any(AnyArray(blank.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+        reduce_any(AnyArray(blank.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
     )
     assert_true(
         reduce_any(AnyArray(blank^), AggKind.ALL).as_typed[DType.bool]()[0]
@@ -530,7 +538,9 @@ def test_a_boolean_column_answers_both_truth_values() raises:
     for i in range(200):
         flags[i] = i % 7 == 3
     assert_true(
-        reduce_any(AnyArray(flags.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+        reduce_any(AnyArray(flags.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
     )
     assert_false(
         reduce_any(AnyArray(flags^), AggKind.ALL).as_typed[DType.bool]()[0]
