@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.78] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Set operations on the SQL side, `drop` on the pandas side, and three rules the planner should have had and did not. The planner work is the one worth reading about: none of it is a new node or a new kernel, all three are decisions the planner was already in a position to make and was making the lazy way, and two of the three are ClickBench queries that were paying for the laziness by the row.
+
 ### Changed: the conditions of a WHERE run in the order that costs least
 
 The lowering already made one physical filter per conjunct so that each condition only reads what the one before it kept, and the planner already threw away the halves of a conjunction that belonged somewhere else, but what was left over at a node was put back together in the order it was met, which is the order somebody typed it in. Predicate pushdown now sorts them. An equality against a constant goes first, then an ordered comparison against a constant, then any other single comparison, then everything with more than one operation in it. Two conditions of one class keep the order the query wrote them in, because nothing in the pass can tell them apart and the query is the only thing that can.
@@ -33,6 +39,14 @@ The last key never goes, even when it is constant. An aggregate with no keys is 
 The shape is a group by rather than an anti join or a semi join on purpose. SQL compares two rows of a set operation with a null equal to a null, and a join key is never equal to a null, so a difference written as an anti join drops every row with a null in it and does it quietly. A group by puts the nulls of a column in one group, which is the rule SQL asked for.
 
 `EXCEPT ALL` and `INTERSECT ALL` are still refused, and the message now says why rather than saying the operation is not lowered. Both of them count the copies of a row on each side and emit as many rows as those two counts say, a difference for one and the thinner of the two for the other, and a group by answers one row per group rather than a number of them.
+
+### Added: DataFrame.drop and Series.drop
+
+The second word pandas gives to two different operations, and the first one where both halves can be built. The column half is one binding over the core's drop, which resolves the names against the schema once and selects the positions that were not asked for. The row half is `Index.drop` followed by a reindex, two calls that already existed, with no new core code at all.
+
+That composition costs one extra hashing pass over the index and it inherits the reindex's refusal of a repeated row label, so a frame whose index holds the same label twice raises here where pandas drops both rows. `docs/specs/46-dropping-a-column-and-dropping-a-row.md` argues for the trade and says what the kernel that removes it would look like.
+
+The three ways of naming the wrong door are pandas' own, in pandas' order, with pandas' messages. `Series.drop(columns=...)` is accepted and does nothing, which is measured against a running pandas rather than chosen. `level` and `inplace` refuse, and a misspelled `errors` raises here where pandas reads it as `raise`.
 
 ## [0.6.77] - 2026-09-12
 
@@ -6226,7 +6240,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.77...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.78...HEAD
+[0.6.78]: https://github.com/tamnd/firepanda/releases/tag/v0.6.78
 [0.6.77]: https://github.com/tamnd/firepanda/releases/tag/v0.6.77
 [0.6.76]: https://github.com/tamnd/firepanda/releases/tag/v0.6.76
 [0.6.75]: https://github.com/tamnd/firepanda/releases/tag/v0.6.75
