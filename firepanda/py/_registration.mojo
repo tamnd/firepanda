@@ -75,6 +75,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.dtypes](
         "dtypes", docstring="The column types, in order, as dtype spells them."
     )
+    _ = dataframe.def_method[PyDataFrame.null_counts](
+        "null_counts",
+        docstring="How many rows are missing from each column, in order.",
+    )
     _ = dataframe.def_method[PyDataFrame.set_index](
         "set_index",
         docstring="The frame with one column moved into the row labels.",
@@ -112,6 +116,10 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = dataframe.def_method[PyDataFrame.filter_rows](
         "filter_rows", docstring="The rows a boolean column is true at."
+    )
+    _ = dataframe.def_method[PyDataFrame.fill_null](
+        "fill_null",
+        docstring="One column's missing rows taken from another column.",
     )
     _ = dataframe.def_method[PyDataFrame.cell](
         "cell", docstring="One value, by row and by column position."
@@ -261,6 +269,9 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.filter_rows](
         "filter_rows", docstring="The rows a boolean column is true at."
+    )
+    _ = series.def_method[PySeries.fill_null](
+        "fill_null", docstring="Every missing row taken from another column."
     )
     _ = series.def_method[PySeries.cell](
         "cell", docstring="One value, by position."

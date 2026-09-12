@@ -1222,6 +1222,148 @@ def _limit_wanted(limit: Any) -> int:
     return limit
 
 
+_NO_FILL_LIMIT = (
+    "stopping after a number of rows means the fill has to count what it has"
+    " already done as it goes, and the kernel underneath here is a coalesce,"
+    " which reads a validity bit and picks a side without ever knowing how many"
+    " rows came before it. ffill and bfill take a limit because they walk"
+)
+
+_NO_FILL_MAP = (
+    "a mapping from row labels to values is a fallback column built by lining"
+    " the mapping up against this object's own labels, which is reindex on a"
+    " column made out of the mapping, and document 47 says why that is a"
+    " separate piece of work rather than a branch here"
+)
+
+_NO_FILL_ALIGNED = (
+    "a fallback that carries rows has to be lined up against this object's own"
+    " labels before a single value of it can be used, which is the alignment"
+    " reindex does and document 47 says why it is a separate piece of work"
+)
+
+
+def _holds(printed: str, value: Any) -> bool:
+    """Whether a column of one type can hold a value without changing it.
+
+    The question is not whether a cast exists. A cast from a number to text
+    exists and answers `'0'`, and a cast from a float to an integer exists and
+    throws the fraction away, and neither of those is what a caller who wrote
+    `fillna(0)` asked for. So the kind of the value is checked against the kind
+    of the column here, above the cast, and the cast below only ever changes the
+    width.
+
+    The rules are pandas' own rules for its nullable types rather than an
+    invention, which is the comparison that matters because a firepanda column
+    is nullable the way `Int64` is and not the way `int64` is. pandas fills an
+    `Int64` with `2.0` and refuses `True`, fills a `Float64` with `2` and
+    refuses `True`, and refuses a number for a `boolean`. Every one of those is
+    what this answers.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+        value: The value the caller wants put in the missing rows.
+
+    Returns:
+        Whether the fill can go ahead.
+    """
+    # A bool is an int in Python and is not one here, so it is asked about
+    # first. Filling a column of numbers with True is a mistake often enough
+    # that pandas refuses it on every nullable numeric type it has.
+    if isinstance(value, bool):
+        return printed == "bool"
+    if isinstance(value, int):
+        return printed in _SIGNED or printed in _UNSIGNED or printed in _FLOATING
+    if isinstance(value, float):
+        if printed in _FLOATING:
+            return True
+        # A float that is a whole number is a number a column of whole numbers
+        # can hold, which is the one place pandas lets the two kinds meet.
+        return (printed in _SIGNED or printed in _UNSIGNED) and value.is_integer()
+    if isinstance(value, str):
+        return printed == "string"
+    return False
+
+
+def _fallback(printed: str, value: Any) -> Any:
+    """The fill value as a column of one row, of the type it is going into.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+        value: What the caller wants put in the missing rows.
+
+    Returns:
+        The inner one row series the extension takes.
+
+    Raises:
+        DTypeError: If the column cannot hold the value. The sentence is
+            pandas' own, which a caller who is already catching pandas here is
+            already matching on.
+    """
+    from ._frame import Series
+
+    if not _holds(printed, value):
+        raise DTypeError(f"Invalid value '{value}' for dtype '{printed}'")
+    try:
+        return Series([value])._inner.cast(printed, True)
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _fill_values(value: Any, held: Any, owner: str) -> dict[str, Any]:
+    """Reads the one argument `fillna` has into a value per column.
+
+    A scalar names every column and a dict names some of them. A key the object
+    does not have is dropped rather than complained about, which is pandas'
+    rule and is the opposite of what `drop` does with a missing name, and the
+    difference is that `drop` was asked to remove something and this was offered
+    something to use.
+
+    Args:
+        value: What the caller passed.
+        held: The column names, for a frame, or the one name, for a column.
+        owner: The class name, for the message.
+
+    Returns:
+        The columns to fill and what to fill each one with, which is empty when
+        there is nothing to do.
+
+    Raises:
+        NotImplementedError: If the value is a mapping onto row labels, or an
+            object rather than a value.
+    """
+    names = list(held)
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        if owner == "Series":
+            raise UnsupportedError(f"a dict value is not supported yet, because {_NO_FILL_MAP}")
+        there = set(names)
+        return {str(key): what for key, what in value.items() if str(key) in there}
+    if _is_object(value):
+        raise UnsupportedError(
+            f"a {type(value).__name__} value is not supported yet, because {_NO_FILL_ALIGNED}"
+        )
+    return dict.fromkeys(names, value)
+
+
+def _is_object(value: Any) -> bool:
+    """Whether the fill value is a whole column or frame rather than a value.
+
+    Read by duck typing rather than by isinstance, because the four shapes that
+    arrive here are this library's two classes and pandas' two, and importing
+    pandas to recognise the second pair would acquire the dependency for one
+    check.
+
+    Args:
+        value: What the caller passed.
+
+    Returns:
+        Whether it carries rows.
+    """
+    return any(hasattr(value, what) for what in ("_inner", "iloc", "dtypes"))
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -2021,6 +2163,78 @@ class DataFrameMixin:
             return DataFrame._wrap(answer._inner.drop(going))
         except Exception as error:
             raise translate(error) from None
+
+    def fillna(
+        self,
+        value: Any = None,
+        *,
+        axis: Any = None,
+        inplace: bool = False,
+        limit: Any = None,
+    ) -> DataFrame:
+        """The frame with its missing values replaced by one that was named.
+
+        Document 47 is the long version. The short one is that a column here is
+        typed and stays typed, so the value has to be one the column can hold,
+        and the check for that is against the kind of the value rather than
+        against whether a cast exists, since a cast from a number to text exists
+        and answers the wrong thing.
+
+        A column with nothing missing is left alone whatever the value is, which
+        is not a shortcut but the rule. pandas widens a column's type only when
+        it actually puts a value in one, so `df.fillna(0)` on a frame whose text
+        column is complete is fine over there and is fine here, and the same
+        call on the same frame with one value missing from that column widens to
+        object over there and raises here, because this library has no type that
+        holds a number beside text.
+
+        `value` is positional and required in pandas rather than defaulted,
+        because `method` went away in 3.0 and nothing is left for a call with no
+        argument to mean. It is defaulted to None here so that a caller who
+        writes it as a keyword still reaches the same code, and None is read the
+        way pandas reads it, which is as nothing to do.
+
+        Args:
+            value: One value for every column, or a dict naming a column and
+                what to put in it. A key the frame does not have is dropped.
+            axis: Which axis to fill along. Accepted and not read, since with
+                one value per column both answers are the same frame.
+            inplace: Refused.
+            limit: Refused, after being checked the way pandas checks it.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If a column that has something missing cannot hold the
+                value offered for it.
+            NotImplementedError: For `inplace`, for a limit, and for a value
+                that is a mapping onto row labels or an object with rows.
+        """
+        from ._frame import DataFrame
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        _axis_number(axis, "DataFrame", 0, (0, 1))
+        if _limit_wanted(limit):
+            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        held = list(self.columns)
+        wanted = _fill_values(value, held, "DataFrame")
+        # The two facts each column is judged on, its type and whether it has a
+        # gap, are read off the schema and the validity bits rather than through
+        # square brackets, because square brackets copy the column and this is
+        # not going to look at a single value in it.
+        types = dict(zip(held, self._inner.dtypes(), strict=True))
+        gaps = dict(zip(held, self._inner.null_counts(), strict=True))
+        answer = self.copy()
+        for name, one in wanted.items():
+            if gaps[name] == 0:
+                continue
+            filled = _fallback(types[name], one)
+            try:
+                answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
+            except Exception as error:
+                raise translate(error) from None
+        return answer
 
     def rename(
         self,
@@ -3516,6 +3730,61 @@ class SeriesMixin:
             limit=None,
             tolerance=None,
         )
+
+    def fillna(
+        self,
+        value: Any = None,
+        *,
+        axis: Any = None,
+        inplace: bool = False,
+        limit: Any = None,
+    ) -> Series:
+        """The column with its missing rows replaced by a value that was named.
+
+        The frame's method with one column under it, and every rule it states
+        holds here: the value has to be one this column's type can hold, a
+        column with nothing missing comes back untouched whatever was offered,
+        and a None means nothing to do.
+
+        The one difference is the dict. On a frame a dict names columns, and on
+        a column there are no columns left to name, so pandas reads it as a
+        mapping from row labels to values. That is a fallback column lined up
+        against this column's labels rather than a value, and it is refused here
+        with the sentence saying what would build it.
+
+        Args:
+            value: The value to put in every missing row.
+            axis: Accepted and not read, the way every axis on a column is.
+            inplace: Refused.
+            limit: Refused, after being checked the way pandas checks it.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the column has something missing and cannot hold the
+                value.
+            NotImplementedError: For `inplace`, for a limit, and for a value
+                that is a mapping or an object with rows.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _axis_number(axis, "Series", 0, (0,))
+        if _limit_wanted(limit):
+            raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
+        # The name, the type and the count of gaps all come off the boundary
+        # rather than off the properties above them, for the reason the frame's
+        # method gives: these are three facts about the column and none of them
+        # is a reason to build a wrapper around it.
+        wanted = _fill_values(value, [self._inner.label()], "Series")
+        if not wanted or self._inner.null_count() == 0:
+            return self.copy()
+        filled = _fallback(self._inner.dtype(), next(iter(wanted.values())))
+        try:
+            return Series._wrap(self._inner.fill_null(filled))
+        except Exception as error:
+            raise translate(error) from None
 
     def rename(
         self,
