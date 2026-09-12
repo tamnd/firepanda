@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a column prints its labels rather than its positions
+
+`fp.DataFrame({"k": ["p", "q"], "v": [1, 2]}).set_index("k")["v"]` printed `0` and `1` down the left where pandas prints `p` and `q`. The labels were in the column the whole time, so `s.index.tolist()`, `s["p"]` and `list(s.items())` all gave the right answer and only the rendering was wrong, which is issue 719.
+
+A defect that only the renderer has is invisible to a test suite that reads values and visible to everybody who looks at a frame, and printing is usually what somebody reached for because they already suspected something was wrong. So the labels now reach the renderer. They arrive already rendered, because the display module cannot import `Index` without a cycle, and only the eleven that will be printed are ever built, so this costs the same on a frame of any height and never materializes a range.
+
+The name of the level is printed too, where it was not before: on a line of its own above the listing on a column, and on its own row under the header on a frame, which is pandas' layout in both shapes. The labels are left aligned and the values stay right aligned, including numeric labels, which is also pandas. A label that is missing prints `<NA>` rather than pandas' `NaN`, for the reason every missing value here prints differently from a float `NaN`.
+
+Printing a frame from Python still gives the schema and the shape rather than the rows, which is a separate decision recorded in document 13 and is not changed here. The table with the labels in it is what a Mojo caller sees.
+
 ### Added: a frame and a column can print what they hold
 
 `df.info()` and `s.info()`, with `verbose`, `buf`, `max_cols`, `memory_usage` and `show_counts`.

@@ -135,7 +135,13 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.dtype.lists import ALL, ORDERED
 from firepanda.dtype.logical import LogicalType, logical_for
-from firepanda.frame.display import DisplayOptions, render_value, visible
+from firepanda.frame.display import (
+    ELLIPSIS,
+    DisplayOptions,
+    IndexCells,
+    render_value,
+    visible,
+)
 from firepanda.hash.function import key_bits
 from firepanda.hash.grouping import KeyCodes, factorize_any
 from firepanda.kernel.concat import concat_two_any
@@ -701,6 +707,38 @@ struct Index(Copyable, Movable, Sized, Writable):
             True when this is the range starting at zero.
         """
         return self.is_range() and self.start == 0
+
+    def display_cells(self, options: DisplayOptions) -> IndexCells:
+        """The labels a renderer should print down the left, already rendered.
+
+        Only the labels that will be printed are built, so this costs eleven
+        renderings on a frame of any height and never materializes a range. The
+        positions that were elided get the ellipsis, in the same place the rows
+        themselves get it, because the two columns have to line up.
+
+        A label that is missing prints the way a missing value prints anywhere
+        else, which is `<NA>` rather than pandas' `NaN`, for the reason the
+        header of `firepanda/frame/display.mojo` gives.
+
+        Args:
+            options: How many rows will be printed, and how to spell what is in
+                them.
+
+        Returns:
+            The name and one cell per printed row.
+        """
+        var shown = visible(self.length, options.max_rows)
+        var cells = List[String](capacity=len(shown))
+        for i in range(len(shown)):
+            if shown[i] < 0:
+                cells.append(String(ELLIPSIS))
+            elif self.labels:
+                cells.append(
+                    render_value(self.labels.value(), shown[i], options)
+                )
+            else:
+                cells.append(String(self.start + shown[i]))
+        return IndexCells(Optional[String](copy=self.name), cells^)
 
     def materialize(self) raises -> AnyArray:
         """The labels as an array, building the range out if it is still a range.

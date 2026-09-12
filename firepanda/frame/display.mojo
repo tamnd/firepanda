@@ -6,11 +6,18 @@ back one at a time to say what it saw. So this is worth having early even though
 nothing depends on it.
 
 The output follows pandas closely enough that a Python reader will not have to
-think about it: a header row, an integer index down the left, values right
-aligned in their columns, and both the rows and the columns elided in the middle
-when there are too many to print. What it does not copy is the parts of pandas
-display that exist because pandas has an index made of arbitrary labels. There is
-no index name line, and the left column is always the row position.
+think about it: a header row, the row labels down the left, values right aligned
+in their columns, and both the rows and the columns elided in the middle when
+there are too many to print.
+
+The labels down the left are the frame's own labels and not the row positions,
+and they are left aligned rather than right aligned, both of which are pandas'
+layout. A named index gets its name printed too, on a line of its own above the
+listing on a column and inside the table under the header on a frame. None of
+that happens in here, because this file cannot reach an `Index` without a cycle.
+The labels arrive already rendered as an `IndexCells`, and a caller that passes
+none still gets the positions, which is what every caller got before labels
+existed.
 
 Three decisions in here are ours rather than inherited.
 
@@ -111,6 +118,65 @@ def pad_left(text: String, width: Int) -> String:
     while out.byte_length() < width:
         out = String(" ", out)
     return out^
+
+
+def pad_right(text: String, width: Int) -> String:
+    """Left aligns a cell in a column.
+
+    Only the index column is aligned this way. pandas left aligns the labels
+    whatever they are, so a column of labels `10`, `200` and `3` prints with all
+    three hard against the left edge rather than lined up on their last digit,
+    and copying that is the whole reason this exists beside `pad_left`.
+
+    Args:
+        text: The cell.
+        width: The column width in bytes.
+
+    Returns:
+        The padded cell, or the original if it is already wider.
+    """
+    var out = text
+    while out.byte_length() < width:
+        out += " "
+    return out^
+
+
+struct IndexCells(Copyable, Movable):
+    """The labels a renderer prints down the left, already rendered.
+
+    The renderers in this file cannot reach an `Index`, because `index.mojo`
+    imports this file and the cycle would not resolve. So the index arrives
+    already turned into text, which also keeps the cost right: only the labels
+    that will be printed are ever rendered, so a million row frame renders
+    eleven of them and not a million.
+
+    An empty `cells` means the caller did not supply any and the renderer falls
+    back to the row positions, which is what every caller used to get and is
+    what the tests and the benchmarks still ask for.
+    """
+
+    var name: Optional[String]
+    """What the level is called. `None` prints no name line at all, which is
+    what an index that was never named has."""
+
+    var cells: List[String]
+    """One entry per printed row, in order, with the elision already standing in
+    for the rows that were left out."""
+
+    def __init__(out self):
+        """Constructs the absence: no name, and positions down the side."""
+        self.name = None
+        self.cells = List[String]()
+
+    def __init__(out self, var name: Optional[String], var cells: List[String]):
+        """Constructs the labels for one rendering.
+
+        Args:
+            name: The level name, or `None` for unnamed.
+            cells: The rendered labels, one per printed row.
+        """
+        self.name = name^
+        self.cells = cells^
 
 
 def format_float(value: Float64, precision: Int) -> String:
@@ -256,6 +322,7 @@ def render_table[
     columns: ColumnRefs[o],
     rows: Int,
     options: DisplayOptions,
+    index: IndexCells = IndexCells(),
 ) -> String:
     """Renders a frame as a table with a header, an index and a shape line.
 
@@ -270,6 +337,7 @@ def render_table[
         columns: The data, one per schema field.
         rows: The frame's height.
         options: How much to print.
+        index: The row labels, rendered. Left out means the row positions.
 
     Returns:
         The table, with no trailing newline.
@@ -279,27 +347,41 @@ def render_table[
 
     var shown_rows = visible(rows, options.max_rows)
     var shown_columns = visible(len(columns), options.max_columns)
+    # A caller that got the count wrong would index past the end of its own
+    # list, so the positions are used instead. Nothing in the library does this
+    # and the check costs one comparison.
+    var labelled = len(index.cells) == len(shown_rows)
+    var named = Bool(index.name)
 
     var grid = List[List[String]]()
 
-    var index = List[String]()
-    index.append(String(""))
+    var labels = List[String]()
+    labels.append(String(""))
+    if named:
+        labels.append(index.name.value())
     for i in range(len(shown_rows)):
         if shown_rows[i] < 0:
-            index.append(String(ELLIPSIS))
+            labels.append(String(ELLIPSIS))
+        elif labelled:
+            labels.append(index.cells[i])
         else:
-            index.append(String(shown_rows[i]))
-    grid.append(index^)
+            labels.append(String(shown_rows[i]))
+    grid.append(labels^)
 
     for c in range(len(shown_columns)):
         var at = shown_columns[c]
         var cells = List[String]()
         if at < 0:
-            for _ in range(len(shown_rows) + 1):
+            cells.append(String(ELLIPSIS))
+            if named:
+                cells.append(String(""))
+            for _ in range(len(shown_rows)):
                 cells.append(String(ELLIPSIS))
             grid.append(cells^)
             continue
         cells.append(schema[at].name)
+        if named:
+            cells.append(String(""))
         for i in range(len(shown_rows)):
             if shown_rows[i] < 0:
                 cells.append(String(ELLIPSIS))
@@ -322,7 +404,10 @@ def render_table[
         for c in range(len(grid)):
             if c > 0:
                 out += "  "
-            out += pad_left(grid[c][r], widths[c])
+            if c == 0:
+                out += pad_right(grid[c][r], widths[c])
+            else:
+                out += pad_left(grid[c][r], widths[c])
         out += "\n"
 
     out += String("\n[", rows, " rows x ", len(columns), " columns]")
@@ -330,7 +415,10 @@ def render_table[
 
 
 def render_column(
-    name: String, col: AnyArray, options: DisplayOptions
+    name: String,
+    col: AnyArray,
+    options: DisplayOptions,
+    index: IndexCells = IndexCells(),
 ) -> String:
     """Renders a single column as a two column listing with a footer.
 
@@ -339,6 +427,7 @@ def render_column(
             pandas does.
         col: The data.
         options: How much to print.
+        index: The row labels, rendered. Left out means the row positions.
 
     Returns:
         The listing, with no trailing newline.
@@ -355,27 +444,32 @@ def render_column(
         return String("Series([], ", footer, ")")
 
     var shown = visible(len(col), options.max_rows)
-    var index = List[String]()
+    var labelled = len(index.cells) == len(shown)
+    var labels = List[String]()
     var cells = List[String]()
     for i in range(len(shown)):
         if shown[i] < 0:
-            index.append(String(ELLIPSIS))
+            labels.append(String(ELLIPSIS))
             cells.append(String(ELLIPSIS))
         else:
-            index.append(String(shown[i]))
+            labels.append(index.cells[i] if labelled else String(shown[i]))
             cells.append(render_value(col, shown[i], options))
 
     var index_width = 0
     var cell_width = 0
-    for i in range(len(index)):
-        if index[i].byte_length() > index_width:
-            index_width = index[i].byte_length()
+    for i in range(len(labels)):
+        if labels[i].byte_length() > index_width:
+            index_width = labels[i].byte_length()
         if cells[i].byte_length() > cell_width:
             cell_width = cells[i].byte_length()
 
-    var out = String("")
-    for i in range(len(index)):
-        out += pad_left(index[i], index_width)
+    # The name goes on a line of its own above the listing and is not padded to
+    # the width of the labels under it, which is pandas' layout. On a frame the
+    # same name goes inside the table instead, because there is a header row
+    # there for it to sit under and here there is not.
+    var out = String(index.name.value(), "\n") if index.name else String("")
+    for i in range(len(labels)):
+        out += pad_right(labels[i], index_width)
         out += "    "
         out += pad_left(cells[i], cell_width)
         out += "\n"
