@@ -23,6 +23,17 @@ The run being looked for has to be written out in the query. A needle that came 
 The second argument is a set of characters and not a prefix, which is DuckDB's reading as well: `trim('abcxcba', 'abc')` is `x`. It has to be written out in the query, because a set that came from a column would mean a new set per row and there is no kernel for that.
 
 What comes off when no set is named is the Unicode Zs characters and nothing else, which is seventeen code points and is a narrower set than the twenty nine `str.strip` removes. A tab, a newline, a carriage return or a form feed on the end of a value survives a `TRIM` and does not survive a `.str.strip()`. That divergence is deliberate and is what DuckDB does, so `is_sql_space` sits beside `is_python_space` in `firepanda.kernel.edges` and `text_trim` sits beside `text_strip`.
+### Added: a column and a frame can be asked whether a value is one of a set
+
+`s.isin([1, 2, 3])` and `df.isin(...)` are here. The hash table underneath them has been in `firepanda/kernel/member.mojo` since the indexing work and `Series.is_in` has been on the core for just as long, so what this adds is one binding and the rules about what a set is, which turned out to be most of the method.
+
+The kernel compares one type against one type and refuses a mismatch. pandas compares by value and never refuses, so `Series([1, 2]).isin(["1"])` finds nothing and says nothing about the string, and `isin([2, "b", 9.5, None])` finds the two and ignores the rest. That is now the answer here, because a value a column cannot hold is a value none of its rows can equal, so it is dropped rather than compared. Two values do cross a kind boundary, since Python thinks a flag is a number: a zero or a one matches a column of flags, and `True` matches a one in a column of numbers, both of which are pandas' answers.
+
+A missing row is false rather than missing, which is pandas' rule and not the core's. The core is describing SQL's `IN`, where a comparison against an unknown value is unknown. pandas instead matches a missing row against that dtype's own missing value, and it has four of them where firepanda has one, so which one is meant is read off the set: a column of words finds `None` and a nan, a column of numbers finds only the nan, and a column of flags finds neither. A real nan in a float column is found too, which takes a second pass because a nan is not equal to itself and the kernel therefore misses it.
+
+A category column is looked up through its codes, since that is what it stores, and the set becomes a set of positions rather than a second category column. A value that is not one of the categories has no position and the rows answer false, which is what pandas answers.
+
+`DataFrame.isin` takes a list as one set for every column and a mapping as a set per column, with a column the mapping does not name answering false all the way down. A frame or a series as the argument is refused: pandas lines either of them up by label and compares cell against cell, which is an equality test wearing this method's name, and answering it as a set would be a wrong answer that looks like a right one. A temporal column asked about a timestamp is refused for a smaller reason, which is that the set crosses as a column and a column of timestamps cannot be built out of Python objects yet. Specified in `docs/specs/55-asking-whether-a-value-is-one-of-a-set.md`.
 
 ### Added: a group can be reduced with a product and asked whether it is true
 

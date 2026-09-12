@@ -285,6 +285,9 @@ def register(mut module: PythonModuleBuilder) raises:
         "pick",
         docstring="Every row taken from this column or from another one.",
     )
+    _ = series.def_method[PySeries.is_in](
+        "is_in", docstring="Which rows hold one of a set of values."
+    )
     _ = series.def_method[PySeries.cell](
         "cell", docstring="One value, by position."
     )

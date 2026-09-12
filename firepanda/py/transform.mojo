@@ -106,9 +106,9 @@ def transformed(column: Series, kind: String, periods: Int) raises -> Series:
     if kind == "dropna":
         return column.drop_nulls()
     if kind == "isna":
-        return _masked(column, column.is_null())
+        return masked(column, column.is_null())
     if kind == "notna":
-        return _masked(column, column.is_not_null())
+        return masked(column, column.is_not_null())
     if kind == "ffill":
         return column.fill_forward(periods)
     if kind == "bfill":
@@ -130,7 +130,7 @@ def transformed(column: Series, kind: String, periods: Int) raises -> Series:
     raise tagged(VALUE, String("unknown transformation ", kind))
 
 
-def _masked(column: Series, var mask: Array[DType.bool]) raises -> Series:
+def masked(column: Series, var mask: Array[DType.bool]) raises -> Series:
     """Puts a bool mask back on the column's name and labels.
 
     `is_null` answers a bare `Array` on purpose, because a mask is almost always
@@ -139,6 +139,12 @@ def _masked(column: Series, var mask: Array[DType.bool]) raises -> Series:
     pandas program writes `s.isna()` to look at the answer rather than to feed
     it to something, and a mask with no labels cannot be lined up against the
     rows it describes.
+
+    This had an underscore on it while `isna` and `notna` were the only two
+    callers, and it lost the underscore when `isin` became the third. `isin`
+    lives in `series.mojo` rather than here because it takes a second column and
+    everything in this file reads one, so the helper had to cross a module and a
+    name with an underscore on it is a name that says not to.
 
     Args:
         column: The column the mask was taken from, read for its name and

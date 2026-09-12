@@ -2650,6 +2650,13 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.is_in",
+            name="is_in",
+            doc="Which rows hold one of a set of values.",
+            params=(("values", "Series"),),
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.cell",
             name="cell",
             doc="One value, by position.",

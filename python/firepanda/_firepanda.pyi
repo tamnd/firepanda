@@ -219,6 +219,9 @@ class Series:
     def pick(self, cond: Series, other: Series) -> Series:
         """Every row taken from this column or from another one."""
         ...
+    def is_in(self, values: Series) -> Series:
+        """Which rows hold one of a set of values."""
+        ...
     def cell(self, at: int) -> object:
         """One value, by position."""
         ...

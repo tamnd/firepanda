@@ -118,7 +118,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [x] `take` (M6), on either axis and counting a negative position from the end
 - [ ] `xs`, `get`, `pop`, `insert` (M6)
 - [ ] `where`, `mask`, `query` (M6, `query` M4b)
-- [x] `isin` on Series (M1)
+- [x] `isin` on Series (M1) and on DataFrame (M6), apart from a frame or a series as the argument, which pandas lines up by label and compares cell against cell rather than reading as a set
 - [ ] `between` on Series (M1)
 - [ ] `first`, `last` (M7)
 
