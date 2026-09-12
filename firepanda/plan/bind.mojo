@@ -18,7 +18,9 @@ The second is that a type error becomes a plan error. Adding a string to a date
 is refused here, with the operation named, before a single row has moved.
 `binary_type`, `unary_type` and `agg_type` are the same functions the kernels
 use to decide what they produce, so the type on the node is the type the kernel
-will really answer and not a second opinion about it.
+will really answer and not a second opinion about it. Comparing a date column
+against a string literal is the one place binding reads a value rather than a
+type alone, and `_instant_literal` has the whole of why.
 
 ## What binding computes for a node
 
@@ -55,7 +57,7 @@ rather than accumulates.
 from firepanda.dtype.logical import LogicalType, promote
 from firepanda.dtype.schema import Field, Schema
 from firepanda.join.pairs import JoinKind
-from firepanda.kernel.binary import BinaryOp, binary_type
+from firepanda.kernel.binary import BinaryOp, binary_type, resolve_constant
 from firepanda.kernel.group import AggKind, agg_type
 from firepanda.kernel.unary import UnaryOp, unary_type
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
@@ -417,6 +419,70 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     return LogicalType.BOOL
 
 
+def _instant_literal(
+    exprs: Expressions,
+    kids: List[Int],
+    mut below: List[LogicalType],
+    op: BinaryOp,
+) raises:
+    """Reads a text literal in a comparison against instants as an instant.
+
+    `WHERE EventDate >= '2013-07-01'` is how every SQL dialect writes a date
+    bound and it is what seven of the 43 ClickBench statements are made of. The
+    literal is text and the column holds days, the two have no common type, and
+    without this the comparison is refused before a row moves.
+
+    It is a rule about a literal and not a rule about the text type. A literal
+    is something the person writing the query typed, and typing a date between
+    quotes is how the language spells one, so reading it as a date is reading
+    what they wrote. A column of text is not that: nobody said those rows are
+    dates, and the comparison stays refused so that whoever wrote it says which
+    they meant with a cast.
+
+    The type is worked out here and the value is not touched. `resolve_constant`
+    is what reads the text, and it is already what `ComputeNode.schema` and
+    `binary_value_any` call on the constant when the comparison runs, so the
+    type this declares is the type the loop will really answer and the literal
+    gets read in one place rather than in two. The arena is left alone on
+    purpose: an index can be read by more than one plan node, which is the
+    reason `Expressions.rebuild` adds a node rather than editing one, and a
+    literal rewritten in place here would change a comparison under a node that
+    never asked.
+
+    Args:
+        exprs: The arena, read for the operands' kinds and values.
+        kids: The two operands.
+        below: The operands' types, with the literal's replaced by what it will
+            be read as.
+        op: The operation, since only a comparison reads a literal this way.
+
+    Raises:
+        Error: If the text is not a date or a timestamp the column can be
+            compared against, which quotes the text and comes from
+            `parse_instant`.
+    """
+    if not op.is_comparison():
+        # Arithmetic on an instant and text has no answer whatever the text
+        # says, and reading it first would report a badly written date to
+        # somebody whose real problem is that they added two things that do not
+        # add. The promotion's refusal is the one that fits.
+        return
+    if below[0].is_temporal() == below[1].is_temporal():
+        return
+    var side = 1 if below[0].is_temporal() else 0
+    if exprs.nodes[kids[side]].kind != ExprKind.LITERAL:
+        return
+    if not below[side].is_variable_width():
+        return
+    if not exprs.nodes[kids[side]].value.present:
+        # A null literal is a comparison that answers null for every row and
+        # the kernels have that already. There is no text to read.
+        return
+    below[side] = resolve_constant(
+        below[1 - side], exprs.nodes[kids[side]].value, op
+    ).type
+
+
 def bind_expr(
     mut exprs: Expressions, root: Int, schema: Schema, origin: List[Int]
 ) raises:
@@ -468,9 +534,9 @@ def bind_expr(
             UnaryOp(exprs.nodes[root].op), below[0]
         )
     elif kind == ExprKind.BINARY:
-        exprs.nodes[root].type = binary_type(
-            BinaryOp(UInt8(exprs.nodes[root].op)), below[0], below[1]
-        )
+        var op = BinaryOp(UInt8(exprs.nodes[root].op))
+        _instant_literal(exprs, kids, below, op)
+        exprs.nodes[root].type = binary_type(op, below[0], below[1])
     elif kind == ExprKind.CALL:
         exprs.nodes[root].type = _call_type(exprs.nodes[root].name, below)
     elif kind == ExprKind.AGGREGATE or kind == ExprKind.WINDOW:

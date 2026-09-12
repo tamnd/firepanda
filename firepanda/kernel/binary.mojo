@@ -370,6 +370,23 @@ def temporal_binary_type(
     var spans = a.kind == TypeKind.DURATION and b.kind == TypeKind.DURATION
 
     if op.is_comparison():
+        if a.is_variable_width() or b.is_variable_width():
+            # The one pair that gets its own sentence here rather than the
+            # promotion's. A text literal against a column of instants is a
+            # date literal written without the keyword and it is read as one
+            # before binding asks this question, so text arriving here is a
+            # column of text, and what that caller needs to hear is that the
+            # cast is theirs to write.
+            raise Error(
+                "binary: "
+                + String(op)
+                + " has no answer for "
+                + String(a)
+                + " and "
+                + String(b)
+                + ", because a literal in a comparison is read as an instant"
+                " for you and a column of text is not, so cast the column"
+            )
         # `promote` refuses a mixture of kinds and a mixture of zones, which is
         # what decides this, so the comparison rule is one line and the message
         # for a pair that cannot compare is the promotion's own.
