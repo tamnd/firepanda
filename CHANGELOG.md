@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The minor bump is for one name whose type changed and four new ones below the frame. `Series.name` is `Optional[String]` rather than `String`, so a column that was never given a name answers `None` instead of the empty string, and a column named `""` is now a different thing from a column named nothing. That is the migration in this release: anything reading `Series.name` as a string gets an optional, and `rename(None)` clears a name where `rename("")` sets an empty one. The new names are `conjoin` and `disjoin` in `firepanda.kernel`, which fold any number of masks in one pass, and `gather_rows` and `gather_any`, which read a column through a selection. `filter_rows`, `filter_any` and the string filter behind them take a `spread` flag now, which defaults to what they did before.
+
+The two performance entries are both kernels with nothing above them reaching in yet, and both are the floor under a stage that was waiting on a number. The n-ary connectives are worth 1.94x at the five masks TPC-H q6 writes and 2.74x at the twelve q19 writes. The gather settles #521, which had been reverted once on a measurement that compared a filter on ten cores against a gather on one: with both sides pinned, a gather is 69 microseconds against 123 for a filtered copy, and writing the selection went from 304 microseconds to 36 once the branch came out of it. On the SQL side, ClickBench q42 should run through the planner now, which leaves q28 and its `REGEXP_REPLACE` as the only one of the 43 still refused.
+
+### Added: a conjunction or disjunction over any number of masks in one pass
+
+A predicate built out of several comparisons has until now been a chain of pairwise `logical_and` calls, and every link in the chain writes a whole intermediate column for the next link to read back. Five predicates anded together writes four of those. Nobody asked for any of them, and on six million rows they cost more than the comparisons did: four writes and eight reads of a byte a row, against the one write and five reads the answer actually needs. `conjoin` and `disjoin` take a list of boolean columns and make one pass, accumulating in a register.
+
+Measured on a thirty two thread desktop over six million rows, which is sf1 lineitem, medians of seven runs after a warm up. Without nulls: two masks 1.15 ms against 1.05, three 1.44 against 0.87, five 3.31 against 1.70, eight 6.33 against 2.60, twelve 9.21 against 3.36. So 1.94x at five masks, which is the shape of TPC-H q6, and 2.74x at twelve, which is the shape of q19. With a null every thousand rows the gain is larger, 2.46x at five and 3.25x at twelve, because the chain pays the three valued repair once per link and this pays it once. The disjunction behaves the same way, 14.69 ms against 3.65 at twelve masks.
+
+The three valued rule generalises the way the pairwise one already worked. Under an and a single present false decides the row whatever the nulls beside it hold, and under an or a single present true does, so the repair walks only the validity words the intersection leaves unset, and within those words only the rows a null reaches, and it stops at the first column holding the decisive value. A column with no nulls in it pays nothing beyond the bitmap intersection, same as before.
+
+One column is handed straight back as a copy and two go to the existing pairwise implementation, so nothing already on that path changes shape or cost. The n-ary answer is tested against the pairwise chain row by row rather than against a fresh scalar loop, since the pairwise form is the thing already pinned to the truth table and agreeing with it is the stronger claim.
+
+This is a kernel and nothing in the plan layer reaches it yet. Flattening an and chain in a plan into one call is the next step and is where a SQL query would start to see it.
+
 ### Fixed: a column with no name reported that it was called nothing
 
 `pd.Series([1]).name` is `None` and `pd.Series([1], name="").name` is `""`, and pandas has told the two apart all along. This library held a name as a Mojo `String`, which has no absent value, so the empty string was doing both jobs and every column that had never been given a name answered `""`. The difference is visible well past the attribute: `to_frame` calls the first one's column `0` and the second one's column `""`, `reset_index` does the same, an operation between two columns that disagree on a name lands on `None`, and a frame reduction, which is about none of the columns it read, hands back a column with no name at all.
@@ -87,17 +107,6 @@ The answer is a microsecond timestamp whatever went in, which is DuckDB's rule a
 DuckDB also accepts a handful of field names here and folds each one onto the unit that field lives in, so `date_trunc('dayofweek', ...)` truncates to the day and `date_trunc('epoch', ...)` to the second. Those are refused rather than answered. They read as a truncation to something that is not a length, and a query that writes one is far more likely to have meant a field than to have meant this. Everything else is refused by name with the thirteen units listed back.
 
 One thing fixed on the way. `date_part('YEAR', d)` was accepted while the plan was built and then failed in the engine, because the field name was only folded to lower case on the path the keyword spelling takes and the operator looks it up in a table that holds it in lower case only. Both spellings fold now, and so does the unit of a `DATE_TRUNC`.
-### Added: a conjunction or disjunction over any number of masks in one pass
-
-A predicate built out of several comparisons has until now been a chain of pairwise `logical_and` calls, and every link in the chain writes a whole intermediate column for the next link to read back. Five predicates anded together writes four of those. Nobody asked for any of them, and on six million rows they cost more than the comparisons did: four writes and eight reads of a byte a row, against the one write and five reads the answer actually needs. `conjoin` and `disjoin` take a list of boolean columns and make one pass, accumulating in a register.
-
-Measured on a thirty two thread desktop over six million rows, which is sf1 lineitem, medians of seven runs after a warm up. Without nulls: two masks 1.15 ms against 1.05, three 1.44 against 0.87, five 3.31 against 1.70, eight 6.33 against 2.60, twelve 9.21 against 3.36. So 1.94x at five masks, which is the shape of TPC-H q6, and 2.74x at twelve, which is the shape of q19. With a null every thousand rows the gain is larger, 2.46x at five and 3.25x at twelve, because the chain pays the three valued repair once per link and this pays it once. The disjunction behaves the same way, 14.69 ms against 3.65 at twelve masks.
-
-The three valued rule generalises the way the pairwise one already worked. Under an and a single present false decides the row whatever the nulls beside it hold, and under an or a single present true does, so the repair walks only the validity words the intersection leaves unset, and within those words only the rows a null reaches, and it stops at the first column holding the decisive value. A column with no nulls in it pays nothing beyond the bitmap intersection, same as before.
-
-One column is handed straight back as a copy and two go to the existing pairwise implementation, so nothing already on that path changes shape or cost. The n-ary answer is tested against the pairwise chain row by row rather than against a fresh scalar loop, since the pairwise form is the thing already pinned to the truth table and agreeing with it is the stronger claim.
-
-This is a kernel and nothing in the plan layer reaches it yet. Flattening an and chain in a plan into one call is the next step and is where a SQL query would start to see it.
 
 ### Added: EXTRACT, date_part and datepart
 
@@ -6646,7 +6655,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
 [0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1
 [0.7.0]: https://github.com/tamnd/firepanda/releases/tag/v0.7.0
 [0.6.83]: https://github.com/tamnd/firepanda/releases/tag/v0.6.83
