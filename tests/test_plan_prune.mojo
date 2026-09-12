@@ -240,6 +240,69 @@ def test_an_aggregate_keeps_a_group_key_nothing_above_it_reads() raises:
     )
 
 
+def test_a_constant_group_key_nothing_reads_is_dropped() raises:
+    # The one key that is not a different query. Every row agrees on it, so it
+    # puts every row in the same group it was already in, and grouping on it
+    # costs a column of ones hashed alongside the real key. ClickBench q34
+    # writes one and this is where it goes.
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var flag = plan.exprs.column("l_returnflag")
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var qty = plan.exprs.column("l_quantity")
+    var summed = plan.aggregate(
+        scan,
+        [one, flag],
+        [plan.exprs.aggregate(AggKind.SUM, qty)],
+        ["one", "l_returnflag", "qty"],
+    )
+    var out = plan.exprs.column("qty")
+    var root = plan.project(summed, [out], ["qty"])
+    _ = prune(plan, root, [_lineitem()])
+    assert_equal(len(plan.nodes[summed].exprs), 2, "the real key and the sum")
+    assert_equal(plan.nodes[summed].parts, 1, "one key left")
+    assert_equal(plan.nodes[summed].names[0], "l_returnflag", "the real one")
+
+
+def test_a_constant_group_key_something_above_reads_stays() raises:
+    # It is still an output of the node, and an output nothing else computes.
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var flag = plan.exprs.column("l_returnflag")
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var qty = plan.exprs.column("l_quantity")
+    var summed = plan.aggregate(
+        scan,
+        [one, flag],
+        [plan.exprs.aggregate(AggKind.SUM, qty)],
+        ["one", "l_returnflag", "qty"],
+    )
+    var root = plan.project(
+        summed, [plan.exprs.column("one"), plan.exprs.column("qty")], ["a", "b"]
+    )
+    _ = prune(plan, root, [_lineitem()])
+    assert_equal(len(plan.nodes[summed].exprs), 3, "all three stay")
+    assert_equal(plan.nodes[summed].parts, 2, "both keys left")
+
+
+def test_the_last_group_key_is_never_dropped_even_when_it_is_constant() raises:
+    # An aggregate with no keys is a whole frame reduction and the two differ
+    # on empty input: the reduction answers one row and the grouping answers
+    # none. So the key that would leave none behind stays.
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var qty = plan.exprs.column("l_quantity")
+    var summed = plan.aggregate(
+        scan, [one], [plan.exprs.aggregate(AggKind.SUM, qty)], ["one", "qty"]
+    )
+    var out = plan.exprs.column("qty")
+    var root = plan.project(summed, [out], ["qty"])
+    _ = prune(plan, root, [_lineitem()])
+    assert_equal(len(plan.nodes[summed].exprs), 2, "the key stayed")
+    assert_equal(plan.nodes[summed].parts, 1, "still a grouping")
+
+
 def test_a_whole_frame_reduction_that_reads_nothing_still_reads_one_column() raises:
     # `count(*)` over a table demands no column of it, and a scan with no
     # column list means every column, so the narrowest list the pass can write

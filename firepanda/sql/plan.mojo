@@ -1043,6 +1043,10 @@ struct _Walk(Movable):
     var agg_names: List[String]
     """What each of those is called in the aggregate's output."""
 
+    var agg_keys: List[String]
+    """The shape of each of those, so that a second call computing the same
+    thing finds the first rather than adding a slot beside it."""
+
     var windows: List[Int]
     """The window expressions found in the select list and the `QUALIFY`, in the
     order they were found."""
@@ -1084,6 +1088,7 @@ struct _Walk(Movable):
         """Starts an empty walk."""
         self.aggs = List[Int]()
         self.agg_names = List[String]()
+        self.agg_keys = List[String]()
         self.windows = List[Int]()
         self.window_names = List[String]()
         self.window_keys = List[String]()
@@ -1156,19 +1161,39 @@ struct _Walk(Movable):
                 return i
         return -1
 
-    def _record(mut self, at: Int, var name: String) -> Int:
+    def _record(
+        mut self, exprs: Expressions, at: Int, var name: String
+    ) raises -> Int:
         """Adds an aggregate to the list the `AGGREGATE` node will compute.
 
+        Two calls that compute the same thing get the same slot and the second
+        name is never minted. `SELECT g, count(*) FROM t GROUP BY g HAVING
+        count(*) > 100` writes the count twice and means it once, and
+        ClickBench q27 and q28 are that query. A slot of its own would be a
+        second counter per group, kept through the whole aggregation and merged
+        at the end, for a number the first slot already holds. The projection
+        above reads the one column twice instead, which it is allowed to do.
+
         Args:
+            exprs: The arena the lowered expression lives in.
             at: The lowered aggregate expression.
             name: What to call its output column.
 
         Returns:
-            Its position among the aggregates.
+            Its position among the aggregates, which is an earlier one when an
+            earlier one computes the same thing.
+
+        Raises:
+            If the expression is not in the arena.
         """
+        var key = _agg_shape(exprs, at)
+        for i in range(len(self.agg_keys)):
+            if self.agg_keys[i] == key:
+                return i
         var place = len(self.aggs)
         self.aggs.append(at)
         self.agg_names.append(name^)
+        self.agg_keys.append(key^)
         return place
 
     def _record_window(
@@ -1189,6 +1214,33 @@ struct _Walk(Movable):
         self.window_names.append(name^)
         self.window_keys.append(key^)
         return place
+
+
+def _agg_shape(exprs: Expressions, root: Int) raises -> String:
+    """Writes down what an aggregate expression computes.
+
+    The key `cse.key_for` writes, with each operand's own key as its token,
+    which is the same way subplan elimination compares two expressions that
+    have never been unified against each other. Not memoized, because an
+    aggregate's argument is a column or a small expression over one and a query
+    has a handful of aggregates in it.
+
+    Args:
+        exprs: The arena.
+        root: The expression.
+
+    Returns:
+        The key. Two expressions with the same key compute the same thing.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    var kids = exprs.nodes[root].children.copy()
+    var tokens = List[String](capacity=len(kids))
+    for i in range(len(kids)):
+        tokens.append(_agg_shape(exprs, kids[i]))
+    return key_for(exprs, root, tokens)
 
 
 def _lower_expr(
@@ -1392,7 +1444,9 @@ def _lower_expr(
                     )
                 )
             var built = plan.exprs.aggregate(_agg_kind(name, distinct), over)
-            var place = walk._record(built, String("__agg_", len(walk.aggs)))
+            var place = walk._record(
+                plan.exprs, built, String("__agg_", len(walk.aggs))
+            )
             return plan.exprs.column(String(walk.agg_names[place]))
         var lowered = List[Int]()
         for i in range(len(args)):

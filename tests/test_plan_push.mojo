@@ -347,6 +347,104 @@ def test_an_or_is_not_split() raises:
     assert_equal(_under(plan, at), "JOIN", "the whole disjunction stayed")
 
 
+def _equals(mut plan: Plan, name: String, to: Int) raises -> Int:
+    """Returns a predicate that one integer column is one number."""
+    return plan.exprs.binary(
+        BinaryOp.EQ, plan.exprs.column(name), plan.exprs.literal(Value(to))
+    )
+
+
+def _joined(mut plan: Plan, var pieces: List[Int], on: Int) raises -> Int:
+    """Returns the plan with those conjuncts filtered above one node."""
+    return plan.filter(on, plan.exprs.call(String("and"), pieces^, True))
+
+
+def test_an_equality_runs_before_a_range() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var pieces = List[Int]()
+    pieces.append(_small(plan, "l_quantity", 30))
+    pieces.append(_equals(plan, "l_partkey", 62))
+    var root = _joined(plan, pieces^, scan)
+    var at = push(plan, root, [_lineitem()])
+    # Written the other way round, and the equality is both the same cost and
+    # the more selective of the two, so the range is left reading whatever it
+    # kept.
+    assert_equal(
+        explain(plan, at),
+        "FILTER and(l_partkey == 62, l_quantity < 30)\n  SCAN lineitem []\n",
+        "the equality came first",
+    )
+
+
+def test_a_disjunction_runs_after_every_plain_comparison() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var either = List[Int]()
+    either.append(_equals(plan, "l_partkey", 1))
+    either.append(_equals(plan, "l_partkey", 2))
+    var pieces = List[Int]()
+    pieces.append(plan.exprs.call(String("or"), either^, rowwise=True))
+    pieces.append(_small(plan, "l_quantity", 30))
+    pieces.append(_equals(plan, "l_orderkey", 62))
+    var root = _joined(plan, pieces^, scan)
+    var at = push(plan, root, [_lineitem()])
+    # An `or` of two equalities is two passes and a combine before it is a
+    # mask, so it goes last however selective it turns out to be.
+    assert_equal(
+        explain(plan, at),
+        (
+            "FILTER and(and(l_orderkey == 62, l_quantity < 30), or(l_partkey =="
+            " 1, l_partkey == 2))\n"
+            "  SCAN lineitem []\n"
+        ),
+        "the disjunction came last",
+    )
+
+
+def test_a_comparison_of_two_columns_runs_after_one_on_a_number() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var pieces = List[Int]()
+    pieces.append(
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("l_orderkey"),
+            plan.exprs.column("l_partkey"),
+        )
+    )
+    pieces.append(_small(plan, "l_quantity", 30))
+    var root = _joined(plan, pieces^, scan)
+    var at = push(plan, root, [_lineitem()])
+    # It is an equality, and it reads two columns and says nothing about how
+    # many rows survive, so it is not the equality the rule puts first.
+    assert_equal(
+        explain(plan, at),
+        (
+            "FILTER and(l_quantity < 30, l_orderkey == l_partkey)\n"
+            "  SCAN lineitem []\n"
+        ),
+        "the range against a number came first",
+    )
+
+
+def test_two_conjuncts_of_one_class_keep_the_order_they_were_written() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var pieces = List[Int]()
+    pieces.append(_equals(plan, "l_partkey", 62))
+    pieces.append(_equals(plan, "l_orderkey", 7))
+    var root = _joined(plan, pieces^, scan)
+    var at = push(plan, root, [_lineitem()])
+    # Nothing in the pass can tell two equalities against a number apart, and
+    # the query is the only thing that can, so it decides.
+    assert_equal(
+        explain(plan, at),
+        "FILTER and(l_partkey == 62, l_orderkey == 7)\n  SCAN lineitem []\n",
+        "written order survived",
+    )
+
+
 def test_a_filter_already_on_a_scan_is_left_alone() raises:
     var plan = Plan()
     var scan = plan.scan("lineitem", List[String](), 0)

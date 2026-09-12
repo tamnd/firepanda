@@ -85,6 +85,7 @@ opinion about which of the two was meant.
 from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.plan.bind import Bound, bind, bind_all
+from firepanda.plan.expr import ExprKind
 from firepanda.plan.node import (
     SET_UNION,
     NodeKind,
@@ -328,11 +329,19 @@ def _narrow(
         return
     var exprs = List[Int]()
     var names = List[String]()
+    # Counted rather than carried over, because a dropped constant key is the
+    # one thing this pass takes out of the first of the two lists and `parts`
+    # is what says where that list ends. It is zero on a project and stays
+    # zero, since nothing below `parts` is ever kept there.
+    var parts = 0
     for i in range(len(keep)):
+        if keep[i] < plan.nodes[at].parts:
+            parts += 1
         exprs.append(plan.nodes[at].exprs[keep[i]])
         names.append(plan.nodes[at].names[keep[i]])
     plan.nodes[at].exprs = exprs^
     plan.nodes[at].names = names^
+    plan.nodes[at].parts = parts
 
 
 def _kept(plan: Plan, at: Int, need: List[Int]) raises -> List[Int]:
@@ -358,10 +367,13 @@ def _kept(plan: Plan, at: Int, need: List[Int]) raises -> List[Int]:
             out.append(i)
         return out^
     var keys = plan.nodes[at].parts
+    var dropped = _constant_keys(plan, at, need)
     for i in range(keys):
         # A group key is not a projection. Dropping one changes which rows come
-        # out, so it stays whatever anything above thinks of it.
-        out.append(i)
+        # out, so it stays whatever anything above thinks of it. The exception
+        # is a key every row agrees on, which `_constant_keys` works out.
+        if not dropped[i]:
+            out.append(i)
     for i in range(len(need)):
         if need[i] >= keys:
             out.append(need[i])
@@ -370,6 +382,62 @@ def _kept(plan: Plan, at: Int, need: List[Int]) raises -> List[Int]:
         # from this one, so which output stays is arbitrary and the first is as
         # good as any.
         out.append(0)
+    return out^
+
+
+def _constant_keys(plan: Plan, at: Int, need: List[Int]) raises -> List[Bool]:
+    """Which group keys are constants that can come out, one flag per key.
+
+    A group key that is the same literal in every row puts every row in the
+    same bucket as far as that key is concerned, so the groups are the same
+    with it or without it and hashing it is a column materialized and hashed to
+    ask a question with one answer. ClickBench q34 is `GROUP BY 1, URL`, where
+    the one is the first select item and the first select item is the literal
+    one, and it exists to see whether an engine notices.
+
+    Two things stop it. A key anything above reads is still that node's output
+    column, and this pass is allowed to drop a column nobody reads and not one
+    somebody does. In SQL the projection above writes the constant itself
+    rather than reading the key back, which is why the rule fires on q34 at
+    all.
+
+    And the last key never goes, even when it is constant and nobody reads it.
+    A grouped aggregation with no keys is a whole frame reduction, and the two
+    differ on an input with no rows in it: the reduction answers one row
+    because the whole input is a group that is always there, and the group by
+    answers none because it found no groups. `Reduce`'s docstring says so. One
+    wasted hash of a constant column is the price of not changing the answer.
+
+    Args:
+        plan: The plan.
+        at: The node.
+        need: The output positions anything above it reads.
+
+    Returns:
+        One flag per group key, true for the ones to leave out.
+
+    Raises:
+        If an expression is not in the arena.
+    """
+    var keys = plan.nodes[at].parts
+    var out = List[Bool](length=keys, fill=False)
+    var left = keys
+    for i in range(keys):
+        if left < 2:
+            break
+        var one = plan.nodes[at].exprs[i]
+        plan.exprs.check(one)
+        if plan.exprs.nodes[one].kind != ExprKind.LITERAL:
+            continue
+        var wanted = False
+        for j in range(len(need)):
+            if need[j] == i:
+                wanted = True
+                break
+        if wanted:
+            continue
+        out[i] = True
+        left -= 1
     return out^
 
 
