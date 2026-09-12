@@ -105,7 +105,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 
 ### Attributes
 
-- [ ] `index`, `columns`, `dtypes`, `shape`, `size`, `ndim`, `empty`, `values`, `axes`, `flags`, `attrs` (M1)
+- [x] `index`, `columns`, `dtypes`, `shape`, `size`, `ndim`, `empty`, `axes` (M6), where `empty` asks about either axis rather than about rows and `dtypes` is a column labelled by column name
+- [ ] `values`, `flags`, `attrs` (M1), where `values` is the door out to numpy rather than a fact about the shape
 - [ ] `T` — `adapted`, transpose of a columnar frame requires a common dtype and raises otherwise (M6)
 
 ### Iteration
@@ -200,6 +201,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 Everything in section 2 that makes sense on one dimension, plus:
 
 - [x] `__iter__`, `__contains__`, `keys`, `items` (M6), where a column walks its values and `in` asks about a label rather than a value
+- [x] `ndim`, `size`, `shape`, `empty`, `axes`, `dtypes` (M6), where `axes` is a list of one so the same loop reads both classes and `dtypes` is what `dtype` answers
+- [ ] `nbytes` (M6), which measures the Arrow buffers here and the numpy representation there and needs a divergence registered before it can land
 - [ ] `values`, `array`, `name`, `dtype`, `hasnans`, `is_unique`, `is_monotonic_increasing`, `is_monotonic_decreasing` (M1)
 - [ ] `item`, `tolist`, `to_frame`, `to_list`, `unique`, `nunique`, `value_counts` (M1)
 - [ ] `argsort`, `argmin`, `argmax`, `searchsorted` (M6)

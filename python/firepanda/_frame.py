@@ -1795,6 +1795,32 @@ class DataFrame(DataFrameMixin):
             raise translate(error) from None
 
     @property
+    def size(self) -> int:
+        """How many cells the frame holds, which is rows times columns."""
+        try:
+            return self._inner.length() * self._inner.width()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of axes, which is two for a frame and always two."""
+        try:
+            return 2
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def empty(self) -> bool:
+        """Whether either axis is empty, so a frame of columns with no rows in them is
+        empty.
+        """
+        try:
+            return self._inner.length() == 0 or self._inner.width() == 0
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
     def index(self) -> Index:
         """The row labels of the frame."""
         try:
@@ -2844,6 +2870,22 @@ class Series(SeriesMixin):
         """A tuple of the number of rows, which for a series is one long."""
         try:
             return (self._inner.length(),)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of axes, which is one for a series and always one."""
+        try:
+            return 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def empty(self) -> bool:
+        """Whether the series has no rows at all."""
+        try:
+            return self._inner.length() == 0
         except Exception as error:
             raise translate(error) from None
 

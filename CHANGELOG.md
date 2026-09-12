@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a frame and a column can say how big they are and what they hold
+
+`df.empty`, `df.ndim`, `df.size`, `df.axes`, `df.dtypes`, `s.empty`, `s.ndim`, `s.axes` and `s.dtypes`. `shape` was already on both classes and `size` was already on a column.
+
+These do no work, cannot fail and are one line each, and they matter because they are the first members anything else reads. A library handed a frame it did not build asks `ndim` to find out what it is, `shape` to find out how big, `dtypes` to find out what is in the columns and `empty` before doing anything at all, and four of those raised `AttributeError` here, which reads to a caller as this not being a dataframe.
+
+Two of them have a rule the name does not say. `empty` is not a row count, it is whether either axis is empty, so a frame of two columns holding no rows is empty and so is a frame of no columns at all. And `size` is cells on a frame and rows on a column, so a frame of three rows and three columns answers nine, which is pandas' rule and numpy's.
+
+`df.dtypes` is a column of the type names labelled by column name rather than a list, because the reason to ask a frame of forty columns what it holds is to read the names off beside the types. The values are the strings `dtype` answers rather than the dtype objects pandas answers, which is the divergence `dtype` already carries in a more visible place. `s.dtypes` is `s.dtype`, and `s.axes` is a list holding one index, both of which read oddly on their own and exist so that code walking either class asks the same question.
+
+`nbytes` is not here. `DataFrame.nbytes` does not exist in pandas either, and the column's half measures the Arrow buffers here and the numpy representation there, which is a divergence that has to be registered on its own before the member can land.
+
 ### Added: a frame and a column can be walked, and asked whether something is in one
 
 `for name in df`, `for value in s`, `"a" in df`, `"p" in s`, `df.keys()`, `s.keys()`, `df.items()`, `s.items()` and `df.itertuples()`, plus `sum(s)`, `min(s)`, `sorted(s)`, `set(s)` and a comprehension over a column, none of which worked before.
