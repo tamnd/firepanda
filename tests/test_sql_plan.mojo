@@ -2939,10 +2939,13 @@ def test_a_trim_of_a_set_that_is_not_text_is_refused_while_it_binds() raises:
         _ = _plan("SELECT trim(g, a) FROM t")
 
 
-def test_a_trim_of_three_things_is_refused_where_it_is_read() raises:
-    # `TRIM` has a grammar rule of its own, so a count it does not take is
-    # caught while the call is built rather than while it binds.
-    with assert_raises(contains="this one was written with 3"):
+def test_a_trim_of_three_things_is_refused_while_it_binds() raises:
+    # `TRIM` has a grammar rule of its own, but a count it does not take is
+    # still the binder's to refuse rather than the transformer's. It used to be
+    # refused in both places, and the transformer's copy meant a query DuckDB
+    # rejects on arity looked like a transformer that had failed to whatever
+    # runs the parser without running the binder.
+    with assert_raises(contains="'trim' takes one or two arguments"):
         _ = _plan("SELECT trim(g, 'a', 'b') FROM t")
 
 
