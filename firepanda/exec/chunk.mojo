@@ -48,7 +48,7 @@ this changes no answer anywhere.
 """
 
 from firepanda.array.any import AnyArray
-from firepanda.kernel.select import take_any
+from firepanda.kernel.select import gather_any
 
 
 struct Chunk(Movable, Sized):
@@ -70,13 +70,13 @@ struct Chunk(Movable, Sized):
     `count(*)` over a projected away table is.
     """
 
-    var picks: List[Int]
+    var picks: List[UInt32]
     """The selection, or empty when there is none.
 
-    A list of `Int` rather than of `UInt32`, because that is what `take_any`
-    takes and converting on every gather would cost more than the eight bytes a
-    position saves. Narrowing it is worth doing once something reads a selection
-    without gathering through it.
+    Four bytes a position. A selection points into one chunk and a chunk is a
+    hundred and twenty eight thousand rows, so three bytes would do, and the
+    width is worth having because `gather_any` reads one position for every
+    value it moves.
     """
 
     var dense: List[Bool]
@@ -105,7 +105,7 @@ struct Chunk(Movable, Sized):
                     + String(self.rows)
                 )
         self.columns = columns^
-        self.picks = List[Int]()
+        self.picks = List[UInt32]()
         self.dense = List[Bool]()
 
     def __init__(out self, var columns: List[AnyArray], rows: Int):
@@ -121,13 +121,13 @@ struct Chunk(Movable, Sized):
         """
         self.columns = columns^
         self.rows = rows
-        self.picks = List[Int]()
+        self.picks = List[UInt32]()
         self.dense = List[Bool]()
 
     def __init__(
         out self,
         var columns: List[AnyArray],
-        var picks: List[Int],
+        var picks: List[UInt32],
         var dense: List[Bool],
     ):
         """Constructs a chunk under a selection.
@@ -189,8 +189,8 @@ struct Chunk(Movable, Sized):
         for i in range(len(self.columns)):
             if i < len(self.dense) and self.dense[i]:
                 continue
-            self.columns[i] = take_any(self.columns[i], self.picks, spread)
-        self.picks = List[Int]()
+            self.columns[i] = gather_any(self.columns[i], self.picks, spread)
+        self.picks = List[UInt32]()
         self.dense = List[Bool]()
 
     def column(self, at: Int, spread: Bool = True) raises -> AnyArray:
@@ -219,7 +219,7 @@ struct Chunk(Movable, Sized):
             )
         if not self.selected() or (at < len(self.dense) and self.dense[at]):
             return AnyArray(copy=self.columns[at])
-        return take_any(self.columns[at], self.picks, spread)
+        return gather_any(self.columns[at], self.picks, spread)
 
     def append(mut self, var column: AnyArray, dense: Bool):
         """Puts a column on the end, saying whether it is at the chunk's rows.

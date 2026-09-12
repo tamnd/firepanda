@@ -32,6 +32,7 @@ from firepanda.kernel import (
     equal,
     filter_rows,
     floor_divide,
+    gather_rows,
     greater,
     invert,
     less,
@@ -44,6 +45,7 @@ from firepanda.kernel import (
     negate,
     not_equal,
     power,
+    select_positions,
     subtract,
     sum_of,
     take_rows,
@@ -902,6 +904,233 @@ def test_take_turns_a_negative_index_into_a_null() raises:
     assert_false(taken.is_valid(1))
     assert_equal(taken[1], 0)
     assert_equal(taken[2], 10)
+
+
+def ascending(rows: Int) -> List[UInt32]:
+    """Returns an ascending selection of `rows` positions with holes in it.
+
+    Every twentieth row is skipped, so the positions rise faster than the output
+    rows do and the run fast path cannot take it. The shape a filter that keeps
+    most of its input produces.
+    """
+    var out = List[UInt32](capacity=rows)
+    for i in range(rows):
+        out.append(UInt32(i + i // 20))
+    return out^
+
+
+def first_gathered_wrong(
+    got: Array[DType.int64], source: Array[DType.int64], picks: List[UInt32]
+) -> Int:
+    """Returns the first gathered row that is not what the source says, or -1.
+
+    `first_wrong` above does the same job for a take and cannot be shared,
+    because a take's index list is signed and a selection's is not. Written the
+    same way and for the same reason: these tests gather sixty five thousand
+    rows to reach the length where the split turns on, and an assertion per row
+    would format a message for each of them.
+    """
+    for i in range(len(picks)):
+        var at = Int(picks[i])
+        if got.is_valid(i) != source.is_valid(at):
+            return i
+        if source.is_valid(at) and got[i] != source[at]:
+            return i
+    return -1
+
+
+def test_a_gather_through_a_selection_agrees_with_the_take() raises:
+    # The two kernels answer the same question for the positions they both
+    # accept, which is the claim the whole selection design rests on, so it is
+    # checked against the older one rather than against a hand written list.
+    var col = build[DType.int64](128, 5)
+    var picks = List[UInt32]()
+    var wide = List[Int]()
+    for i in range(0, 128, 3):
+        picks.append(UInt32(i))
+        wide.append(i)
+
+    var gathered = gather_rows(col, picks)
+    var taken = take_rows(col, wide)
+    assert_equal(len(gathered), len(picks))
+    for i in range(len(picks)):
+        assert_equal(gathered.is_valid(i), taken.is_valid(i))
+        assert_equal(gathered[i], taken[i])
+
+
+def test_a_gather_from_a_column_with_no_nulls_has_no_nulls() raises:
+    # The arm that never touches a bit. A selection holds no negative, so there
+    # is no way for the output to be missing a row the source had, and the
+    # bitmap the array starts with is already the answer.
+    var col = build[DType.int64](64, 0)
+    var picks = List[UInt32]()
+    picks.append(7)
+    picks.append(8)
+    picks.append(40)
+
+    var gathered = gather_rows(col, picks)
+    assert_equal(len(gathered), 3)
+    assert_equal(gathered.null_count(), 0, "nothing became null")
+    assert_equal(gathered[0], col[7])
+    assert_equal(gathered[1], col[8])
+    assert_equal(gathered[2], col[40])
+
+
+def test_a_gather_of_no_rows_answers_a_column_of_no_rows() raises:
+    # A predicate that kept nothing, which is a selection of length zero, and
+    # the run check has to decline rather than read a position that is not
+    # there.
+    var col = build[DType.int64](64, 5)
+    var gathered = gather_rows(col, List[UInt32]())
+    assert_equal(len(gathered), 0)
+
+
+def test_a_gather_past_the_split_carries_the_nulls_across() raises:
+    # Above `PARALLEL_TAKE_ROWS` the gather runs on every core and the workers
+    # share one validity bitmap, a word per sixty four output rows, so the
+    # morsel boundaries have to land on word boundaries. A length one past a
+    # multiple of sixty four is what catches a last morsel that keeps a partial
+    # word it never stored.
+    var col = build[DType.int64](70_000, 7)
+    var picks = ascending(65_601)
+
+    var gathered = gather_rows(col, picks)
+    assert_equal(len(gathered), 65_601)
+    assert_equal(
+        first_gathered_wrong(gathered, col, picks),
+        -1,
+        "a gathered row is wrong",
+    )
+
+
+def test_a_gather_past_the_split_from_a_column_with_no_nulls() raises:
+    # The other arm at the same length, which writes no validity at all, so a
+    # worker that got its bounds wrong shows up in the values rather than in
+    # the bits.
+    var col = build[DType.int64](70_000, 0)
+    var picks = ascending(65_601)
+
+    var gathered = gather_rows(col, picks)
+    assert_equal(
+        first_gathered_wrong(gathered, col, picks),
+        -1,
+        "a gathered row is wrong",
+    )
+
+
+def test_a_gather_of_consecutive_positions_is_the_slice_it_looks_like() raises:
+    # The run fast path replaces the loop with a memcpy, and it needs the same
+    # length as the two above: past the split, so several morsels take it
+    # independently, and one past a multiple of sixty four. The run starts away
+    # from zero because the copy's source offset and its output offset are
+    # different numbers and a run beginning at zero would not tell them apart.
+    var col = build[DType.int64](70_000, 0)
+    var picks = List[UInt32](capacity=65_601)
+    for i in range(65_601):
+        picks.append(UInt32(100 + i))
+
+    var gathered = gather_rows(col, picks)
+    assert_equal(len(gathered), 65_601)
+    assert_equal(
+        first_gathered_wrong(gathered, col, picks),
+        -1,
+        "a gathered row is wrong",
+    )
+
+
+def test_a_gather_of_almost_consecutive_positions_falls_back() raises:
+    # One position out of place has to put the whole morsel back on the general
+    # loop, and the one that matters is the last row of a morsel, because that
+    # is the one a check that stopped early would miss. `TAKE_MORSEL_ROWS` is
+    # sixty five thousand five hundred and thirty six.
+    var col = build[DType.int64](70_000, 0)
+    var picks = List[UInt32](capacity=65_601)
+    for i in range(65_601):
+        picks.append(UInt32(100 + i))
+    picks[65_535] = 69_999
+
+    var gathered = gather_rows(col, picks)
+    assert_equal(
+        first_gathered_wrong(gathered, col, picks),
+        -1,
+        "a gathered row is wrong",
+    )
+
+
+def test_a_gather_through_a_mask_keeps_what_the_filter_keeps() raises:
+    # The equivalence the selection exists for: writing the positions a mask
+    # keeps and gathering through them is the same column as copying through the
+    # mask, row for row and null for null. Past the split on both sides, and
+    # over a column with nulls so that the gather's bitmap and the filter's are
+    # both built rather than both skipped.
+    var col = build[DType.int64](200_003, 7)
+    var mask = Array[DType.bool](200_003)
+    for i in range(200_003):
+        mask[i] = i % 10 != 3
+    mask.set_null(11)
+
+    var picks = select_positions(mask)
+    var gathered = gather_rows(col, picks)
+    var kept = filter_rows(col, mask)
+    assert_equal(len(gathered), len(kept), "the same number of rows")
+    assert_equal(
+        first_gathered_wrong(gathered, col, picks),
+        -1,
+        "a gathered row is wrong",
+    )
+    var wrong = -1
+    for i in range(len(kept)):
+        if gathered.is_valid(i) != kept.is_valid(i):
+            wrong = i
+            break
+        if kept.is_valid(i) and gathered[i] != kept[i]:
+            wrong = i
+            break
+    assert_equal(wrong, -1, "a row the two routes disagree on")
+
+
+def test_the_positions_a_mask_keeps_skip_the_nulls_in_it() raises:
+    # A mask with nulls scattered through it is the route where writing the
+    # cursor test as `valid and true` would short circuit and put back the
+    # branch the loop is written without. The answer follows the rule
+    # `filter_rows` follows, which is that a null drops the row.
+    var mask = Array[DType.bool](1000)
+    for i in range(1000):
+        mask[i] = i % 3 != 0
+    for i in range(0, 1000, 7):
+        mask.set_null(i)
+
+    var picks = select_positions(mask)
+    var wanted = List[UInt32]()
+    for i in range(1000):
+        if mask.is_valid(i) and Bool(mask[i]):
+            wanted.append(UInt32(i))
+
+    assert_equal(len(picks), len(wanted), "the number of positions")
+    var wrong = -1
+    for i in range(len(wanted)):
+        if picks[i] != wanted[i]:
+            wrong = i
+            break
+    assert_equal(wrong, -1, "a position that is wrong")
+
+
+def test_a_mask_that_keeps_nothing_selects_nothing() raises:
+    # Room for every row is taken in front of the loop and the length is cut
+    # back to the cursor at the end, so the two ends of that are worth pinning:
+    # a mask that never advances the cursor has to come back at no length rather
+    # than at the length it was allocated with.
+    var empty = Array[DType.bool](64)
+    for i in range(64):
+        empty[i] = False
+    assert_equal(len(select_positions(empty)), 0, "positions out of nothing")
+
+    var full = Array[DType.bool](64)
+    for i in range(64):
+        full[i] = True
+    var picks = select_positions(full)
+    assert_equal(len(picks), 64, "positions out of everything")
+    assert_equal(Int(picks[63]), 63, "the last position")
 
 
 def test_filter_matches_the_twin() raises:

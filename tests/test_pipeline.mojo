@@ -2540,7 +2540,7 @@ def selected_chunk() raises -> Chunk:
     var columns = List[AnyArray]()
     columns.append(numbers([1, 2, 3, 4, 5, 6]))
     columns.append(numbers([70, 80]))
-    var picks = List[Int]()
+    var picks = List[UInt32]()
     picks.append(1)
     picks.append(3)
     var dense = List[Bool]()

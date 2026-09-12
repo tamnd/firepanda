@@ -1,6 +1,6 @@
-"""Reordering and dropping rows: take and filter.
+"""Reordering and dropping rows: take, gather and filter.
 
-These two are where the vectorized style runs out. A gather reads a different
+These are where the vectorized style runs out. A gather reads a different
 cache line per row and a compaction writes a variable number of them, so neither
 loop has a shape the vector unit helps with on the targets firepanda builds for.
 What can be done is to keep the branches out of the value loop, and both kernels
@@ -24,7 +24,17 @@ the index list is signed.
 them, would mean `filter(m)` and `filter(not m)` both contain the same row, which
 no query engine does and pandas does not either.
 
-Both kernels come in two spellings. The typed one takes an `Array[dt]` and is
+`gather_rows` is the take again for the one index list the engine produces
+itself. A selection out of `select_positions` ascends, holds no negative and
+holds nothing outside the column, and those three facts are worth a loop of
+their own: the branch on the negative goes, the prefetch goes because walking a
+column upwards is what the hardware already predicts, and a source with no
+nulls gathers into an output with no nulls so the validity never comes into it.
+The positions are four bytes wide rather than eight, which matters here and
+nowhere else in this file, because a gather reads one index for every value it
+moves. Section 4 of `docs/specs/engine/02-execution-model.md` and issue #521.
+
+All three kernels come in two spellings. The typed one takes an `Array[dt]` and is
 what other kernels call. The erased one takes an `AnyArray` and is what a
 `DataFrame` calls, because a frame holds a list of columns whose dtypes are only
 known at runtime and differ from each other. They share a body: the typed entry
@@ -526,9 +536,193 @@ def _take_core[
     return out^
 
 
+def gather_rows[
+    dt: DType
+](col: Array[dt], picks: List[UInt32]) raises -> Array[dt]:
+    """Gathers rows through a selection, which ascends and has no holes in it.
+
+    The same answer `take_rows` gives for the same positions and a different
+    loop to get there, because a selection is not any old index list. It
+    ascends, every position is inside the column, and none of them is the
+    negative that a left join uses to say a row was not there. So the branch
+    per row that a take pays for the negative is gone, and so is the prefetch,
+    which a take issues eight rows ahead because its next read can be anywhere
+    and which a walk up the column in order does not need since the hardware
+    is already doing it.
+
+    The validity is the other half. A take builds the output bitmap a word at a
+    time whatever the source looks like, because a negative index makes a null
+    out of a column that has none. A selection cannot, so a source with no
+    nulls gathers into an output with no nulls and the loop never touches a bit.
+
+    What is left when those three are gone is a load at an index and a store,
+    which is what `_filter_core`'s no-null route costs per input row, over
+    fewer rows.
+
+    Args:
+        col: The column to gather from.
+        picks: The selection. Ascending, and every position inside the column.
+            Not checked, for the same reason `take_rows` does not check: the
+            caller is the operator that just built it.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of length `len(picks)`.
+    """
+    return _gather_core(
+        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, picks
+    )
+
+
+def gather_any(
+    col: AnyArray, picks: List[UInt32], spread: Bool = True
+) raises -> AnyArray:
+    """Gathers rows through a selection from a column of a runtime dtype.
+
+    What `Chunk.flatten` and `Chunk.column` call. The text route is
+    `_take_strings` with the positions widened back to `Int`, and that is not an
+    oversight: a gather of text moves a sixteen byte view and a payload per row,
+    so the four bytes an index saves and the branch it removes are both below
+    the noise of what the loop is actually doing. Writing the same hundred and
+    fifty lines again to save them would be a second copy of the hardest kernel
+    in this file for no measurable return.
+
+    Args:
+        col: The column to gather from.
+        picks: The selection. Ascending, and every position inside the column.
+        spread: Whether this gather may use more than one core. False when the
+            caller is already running on a worker.
+
+    Returns:
+        A column of length `len(picks)` with the same dtype as the input.
+
+    Raises:
+        If the column's dtype is not one firepanda has a physical layout for.
+    """
+    if col.is_string():
+        var widened = List[Int](capacity=len(picks))
+        for i in range(len(picks)):
+            widened.append(Int(picks[i]))
+        return AnyArray(_take_strings(col.strings(), widened, spread)).retyped(
+            col.type
+        )
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            return with_categories(
+                AnyArray(
+                    _gather_core(
+                        col.unsafe_ptr[candidate](),
+                        col.data.validity,
+                        col.null_count() > 0,
+                        picks,
+                        spread,
+                    )
+                ).retyped(col.type),
+                col,
+            )
+    raise Error("gather: unsupported dtype")
+
+
+def _gather_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_nulls: Bool,
+    picks: List[UInt32],
+    spread: Bool = True,
+) raises -> Array[dt]:
+    """The selection gather, over a pointer and a bitmap rather than a column.
+    """
+    var n = len(picks)
+
+    # Not the zeroing constructor, for the reason `_take_core` gives: every
+    # output element is written below, and a memset in front of the loop is a
+    # second pass that also faults the whole output in on one core.
+    var out = Array[dt](overwritten=n)
+
+    if not has_nulls:
+        # A selection has no negative in it, so every output row comes from a
+        # row that is present, so the output is all present, which is what
+        # `Array` already says. The whole bitmap half of the gather is gone and
+        # the loop is a load and a store.
+        def dense(start: Int, stop: Int) raises {mut out, imm}:
+            var target = out.unsafe_mut_ptr()
+
+            # A run of consecutive positions is a copy, and a filter that kept
+            # everything or that kept one span of a column its rows arrived
+            # sorted in produces exactly that. The check stops at the first
+            # position that is not consecutive, which on a selection with a
+            # hole in the front of it is the second row.
+            if stop > start:
+                var first = Int(picks[start])
+                var run = True
+                for i in range(start + 1, stop):
+                    if Int(picks[i]) != first + (i - start):
+                        run = False
+                        break
+                if run:
+                    unsafe_memcpy(
+                        dest=target.unsafe_offset(start),
+                        src=source.unsafe_offset(first),
+                        count=stop - start,
+                    )
+                    return
+
+            for i in range(start, stop):
+                target.unsafe_offset(i).unsafe_write(
+                    source.unsafe_offset(Int(picks[i])).unsafe_load()
+                )
+
+        if n < PARALLEL_TAKE_ROWS or not spread:
+            dense(0, n)
+        else:
+            parallel_morsels(dense, n, TAKE_MORSEL_ROWS)
+        return out^
+
+    var built = Bitmap(n, all_valid=False)
+
+    # The source has nulls, so the output can, and the bits go into a register
+    # and down a word at a time as they do in `_take_core`. The value is written
+    # whether or not the row is present, which is what `_filter_core` does with
+    # a null as well: the bitmap says the row is missing and what is underneath
+    # it is not a value anybody may read.
+    def sparse(start: Int, stop: Int) raises {mut out, mut built, imm}:
+        var target = out.unsafe_mut_ptr()
+        var word = UInt64(0)
+        for i in range(start, stop):
+            var at = Int(picks[i])
+            target.unsafe_offset(i).unsafe_write(
+                source.unsafe_offset(at).unsafe_load()
+            )
+            if validity.get(at):
+                word |= UInt64(1) << UInt64(i & 63)
+            if i & 63 == 63:
+                built.unsafe_set_word(i >> 6, word)
+                word = 0
+
+        # Only a morsel that ends part way through a word has anything left in
+        # the register, and the morsel is a multiple of sixty four, so that is
+        # only ever the last one.
+        if stop & 63 != 0 and stop > start:
+            built.unsafe_set_word(stop >> 6, word)
+
+    if n < PARALLEL_TAKE_ROWS or not spread:
+        sparse(0, n)
+    else:
+        parallel_morsels(sparse, n, TAKE_MORSEL_ROWS)
+
+    out.data.validity = built^
+    return out^
+
+
 def filter_rows[
     dt: DType
-](col: Array[dt], mask: Array[DType.bool]) raises -> Array[dt]:
+](col: Array[dt], mask: Array[DType.bool], spread: Bool = True) raises -> Array[
+    dt
+]:
     """Keeps the rows where the mask is true.
 
     Two passes. The first counts the kept rows so the output can be allocated
@@ -547,6 +741,10 @@ def filter_rows[
     Args:
         col: The column to filter.
         mask: The mask. Must be the same length as `col`.
+        spread: Whether this filter may use more than one core. False when the
+            caller is already running on a worker, and false when a caller is
+            timing a filter against something else and wants both sides on the
+            same number of cores.
 
     Parameters:
         dt: The dtype.
@@ -555,16 +753,20 @@ def filter_rows[
         A column holding the kept rows, in their original order.
     """
     return _filter_core(
-        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, mask
+        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, mask, spread
     )
 
 
-def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
+def filter_any(
+    col: AnyArray, mask: Array[DType.bool], spread: Bool = True
+) raises -> AnyArray:
     """Keeps the rows where the mask is true, for a runtime dtype.
 
     Args:
         col: The column to filter.
         mask: The mask. Must be the same length as `col`.
+        spread: Whether this filter may use more than one core. False when the
+            caller is already running on a worker.
 
     Returns:
         A column holding the kept rows, with the same dtype as the input.
@@ -573,7 +775,9 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_filter_strings(col.strings(), mask)).retyped(col.type)
+        return AnyArray(_filter_strings(col.strings(), mask, spread)).retyped(
+            col.type
+        )
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return with_categories(
@@ -583,6 +787,7 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
                         col.data.validity,
                         col.null_count() > 0,
                         mask,
+                        spread,
                     )
                 ).retyped(col.type),
                 col,
@@ -591,7 +796,7 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
 
 
 def _filter_strings(
-    col: StringArray, mask: Array[DType.bool]
+    col: StringArray, mask: Array[DType.bool], spread: Bool = True
 ) raises -> StringArray:
     """Keeps the variable width rows where the mask is true.
 
@@ -614,6 +819,7 @@ def _filter_strings(
     Args:
         col: The column to filter.
         mask: The mask. Must be as tall as the column.
+        spread: Whether this filter may use more than one core.
 
     Returns:
         A column holding the kept rows in their original order.
@@ -633,7 +839,7 @@ def _filter_strings(
     var n = len(col)
     var values = mask.unsafe_ptr()
     var workers = worker_count()
-    if n < PARALLEL_FILTER_ROWS or workers <= 1:
+    if n < PARALLEL_FILTER_ROWS or workers <= 1 or not spread:
         var builder = StringBuilder(capacity=n)
         for i in range(n):
             if not mask.data.validity.get(i):
@@ -769,12 +975,13 @@ def _filter_core[
     validity: Bitmap,
     has_null: Bool,
     mask: Array[DType.bool],
+    spread: Bool = True,
 ) raises -> Array[dt]:
     """The compaction loop, over a pointer and a bitmap rather than a column."""
     var n = len(mask)
     var mask_values = mask.unsafe_ptr()
 
-    if n >= PARALLEL_FILTER_ROWS:
+    if n >= PARALLEL_FILTER_ROWS and spread:
         return _filter_spread(source, validity, has_null, mask)
 
     var kept = 0
@@ -1038,7 +1245,7 @@ def take_range(start: Int, indices: List[Int]) raises -> Array[DType.int64]:
     return out^
 
 
-def select_positions(mask: Array[DType.bool]) -> List[Int]:
+def select_positions(mask: Array[DType.bool]) -> List[UInt32]:
     """Returns the positions a mask keeps, which is a selection over it.
 
     What `Filter` builds instead of copying its columns. The output is one
@@ -1046,17 +1253,36 @@ def select_positions(mask: Array[DType.bool]) -> List[Int]:
     so on a chunk of any width at all this is the cheap half of what filtering
     used to cost.
 
+    Four bytes a position rather than eight. A selection is a list of positions
+    into one chunk, a chunk is a hundred and twenty eight thousand rows, and no
+    row number in one has ever needed more than three bytes. The width is worth
+    naming because the gather on the other end reads an index for every value it
+    moves, so the index traffic is not a rounding error on top of the values,
+    it is the same order of magnitude as them.
+
     A null in the mask drops the row, which is the rule `filter_rows` and
     `filter_range` both follow, so a chunk filtered into a selection keeps the
     same rows as the same chunk filtered by copying.
 
-    One pass, and room for every row reserved in front of it rather than a
-    counting pass to find out how many there will be. A count would be a second
-    read of the mask and, worse, it makes the output exactly as long as the
-    answer, which means the write pass has to zero it first. Reserving the input
-    length instead costs address space that is never touched past the last
-    position written, and the pages behind the rows that were dropped are never
-    faulted in at all.
+    One pass, and room for every row taken in front of it rather than a counting
+    pass to find out how many there will be. A count would be a second read of
+    the mask, and taking the input length instead costs address space that is
+    never touched past the last position written, so the pages behind the rows
+    that were dropped are never faulted in at all. The length is cut back to the
+    rows kept at the end, which for a list of a trivial element is a field and
+    not a copy.
+
+    No branch on the mask. Every row writes its own number at the cursor and the
+    cursor advances by the mask bit, so a row nobody keeps is a store that the
+    next row overwrites. That is the same trick `_filter_core` plays and it is
+    worth more here than it is there, because a mask a predicate produced is not
+    predictable and the branch this removes was being missed about half the time.
+    On a chunk of a hundred and thirty one thousand rows with the kept rows
+    scattered, this loop is 36 microseconds beside 123 for a filtered copy of one
+    column of int64. With the branch in it was 304 beside 168 for the same pair,
+    which is the comparison that matters: building a selection cost nearly twice
+    what copying the column it was meant to save copying cost, and that would
+    have settled the argument for #521 the other way on its own.
 
     Serial, and on purpose. The cursor only the writing thread can advance is
     the whole loop. Spreading it means a count per morsel, a prefix sum over the
@@ -1072,7 +1298,9 @@ def select_positions(mask: Array[DType.bool]) -> List[Int]:
     """
     var n = len(mask)
     var values = mask.unsafe_ptr()
-    var out = List[Int](capacity=n)
+    var out = List[UInt32](unsafe_uninit_length=n)
+    var target = out.unsafe_ptr()
+    var at = 0
 
     # The validity probe is a bit load and a shift on every row and a mask with
     # no nulls in it does not need either. A mask is what a comparison just
@@ -1080,15 +1308,20 @@ def select_positions(mask: Array[DType.bool]) -> List[Int]:
     # that has none, which is the common case and is the case q6 is.
     if mask.null_count() == 0:
         for i in range(n):
-            if Bool(values.unsafe_offset(i).unsafe_load()):
-                out.append(i)
+            target.unsafe_offset(at).unsafe_write(UInt32(i))
+            at += Int(Bool(values.unsafe_offset(i).unsafe_load()))
+        out.resize(at, 0)
         return out^
 
+    # Both halves read and then combined with a bitwise and rather than written
+    # as `valid and true`, which would short circuit and put back the branch the
+    # loop above is here to avoid.
     for i in range(n):
-        if not mask.data.validity.get(i):
-            continue
-        if Bool(values.unsafe_offset(i).unsafe_load()):
-            out.append(i)
+        var valid = Int(mask.data.validity.get(i))
+        var truth = Int(Bool(values.unsafe_offset(i).unsafe_load()))
+        target.unsafe_offset(at).unsafe_write(UInt32(i))
+        at += valid & truth
+    out.resize(at, 0)
     return out^
 
 
