@@ -1005,6 +1005,55 @@ def test_a_mean_over_uneven_chunks_is_not_a_mean_of_means() raises:
     assert_equal(got, Float64(3.5), "the mean of one through six")
 
 
+def kept_nothing() raises -> DataFrame:
+    """Three rows behind a mask that keeps none of them."""
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3]))
+    var keep = ChunkedArray(LogicalType.BOOL)
+    keep.append(flags([False, False, False]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(keep^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_reduction_over_an_input_that_kept_nothing_is_one_row() raises:
+    """A fold with no key is one group whether or not anything was read, so it
+    hands out one row rather than none. What is in it is what `agg` answers over
+    an empty column: a zero for the count and for the sum, and a null for the
+    two extremes, which found nothing to be the extreme of."""
+    var pipeline = Pipeline(kept_nothing())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(totals()))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "seen"), 0, "nothing to count")
+    assert_equal(one_int(out, "total"), 0, "the sum of nothing")
+    var low = out.column("low").as_typed[DType.int64]()
+    assert_false(low.is_valid(0), "the smallest of nothing")
+    var high = out.column("high").as_typed[DType.int64]()
+    assert_false(high.is_valid(0), "the largest of nothing")
+
+
+def test_a_mean_over_an_input_that_kept_nothing_is_null() raises:
+    """The mean is the one fold whose state is two slots, so the empty answer
+    goes through the same division the full one does: a sum of zero over a count
+    of zero, which `_mean_of` calls null rather than dividing. That is the same
+    answer a group with nothing but nulls in it gets."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var pipeline = Pipeline(kept_nothing())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("average").as_typed[DType.float64]()
+    assert_false(got.is_valid(0), "the mean of nothing")
+
+
 def test_a_reduction_reduces_what_reached_it() raises:
     """Two hundred rows through a filter that drops every third one. The
     reduction is at the end of a pipeline whose front runs on every core, so

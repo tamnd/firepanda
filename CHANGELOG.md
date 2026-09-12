@@ -44,6 +44,18 @@ The join settles its build side once in `bind`, one array per right column, lend
 
 The multi chunk end of the same accessor is #583 and is still open. This was #611.
 
+### Fixed: a fold with no GROUP BY over no rows hands out one row
+
+`SELECT max(band) AS top FROM tiers WHERE band > 1000` answered a frame of no rows. SQL says one row with a null in it and DuckDB answers that. A group by with keys finds no groups in nothing and rightly has no rows to hand out, but a fold with no keys is one group whether or not anything was read, and the operator was treating the two the same way.
+
+`Reduce` now hands out its one row when nothing reached it. What is in the row is what the same reduction answers over a column of no rows, read off the kernel rather than written out as a table of identities here, so the two cannot drift apart: a count is zero, a minimum, a maximum and a mean are null, and a sum is zero, which is what the whole frame `agg` answers over an empty column and over a column that is entirely null.
+
+That last one differs from DuckDB, where `sum` over nothing is null. The difference is older and wider than this change: firepanda already answered zero for a sum over a column that is entirely null, which DuckDB also calls null, so the empty case now agrees with the all null case rather than being a third answer. Which of the two rules SQL should get is its own decision and its own change.
+
+The subquery that was refused because of this runs now. `WHERE qty > (SELECT max(band) FROM tiers WHERE band > 1000)` used to raise "a right side of 0 rows" from the cross join under it, and answers no rows, because a comparison against a null keeps nothing.
+
+This was #608.
+
 ## [0.6.73] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

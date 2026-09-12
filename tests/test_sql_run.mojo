@@ -1492,30 +1492,38 @@ def test_a_subquery_over_no_table_runs() raises:
     )
 
 
-def test_a_fold_over_no_rows_hands_out_no_row_rather_than_one_null() raises:
-    # SQL says a fold with no GROUP BY over an empty input is one row with null
-    # in it, and DuckDB answers that. firepanda hands out no rows instead. That
-    # is a gap in the aggregate rather than in the rewrite that puts a subquery
-    # on a cross join, and it is pinned here because the next test is what it
-    # costs.
+def test_a_fold_over_no_rows_hands_out_one_null_row() raises:
+    # A fold with no GROUP BY is one group whether or not anything was read, so
+    # the answer is one row and the maximum of nothing is a null in it.
     var got = run(
         "SELECT max(band) AS top FROM tiers WHERE band > 1000", session()
     )
+    assert_equal(len(got), 1)
+    var col = got.column("top").as_typed[DType.int64]()
+    assert_true(not col.is_valid(0), "the maximum of nothing")
+
+
+def test_a_count_over_no_rows_hands_out_a_zero() raises:
+    # The one fold that finds an answer in nothing, because counting what is
+    # there is a question an empty column can answer.
+    same(
+        answer("SELECT count(*) AS n FROM tiers WHERE band > 1000", "n"),
+        [0],
+        "n",
+    )
+
+
+def test_a_subquery_over_no_rows_keeps_no_rows() raises:
+    # The fold above is one null row, the cross join puts that null on every
+    # row, and a comparison against a null keeps nothing.
+    var got = run(
+        (
+            "SELECT qty FROM sales WHERE qty > (SELECT max(band) FROM"
+            " tiers WHERE band > 1000)"
+        ),
+        session(),
+    )
     assert_equal(len(got), 0)
-
-
-def test_a_subquery_over_no_rows_is_refused_while_that_gap_is_open() raises:
-    # Were the fold above one null row, this would answer no rows, because a
-    # comparison against null keeps nothing. It raises instead, and the message
-    # is the one the cross join gives a right side that is not one row.
-    with assert_raises(contains="right side of 0 rows"):
-        _ = run(
-            (
-                "SELECT qty FROM sales WHERE qty > (SELECT max(band) FROM"
-                " tiers WHERE band > 1000)"
-            ),
-            session(),
-        )
 
 
 def test_a_cross_join_onto_one_row_runs() raises:

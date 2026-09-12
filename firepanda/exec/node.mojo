@@ -2981,10 +2981,14 @@ struct Reduce(Movable):
     point addition is not associative, so a sum of floats can differ in the last
     bits. Every other kind here is exact.
 
-    An input that hands over no chunks at all produces no rows rather than a row
-    of nothing, which is what `Group` does with the same input and is the thing
-    a pipeline can say. `agg` on a frame of no rows answers one row, and a
-    pipeline that has to match it can put a `Materialize` here instead.
+    An input that hands over no rows still produces one row, because a fold with
+    no key is one group whether or not anything was read. That is not what
+    `Group` does with the same input, and the difference is the point: a group
+    by with keys finds no groups in nothing and so has no rows to hand out,
+    while the whole input is a group that is always there. What is in that row
+    is whatever the same reduction answers over a column of no rows, which is a
+    zero for a count and a null for a minimum and a maximum, and it is read off
+    the kernel rather than written out here so that the two cannot drift.
     """
 
     var aggs: List[GroupAgg]
@@ -3252,18 +3256,29 @@ struct Reduce(Movable):
         """Hands the one row answer back.
 
         Returns:
-            One chunk of exactly one row the first time, and None after that or
-            if no chunk with rows in it ever arrived.
+            One chunk of exactly one row the first time and None after that,
+            including when no chunk with rows in it ever arrived.
 
         Raises:
             If a mean cannot be computed from its sum and its count, or if a
-            held column cannot be flattened or reduced.
+            state slot's column has no empty form, or if a held column cannot
+            be flattened or reduced.
         """
         if self.ran:
             return None
         self.ran = True
         if not self.started:
-            return None
+            # Nothing was read, and the answer is still one row. Each slot gets
+            # what its reduction answers over a column of no rows, which is the
+            # kernel's answer rather than a table of identities written here: a
+            # count finds nothing and is zero, a minimum and a maximum find
+            # nothing and are null, and a sum is zero because that is what the
+            # same kernel answers over a column that is entirely null and the
+            # two cases have to agree with each other.
+            self.state = List[AnyArray](capacity=len(self._source))
+            for s in range(len(self._source)):
+                var none = empty_any(self.input[self._source[s]].dtype)
+                self.state.append(reduce_any(none, self._produce[s]))
 
         var out = List[AnyArray](capacity=len(self.aggs))
         for a in range(len(self.aggs)):
