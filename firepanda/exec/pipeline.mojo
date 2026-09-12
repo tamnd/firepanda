@@ -53,7 +53,7 @@ the prefix in parallel and the grouping serial. Thread local tables merged
 partition wise is the next step and it is a change to `Group`, not to this file.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, empty_any
 from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.schema import Schema
 from firepanda.frame.frame import DataFrame
@@ -215,6 +215,13 @@ struct Collect(Movable):
         decides the width and an empty column of the right type is made for each
         field. That is the difference between a frame of no rows and no frame.
 
+        Each of those columns holds one chunk of no rows rather than no chunks.
+        A column of no chunks is the same zero rows and reads as a column that
+        was never built: `DataFrame.__getitem__` is `ChunkedArray.only`, which
+        wants exactly one, so a frame made the other way is one nothing can read
+        a column out of and a predicate that happened to keep nothing would
+        raise where it should answer.
+
         Args:
             schema: The schema of the result. Consumed.
 
@@ -227,7 +234,11 @@ struct Collect(Movable):
         if not self.started:
             var empty = List[ChunkedArray](capacity=len(schema))
             for i in range(len(schema)):
-                empty.append(ChunkedArray(schema[i].dtype))
+                # Built from the chunk rather than appended to, because
+                # `append` drops a chunk of no rows to keep two chunks from
+                # starting at the same row, and here there is no second chunk
+                # and no row to start.
+                empty.append(ChunkedArray(empty_any(schema[i].dtype)))
             return DataFrame(schema^, empty^)
         if len(self.columns) != len(schema):
             raise Error(
