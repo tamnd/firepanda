@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.81] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two things the SQL layer used to refuse now run, and both of them were refused for the same kind of reason: the shape they needed was not there rather than the rule being wrong. A correlated subquery that folds is a group under a left join, and the two set operations written `ALL` are the same group by counting instead of comparing, over a new operator that can turn a number into that many rows. The fill fix is the smaller one and the one most likely to have bitten somebody, since a float column could report two missing rows and come back from a fill with one of them still missing.
+
 ### Fixed: a NaN is missing to a fill, the way it is to isna and dropna
 
 `Series.null_count` counts the cleared validity bits plus the NaNs, and says in its own docstring that this is the line between the two halves of the library, where an `Array` is Arrow and answers what is in the buffers and a `Series` is pandas and answers what pandas would say. `isna` followed that rule and so did `dropna`, and `fill_null` did not, so a float column that reported two missing rows came back from a fill with one of them still missing and the two calls disagreed about the same column.
@@ -6316,7 +6322,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.80...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.81...HEAD
+[0.6.81]: https://github.com/tamnd/firepanda/releases/tag/v0.6.81
 [0.6.80]: https://github.com/tamnd/firepanda/releases/tag/v0.6.80
 [0.6.79]: https://github.com/tamnd/firepanda/releases/tag/v0.6.79
 [0.6.78]: https://github.com/tamnd/firepanda/releases/tag/v0.6.78
