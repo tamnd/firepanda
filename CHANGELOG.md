@@ -33,6 +33,7 @@ The parallel route works unchanged. `partial` runs on a worker and cannot write 
 A reduction that reads two columns is still refused, and by a better sentence. `corr` and `cov` want a pair and the plan node here names one column, so they say so instead of saying they cannot fold.
 
 `Group` still refuses. Holding a column beside a key map is a change of its own and is not in here.
+
 ### Fixed: a join whose build side has no rows joins against nothing
 
 `SELECT qty FROM sales WHERE qty IN (SELECT band FROM tiers WHERE band > 1000)` raised `column has 0 chunks, not one; call combine() first`. A column that no rows reached has no chunks at all rather than one empty chunk, which is the column's own rule and a good one, because an empty chunk would put two equal entries in the offsets and a row position could then name it. The pipeline join read the one chunk of the build side's key column and there was not one.
