@@ -37,6 +37,14 @@ the same clause is that the alias is the name the key is written into the
 aggregate under, so the projection above reads a column back instead of
 computing the expression again over columns that are no longer there.
 
+The same expression written out in both clauses is the same problem without the
+name, and `_read_keys` is the answer to it. A select item, a `HAVING` or an
+`ORDER BY` that computes what a key computes is rewritten into a reference to
+the column that key came out in, matched on the shape of the lowered expression
+rather than on the text. So the three ways of writing the query, the key by its
+alias, the key written out again, and the key read in a derived table, all
+produce the same plan and compute the expression once.
+
 ### A query with no table still reads one
 
 `SELECT 1` has no `FROM` and a plan has no node that produces a row out of
@@ -1744,6 +1752,76 @@ def _agg_shape(exprs: Expressions, root: Int) raises -> String:
     return key_for(exprs, root, tokens)
 
 
+def _read_keys(
+    mut exprs: Expressions,
+    root: Int,
+    shapes: List[String],
+    names: List[String],
+) raises -> Int:
+    """Reads a group key back rather than computing it a second time.
+
+    `SELECT date_trunc('minute', t), count(*) FROM hits GROUP BY
+    date_trunc('minute', t)` writes the same expression twice and means it once.
+    The first copy goes into the aggregate as a key, and everything above the
+    aggregate can only see the keys and the folds, so the second copy would be
+    built over a column that is no longer there. This turns the second copy into
+    a reference to the column the key came out in, which is what the same query
+    written with the key named by its alias already does.
+
+    The match is on the shape of the lowered expression and not on the text,
+    because `d` and `t.d` are the same column written two ways and the text is
+    not. It is the key `_agg_shape` writes, so two calls that compute the same
+    thing count as the same whether or not the query spelled them alike.
+
+    Largest first, from the top down. A key of `f(g(x))` and a key of `g(x)` can
+    both be written and an item of `f(g(x))` is the first of them rather than
+    the second wrapped in a call, so the whole subtree is tried against the keys
+    before anything under it is. That means a shape is written out once per
+    level rather than once, which is a handful of strings for a select item and
+    not worth a memo.
+
+    Args:
+        exprs: The arena, added to.
+        root: The lowered expression.
+        shapes: The shape of each key that is not a plain column.
+        names: What the aggregate calls each of those keys.
+
+    Returns:
+        The expression to use, which is `root` itself when no key appears in it.
+
+    Raises:
+        If an expression is not in the arena.
+    """
+    if len(shapes) == 0:
+        return root
+    exprs.check(root)
+    # A column reference is either a key already, under the name the aggregate
+    # hands it through by, or a column the query has no right to here, and in
+    # neither case is there anything to rewrite. A literal is left alone too:
+    # `ORDER BY 1` is a position in the select list and not a number to compare
+    # against a key.
+    var kind = exprs.nodes[root].kind
+    if kind == ExprKind.COLUMN or kind == ExprKind.LITERAL:
+        return root
+    var shape = _agg_shape(exprs, root)
+    for i in range(len(shapes)):
+        if shapes[i] == shape:
+            return exprs.column(String(names[i]))
+    var kids = exprs.nodes[root].children.copy()
+    if len(kids) == 0:
+        return root
+    var grown = List[Int](capacity=len(kids))
+    var same = True
+    for i in range(len(kids)):
+        var one = _read_keys(exprs, kids[i], shapes, names)
+        if one != kids[i]:
+            same = False
+        grown.append(one)
+    if same:
+        return root
+    return exprs.rebuild(root, grown^)
+
+
 def _lower_expr(
     ast: Ast,
     at: UInt32,
@@ -2463,6 +2541,52 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
             if _has_aggregate(ast, part):
                 return True
         return _has_aggregate(ast, node.a)
+    return False
+
+
+def _has_over(ast: Ast, at: UInt32) -> Bool:
+    """Whether an expression holds a call with an `OVER` on it anywhere in it.
+
+    The same walk `_has_aggregate` does, asking the other half of the question
+    it asks. One caller, the `ORDER BY`, which lowers an entry once to see what
+    it computes and then may lower it again somewhere else. Lowering a window is
+    not a thing to do twice, since it records a slot in the node that computes
+    the windows and two slots is two columns for one answer, so an entry with a
+    window in it is left alone.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+
+    Returns:
+        True if a call with a window on it is written anywhere in it.
+    """
+    if at == NO_NODE:
+        return False
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_FUNCTION:
+        if node.b != NO_NODE:
+            return True
+        for arg in ast.items(node.children):
+            if _has_over(ast, arg):
+                return True
+        return False
+    if node.kind == EXPR_BINARY:
+        return _has_over(ast, node.a) or _has_over(ast, node.b)
+    if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
+        return _has_over(ast, node.a)
+    if node.kind == EXPR_CASE:
+        if _has_over(ast, node.a) or _has_over(ast, node.b):
+            return True
+        for arm in ast.items(node.children):
+            if _has_over(ast, arm):
+                return True
+        return False
+    if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
+        for part in ast.items(node.children):
+            if _has_over(ast, part):
+                return True
+        return _has_over(ast, node.a)
     return False
 
 
@@ -5937,6 +6061,28 @@ def _block(
             keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
             key_names.append(_name_of(ast, group.a, len(key_names), scope))
 
+    # The shape of each key that is worth looking for again higher up, and the
+    # name the aggregate puts that key out under. A key that is a plain column
+    # is left out: the aggregate hands a column key through under the column's
+    # own name, so a select item that writes the same column already reads the
+    # key by writing it, and there is nothing to rewrite.
+    var shapes = List[String]()
+    var shape_names = List[String]()
+    for i in range(len(keys)):
+        var kind = plan.exprs.nodes[keys[i]].kind
+        if kind == ExprKind.COLUMN or kind == ExprKind.LITERAL:
+            continue
+        shapes.append(_agg_shape(plan.exprs, keys[i]))
+        shape_names.append(key_names[i].copy())
+
+    # The same thing for the select list, which is what an ORDER BY writing an
+    # expression out is matched against. The shape is the item's before it was
+    # rewritten, since that is the shape the ORDER BY wrote, and the name is the
+    # item's output name, which is a column above the projection and so needs no
+    # widening under the sort.
+    var item_shapes = List[String]()
+    var item_names = List[String]()
+
     # The select list is lowered before the aggregate is built, because
     # lowering it is what finds the aggregates the node has to compute.
     var outputs = List[Int]()
@@ -5965,12 +6111,23 @@ def _block(
         if reads[i] >= 0:
             outputs.append(plan.exprs.column(key_names[reads[i]].copy()))
             names.append(ast.text(item.payload))
+            # The item was never lowered, so the shape an ORDER BY would have
+            # written is the key's, and the name it reads it back by is this
+            # item's rather than the key's.
+            if plan.exprs.nodes[keys[reads[i]]].kind != ExprKind.COLUMN:
+                item_shapes.append(_agg_shape(plan.exprs, keys[reads[i]]))
+                item_names.append(ast.text(item.payload))
             continue
-        outputs.append(_lower_expr(ast, item.a, plan, walk, scope, grouped))
+        var lowered = _lower_expr(ast, item.a, plan, walk, scope, grouped)
+        outputs.append(_read_keys(plan.exprs, lowered, shapes, shape_names))
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
             names.append(_name_of(ast, item.a, i, scope))
+        var kind = plan.exprs.nodes[lowered].kind
+        if kind != ExprKind.COLUMN and kind != ExprKind.LITERAL:
+            item_shapes.append(_agg_shape(plan.exprs, lowered))
+            item_names.append(names[len(names) - 1].copy())
 
     # A star whose EXCLUDE names every column it stood for leaves nothing, and
     # a select list of nothing is not a query. DuckDB's wording, since this is
@@ -5980,7 +6137,12 @@ def _block(
 
     var predicate = -1
     if having != NO_NODE:
-        predicate = _lower_expr(ast, having, plan, walk, scope, True)
+        predicate = _read_keys(
+            plan.exprs,
+            _lower_expr(ast, having, plan, walk, scope, True),
+            shapes,
+            shape_names,
+        )
 
     # Lowered here and filtered on further down, because a QUALIFY is where the
     # windows it reads are written and the node that computes them has to be
@@ -6005,13 +6167,45 @@ def _block(
     #
     # An entry with no fold in it is left alone and lowered above the block,
     # where a bare name still means an output column and `ORDER BY c` can find
-    # the alias the select list wrote.
+    # the alias the select list wrote. The exception is an entry that writes out
+    # what a select item or a group key already computes, which is answered here
+    # because up there the columns it reads are gone.
+    var sort_shapes = item_shapes.copy()
+    var sort_names = item_names.copy()
+    for i in range(len(shapes)):
+        sort_shapes.append(shapes[i].copy())
+        sort_names.append(shape_names[i].copy())
     for i in range(len(orders)):
         var entry = ast.stmts[Int(orders[i])]
-        if not grouped or not _has_aggregate(ast, entry.a):
+        if not grouped:
             ordered.append(-1)
             continue
-        ordered.append(_lower_expr(ast, entry.a, plan, walk, scope, True))
+        if _has_aggregate(ast, entry.a):
+            ordered.append(
+                _read_keys(
+                    plan.exprs,
+                    _lower_expr(ast, entry.a, plan, walk, scope, True),
+                    shapes,
+                    shape_names,
+                )
+            )
+            continue
+        # Lowered to see what it computes and then thrown away if it computes
+        # nothing the query already has, which leaves the entry to be lowered
+        # again above the block exactly as it was before. What that costs is a
+        # few arena nodes nothing reaches. An entry with an `OVER` in it is left
+        # alone rather than lowered twice, because lowering a window is what
+        # puts a slot in the node that computes it and two slots is two columns.
+        if (
+            len(sort_shapes) == 0
+            or entry.a == NO_NODE
+            or _has_over(ast, entry.a)
+        ):
+            ordered.append(-1)
+            continue
+        var written = _lower_expr(ast, entry.a, plan, walk, scope, True)
+        var found = _read_keys(plan.exprs, written, sort_shapes, sort_names)
+        ordered.append(found if found != written else -1)
 
     if grouped:
         var aggs = walk.aggs.copy()

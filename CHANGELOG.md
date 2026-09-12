@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a GROUP BY may write its key out rather than name it
+
+`SELECT DATE_TRUNC('minute', EventTime) AS m, COUNT(*) FROM hits GROUP BY DATE_TRUNC('minute', EventTime) ORDER BY DATE_TRUNC('minute', EventTime)` is ClickBench q42 and it was refused. Writing the key out again in every clause that mentions it is how the published text writes it and it is how most SQL gets written, and the only two spellings that lowered were the key named by its alias and the key read in a derived table.
+
+What was in the way is where the select list is lowered. It goes above the aggregate, over the columns the aggregate hands out, which are its keys and its folds and nothing else, so the second copy of the key was built over a column that is not there any more. The refusal said so without meaning to: it named `EventTime`, which the query does write, just not anywhere the projection can see it.
+
+The second copy is not built now. A select item, a `HAVING` or an `ORDER BY` that computes what a key computes becomes a reference to the column that key came out in, which is what the same query written with the alias already did. The comparison is on the shape of the lowered expression rather than on the text, and the shape is the key `cse.mojo` writes to decide that two expressions are one thing, so the two copies count as one whether or not the query spelled them alike. A key that a larger expression holds is read where it sits rather than only as a whole item, so `SELECT (a + 1) * 2 ... GROUP BY a + 1` multiplies the key's column by two instead of rebuilding the sum, and the largest match wins, which is what makes a key of `f(g(x))` and a key of `g(x)` both writable in one query.
+
+An `ORDER BY` is matched against the select list first and the keys second, and the order matters. An entry that computes what an item computes sorts on that item's own output column, which is above the projection and so is already a column there, and nothing has to be widened underneath the sort. That is the q42 case, since q42 returns the truncation it sorts by.
+
+Three things are deliberately left as they were. A key that is a plain column is not rewritten, because the aggregate hands a column key through under the column's own name, so an item that writes the column is already reading the key by writing it. `ORDER BY 1` is a position in the select list and not an expression to compare against anything. And a bare name anywhere still resolves the way it did, so the alias route and the derived table route build what they always built.
+
+q42 should run through the planner route now. q18 writes its key as `GROUP BY UserID, m, SearchPhrase`, which is the alias route and has run since that landed rather than being this. Where the two of them leave the count is for the bench pass to say, since it has not been remeasured for the last four merges. What is certainly still refused is q28, which wants `REGEXP_REPLACE`.
+
 ### Changed: a function name that goes nowhere says which kind of nowhere it is
 
 `SELECT upper(name) FROM t`, `SELECT mean(x) FROM t` and `SELECT lenght(name) FROM t` all came back with the same sentence, `there is no function named 'upper' yet`. That sentence is right for one of the three. `upper` is a kernel nobody has written, `mean` is a real function DuckDB runs, and `lenght` is a typo for `length`.

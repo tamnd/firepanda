@@ -400,6 +400,114 @@ def test_a_group_by_name_that_is_neither_still_says_it_is_neither() raises:
         _ = _plan("SELECT g, count(*) FROM t GROUP BY nope")
 
 
+def test_a_group_by_may_write_the_expression_the_select_list_writes() raises:
+    # The same aggregate the query naming the key by its alias builds, and the
+    # projection reads the key's column back rather than computing `a + 1` a
+    # second time over an `a` the aggregate no longer hands out.
+    assert_equal(
+        _plan("SELECT a + 1, count(*) FROM t GROUP BY a + 1"),
+        (
+            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [a + 1] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_the_key_written_out_twice_is_read_back_twice() raises:
+    # One key and one aggregate, with both items reading the one column, which
+    # is the same thing the aggregate list does with a fold written twice.
+    assert_equal(
+        _plan("SELECT a + 1, a + 1, count(*) FROM t GROUP BY a + 1"),
+        (
+            "PROJECT [__expr_0, __expr_0 as __expr_1, __agg_0 as __expr_2]\n"
+            "  AGGREGATE [a + 1] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_key_written_inside_a_larger_item_is_read_where_it_sits() raises:
+    # The item is not the key, it holds the key, so what the projection computes
+    # is the rest of the item over the column the key came out in.
+    assert_equal(
+        _plan("SELECT (a + 1) * 2 AS m, count(*) FROM t GROUP BY a + 1"),
+        (
+            "PROJECT [__expr_0 * 2 as m, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [a + 1] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_having_that_writes_the_key_out_reads_the_key() raises:
+    assert_equal(
+        _plan("SELECT a + 1, count(*) FROM t GROUP BY a + 1 HAVING a + 1 > 2"),
+        (
+            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
+            "  FILTER __expr_0 > 2\n"
+            "    AGGREGATE [a + 1] -> [count(1)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_that_writes_the_key_out_sorts_on_the_item() raises:
+    # The sort reads the projection's own output column rather than the key's,
+    # because it sits above the projection, which is also why nothing has to be
+    # widened underneath it.
+    assert_equal(
+        _plan(
+            "SELECT a + 1 AS m, count(*) FROM t GROUP BY a + 1 ORDER BY a + 1"
+        ),
+        (
+            "SORT [m asc nulls last]\n"
+            "  PROJECT [__expr_0 as m, __agg_0 as __expr_1]\n"
+            "    AGGREGATE [a + 1] -> [count(1)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_group_by_of_a_date_trunc_is_the_shape_q42_writes() raises:
+    # ClickBench q42, with the same expression in the select list, the GROUP BY
+    # and the ORDER BY, which is three copies of one column.
+    assert_equal(
+        _plan(
+            "SELECT date_trunc('minute', ts) AS m, count(*) AS c FROM w GROUP"
+            " BY date_trunc('minute', ts) ORDER BY date_trunc('minute', ts)"
+        ),
+        (
+            "SORT [m asc nulls last]\n"
+            "  PROJECT [__expr_0 as m, __agg_0 as c]\n"
+            "    AGGREGATE [date_trunc(minute, ts)] -> [count(1)]\n"
+            "      SCAN w []\n"
+        ),
+    )
+
+
+def test_a_group_by_of_an_extract_is_the_shape_q18_writes() raises:
+    assert_equal(
+        _plan(
+            "SELECT extract(minute FROM ts) AS m, count(*) FROM w GROUP BY"
+            " extract(minute FROM ts)"
+        ),
+        (
+            "PROJECT [__expr_0 as m, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [date_part(minute, ts)] -> [count(1)]\n"
+            "    SCAN w []\n"
+        ),
+    )
+
+
+def test_an_item_that_is_not_the_key_is_refused_as_it_always_was() raises:
+    # The rule is about an expression the query wrote twice and nothing else,
+    # so a column that is neither a key nor folded is still a column the
+    # aggregate does not hand out.
+    with assert_raises(contains="no column named 'b'"):
+        _ = _plan("SELECT b, count(*) FROM t GROUP BY a + 1")
+
+
 def test_an_order_by_may_name_a_column_the_query_does_not_return() raises:
     # The projection under the sort is one column wider than the query asked
     # for and the one above it takes the query's own columns back.
