@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Nine of these eleven entries are the SQL front end reaching kernels that were already written and already tested, and that is most of what the distance between 33 of the 43 published ClickBench statements running and 40 of them turned out to be. `IS NULL`, `COALESCE`, `SUBSTRING`, `EXTRACT`, `DATE_TRUNC` and `STRLEN` all had their loops sitting in `firepanda/kernel` before any of them could be written in a query, and a date column would not compare against a date written between quotes, which is how every dialect spells a date bound. The three statements still refused are q28, which also wants `REGEXP_REPLACE`, and q18 and q42, which write a function call inside their own `GROUP BY`.
+
+The other two entries are not that. The Parquet reader lost the route that described DuckDB's vectors as Arrow arrays without converting them, because against DuckDB 1.5.5 that had become the more expensive of its two routes, and taking it out removed 376 lines of pointer arithmetic and lowered peak resident set on eighteen of the twenty two TPC-H queries. The frame layer gained `any`, `all`, `prod` and `product` on both classes, and with them the `axis=None` fold that every reduction on a frame had been quietly answering a column for since the first reduction slice.
+
 ### Added: STRLEN, and the two other names DuckDB gives it
 
 `SELECT AVG(STRLEN(URL)) FROM hits GROUP BY CounterID` is what two ClickBench statements are built around and it was refused. `LENGTH` and `LEN` are DuckDB's other two names for the same function and all three run now. The kernel has been in `firepanda/kernel/chars.mojo` since the string layer was written, so this is the same shape as the last few entries: the plumbing from a query down to a kernel that was already there and already tested.
@@ -63,6 +71,7 @@ It reads the two numbers as characters and not as bytes. That is what the standa
 The clipping rule is DuckDB's and it falls out rather than being arranged. The window is a range with both ends counted from one and both ends clipped into the string, so a start of zero spends its first position outside the string and comes back one character short, a negative start counts back from the end, and a negative length runs the window backwards from the start instead of being an error. `substring('hello', 0, 2)` is `h` and `substring('hello', 2, -1)` is `h` for the same reason, which is that the clipping happens to the ends and not to the answer.
 
 The positions have to be written out. A column in either of them would mean a different window for every row, and the kernel takes one window for the whole column, so a query that asks for that is refused at the point the plan is built with a message saying that is what it asked for. `substr` is renamed to `substring` while the query is lowered, the same way `ifnull` is, since nothing after that point could tell the two apart.
+
 ### Added: any, all, prod and product on both classes
 
 `s.prod()` and `df.any()` were the four reduction names still missing from the Python layer, and two of them could not be written by copying the one beside them. A null is a zero in the values buffer here, which is what lets the sum add straight down a column without reading the validity bitmap, and zero is the identity for addition rather than for multiplication, so a product written that way would report nothing for any column with a gap in it. The product reads the bitmap and takes the three paths per word that the extremes take. It needs no found flag though, because a product over nothing is one and one is also the answer.
@@ -6578,7 +6587,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1
 [0.7.0]: https://github.com/tamnd/firepanda/releases/tag/v0.7.0
 [0.6.83]: https://github.com/tamnd/firepanda/releases/tag/v0.6.83
 [0.6.82]: https://github.com/tamnd/firepanda/releases/tag/v0.6.82
