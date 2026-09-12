@@ -265,6 +265,7 @@ from firepanda.exec.node import (
     GroupAgg,
     Join,
     Limit,
+    Match,
     Node,
     Project,
     Reduce,
@@ -279,6 +280,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
+from firepanda.kernel.pattern import MatchKind, read_pattern
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
@@ -532,6 +534,9 @@ def _lower_expr(
     if kind == ExprKind.CALL and is_logic_name(exprs.nodes[root].name):
         return _lower_connective(exprs, root, pipe, base, name, memo)
 
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "like":
+        return _lower_like(exprs, root, pipe, base, name, memo)
+
     if kind == ExprKind.CONDITIONAL:
         return _lower_conditional(exprs, root, pipe, base, name, memo)
 
@@ -662,6 +667,88 @@ def _lower_connective(
         at = len(pipe.schema) - 1
     memo.remember(root, at)
     return at
+
+
+def _lower_like(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `LIKE`.
+
+    The pattern is read here rather than per row. A `LIKE` whose right side is a
+    constant, which is every one anybody writes, is one of five searches once
+    the wildcards have been counted, and which of the five it is does not change
+    from row to row. So the work of deciding is done once, at plan time, and
+    what goes in the pipeline is a node that knows what it is looking for.
+
+    Four of the five are a `Match`, which is the substring kernels. The fifth is
+    a pattern with no wildcard in it at all, which is an equality against a
+    constant, and that is a `Compute` with the same kernel `x = 'abc'` already
+    runs. Writing `LIKE 'abc'` is unusual but it is legal, and it costs nothing
+    to send it somewhere that already exists.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, if the pattern is
+            not a constant, if it is null, or if it has a shape none of the five
+            searches covers.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 2:
+        raise Error(
+            String("lower: like reads two arguments and was given ", len(args))
+        )
+
+    if exprs.nodes[args[1]].kind != ExprKind.LITERAL:
+        raise Error(
+            "lower: the pattern of a LIKE has to be written out, and this one"
+            " is an expression, which would mean reading a new pattern for"
+            " every row and there is no kernel that does that"
+        )
+
+    if exprs.nodes[args[1]].value.is_null():
+        # True for no row and false for no row either, so it is a column of
+        # nulls, and there is no node that makes one of those out of nothing.
+        raise Error(
+            "lower: a LIKE against a null pattern is null for every row, and"
+            " there is no operator that answers a column of nulls yet"
+        )
+
+    var pattern = read_pattern(exprs.nodes[args[1]].value.as_string())
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+
+    if pattern.kind == MatchKind.EQUALS:
+        # Nothing was taken out of the pattern on the way here, no wildcard
+        # having been in it, so the literal itself is what to compare against.
+        pipe.add(
+            Node(
+                Compute(
+                    at,
+                    Value(copy=exprs.nodes[args[1]].value),
+                    BinaryOp.EQ,
+                    name,
+                )
+            )
+        )
+    else:
+        pipe.add(Node(Match(at, pattern, name)))
+
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
 
 
 def _lower_conditional(

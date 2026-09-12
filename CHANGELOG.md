@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: LIKE
+
+`SELECT count(*) FROM hits WHERE URL LIKE '%google%'` is a shape several of the ClickBench statements are written in, and it was refused with "firepanda has no kernel for the operator LIKE yet", which was wrong about the kernel. The four substring searches a pattern turns into have been in `firepanda/kernel/pattern.mojo` for a while, and what was missing was everything between them and a query: nothing read a pattern, nothing chose between them, and the plan had no operator to put one in.
+
+A `LIKE` is a call in the plan rather than a thirteenth binary operator. Its right side is a pattern rather than an operand, and the pattern is read once while the plan is being lowered instead of once per row, so what ends up in the pipeline is a node that already knows which of the searches it is and what it is looking for. `x LIKE 'a%'` is a prefix, `'%a'` a suffix, `'%a%'` a substring, `'%a%b%'` two runs that have to appear in that order, and a pattern with no wildcard in it at all is an equality against a constant, which is the kernel `x = 'abc'` already runs. `~~` and `!~~` are the same thing written the other way and reach the same plan.
+
+A null matches nothing and its negation is not true either, both being null, which is what the kernels already did and what DuckDB does. An empty element matches `%` and nothing else. `ESCAPE` was already refused by the front end, and a backslash in a pattern is an ordinary byte here as it is in DuckDB with no escape set.
+
+What is refused is refused by name rather than answered approximately. A `_` says it stands for any one character and that a substring search has no way to say that. A pattern with a run in the middle, like `'a%e'`, says it is none of the five shapes, because reading it as the prefix alone would keep rows the query did not ask for. `ILIKE` says it is the case fold that is missing, `GLOB` says its wildcards are not these, and `SIMILAR TO` and the regex operators say there is no regular expression engine.
+
 ### Added: an aggregate written in the ORDER BY
 
 `SELECT shop, sum(qty) FROM stock GROUP BY shop ORDER BY sum(qty) DESC` is the shape most of ClickBench is written in, and until now it was refused with "sum is an aggregate and this query has no GROUP BY", which was a confusing thing to read on a query whose second line is a GROUP BY. Writing the fold once in the select list and sorting on the name it was given did work, and was the workaround.

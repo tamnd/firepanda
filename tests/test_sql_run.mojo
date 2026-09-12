@@ -24,6 +24,7 @@ from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.strings import StringBuilder
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
@@ -202,6 +203,40 @@ def gaps() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def words() raises -> DataFrame:
+    """Seven pieces of text and a number saying which row each one is.
+
+    The only frame here with a string column in it, which is what a `LIKE` needs
+    and what nothing else in this file was written for. The rows are picked so
+    that each of the four searches keeps a different set: two share a prefix,
+    two share a suffix, one holds a run in the middle, one holds two runs in
+    order, one is empty and one is null.
+
+    The empty string and the null are the two that catch a search written the
+    easy way. An empty element matches `%` and matches nothing else, and a null
+    matches nothing at all and is not false either.
+    """
+    var text = StringBuilder(capacity=7)
+    text.append(String("apple").as_bytes())
+    text.append(String("apricot").as_bytes())
+    text.append(String("banana").as_bytes())
+    text.append(String("grape").as_bytes())
+    text.append(String("").as_bytes())
+    text.append_null()
+    text.append(String("pineapple").as_bytes())
+    var word = ChunkedArray(LogicalType.STRING)
+    word.append(AnyArray(text^.finish()))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4, 5, 6, 7]))
+    var columns = List[ChunkedArray]()
+    columns.append(word^)
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("word", LogicalType.STRING, True))
+    fields.append(Field("n", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def hits() raises -> DataFrame:
     """Four rows under ClickBench's spelling, which is not the query's.
 
@@ -249,6 +284,7 @@ def visits() raises -> DataFrame:
 def session() raises -> Catalog:
     """A catalog holding the nine frames under the names the queries write."""
     var catalog = Catalog()
+    catalog.register("words", words())
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
@@ -1143,6 +1179,88 @@ def test_a_not_between_keeps_the_rows_outside_both_bounds() raises:
         [3, 40, 25, 1, 30],
         "qty",
     )
+
+
+def test_a_like_with_a_percent_at_the_end_is_a_prefix() raises:
+    same(answer("SELECT n FROM words WHERE word LIKE 'a%'", "n"), [1, 2], "n")
+
+
+def test_a_like_with_a_percent_at_the_start_is_a_suffix() raises:
+    same(
+        answer("SELECT n FROM words WHERE word LIKE '%e'", "n"), [1, 4, 7], "n"
+    )
+
+
+def test_a_like_with_a_percent_at_both_ends_is_a_substring() raises:
+    same(answer("SELECT n FROM words WHERE word LIKE '%an%'", "n"), [3], "n")
+
+
+def test_a_like_with_two_runs_reads_them_in_the_order_written() raises:
+    # The pair is the one search where the pattern's order is the whole
+    # question, so both ways round are asserted. `pineapple` holds an n and an
+    # e, and only one of the two orders is in it.
+    same(answer("SELECT n FROM words WHERE word LIKE '%n%e%'", "n"), [7], "n")
+    same(answer("SELECT n FROM words WHERE word LIKE '%e%n%'", "n"), [], "n")
+
+
+def test_a_like_with_no_wildcard_is_an_equality() raises:
+    same(answer("SELECT n FROM words WHERE word LIKE 'grape'", "n"), [4], "n")
+
+
+def test_a_like_against_one_percent_keeps_every_row_that_is_not_null() raises:
+    # The row with nothing in it is kept and the row with nothing known about it
+    # is not, which is the difference a search written the easy way loses.
+    same(
+        answer("SELECT n FROM words WHERE word LIKE '%'", "n"),
+        [1, 2, 3, 4, 5, 7],
+        "n",
+    )
+    same(
+        answer("SELECT n FROM words WHERE word LIKE '%%'", "n"),
+        [1, 2, 3, 4, 5, 7],
+        "n",
+    )
+
+
+def test_a_like_against_nothing_keeps_the_row_holding_nothing() raises:
+    same(answer("SELECT n FROM words WHERE word LIKE ''", "n"), [5], "n")
+
+
+def test_a_not_like_drops_the_matches_and_the_null_with_them() raises:
+    # A null is not a match and its negation is not one either, both being null,
+    # so the sixth row is missing from this answer and from the one above it.
+    same(
+        answer("SELECT n FROM words WHERE word NOT LIKE 'a%'", "n"),
+        [3, 4, 5, 7],
+        "n",
+    )
+
+
+def test_a_like_in_a_select_list_is_a_column_of_answers() raises:
+    same(
+        truths(
+            run("SELECT word LIKE '%e' AS ends FROM words", session()), "ends"
+        ),
+        [1, 0, 0, 1, 0, -1, 1],
+        "ends",
+    )
+
+
+def test_a_like_with_an_underscore_in_it_says_what_it_cannot_do() raises:
+    with assert_raises(contains="stands for any one character"):
+        _ = run("SELECT n FROM words WHERE word LIKE 'a_p%'", session())
+
+
+def test_a_like_with_a_run_in_the_middle_is_refused() raises:
+    # `a%e` is a prefix and a suffix at once and neither kernel answers it, and
+    # answering it as one of the two would keep rows the query did not ask for.
+    with assert_raises(contains="is none of those"):
+        _ = run("SELECT n FROM words WHERE word LIKE 'a%e'", session())
+
+
+def test_a_like_against_a_column_is_refused() raises:
+    with assert_raises(contains="pattern of a LIKE has to be written out"):
+        _ = run("SELECT n FROM words WHERE word LIKE word", session())
 
 
 def test_a_chain_of_ors_folds_left_to_right_and_keeps_every_arm() raises:

@@ -148,7 +148,10 @@ from .parse_time import (
     parse_timestamps,
 )
 from .pattern import (
+    MatchKind,
+    Pattern,
     find_bytes,
+    read_pattern,
     text_contains,
     text_contains_in_order,
     text_ends_with,

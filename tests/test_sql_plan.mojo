@@ -2398,6 +2398,51 @@ def test_an_in_of_one_is_one_comparison() raises:
     )
 
 
+def test_a_like_is_a_call_rather_than_an_operation() raises:
+    # The right side is a pattern rather than an operand, and what runs it reads
+    # that pattern once while the plan is being lowered, so it is a named call
+    # the way `and` and `or` are and not a thirteenth binary operator.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g LIKE 'a%'"),
+        "PROJECT [a]\n  FILTER like(g, a%)\n    SCAN t []\n",
+    )
+
+
+def test_a_not_like_is_the_call_with_a_not_over_it() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g NOT LIKE '%a%'"),
+        "PROJECT [a]\n  FILTER not(like(g, %a%))\n    SCAN t []\n",
+    )
+
+
+def test_the_operator_spelling_of_a_like_is_the_same_call() raises:
+    # `~~` is what postgres calls it and duckdb takes both, so the two have to
+    # reach the same plan or a query means one thing and its rewrite another.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g ~~ 'a%'"),
+        _plan("SELECT a FROM t WHERE g LIKE 'a%'"),
+    )
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g !~~ 'a%'"),
+        _plan("SELECT a FROM t WHERE g NOT LIKE 'a%'"),
+    )
+
+
+def test_a_like_over_a_number_is_refused() raises:
+    with assert_raises(contains="'like' reads text and argument 0 is"):
+        _ = _plan("SELECT a FROM t WHERE b LIKE 'a%'")
+
+
+def test_an_ilike_says_it_is_the_case_fold_that_is_missing() raises:
+    with assert_raises(contains="matches a LIKE pattern byte for byte"):
+        _ = _plan("SELECT a FROM t WHERE g ILIKE 'a%'")
+
+
+def test_a_similar_to_says_there_is_no_regular_expression_engine() raises:
+    with assert_raises(contains="no regular expression engine"):
+        _ = _plan("SELECT a FROM t WHERE g SIMILAR TO 'a.*'")
+
+
 def test_a_not_in_negates_the_chain_rather_than_inverting_it() raises:
     # The one that matters. `b <> 1 AND b <> 2` answers true for a row that a
     # null in the list should have made null, which is the classic wrong answer
