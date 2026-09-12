@@ -2045,6 +2045,303 @@ def _offered(value: Any) -> Any:
     return value
 
 
+_NO_OUT = "the 'out' parameter is not supported in the pandas implementation of clip()"
+"""What pandas says when numpy's `out` arrives holding something."""
+
+
+def _numpy_clip(kwargs: dict[str, Any]) -> None:
+    """Holds numpy's keywords at rest, which is what pandas does with them.
+
+    `clip` is the one method in this area with a catch all in its signature, and
+    the reason is numpy rather than pandas: `np.clip(s, 2, 8, out)` lands on this
+    method with the output array in a keyword. pandas takes it and refuses it,
+    because there is nowhere for it to write, and refuses anything else it does
+    not know by name.
+
+    Args:
+        kwargs: Whatever arrived that the signature does not name.
+
+    Raises:
+        InvalidArgumentError: If `out` holds anything.
+        TypeError: For a keyword neither library has, in Python's own words.
+    """
+    if kwargs.get("out") is not None:
+        raise InvalidArgumentError(_NO_OUT)
+    for name in kwargs:
+        if name != "out":
+            raise TypeError(f"clip() got an unexpected keyword argument '{name}'")
+
+
+def _nothing(value: Any) -> bool:
+    """Whether a single value says nothing at all.
+
+    Args:
+        value: A value, which has to be one rather than a run of them, since a
+            run of them answers this one row at a time.
+
+    Returns:
+        Whether it is None or a NaN or one of the other things that stand for a
+        value nobody wrote.
+    """
+    return value is None or value != value
+
+
+def _single(value: Any) -> bool:
+    """Whether a bound is one value rather than something carrying rows.
+
+    Args:
+        value: What the caller passed as a bound.
+
+    Returns:
+        Whether it is a value, which is what makes the two bounds comparable to
+        each other and is the only shape pandas puts in order.
+    """
+    return not _is_object(value) and not isinstance(value, dict) and not _positional(value)
+
+
+def _thresholds(lower: Any, upper: Any) -> tuple[Any, Any]:
+    """The two bounds, with the ones that say nothing turned into no bound.
+
+    A bound that is a NaN is no bound, which is pandas reading numpy's rule
+    rather than inventing one, and it matters because a comparison against a NaN
+    is false and would otherwise clip every row to nothing.
+
+    Two bounds that are both values and are the wrong way round are put in
+    order. That is pandas' oldest correction in this method and it is only made
+    for a pair of values, so `s.clip(8, 2)` is `s.clip(2, 8)` and the same pair
+    written as columns is not.
+
+    Args:
+        lower: The floor, as it arrived.
+        upper: The ceiling, as it arrived.
+
+    Returns:
+        The pair, with a bound that says nothing as None.
+    """
+    low = None if lower is None or (_single(lower) and _nothing(lower)) else lower
+    high = None if upper is None or (_single(upper) and _nothing(upper)) else upper
+    if low is not None and high is not None and _single(low) and _single(high) and high < low:
+        return high, low
+    return low, high
+
+
+def _coerced(size: int, wanted: int) -> str:
+    """What pandas says when a bound carrying rows is the wrong length."""
+    return f"Unable to coerce to Series, length must be {wanted}: given {size}"
+
+
+def _shaped(height: int, width: int, rows: int, columns: int) -> str:
+    """What pandas says when a bound carrying cells is the wrong shape."""
+    return (
+        f"Unable to coerce to DataFrame, shape must be ({height}, {width}):"
+        f" given ({rows}, {columns})"
+    )
+
+
+def _bound_rows(bound: Any, labels: list[Any]) -> Any:
+    """A bound that carries rows, as a column labelled the way the rows are.
+
+    Three shapes arrive here and only one of them carries labels of its own. A
+    column does, and what it does not carry a label for is section 4 of document
+    49. A mapping is read by key and a key that is not a label is dropped, which
+    is what building a column on this column's labels does to it. A run of
+    values carries nothing and is read by position, so it has to be exactly as
+    tall.
+
+    Args:
+        bound: What the caller passed.
+        labels: The labels of the rows being clipped, in order.
+
+    Returns:
+        A series carrying labels, which is either the one that arrived or one
+        built out of what did.
+
+    Raises:
+        InvalidArgumentError: If a run of values is the wrong length or has more
+            than one dimension.
+    """
+    if _is_object(bound):
+        return bound if hasattr(bound, "_inner") else _labelled(list(bound.index), bound.tolist())
+    if isinstance(bound, dict):
+        return _labelled([key for key in bound], list(bound.values()))
+    given = [_plain(value) for value in bound]
+    if given and _positional(given[0]):
+        shape = tuple(getattr(bound, "shape", (len(given), len(given[0]))))
+        raise InvalidArgumentError(
+            f"Data must be 1-dimensional, got ndarray of shape {shape} instead"
+        )
+    if len(given) != len(labels):
+        raise InvalidArgumentError(
+            f"Length of values ({len(given)}) does not match length of index ({len(labels)})"
+        )
+    return _labelled(labels, given)
+
+
+def _covering(held: Any, labels: list[Any]) -> Any:
+    """Which rows the bound carries a label for, as a column of flags.
+
+    Args:
+        held: The bound, carrying labels of its own.
+        labels: The labels of the rows being clipped, in order.
+
+    Returns:
+        A boolean column, true where the bound has a row and false where it has
+        none. A row it has that holds nothing is still a row it has, and the two
+        are read differently, which is the whole reason this is asked.
+    """
+    carried = held._inner.labels().to_list()
+    return _labelled(carried, [True] * len(carried))._inner.reindex(labels, False, False)
+
+
+def _keeping(flags: Any, column: Any, aligned: Any, covered: Any) -> Any:
+    """The rows a bound leaves alone, out of the comparison and three corrections.
+
+    The comparison is the bound applied, and everything else here is about the
+    rows it could not answer for. A row the column is missing in is kept, which
+    is the rule that makes `clip` leave a gap alone without anybody writing it.
+    A row the bound holds nothing in is kept as well, because a bound nobody
+    wrote is no bound. A row the bound has no label for is not kept, which is
+    the one of the three that surprises people and is pandas' answer.
+
+    Args:
+        flags: The comparison, which says nothing about a row either side is
+            missing in.
+        column: The inner column being clipped.
+        aligned: The bound lined up against the rows, or None when it is one
+            value.
+        covered: Which rows the bound carries a label for, or None when it
+            carries no labels and so covers all of them.
+
+    Returns:
+        A boolean column with nothing missing in it, true for a row that keeps
+        what it holds.
+    """
+    from ._frame import Series
+
+    kept = _no_gaps(flags.unary("invert")).unary("invert")
+    if aligned is not None:
+        blank = aligned.transform("isna", 0)
+        if bool(blank.reduce("max", 0.0)):
+            kept = kept.pick(blank.unary("invert"), Series([True])._inner)
+    if covered is not None and bool(covered.unary("invert").reduce("max", 0.0)):
+        kept = kept.pick(covered, Series([False])._inner)
+    gone = column.transform("isna", 0)
+    if bool(gone.reduce("max", 0.0)):
+        kept = kept.pick(gone.unary("invert"), Series([True])._inner)
+    return kept
+
+
+def _clipping(column: Any, bound: Any, op: str, printed: str, labels: list[Any]) -> Any:
+    """One bound against one column, as the pair `pick` takes.
+
+    The flags are read off the column as it arrived rather than off the answer
+    the other bound built, which is what pandas does and is only visible when
+    the two bounds cross each other. It also means the two bounds can be worked
+    out in either order.
+
+    Args:
+        column: The column being clipped, as it arrived.
+        bound: The floor or the ceiling for this column.
+        op: `ge` for a floor and `le` for a ceiling.
+        printed: The column's type as `dtype` spells it.
+        labels: The labels of the rows, in order.
+
+    Returns:
+        The rows to keep and what the rest of them take, or None when the bound
+        does not reach a single row, in which case the column is not touched at
+        all and the bound is never asked whether this column could hold it.
+
+    Raises:
+        DTypeError: If the column cannot hold the bound, or cannot be compared
+            with it.
+    """
+    if bound is NO_DEFAULT:
+        return _everywhere(labels, False), column._inner.missing_row()
+    held, aligned, covered = None, None, None
+    try:
+        if _single(bound):
+            flags = column._inner.binary_value(bound, op, False)
+        else:
+            held = _bound_rows(bound, labels)
+            aligned = held._inner.reindex(labels, None, False)
+            covered = _covering(held, labels) if _is_object(bound) else None
+            flags = column._inner.compare_series(aligned, op)
+    except FirepandaError:
+        raise
+    except Exception as error:
+        raise translate(error) from None
+    kept = _keeping(flags, column._inner, aligned, covered)
+    replaced = kept.unary("invert")
+    if not bool(replaced.reduce("max", 0.0)):
+        return None
+    looked = column if printed == "category" else None
+    if held is None:
+        return kept, _fallback(printed, bound, looked)
+    return kept, _fill_column(printed, held, labels, replaced, looked)
+
+
+def _frame_thresholds(
+    bound: Any, names: list[str], labels: list[Any], along: int, told: bool
+) -> dict[str, Any]:
+    """One bound per column of the frame, out of the six shapes a bound arrives in.
+
+    The rules are `fillna`'s and `where`'s with one difference, and the
+    difference is the run of values. `where` reads one against a frame as a
+    value per column, which is numpy's broadcasting rule, and `clip` reads it as
+    a value per column only until an axis says otherwise, since pandas lines a
+    bound up against an axis rather than reshaping it.
+
+    Args:
+        bound: What the caller passed, or None for no bound.
+        names: The frame's column names, in order.
+        labels: The frame's row labels, in order.
+        along: Which axis something with one axis is read along.
+        told: Whether the caller said which axis.
+
+    Returns:
+        What each column's bound is, which is a value, a run of values, a
+        column, nothing at all, or `NO_DEFAULT` for a column the bound does not
+        reach, whose rows all go.
+
+    Raises:
+        InvalidArgumentError: If a column of values arrives with no axis named,
+            or a bound carrying rows is not the frame's shape.
+    """
+    height, width = len(labels), len(names)
+    if bound is None:
+        return dict.fromkeys(names, None)
+    if _is_frame(bound):
+        carried = {str(name) for name in bound.columns}
+        return {name: bound[name] if name in carried else NO_DEFAULT for name in names}
+    if _is_object(bound):
+        if not told:
+            raise InvalidArgumentError(_NEEDS_AXIS)
+        if along == 0:
+            return dict.fromkeys(names, bound)
+        pairs = dict(zip([str(key) for key in bound.index], bound.tolist(), strict=True))
+        return {name: _offered(pairs.get(name)) for name in names}
+    if isinstance(bound, dict):
+        pairs = {str(key): value for key, value in bound.items()}
+        if len(pairs) != width:
+            raise InvalidArgumentError(_coerced(len(pairs), width))
+        return {name: _offered(pairs.get(name)) for name in names}
+    if _positional(bound):
+        rows = [_plain(value) for value in bound]
+        if rows and _positional(rows[0]):
+            grid = [[_plain(value) for value in row] for row in rows]
+            if len(grid) != height or any(len(row) != width for row in grid):
+                raise InvalidArgumentError(_shaped(height, width, len(grid), len(grid[0])))
+            return {name: [row[at] for row in grid] for at, name in enumerate(names)}
+        if told and along == 0:
+            if len(rows) != height:
+                raise InvalidArgumentError(_coerced(len(rows), height))
+            return dict.fromkeys(names, _labelled(labels, rows))
+        if len(rows) != width:
+            raise InvalidArgumentError(_coerced(len(rows), width))
+        return dict(zip(names, rows, strict=True))
+    return dict.fromkeys(names, bound)
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -3092,6 +3389,83 @@ class DataFrameMixin:
                 answer = DataFrame._wrap(answer._inner.pick(name, kept, taken))
             except Exception as error:
                 raise translate(error) from None
+        return answer
+
+    def clip(
+        self,
+        lower: Any = None,
+        upper: Any = None,
+        *,
+        axis: Any = None,
+        inplace: bool = False,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The frame with every value held between two bounds.
+
+        Two comparisons and two picks, which is why this lives beside `where`
+        rather than beside the arithmetic, and document 49 is the long version.
+        A value below the floor becomes the floor, a value above the ceiling
+        becomes the ceiling, and a value that is missing is neither, so it is
+        left alone without anybody writing a rule for it.
+
+        Both bounds are optional and a bound that is a NaN is no bound at all.
+        Two bounds that are both values and are the wrong way round are put in
+        order, which pandas does only for a pair of values.
+
+        A column no bound reaches is not touched, so a frame that nothing in it
+        is out of bounds keeps all of its types. That does not save a column of
+        words from a bound that is a number, since the comparison is refused
+        before anybody asks whether a row would move. A column that a frame of
+        bounds does not carry loses every row, which is what pandas answers.
+
+        Args:
+            lower: The floor. A value, a run of values read as one per column
+                unless `axis=0` says one per row, a column, a mapping read by
+                column name, or a frame lined up on both axes.
+            upper: The ceiling, in the same shapes.
+            axis: Which way to read something with one axis.
+            inplace: Refused.
+            **kwargs: numpy's, which is `out` and nothing else.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If a column cannot hold a bound or be compared with it.
+            InvalidArgumentError: If a shape does not line up.
+            NotImplementedError: For `inplace`.
+        """
+        from ._frame import DataFrame, Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        along = _axis_number(axis, "DataFrame", 0, (0, 1))
+        _numpy_clip(kwargs)
+        low, high = _thresholds(lower, upper)
+        if low is None and high is None:
+            return self.copy()
+        names = [str(name) for name in self.columns]
+        labels = self._inner.labels().to_list()
+        told = axis is not None
+        floors = _frame_thresholds(low, names, labels, along, told)
+        ceilings = _frame_thresholds(high, names, labels, along, told)
+        types = dict(zip(names, self._inner.dtypes(), strict=True))
+        answer = self.copy()
+        for name in names:
+            # The column is read once and both bounds are judged against it, so
+            # a frame of five hundred columns is five hundred reads and not a
+            # thousand, and the two bounds cannot see each other's work, which
+            # is what pandas does.
+            column = Series._wrap(self._inner.column(name))
+            for bound, op in ((floors[name], "ge"), (ceilings[name], "le")):
+                if bound is None:
+                    continue
+                sides = _clipping(column, bound, op, types[name], labels)
+                if sides is None:
+                    continue
+                try:
+                    answer = DataFrame._wrap(answer._inner.pick(name, sides[0], sides[1]))
+                except Exception as error:
+                    raise translate(error) from None
         return answer
 
     def rename(
@@ -4788,6 +5162,69 @@ class SeriesMixin:
             return Series._wrap(self._inner.pick(kept, taken))
         except Exception as error:
             raise translate(error) from None
+
+    def clip(
+        self,
+        lower: Any = None,
+        upper: Any = None,
+        *,
+        axis: Any = None,
+        inplace: bool = False,
+        **kwargs: Any,
+    ) -> Series:
+        """The column with every value held between two bounds.
+
+        The frame's method one axis narrower, and document 49 is the long
+        version. A value below the floor becomes the floor, a value above the
+        ceiling becomes the ceiling, a value that is missing is left alone, and
+        a bound that is a NaN is no bound.
+
+        A column no bound reaches is handed back untouched and the bound is
+        never asked whether this column could hold it, which is `where`'s rule
+        and is pandas' rule.
+
+        Args:
+            lower: The floor. A value, a run of values read by position, a
+                mapping read by label, or a column lined up by label.
+            upper: The ceiling, in the same shapes.
+            axis: Accepted and not read, since a column has one.
+            inplace: Refused.
+            **kwargs: numpy's, which is `out` and nothing else.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the column cannot hold a bound or be compared with
+                it.
+            InvalidArgumentError: If a bound carrying rows is the wrong length.
+            NotImplementedError: For `inplace`.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _axis_number(axis, "Series", 0, (0,))
+        _numpy_clip(kwargs)
+        low, high = _thresholds(lower, upper)
+        if low is None and high is None:
+            return self.copy()
+        labels = self._inner.labels().to_list()
+        printed = self._inner.dtype()
+        answer = self._inner
+        for bound, op in ((low, "ge"), (high, "le")):
+            if bound is None:
+                continue
+            # Both bounds are judged against the column as it arrived rather
+            # than against what the other bound made of it, which is only
+            # visible when the two cross and is pandas' answer when they do.
+            sides = _clipping(self, bound, op, printed, labels)
+            if sides is None:
+                continue
+            try:
+                answer = answer.pick(sides[0], sides[1])
+            except Exception as error:
+                raise translate(error) from None
+        return Series._wrap(answer)
 
     def rename(
         self,
