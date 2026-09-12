@@ -141,6 +141,7 @@ from firepanda.kernel.running import (
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.unary import UnaryOp, unary_any, unary_type
 
 from .chunk import Chunk
 from .morsel import MORSEL_ROWS
@@ -1507,6 +1508,104 @@ struct Connective(Movable):
             )
         else:
             made = logic_any(chunk.columns[self.left], self.op)
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
+        return Chunk(columns^, rows)
+
+
+struct Apply(Movable):
+    """Appends a column holding one operation applied to each element.
+
+    The one column counterpart of `Compute`. A negation, an absolute value and a
+    bitwise inversion each read one column and write one of the same type, so
+    they share a node the way the thirteen two column operations share that one.
+
+    It appends rather than converting the column where it lies, which is the
+    difference between it and `Cast`. `SELECT a, -a` wants both, and turning
+    column zero over would change what every expression already bound against
+    that position means. The plus sign is here too and copies the column, which
+    is what `unary_any` does with it, because a query that writes `+a` in a
+    select list still wants a column with the name that expression was given.
+
+    A null stays null, which the kernel already does, so nothing here repairs
+    anything.
+    """
+
+    var at: Int
+    """The position of the column to read."""
+
+    var op: UnaryOp
+    """The operation to apply to it."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, op: UnaryOp, name: String):
+        """Constructs an operation over one column.
+
+        Args:
+            at: The position of the column to read.
+            op: The operation.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.op = op
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the answer appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one field on the end.
+
+        Raises:
+            If the position is outside the schema, or the operation has no
+            answer on that column's type.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "apply: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        # Asked here rather than on the first chunk, for the same reason a
+        # `Compute` asks `binary_type` here: a plan that cannot run should be
+        # refused while it is being built.
+        var made = unary_type(self.op, out[self.at].dtype)
+        var nullable = out[self.at].nullable
+        out.append(Field(self.name, made, nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Applies the operation and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the operation has no answer
+            on that column's type.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "apply: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = unary_any(chunk.columns[self.at], self.op)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(made^)
@@ -4453,6 +4552,7 @@ comptime Node = Variant[
     Project,
     Compute,
     Connective,
+    Apply,
     Match,
     Choose,
     Constant,
@@ -4501,6 +4601,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Compute].bind(input^)
     if node.isa[Connective]():
         return node[Connective].bind(input^)
+    if node.isa[Apply]():
+        return node[Apply].bind(input^)
     if node.isa[Match]():
         return node[Match].bind(input^)
     if node.isa[Choose]():
@@ -4635,7 +4737,7 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Match`, `Choose`, `Constant`, `Cast` and `Join`.
+        `Apply`, `Match`, `Choose`, `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -4643,6 +4745,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Connective]()
+        or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Choose]()
         or node.isa[Constant]()
@@ -4690,13 +4793,14 @@ def node_computes_per_row(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Compute`, `Connective`, `Match`, `Choose` and
-        `Join`.
+        True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Choose`
+        and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Compute]()
         or node.isa[Connective]()
+        or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Choose]()
         or node.isa[Join]()
@@ -4771,6 +4875,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
+    if node.isa[Apply]():
+        return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
     if node.isa[Choose]():
@@ -4829,6 +4935,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
+    if node.isa[Apply]():
+        return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
     if node.isa[Choose]():

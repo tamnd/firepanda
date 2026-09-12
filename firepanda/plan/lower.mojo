@@ -254,6 +254,7 @@ from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
+    Apply,
     Cast,
     Choose,
     Compute,
@@ -281,6 +282,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
+from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
@@ -539,6 +541,23 @@ def _lower_expr(
 
     if kind == ExprKind.CONDITIONAL:
         return _lower_conditional(exprs, root, pipe, base, name, memo)
+
+    if kind == ExprKind.UNARY:
+        # A unary over a constant has already been folded by the simplify pass,
+        # so what reaches here reads a column and there is no constant form to
+        # write, which is the one way this differs from the binary case below.
+        var over = _lower_expr(
+            exprs,
+            exprs.nodes[root].children[0],
+            pipe,
+            base,
+            name,
+            memo,
+            reuse=True,
+        )
+        pipe.add(Node(Apply(over, UnaryOp(exprs.nodes[root].op), name)))
+        memo.remember(root, len(pipe.schema) - 1)
+        return len(pipe.schema) - 1
 
     if kind != ExprKind.BINARY:
         raise Error(

@@ -1444,16 +1444,46 @@ def test_a_computed_distinct_key_is_refused_by_name() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_unary_expression_is_refused() raises:
+def test_a_unary_expression_lands_in_a_column_of_its_own() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
     var negated = plan.exprs.unary(UnaryOp.NEG, qty)
     var root = plan.project(scan, [negated], ["negated"])
     _ = bind(plan, root, schemas())
+    var out = lower(plan, root, one_frame())^.run()
 
-    with assert_raises(contains="computes a unary expression"):
-        _ = lower(plan, root, one_frame())
+    assert_equal(out.width(), 1, "the projection kept one column")
+    same(
+        read_back(out, "negated"),
+        [-5, -20, -3, -40, -12, -8, -25, -1, -30, -15],
+        "negated",
+    )
+
+
+def test_a_unary_reads_the_column_the_one_under_it_wrote() raises:
+    # The operand is an expression rather than an input column, so the operator
+    # has to read the position the node under it appended and not a column of
+    # the scan. That is what a plan built by hand catches and a query does not,
+    # a query having no way to write a position down.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var doubled = plan.exprs.binary(
+        BinaryOp.MUL,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(2))),
+    )
+    var root = plan.project(
+        scan, [plan.exprs.unary(UnaryOp.NEG, doubled)], ["down"]
+    )
+    _ = bind(plan, root, schemas())
+    var out = lower(plan, root, one_frame())^.run()
+
+    same(
+        read_back(out, "down"),
+        [-10, -40, -6, -80, -24, -16, -50, -2, -60, -30],
+        "down",
+    )
 
 
 def test_a_projection_of_a_bare_constant_is_a_column_of_it() raises:
