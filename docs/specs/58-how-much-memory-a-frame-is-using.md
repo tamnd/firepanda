@@ -40,7 +40,7 @@ In pandas `deep=True` means to go and measure the Python objects an object colum
 
 Accepting the parameter and ignoring it is the right call rather than the lazy one. Refusing it would tell a caller that something is unavailable, when what is actually unavailable is the shallow answer, and a caller who wrote `deep=True` wanted the accurate number and is getting it. The docstring says this rather than leaving the parameter looking unimplemented.
 
-Both flags go through the same boolean check every other flag in the library reads, so a `1` is refused the way pandas refuses it, a `None` is accepted and means False, and a numpy boolean is accepted.
+Neither flag is checked for being a boolean, which is the one place in this slice where the library does not do what the rest of the library does. Almost every flag here goes through the same check and refuses a `1` with a sentence naming the type that arrived, because pandas validates almost every flag. These two it does not. `df.memory_usage(index=1)` counts the index in pandas, `index=0` and `index=None` and an empty string drop it, and any other non empty string counts it, because the value is read for its truth and nothing else. That was measured against a running pandas rather than assumed from the pattern, and the pattern is what would have been assumed, which is exactly why it was measured. Copying the truthiness is the only way a program that works there works here, and a library that refuses what pandas accepts breaks a working program for no gain.
 
 ## 7. What a caller should actually do with the difference
 
@@ -50,7 +50,7 @@ A caller who needs pandas' number has `to_pandas().memory_usage()`, which costs 
 
 ## 8. What is refused and what is left
 
-Nothing here refuses anything except a flag that is not a flag.
+Nothing here refuses anything at all, including the two flags, for the reason section 6 gives.
 
 `DataFrame.nbytes` is not here and is not a gap, because it does not exist in pandas 3 either. That was checked against a running pandas rather than assumed, and it is worth recording because the member reads like an obvious pair with `Series.nbytes` and somebody will eventually file it as missing.
 

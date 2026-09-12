@@ -20,6 +20,8 @@ The default counts the index and `nbytes` never does. That is pandas' rule, it i
 
 `deep` is accepted and changes nothing, because it means measuring the Python objects an object column points at and there are no object columns here, so every number answered is already the deep one. Refusing it would tell a caller something is unavailable when what is unavailable is the shallow answer.
 
+Neither flag is checked for being a boolean, which is the one place in this slice where the library does not do what the rest of the library does. Almost every flag here goes through the same check and refuses a `1` with a sentence naming the type that arrived, because pandas validates almost every flag. These two it does not: `df.memory_usage(index=1)` counts the index in pandas, `index=0` and `index=None` and an empty string drop it, and any other non empty string counts it. That was measured against a running pandas rather than assumed from the pattern, and the pattern is what would have been assumed. Copying the truthiness is the only way a program that works there works here.
+
 ### Added: a frame and a column can say how big they are and what they hold
 
 `df.empty`, `df.ndim`, `df.size`, `df.axes`, `df.dtypes`, `s.empty`, `s.ndim`, `s.axes` and `s.dtypes`. `shape` was already on both classes and `size` was already on a column.

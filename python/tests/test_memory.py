@@ -194,14 +194,35 @@ def test_deep_is_accepted_and_changes_nothing(firepanda: ModuleType, deep: bool)
     assert frame["k"].memory_usage(deep=deep) == frame["k"].memory_usage()
 
 
-@pytest.mark.parametrize("name", ["index", "deep"])
-def test_a_flag_that_is_not_a_boolean_is_refused(firepanda: ModuleType, name: str) -> None:
-    """The same check every other flag in the library reads, and pandas refuses a one too."""
+@needs_pandas
+@pytest.mark.parametrize("flag", [1, 0, None, "", "no", 2.5])
+def test_a_flag_that_is_not_a_boolean_is_read_for_its_truth(
+    firepanda: ModuleType, flag: Any
+) -> None:
+    """These two parameters are not checked for being booleans, and that is deliberate.
+
+    Almost every flag in this library goes through the same check and refuses a `1` with a
+    sentence naming the type that arrived, because pandas validates almost every flag. These
+    two it does not. `memory_usage` reads whatever arrives for its truth, so a `1` counts the
+    index and a `0` and a `None` and an empty string do not, and `"no"` counts it because a
+    non empty string is true. Copying that is the only way a program that works there works
+    here, and the assertion below is against a running pandas rather than against a memory of
+    one.
+    """
+    import pandas as pd
+
     frame = firepanda.DataFrame(DATA)
-    with pytest.raises(firepanda.errors.InvalidArgumentError, match=name):
-        frame.memory_usage(**{name: 1})
-    with pytest.raises(firepanda.errors.InvalidArgumentError, match=name):
-        frame["v"].memory_usage(**{name: 1})
+    theirs = list(pd.DataFrame(DATA).memory_usage(index=flag).index)
+    assert list(frame.memory_usage(index=flag).index) == theirs
+    counted = frame["v"].memory_usage(index=flag) > frame["v"].memory_usage(index=False)
+    assert counted == ("Index" in theirs and frame.index.nbytes > 0)
+
+
+def test_a_deep_that_is_not_a_boolean_changes_nothing_either(firepanda: ModuleType) -> None:
+    """The flag is ignored, so the type of it cannot matter, and it still must not raise."""
+    frame = firepanda.DataFrame(DATA)
+    assert frame.memory_usage(deep="yes").tolist() == frame.memory_usage().tolist()
+    assert frame["v"].memory_usage(deep=7) == frame["v"].memory_usage()
 
 
 def test_none_is_a_flag_and_means_false(firepanda: ModuleType) -> None:
