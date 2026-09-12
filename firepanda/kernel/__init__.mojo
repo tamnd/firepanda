@@ -116,6 +116,8 @@ from .group import (
 )
 from .logic import (
     LogicOp,
+    conjoin,
+    disjoin,
     is_logic_name,
     logic_any,
     logic_op,

@@ -15,6 +15,8 @@ from firepanda.array.array import Array, from_list
 from firepanda.dtype.logical import LogicalType
 from firepanda.kernel.logic import (
     LogicOp,
+    conjoin,
+    disjoin,
     is_logic_name,
     logic_any,
     logic_op,
@@ -177,6 +179,115 @@ def test_a_long_column_agrees_with_the_table_row_by_row() raises:
 def test_two_columns_of_different_lengths_have_no_rows_in_common() raises:
     with assert_raises(contains="the right has 2"):
         _ = logical_and(build([TRUE, TRUE, TRUE]), build([TRUE, TRUE]))
+
+
+def test_three_columns_conjoined_agree_with_two_calls() raises:
+    var a = build([TRUE, TRUE, TRUE, FALSE, NULL, TRUE, NULL, FALSE])
+    var b = build([TRUE, TRUE, FALSE, NULL, NULL, NULL, TRUE, TRUE])
+    var c = build([TRUE, FALSE, NULL, TRUE, NULL, TRUE, NULL, NULL])
+    var columns: List[Array[DType.bool]] = [a.copy(), b.copy(), c.copy()]
+    var pairwise = logical_and(logical_and(a, b), c)
+    var fused = conjoin(columns)
+    assert_equal(len(fused), len(pairwise))
+    for i in range(len(fused)):
+        assert_equal(fused.is_valid(i), pairwise.is_valid(i))
+        assert_equal(fused[i], pairwise[i])
+
+
+def test_three_columns_disjoined_agree_with_two_calls() raises:
+    var a = build([TRUE, TRUE, TRUE, FALSE, NULL, TRUE, NULL, FALSE])
+    var b = build([TRUE, TRUE, FALSE, NULL, NULL, NULL, TRUE, TRUE])
+    var c = build([TRUE, FALSE, NULL, TRUE, NULL, TRUE, NULL, NULL])
+    var columns: List[Array[DType.bool]] = [a.copy(), b.copy(), c.copy()]
+    var pairwise = logical_or(logical_or(a, b), c)
+    var fused = disjoin(columns)
+    for i in range(len(fused)):
+        assert_equal(fused.is_valid(i), pairwise.is_valid(i))
+        assert_equal(fused[i], pairwise[i])
+
+
+def test_one_false_anywhere_decides_a_conjunction_of_five() raises:
+    """The three valued rule, with the deciding column in every position.
+
+    Four nulls and a false, and the false moves along the row, because a search
+    that stopped at the wrong place would get one of these five right by luck.
+    """
+    var columns = List[Array[DType.bool]]()
+    for k in range(5):
+        var values = List[Int]()
+        for row in range(5):
+            values.append(FALSE if row == k else NULL)
+        columns.append(build(values))
+
+    assert_column(conjoin(columns), [FALSE, FALSE, FALSE, FALSE, FALSE])
+
+
+def test_one_true_anywhere_decides_a_disjunction_of_five() raises:
+    var columns = List[Array[DType.bool]]()
+    for k in range(5):
+        var values = List[Int]()
+        for row in range(5):
+            values.append(TRUE if row == k else NULL)
+        columns.append(build(values))
+
+    assert_column(disjoin(columns), [TRUE, TRUE, TRUE, TRUE, TRUE])
+
+
+def test_nulls_all_the_way_across_stay_null() raises:
+    var columns: List[Array[DType.bool]] = [
+        build([NULL, TRUE, FALSE]),
+        build([NULL, TRUE, FALSE]),
+        build([NULL, TRUE, FALSE]),
+        build([NULL, TRUE, FALSE]),
+    ]
+    assert_column(conjoin(columns), [NULL, TRUE, FALSE])
+    assert_column(disjoin(columns), [NULL, TRUE, FALSE])
+
+
+def test_a_long_conjunction_of_four_agrees_with_the_pairwise_chain() raises:
+    # Long enough to be more than one vector and more than one validity word,
+    # and a length that is no multiple of either, so the tail is exercised.
+    comptime n = 1000
+    var columns = List[Array[DType.bool]]()
+    for k in range(4):
+        var values = List[Int]()
+        for i in range(n):
+            values.append((i // (k + 1)) % 3 - 1)
+        columns.append(build(values))
+
+    var chain = logical_and(
+        logical_and(logical_and(columns[0], columns[1]), columns[2]),
+        columns[3],
+    )
+    var fused = conjoin(columns)
+    var chain_or = logical_or(
+        logical_or(logical_or(columns[0], columns[1]), columns[2]),
+        columns[3],
+    )
+    var fused_or = disjoin(columns)
+    for i in range(n):
+        assert_equal(fused.is_valid(i), chain.is_valid(i))
+        assert_equal(fused[i], chain[i])
+        assert_equal(fused_or.is_valid(i), chain_or.is_valid(i))
+        assert_equal(fused_or[i], chain_or[i])
+
+
+def test_no_columns_and_one_column_and_a_ragged_one() raises:
+    var empty = List[Array[DType.bool]]()
+    with assert_raises(contains="over no columns"):
+        _ = conjoin(empty)
+
+    var one: List[Array[DType.bool]] = [build([TRUE, NULL, FALSE])]
+    assert_column(conjoin(one), [TRUE, NULL, FALSE])
+    assert_column(disjoin(one), [TRUE, NULL, FALSE])
+
+    var ragged: List[Array[DType.bool]] = [
+        build([TRUE, TRUE, TRUE]),
+        build([TRUE, TRUE, TRUE]),
+        build([TRUE, TRUE]),
+    ]
+    with assert_raises(contains="column 2 has 2"):
+        _ = conjoin(ragged)
 
 
 def test_the_erased_form_carries_the_same_answers() raises:
