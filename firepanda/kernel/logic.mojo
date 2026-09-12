@@ -186,6 +186,50 @@ def logical_or(
     return _connect[LOGIC_OR](a, b)
 
 
+def conjoin(columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
+    """Conjoins any number of boolean columns in one pass, three valued.
+
+    `logical_and` twice is two passes and two answers, and the middle one is a
+    whole column written down for the next call to read back. A query that ands
+    five predicates together writes four of those, and the four columns nobody
+    asked for cost more than the predicates did: four writes and eight reads of
+    a byte a row, against the one write and five reads this does.
+
+    Args:
+        columns: The columns to conjoin. Must all be the same length, and there
+            must be at least one.
+
+    Returns:
+        A bool column, null only on the rows no column settles.
+
+    Raises:
+        Error: If no columns were given or they are not all the same length.
+    """
+    return _connect_all[LOGIC_AND](columns)
+
+
+def disjoin(columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
+    """Disjoins any number of boolean columns in one pass, three valued.
+
+    `conjoin` read the other way round, and the same in every other respect.
+    Worth having beside it rather than only the conjunction because the
+    disjunctive predicates are the wide ones: TPC-H q19 is three groups of four
+    comparisons, and written as pairwise calls that is eleven intermediate
+    columns for twelve predicates.
+
+    Args:
+        columns: The columns to disjoin. Must all be the same length, and there
+            must be at least one.
+
+    Returns:
+        A bool column, null only on the rows no column settles.
+
+    Raises:
+        Error: If no columns were given or they are not all the same length.
+    """
+    return _connect_all[LOGIC_OR](columns)
+
+
 def logical_not(a: Array[DType.bool]) raises -> Array[DType.bool]:
     """Negates a boolean column.
 
@@ -287,6 +331,146 @@ def _connect[
 
     apply_validity(out, validity^)
     return out^
+
+
+def _connect_all[
+    op: Int
+](columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
+    """Applies one of the two connectives across any number of columns.
+
+    Args:
+        columns: The columns.
+
+    Parameters:
+        op: One of the `LOGIC_` codes.
+
+    Returns:
+        A bool column.
+
+    Raises:
+        Error: If no columns were given or they are not all the same length.
+    """
+    comptime width = simd_width_of[DType.bool]()
+
+    var count = len(columns)
+    if count == 0:
+        raise Error("logic: a connective over no columns has no answer")
+    if count == 1:
+        return columns[0].copy()
+    if count == 2:
+        return _connect[op](columns[0], columns[1])
+
+    var n = len(columns[0])
+    for k in range(1, count):
+        if len(columns[k]) != n:
+            raise Error(
+                String(
+                    "logic: column 0 has ",
+                    n,
+                    " rows and column ",
+                    k,
+                    " has ",
+                    len(columns[k]),
+                )
+            )
+
+    # Every row is written below, so the zeroing constructor would be a wasted
+    # pass, the same as in the pairwise case.
+    var out = Array[DType.bool](overwritten=n)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        # The value pointers are derived once per morsel rather than once per
+        # vector. `columns[k].unsafe_ptr()` in the inner loop walks the column
+        # to its data to its buffer for a load that is otherwise one
+        # instruction, and the walk is the same answer every time.
+        var srcs = List[Pointer[Scalar[DType.bool], ImmUntrackedOrigin]](
+            capacity=count
+        )
+        for k in range(count):
+            srcs.append(
+                columns[k].unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
+            )
+
+        var dst = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var acc = srcs[0].unsafe_offset(i).unsafe_load[width=width]()
+            for k in range(1, count):
+                var y = srcs[k].unsafe_offset(i).unsafe_load[width=width]()
+                comptime if op == LOGIC_AND:
+                    acc = acc & y
+                else:
+                    acc = acc | y
+            dst.unsafe_offset(i).unsafe_store(acc)
+            i += width
+
+    parallel_morsels(compute, n)
+
+    var validity = Bitmap(copy=columns[0].data.validity)
+    var any_null = columns[0].null_count() != 0
+    for k in range(1, count):
+        validity.and_with(columns[k].data.validity)
+        if columns[k].null_count() != 0:
+            any_null = True
+    if any_null:
+        _settle_all[op](columns, out, validity, n)
+
+    apply_validity(out, validity^)
+    return out^
+
+
+def _settle_all[
+    op: Int
+](
+    columns: List[Array[DType.bool]],
+    mut out: Array[DType.bool],
+    mut validity: Bitmap,
+    n: Int,
+):
+    """Turns back on the rows a null reaches that some other column decides.
+
+    `_settle` generalised. Under an and a single false decides the row whatever
+    the nulls beside it hold, and under an or a single true does, so a row is
+    settled by the first present column holding the decisive value and the
+    search stops there.
+
+    Args:
+        columns: The columns.
+        out: The values, already computed for the rows where every column is
+            present.
+        validity: The intersection on the way in, the answer's validity on the
+            way out.
+        n: The number of rows.
+
+    Parameters:
+        op: One of the `LOGIC_` codes.
+    """
+    comptime decisive = op == LOGIC_OR
+
+    var count = len(columns)
+    for w in range(validity.word_count()):
+        var word = validity.unsafe_word(w)
+        if word == UInt64.MAX:
+            continue
+
+        var base = w * 64
+        var last = min(base + 64, n)
+        for row in range(base, last):
+            if (word >> UInt64(row - base)) & 1 == 1:
+                continue
+
+            var settled = False
+            for k in range(count):
+                if (
+                    columns[k].is_valid(row)
+                    and Bool(columns[k][row]) == decisive
+                ):
+                    settled = True
+                    break
+
+            if settled:
+                validity.set(row, True)
+                out[row] = decisive
 
 
 def _settle[
