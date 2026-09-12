@@ -1457,6 +1457,220 @@ def _holds(printed: str, value: Any) -> bool:
     return False
 
 
+_ISIN_SERIES = "only list-like objects are allowed to be passed to isin(), you passed a `{}`"
+"""What pandas says when `Series.isin` is handed something it cannot iterate.
+
+The frame's sentence below is not the same sentence with a different noun in it. It names the
+method with its class on the front, it says dict-like as well as list-like, and it quotes the type
+name with apostrophes where this one uses backticks. Both are copied rather than generated, because
+a caller matching on either one is matching on the whole string."""
+
+_ISIN_FRAME = (
+    "only list-like or dict-like objects are allowed to be passed to DataFrame.isin(),"
+    " you passed a '{}'"
+)
+"""What pandas says when `DataFrame.isin` is handed something it cannot iterate."""
+
+_ISIN_TEMPORAL = (
+    "isin cannot look a timestamp up in a {} column yet, because the set crosses into the"
+    " extension as a column and a column of timestamps cannot be built out of Python objects"
+)
+"""Why a temporal column refuses a set of timestamps instead of answering false everywhere.
+
+Everything else this method cannot hold is dropped from the set on the grounds that a value the
+column cannot hold is a value no row can equal, and that is pandas' own answer. A timestamp against
+a datetime column is the one case where dropping it would be wrong, since pandas finds those rows,
+so it is refused out loud rather than answered with a column of falses that looks like a result."""
+
+
+def _isin_set(values: Any, sentence: str) -> list[Any]:
+    """The set a membership test is against, as a plain list.
+
+    pandas accepts anything list-like here and reads a mapping as its keys, so a `dict`, a
+    `dict_keys`, a `range`, a generator, a set, a tuple, an ndarray, an `Index` and a `Series` all
+    arrive as the same thing by the time the comparison happens. A string is list-like in Python and
+    is not list-like to pandas, which is the same rule the frame constructor follows and is the one
+    that stops `isin("ab")` from meaning `isin(["a", "b"])`.
+
+    Args:
+        values: What the caller passed.
+        sentence: The refusal to raise, with one `{}` in it for the type name.
+
+    Returns:
+        The values, in the order they were given, with duplicates left in because the kernel reads
+        the set as a set.
+
+    Raises:
+        DTypeError: If the argument is not list-like. pandas raises `TypeError` here and this is
+            one, since what went wrong is the kind of the argument rather than its value.
+    """
+    if isinstance(values, (SeriesMixin, IndexMixin)):
+        return list(values._inner.to_list())
+    if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+        raise DTypeError(sentence.format(type(values).__name__))
+    return list(values)
+
+
+def _isin_wanted(printed: str, values: list[Any]) -> list[Any]:
+    """The values a column of one type could possibly equal, and nothing else.
+
+    A value the column cannot hold is a value no row of it can equal, so dropping it is not a
+    shortcut and it is not an approximation. It is what pandas answers: `Series([1, 2]).isin(["1"])`
+    finds nothing and does not complain about being handed a string, and the whole of the reason is
+    that a number is never equal to a word.
+
+    The two conversions in front of that are the cases where pandas does find a row across a kind
+    boundary. `True == 1` is true in Python and `Series([True, False]).isin([1])` finds the True
+    row, so a number that is zero or one becomes a flag for a column of flags and a flag becomes a
+    number for a column of numbers. Nothing else crosses: a column of words does not find `True`,
+    which is `_holds` refusing it and is pandas' answer as well.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+        values: The set.
+
+    Returns:
+        The values the column can hold, converted where the two kinds meet.
+    """
+    numeric = printed in _SIGNED or printed in _UNSIGNED or printed in _FLOATING
+    kept: list[Any] = []
+    for value in values:
+        wanted = value
+        if isinstance(value, bool):
+            if numeric:
+                wanted = int(value)
+        elif printed == "bool" and isinstance(value, (int, float)) and value in (0, 1):
+            wanted = bool(value)
+        if _holds(printed, wanted):
+            kept.append(wanted)
+    return kept
+
+
+def _isin_codes(column: Any, values: list[Any]) -> list[int]:
+    """The set a category column looks for, as positions in its own list.
+
+    A category column stores codes rather than values, which the kernel says out loud when it is
+    handed one, so the lookup happens against the codes and the set has to be a set of codes too.
+    Turning the values into codes here rather than building a second category column is also what
+    makes a value that is not one of the categories cost nothing: it has no position, so it is not
+    in the list, and the rows answer false the way pandas says they do.
+
+    Args:
+        column: The category column, read for its categories.
+        values: The set.
+
+    Returns:
+        The positions of the categories the set names, which is a short list because the categories
+        are a short list.
+    """
+    words = {value for value in values if isinstance(value, str)}
+    return [at for at, name in enumerate(column.cat.categories) if name in words]
+
+
+def _isin_nulls(printed: str, values: list[Any]) -> bool:
+    """Whether a missing row is one of the set, which is a question about four missing values.
+
+    pandas has a different missing value per dtype and matches each column against its own. A float
+    column finds `nan` and does not find `None`, a column of words finds both, and a `datetime64`
+    column finds neither because it wants `NaT`. firepanda has one missing value underneath all of
+    them, so the distinction cannot come from the column and is read off the set instead, which
+    lands on the same answer for every case pandas has an answer for.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+        values: The set.
+
+    Returns:
+        Whether a row with nothing in it is in the set.
+    """
+    none = any(value is None for value in values)
+    nan = any(isinstance(value, float) and value != value for value in values)
+    if printed in ("string", "category"):
+        return none or nan
+    if printed in _FLOATING:
+        return nan
+    return False
+
+
+def _isin_mask(column: Any, values: list[Any]) -> Any:
+    """One column's membership answer, as the inner boolean column.
+
+    Args:
+        column: The column being asked about.
+        values: The set, already read into a list.
+
+    Returns:
+        The inner boolean column, with the column's own name and labels on it and with no nulls
+        left in it, which is what makes it a pandas answer rather than a SQL one.
+
+    Raises:
+        UnsupportedError: If a temporal column is asked about a timestamp.
+    """
+    from ._frame import Series
+
+    inner = column._inner
+    printed = inner.dtype()
+    if printed == "category":
+        looked = inner.codes()
+        keep: list[Any] = list(_isin_codes(column, values))
+        against = looked.dtype()
+    else:
+        _isin_no_timestamps(printed, values)
+        looked = inner
+        keep = _isin_wanted(printed, values)
+        against = printed
+    try:
+        mask = looked.is_in(Series(keep)._inner.cast(against, True))
+        mask = mask.fill_null(Series([False])._inner)
+        if _isin_nulls(printed, values):
+            # A float column can hold a real nan as well as a missing row, and the kernel answers
+            # false for the nan because a nan is not equal to itself. pandas finds both, so both
+            # are taken from the second side here, and `notna` is the one question that is false in
+            # both places.
+            mask = mask.pick(inner.transform("notna", 0), Series([True])._inner)
+        return mask.relabel(inner.label())
+    except FirepandaError:
+        raise
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _isin_no_timestamps(printed: str, values: list[Any]) -> None:
+    """Refuses the one set a temporal column would answer wrongly rather than loudly."""
+    if not printed.startswith(("datetime64", "timestamp")):
+        return
+    if any(isinstance(value, (datetime.date, datetime.datetime)) for value in values):
+        raise UnsupportedError(_ISIN_TEMPORAL.format(printed))
+
+
+def _isin_framed(frame: Any, columns: dict[str, Any]) -> DataFrame:
+    """A frame of answers, built from values and given back the labels it describes.
+
+    The constructor is the only way to make a frame in this library, and a frame it makes carries a
+    range starting at zero. That is already the right index most of the time, so the common case
+    costs nothing and the frame is handed straight back. When it is not, the labels go in as one
+    more column and come back out as the index, which is the same route `_labelled` takes for one
+    column and for the same reason: an index is built by the constructor or it is not built at all.
+
+    Args:
+        frame: The frame that was asked, read for its labels and their name.
+        columns: One list of flags per column, in the frame's own order.
+
+    Returns:
+        The frame of flags.
+    """
+    from ._frame import DataFrame
+
+    labels = frame._inner.labels()
+    if labels.is_range() and labels.start() == 0 and labels.label() is None:
+        return DataFrame(columns)
+    held = "labels"
+    while held in columns:
+        held += "_"
+    built = _answered(DataFrame({**columns, held: labels.to_list()}).set_index(held))
+    return _answered(built.rename_axis(labels.label()))
+
+
 def _fallback(printed: str, value: Any, column: Any = None) -> Any:
     """The fill value as a column of one row, of the type it is going into.
 
@@ -3701,6 +3915,47 @@ class DataFrameMixin:
                 raise translate(error) from None
         return _kept(self, answer, inplace)
 
+    def isin(self, values: Any) -> DataFrame:
+        """Whether each cell holds one of a set of values.
+
+        A list is one set asked of every column and a mapping is a set per column, with a column the
+        mapping does not name answering false all the way down rather than being left out. Both of
+        those are pandas'.
+
+        A frame or a series is refused, and that is the one shape here that is a gap rather than a
+        decision about a set. pandas does not read either of them as a set at all: it lines them up
+        against this frame by label and compares cell against cell, so `df.isin(other_frame)` is an
+        aligned equality test wearing the name of a membership test. Answering it as a set would be
+        a wrong answer that looks like a right one, so it is not answered.
+
+        The columns are asked one at a time and put back together through the constructor, which
+        means the answer crosses into Python as values and back. That is the slow way to build a
+        frame and it is the only way there is from here, since a frame cannot be assembled out of
+        columns that already exist. It is worth a kernel once anything cares.
+        """
+        from ._frame import Series
+
+        if isinstance(values, (DataFrameMixin, SeriesMixin)):
+            raise UnsupportedError(
+                f"isin against a {type(values).__name__} lines the two up by label and compares"
+                " them cell against cell rather than reading it as a set, and that comparison is"
+                " not written"
+            )
+        names = self._inner.names()
+        if isinstance(values, dict):
+            wanted = {
+                name: _isin_set(values[name], _ISIN_FRAME) for name in names if name in values
+            }
+            made = {name: wanted.get(name, []) for name in names}
+        else:
+            shared = _isin_set(values, _ISIN_FRAME)
+            made = {name: shared for name in names}
+        columns: dict[str, Any] = {
+            name: _isin_mask(Series._wrap(self._inner.column(name)), made[name]).to_list()
+            for name in names
+        }
+        return _isin_framed(self, columns)
+
     def where(
         self,
         cond: Any,
@@ -5284,6 +5539,18 @@ class SeriesMixin:
         """
         wanted = self._inner.label() if name is NO_DEFAULT else name
         return self._framed("0" if wanted is None else str(wanted))
+
+    def isin(self, values: Any) -> Series:
+        """Whether each row holds one of a set of values.
+
+        The answer is boolean with no gaps in it, and a row with nothing in it is false rather than
+        missing. That is pandas' rule and it is not the core's: the core is describing SQL's `IN`,
+        where a comparison against an unknown value is unknown, and this is the layer that knows
+        which of the two the caller asked for.
+        """
+        from ._frame import Series
+
+        return Series._wrap(_isin_mask(self, _isin_set(values, _ISIN_SERIES)))
 
     def duplicated(self, keep: Any = "first") -> Series:
         """Which values repeat one that another row already carries.

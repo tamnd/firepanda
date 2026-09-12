@@ -54,7 +54,7 @@ from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
 from firepanda.py.temporal import word_part
-from firepanda.py.transform import transformation, transformed
+from firepanda.py.transform import masked, transformation, transformed
 from firepanda.py.window import window as window_agg
 from firepanda.py.window import window_settings
 from firepanda.py.values import python_list, python_value
@@ -568,6 +568,45 @@ struct PySeries(Movable, Writable):
                 .series[]
                 .pick(mask[].values.as_typed[DType.bool](), right[])
             )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def is_in(
+        py_self: PythonObject, values: PythonObject
+    ) raises -> PythonObject:
+        """Reports which rows hold one of a set of values.
+
+        The set crosses as a column for the reason `pick` gives, which is that
+        the kernel wants something typed and the layer above is the side that
+        knows what type to make it. It is a column rather than a list for a
+        second reason as well: a caller who wrote `s.isin(other_series)` already
+        has a column, and taking it apart into Python objects so that this side
+        can put it back together would be the slowest part of the call.
+
+        A null row answers null here and not false, because that is what the
+        core says and the core is describing SQL's `IN`. pandas answers false
+        there unless the set holds that dtype's own missing value, which is a
+        rule about four different missing values that this side has one of, so
+        the layer above is where it is applied.
+
+        Args:
+            py_self: The series.
+            values: The set, as a column of a type this one can be compared
+                against. Order, duplicates and nulls in it are ignored.
+
+        Returns:
+            A boolean column with this column's name and labels.
+
+        Raises:
+            Error: Tagged `dtype`, if the set is not a series or if the two
+                types cannot be compared.
+        """
+        var wanted = Self._other(values, "values")
+        var held = Self._held(py_self)[].series
+        try:
+            var mask = held[].is_in(wanted[])
+            return Self._wrapped(masked(held[], mask^))
         except cause:
             raise retagged(DTYPE, cause)
 
