@@ -678,17 +678,61 @@ def test_an_order_by_over_a_union_sorts_the_stack() raises:
     )
 
 
-def test_an_except_is_refused_by_name() raises:
-    with assert_raises(contains="a difference is not a stack of its inputs"):
+def test_an_except_keeps_the_rows_the_second_side_lacks() raises:
+    same(
+        answer("SELECT qty FROM sales EXCEPT SELECT band FROM tiers", "qty"),
+        [5, 12, 8, 25, 1, 30, 15],
+        "3, 20 and 40 are bands as well",
+    )
+
+
+def test_an_intersect_keeps_the_rows_both_sides_have() raises:
+    same(
+        answer("SELECT qty FROM sales INTERSECT SELECT band FROM tiers", "qty"),
+        [20, 3, 40],
+        "99 is a band nobody sold",
+    )
+
+
+def test_an_except_keeps_one_copy_of_a_row_it_keeps() raises:
+    # A set operation is over sets, so the two fours the left side has come
+    # back as one four whatever the right side holds.
+    same(
+        answer("SELECT mark FROM gappy EXCEPT SELECT band FROM gaps", "mark"),
+        [4, 9, 1],
+        "one of each, and the null went with the other side's null",
+    )
+
+
+def test_an_intersect_counts_two_nulls_as_the_same_row() raises:
+    # Which is the rule a set operation has and a comparison does not. Written
+    # as a join this would be empty, because a null is equal to nothing at all.
+    same(
+        gapped(
+            run(
+                "SELECT mark FROM gappy INTERSECT SELECT band FROM gaps",
+                session(),
+            ),
+            "mark",
+        ),
+        [-1],
+        "the null is the only thing both sides wrote",
+    )
+
+
+def test_an_except_all_is_refused_by_name() raises:
+    with assert_raises(contains="EXCEPT ALL counts the copies of a row"):
         _ = run(
-            "SELECT qty FROM sales EXCEPT SELECT band FROM tiers", session()
+            "SELECT qty FROM sales EXCEPT ALL SELECT band FROM tiers",
+            session(),
         )
 
 
-def test_an_intersect_is_refused_by_name() raises:
-    with assert_raises(contains="an intersection is not a stack of its inputs"):
+def test_an_intersect_all_is_refused_by_name() raises:
+    with assert_raises(contains="INTERSECT ALL counts the copies of a row"):
         _ = run(
-            "SELECT qty FROM sales INTERSECT SELECT band FROM tiers", session()
+            "SELECT qty FROM sales INTERSECT ALL SELECT band FROM tiers",
+            session(),
         )
 
 

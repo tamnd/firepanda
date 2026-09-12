@@ -183,9 +183,22 @@ Nothing is read to stack them. A frame is a list of chunks per column, and a
 union of two frames is those lists one after the other.
 
 A union without `ALL` is the stack with a distinct above it, which is the group
-by with nothing to reduce from the section before. A difference and an
-intersection are the same node with another code on it and neither is a stack,
-so both are refused by name.
+by with nothing to reduce from the section before.
+
+A difference and an intersection are the same node with another code on it, and
+they are the same stack with one more column on it saying which arm each row came
+from. A group by over the query's own columns then puts every copy of a row in
+one group whichever arm it came from, and the smallest and the largest tag in a
+group say which arms had it, so an intersection keeps the groups whose two tags
+differ and a difference keeps the groups whose largest tag is still the left's.
+The tags and the mask are dropped by the filter that reads the mask.
+
+Grouping is why this is the right shape rather than a join. SQL compares two rows
+of a set operation with a null equal to a null, and a join key is never equal to
+a null, so a difference written as an anti join drops every row with a null in it
+and does it without saying so. A group by puts the nulls of a column in one
+group, which is the rule SQL asked for. `ALL` is still refused on both, because
+each needs a group to come back out as a number of rows rather than as one.
 
 ### A table function is a source with no table under it
 
@@ -215,8 +228,8 @@ columns the plan's schema numbered.
 
 ### What it refuses, and why refusing is the design
 
-A distinct on part of the row is not lowered here, and neither is a difference,
-an intersection, a unary expression, an ordered window, or a cast
+A distinct on part of the row is not lowered here, and neither is a difference or
+an intersection written `ALL`, a unary expression, an ordered window, or a cast
 over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
@@ -267,6 +280,7 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
+    SET_INTERSECT,
     SET_UNION,
     NodeKind,
     Plan,
@@ -281,6 +295,17 @@ that takes a while. DuckDB produces one chunk at a time and never holds the
 whole thing, and until this does too the length is refused by name at a hundred
 million rows, which is eight hundred megabytes and already more than a test
 should ask for.
+"""
+
+comptime _SIDE = "__side"
+"""What the column saying which arm a row came from is called.
+
+A difference and an intersection stack their two inputs with this appended, and
+the group by above the stack reads it back. Nothing resolves it by name, since
+it is appended at the end and read at the position that puts it, so a query with
+a column called the same thing is not a collision. The name is for the reader of
+an explain or a crash, and the two underscores are the convention the rest of
+this file already uses for a column it invented.
 """
 
 
@@ -1002,6 +1027,93 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     pipe.add(Node(Group(keys^, aggs^)))
 
 
+def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Turns the tagged stack under a difference or an intersection into its rows.
+
+    `_stacked` has put both arms one after the other with a column saying which
+    arm each row came from, zero for the left and one for the right. A group by
+    over the query's own columns then puts every copy of a row in one group
+    whichever arm it came from, and the smallest and the largest tag in a group
+    say which arms had it. Both arms is a smallest of zero and a largest of one,
+    the left alone is zero and zero, and the right alone is one and one.
+
+    So an intersection keeps the groups whose two tags differ, which is one
+    comparison and needs both folds. A difference keeps the groups whose largest
+    tag is still the left's, which needs only the largest, and it is a
+    comparison against a constant, so the constant becomes a column first. The
+    mask and the tags are dropped by the filter, which writes only the positions
+    asked for, so what comes out of here is the row the query wrote and nothing
+    else.
+
+    Grouping is the reason this shape is the right one rather than a join. SQL
+    compares two rows of a set operation with a null equal to a null, and a join
+    key is never equal to a null, so a difference written as an anti join drops
+    every row with a null in it and does it silently. A group by puts the nulls
+    of a column in one group, which is the rule SQL asked for.
+
+    `ALL` is refused. `EXCEPT ALL` subtracts one copy of a row per copy on the
+    right and `INTERSECT ALL` keeps as many copies as the thinner arm has, so
+    both need a group to come back out as some number of rows rather than as
+    one, and nothing here repeats a row.
+
+    Args:
+        plan: The plan, bound.
+        at: The union node, which is a difference or an intersection.
+        pipe: The pipeline over the tagged stack, added to.
+
+    Raises:
+        Error: If `ALL` was asked for.
+    """
+    var op = plan.nodes[at].op
+    if plan.nodes[at].flags[0]:
+        var word = "EXCEPT ALL" if op == SET_EXCEPT else "INTERSECT ALL"
+        raise Error(
+            String(
+                "lower: ",
+                word,
+                (
+                    " counts the copies of a row on each side and emits as"
+                    " many rows as those two counts say, and the group by this"
+                    " is built on answers one row per group rather than a"
+                    " number of them"
+                ),
+            )
+        )
+
+    # One short of the width, because the last column is the tag `_stacked` put
+    # there and the query's own row is everything in front of it.
+    var width = len(pipe.schema) - 1
+    var keys = List[Int](capacity=width)
+    for i in range(width):
+        keys.append(i)
+
+    # The group by puts its keys in front and its folds after them, so the tags
+    # are the positions past the query's own row.
+    var aggs = List[GroupAgg]()
+    var mask: Int
+    if op == SET_INTERSECT:
+        aggs.append(GroupAgg(width, AggKind.MIN, "__first"))
+        aggs.append(GroupAgg(width, AggKind.MAX, "__last"))
+        pipe.add(Node(Group(keys^, aggs^)))
+        pipe.add(Node(Compute(width, width + 1, BinaryOp.NE, "__both")))
+        mask = width + 2
+    else:
+        # Only the largest, because a group the right arm was in has a one in
+        # it and a group it was not in does not, whatever the left arm did. The
+        # comparison is against a constant and an operation takes two columns,
+        # so the constant is a column of its own first.
+        aggs.append(GroupAgg(width, AggKind.MAX, "__last"))
+        pipe.add(Node(Group(keys^, aggs^)))
+        pipe.add(Node(Constant(Value(Int8(0)), LogicalType.INT8, "__left")))
+        pipe.add(Node(Compute(width, width + 1, BinaryOp.EQ, "__only")))
+        mask = width + 2
+
+    var keep = List[Int](capacity=width)
+    for i in range(width):
+        keep.append(i)
+    pipe.add(Node(Filter(mask, keep^)))
+
+
 def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a distinct over the whole row into a group by with no folds.
 
@@ -1641,10 +1753,11 @@ def _stacked(
     giving it two is a change to the driver rather than to this file. Until
     then, everything is in memory at once and it says so here.
 
-    A difference and an intersection are refused. They are the same node with
-    another code on it, but neither is a stack: one drops rows the other side
-    has and the other keeps only those, and both need the right side hashed
-    before a row of the left can be decided.
+    A difference and an intersection stack too, and the stack carries one more
+    column saying which side each row came from. What decides the answer is the
+    group by over the row that `_lower_from` puts above this, which is why the
+    tag is appended here and read there. `_SIDE` is what it is called, and the
+    name is one no column of a query has, since a query cannot write it.
 
     Args:
         plan: The plan, bound.
@@ -1653,34 +1766,21 @@ def _stacked(
         taken: Which relations have already gone, written through.
 
     Returns:
-        The frame the node stands for.
+        The frame the node stands for, with the side tag on it for a difference
+        and an intersection.
 
     Raises:
-        Error: If the node is a difference or an intersection, if two inputs
-            disagree on how many columns they have or on a column's type, or if
-            an input is a line this file cannot lower.
+        Error: If two inputs disagree on how many columns they have or on a
+            column's type, or if an input is a line this file cannot lower.
     """
-    if plan.nodes[at].op != SET_UNION:
-        var word = "a difference" if plan.nodes[at].op == SET_EXCEPT else (
-            "an intersection"
-        )
-        raise Error(
-            String(
-                "lower: ",
-                word,
-                (
-                    " is not a stack of its inputs, and deciding a row of the"
-                    " left needs the right hashed first, which is an operator"
-                    " nobody has written"
-                ),
-            )
-        )
-
+    var tagged = plan.nodes[at].op != SET_UNION
     var inputs = plan.nodes[at].inputs.copy()
     var fields = List[Field]()
     var columns = List[ChunkedArray]()
     for i in range(len(inputs)):
         var side = _lower_from(plan, inputs[i], frames, taken)
+        if tagged:
+            side.add(Node(Constant(Value(Int8(i)), LogicalType.INT8, _SIDE)))
         var out = side^.run()
         if i == 0:
             for c in range(len(out.schema)):
@@ -2028,16 +2128,19 @@ def _lower_from(
         source = _take(frames, taken, plan, first)
     var pipe = Pipeline(source^)
 
-    if plan.nodes[first].kind == NodeKind.UNION and not (
-        plan.nodes[first].flags[0]
-    ):
-        # A `UNION` without `ALL` is the stack with the duplicates dropped, and
-        # dropping them is the distinct above, which is the same group by with
-        # nothing to reduce that `SELECT DISTINCT` lowers to.
-        var keys = List[Int](capacity=len(pipe.schema))
-        for i in range(len(pipe.schema)):
-            keys.append(i)
-        pipe.add(Node(Group(keys^, List[GroupAgg]())))
+    if plan.nodes[first].kind == NodeKind.UNION:
+        if plan.nodes[first].op == SET_UNION:
+            if not plan.nodes[first].flags[0]:
+                # A `UNION` without `ALL` is the stack with the duplicates
+                # dropped, and dropping them is the distinct above, which is the
+                # same group by with nothing to reduce that `SELECT DISTINCT`
+                # lowers to.
+                var keys = List[Int](capacity=len(pipe.schema))
+                for i in range(len(pipe.schema)):
+                    keys.append(i)
+                pipe.add(Node(Group(keys^, List[GroupAgg]())))
+        else:
+            _decide(plan, first, pipe)
 
     for i in range(1, len(order)):
         var at = order[i]
