@@ -140,6 +140,7 @@ from firepanda.kernel import (
     filter_any,
     filter_range,
     filter_rows,
+    gather_any,
     group_count,
     group_first,
     group_mean,
@@ -161,6 +162,7 @@ from firepanda.kernel import (
     pick,
     pick_const,
     pick_constants,
+    select_positions,
     sum_of,
     take_any,
     take_range,
@@ -1305,6 +1307,200 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/pick_text_twin", "rows", rows, pick_text_twin)
+
+
+def bench_select(mut harness: Harness) raises:
+    """Weighs a selection against a filtered copy, which is what #521 turns on.
+
+    Every row here is half of a pair and the pairs are the whole table. A filter
+    that copies costs one `filter_any` per column. A filter that writes a
+    selection costs one `select_positions` for the chunk and then one
+    `gather_any` per column, later, once, for each column something downstream
+    actually reads. So the selection is worth having exactly when a gather is
+    not much dearer than a filtered copy of the same column, and the pairs say
+    whether it is.
+
+    The comparison is only meaningful with the parallelism pinned, which is why
+    most of these pass `spread` false on both sides. At one chunk the filter
+    reads a hundred and thirty one thousand rows and is over
+    `PARALLEL_FILTER_ROWS`, so left alone it goes wide, while the gather that
+    follows it reads only the survivors and at any real selectivity stays under
+    the same threshold and runs on one core. Timing those two against each other
+    says something about core counts and nothing about the two loops. The
+    `_spread` pair at the bottom is the honest version of the parallel question,
+    with both sides allowed every core.
+
+    The mask is pseudorandom rather than strided. A mask that keeps every other
+    row gives a selection whose positions rise by a constant, which both the
+    prefetcher and the run check in `_gather_core` handle better than anything a
+    predicate on real data produces.
+
+    Three selectivities, because the two sides scale with different things. The
+    filter reads every input row whatever it keeps, so its cost is flat in the
+    selectivity and its output allocation is not. The gather reads one position
+    and one value per output row, so it is linear in the selectivity and at ten
+    percent it is doing a tenth of the work the filter is. That crossover is the
+    argument for selections and `select/gather_10` against `select/filter_10` is
+    where it should show.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    # One chunk, the same hundred and twenty eight thousand rows `MORSEL_ROWS`
+    # in `firepanda/exec/morsel.mojo` hands out, and not the harness row count.
+    # A selection lives inside one chunk and never spans two, so measuring it at
+    # a million rows would be measuring a shape the engine never builds.
+    var rows = 128 * 1024
+
+    var numbers = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        numbers[i] = Scalar[BENCH_DTYPE](i % 1000)
+    var number = AnyArray(Array[BENCH_DTYPE](copy=numbers))
+
+    var holed = Array[BENCH_DTYPE](copy=numbers)
+    for i in range(0, rows, 7):
+        holed.set_null(i)
+    var nulled = AnyArray(holed^)
+
+    var text = AnyArray(_string_column(rows, 32, True))
+
+    def scatter(count: Int, keep_percent: Int) -> Array[DType.bool]:
+        var out = Array[DType.bool](count)
+        var bits = out.unsafe_mut_ptr()
+        var state = UInt64(0x9E3779B97F4A7C15)
+        for i in range(count):
+            state = state * 6364136223846793005 + 1442695040888963407
+            bits.unsafe_offset(i).unsafe_write(
+                Int((state >> 33) % 100) < keep_percent
+            )
+        return out^
+
+    var half = scatter(rows, 50)
+    var most = scatter(rows, 90)
+    var few = scatter(rows, 10)
+
+    # The three positions rows should be the same number. The loop writes a
+    # position for every input row and advances its cursor by the mask bit, so
+    # it does the same work whatever the mask keeps and it has no branch to miss.
+    # If `positions_10` ever drifts away from `positions_50`, a branch on the
+    # mask has grown back. When that branch was there these rows cost more than
+    # the filter rows below them, which is the wrong side of the whole argument.
+    def positions() raises {imm half}:
+        var picks = select_positions(half)
+        keep(len(picks))
+
+    harness.record("select/positions_50", "rows", rows, positions)
+
+    def positions_few() raises {imm few}:
+        var picks = select_positions(few)
+        keep(len(picks))
+
+    harness.record("select/positions_10", "rows", rows, positions_few)
+
+    var holes = Array[DType.bool](copy=half)
+    for i in range(0, rows, 11):
+        holes.set_null(i)
+
+    def positions_nulls() raises {imm holes}:
+        var picks = select_positions(holes)
+        keep(len(picks))
+
+    harness.record("select/positions_nulls", "rows", rows, positions_nulls)
+
+    var picks_half = select_positions(half)
+    var picks_most = select_positions(most)
+    var picks_few = select_positions(few)
+
+    def filter_half() raises {imm number, imm half}:
+        var out = filter_any(number, half, False)
+        keep(len(out))
+
+    harness.record("select/filter_50", "rows", rows, filter_half)
+
+    def gather_half() raises {imm number, imm picks_half}:
+        var out = gather_any(number, picks_half, False)
+        keep(len(out))
+
+    harness.record("select/gather_50", "rows", rows, gather_half)
+
+    def filter_most() raises {imm number, imm most}:
+        var out = filter_any(number, most, False)
+        keep(len(out))
+
+    harness.record("select/filter_90", "rows", rows, filter_most)
+
+    def gather_most() raises {imm number, imm picks_most}:
+        var out = gather_any(number, picks_most, False)
+        keep(len(out))
+
+    harness.record("select/gather_90", "rows", rows, gather_most)
+
+    def filter_few() raises {imm number, imm few}:
+        var out = filter_any(number, few, False)
+        keep(len(out))
+
+    harness.record("select/filter_10", "rows", rows, filter_few)
+
+    def gather_few() raises {imm number, imm picks_few}:
+        var out = gather_any(number, picks_few, False)
+        keep(len(out))
+
+    harness.record("select/gather_10", "rows", rows, gather_few)
+
+    # The column with nulls in it, which is the pair where the gather gives up
+    # the most. A filtered copy of a column with no nulls has no branch in its
+    # loop at all, and a gather of one has no bitmap to build, so both sides
+    # have a fast path and both lose it here.
+    def filter_nulls() raises {imm nulled, imm half}:
+        var out = filter_any(nulled, half, False)
+        keep(len(out))
+
+    harness.record("select/filter_nulls", "rows", rows, filter_nulls)
+
+    def gather_nulls() raises {imm nulled, imm picks_half}:
+        var out = gather_any(nulled, picks_half, False)
+        keep(len(out))
+
+    harness.record("select/gather_nulls", "rows", rows, gather_nulls)
+
+    # Text, where the two should come out level. A gather of text widens its
+    # positions back to eight bytes and runs the same `_take_strings` a take
+    # runs, so the only thing left between the pair is a filter reading a mask
+    # against a gather reading a position, under the cost of moving a view and a
+    # payload per row.
+    def filter_text() raises {imm text, imm half}:
+        var out = filter_any(text, half, False)
+        keep(len(out))
+
+    harness.record("select/filter_text", "rows", rows, filter_text)
+
+    def gather_text() raises {imm text, imm picks_half}:
+        var out = gather_any(text, picks_half, False)
+        keep(len(out))
+
+    harness.record("select/gather_text", "rows", rows, gather_text)
+
+    # Both sides wide. The filter splits the input, which it can because a
+    # counting pass tells each worker where its output starts, and the gather
+    # splits the output, which it can because the output row is the position
+    # index and needs nothing from any other worker. Two different ways to cut
+    # the same work, so the pair is not the serial pair times a constant.
+    def filter_spread() raises {imm number, imm half}:
+        var out = filter_any(number, half)
+        keep(len(out))
+
+    harness.record("select/filter_spread", "rows", rows, filter_spread)
+
+    def gather_spread() raises {imm number, imm picks_half}:
+        var out = gather_any(number, picks_half)
+        keep(len(out))
+
+    harness.record("select/gather_spread", "rows", rows, gather_spread)
+
+    _ = numbers^
 
 
 def bench_sort(mut harness: Harness) raises:
@@ -6080,6 +6276,7 @@ def main() raises:
     bench_buffer(harness)
     bench_array(harness)
     bench_kernel(harness)
+    bench_select(harness)
     bench_sort(harness)
     bench_frame(harness)
     bench_index(harness)
