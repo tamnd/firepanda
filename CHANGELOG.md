@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a conditional over text is built on every core instead of one
+
+`text_pick` is what `CASE WHEN c THEN one_text_column ELSE another END` runs, and it built its answer through a `StringBuilder` on one thread while the three numeric forms beside it ran on every core. Its own docstring said so and said the work was waiting on a query that needed it. ClickBench q39 is that query: `CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE '' END AS Src`, grouped by the answer, over a hundred million rows of `Referer`.
+
+It now takes the two pass shape `text_substring` uses. A text output is the one thing a select cannot size up front, because its payload is a mixture of bytes from both sides and each element's place is a running total of the lengths in front of it. So one pass reads the views of the chosen side and adds up each morsel's share of the payload, an exclusive prefix over one number per morsel turns those into the offset each morsel writes at, and then every morsel fills its own stretch with nothing shared and nothing locked. The counting pass follows no pointer into either payload, since an element's length is in its view.
+
+An element short enough to sit inside its own view is carried across whole and costs the payload nothing, so a pair of sides with no payload between them skips the counting pass outright. The output's validity is the condition's choice of the two sides' bits, built a word at a time inside the worker that just wrote those rows, which is safe because a morsel is a multiple of sixty four rows.
+
+A million rows on ten cores, forty byte elements on the true side and empty strings on the false side, which is q39's shape:
+
+| route | median |
+| --- | --- |
+| `kernel/pick_text` | 2.52 ms |
+| `kernel/pick_text_twin`, the one thread builder | 15.99 ms |
+| `kernel/pick_text_inline`, nothing longer than a view | 0.97 ms |
+
+The null rule did not change and is now asserted over text as well: a null condition takes the `ELSE` side. #482 said the opposite, that a null condition gives a null and that this is what DuckDB does. It is not. DuckDB 1.5.5 answers `2` for `CASE WHEN NULL THEN 1 ELSE 2 END`, pandas reads a missing condition as false in `Series.where`, and this library has always taken the false side because a null bool is already a zero in the values buffer. The issue has been corrected rather than the kernel.
+
+Part of #482.
+
 ## [0.6.76] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

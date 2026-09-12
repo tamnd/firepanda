@@ -23,7 +23,10 @@ from firepanda.array.strings import (
     strings_from_list,
 )
 from firepanda.exec.morsel import MORSEL_ROWS
+from firepanda.frame.frame import DataFrame
+from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
+from firepanda.kernel.group import AggKind
 from firepanda.kernel.agg import sum_of
 from firepanda.kernel.compare import not_equal
 from firepanda.kernel.concat import concat_arrays
@@ -306,6 +309,165 @@ def test_text_matches_the_twin() raises:
     assert_false(got.is_valid(1), "took the true side's null")
     assert_equal(got[2], "C")
     assert_equal(got[3], "D")
+
+
+def test_text_crosses_the_morsel_split() raises:
+    """The two pass build is where a wrong prefix or a shared word comes apart.
+
+    Long elements on the true side so the payload is really used, short ones on
+    the false side so both kinds of view go through the same fill, a null in
+    each side well past the first morsel boundary, and a height that is a
+    multiple of neither the morsel size nor sixty four.
+    """
+    var n = MORSEL_ROWS + 37
+    # Built once and appended by index, because formatting a string per row
+    # costs many times what the kernel under test costs.
+    var pool = List[String]()
+    for k in range(8):
+        pool.append(String("a left element far too long to sit in a view ", k))
+    var tiny = List[String]()
+    for k in range(8):
+        tiny.append(String("r", k))
+
+    var left = StringBuilder(capacity=n)
+    var right = StringBuilder(capacity=n)
+    var cond = Array[DType.bool](n)
+    for i in range(n):
+        cond.set_valid(i, i % 3 != 0)
+        if i % 17 == 0:
+            left.append_null()
+        else:
+            left.append(pool[i % 8].as_bytes())
+        if i % 23 == 0:
+            right.append_null()
+        else:
+            right.append(tiny[i % 8].as_bytes())
+    var a = left^.finish()
+    var b = right^.finish()
+
+    var got = text_pick(cond, a, b)
+    var want = text_pick_scalar(cond, a, b)
+    assert_equal(len(got), n)
+    assert_equal(got.null_count(), want.null_count(), "nulls")
+
+    # Counted rather than asserted a row at a time, because the message a
+    # per row assert formats is built whether or not the row fails and a
+    # hundred and thirty thousand of them costs more than the kernel does.
+    var wrong = -1
+    for i in range(n):
+        if got.is_valid(i) != want.is_valid(i) or (
+            got.is_valid(i) and got.unsafe_bytes(i) != want.unsafe_bytes(i)
+        ):
+            wrong = i
+            break
+    assert_equal(wrong, -1, "first row disagreeing with the twin")
+
+
+def test_text_with_nothing_long_in_it_builds_no_payload() raises:
+    """Neither side has a payload, so the counting pass is skipped outright.
+
+    Every element sits inside its own view, so the output's payload is never
+    written and the views are carried across whole.
+    """
+    var n = MORSEL_ROWS + 5
+    var yes = List[String]()
+    var no = List[String]()
+    for k in range(8):
+        yes.append(String("y", k))
+        no.append(String("n", k))
+
+    var left = StringBuilder(capacity=n)
+    var right = StringBuilder(capacity=n)
+    var cond = Array[DType.bool](n)
+    for i in range(n):
+        cond.set_valid(i, i % 2 == 0)
+        left.append(yes[i % 8].as_bytes())
+        right.append(no[i % 8].as_bytes())
+    var a = left^.finish()
+    var b = right^.finish()
+    assert_equal(len(a.payload), 0, "the true side is all inline")
+    assert_equal(len(b.payload), 0, "the false side is all inline")
+
+    var got = text_pick(cond, a, b)
+    var want = text_pick_scalar(cond, a, b)
+    assert_equal(len(got), n)
+    assert_equal(len(got.payload), 0, "the answer is all inline too")
+    var wrong = -1
+    for i in range(n):
+        if got.unsafe_bytes(i) != want.unsafe_bytes(i):
+            wrong = i
+            break
+    assert_equal(wrong, -1, "first row disagreeing with the twin")
+
+
+def test_a_null_text_condition_takes_the_false_side() raises:
+    """The same rule the numeric kernels follow, which is SQL's.
+
+    Worth its own test over text because the text build reads the condition
+    twice, once to size and once to fill, and a disagreement between the two
+    would put the bytes of one side under the view of the other.
+    """
+    var a = strings_from_list(
+        ["a value far too long to sit inside a view", "x"]
+    )
+    var b = strings_from_list(
+        ["another value far too long to sit in a view", "y"]
+    )
+    var cond = Array[DType.bool](2)
+    cond.set_null(0)
+    cond.set_valid(1, True)
+
+    var got = text_pick(cond, a, b)
+    assert_equal(got[0], "another value far too long to sit in a view")
+    assert_equal(got[1], "x")
+
+
+def test_a_picked_text_column_groups_by() raises:
+    """The only thing q39 does with the column this kernel builds.
+
+    `CASE WHEN (SearchEngineID = 0 AND AdvEngineID = 0) THEN Referer ELSE \'\'
+    END AS Src` is a group by key, so the answer has to be a column the hash
+    table will take. It is worth a test of its own because the two pass build
+    writes the views and the payload separately, and a column whose views are
+    right and whose payload offsets are not reads correctly one element at a
+    time and groups wrongly.
+    """
+    var referer = strings_from_list(
+        [
+            "http://example.com/a/very/long/path/that/does/not/inline",
+            "http://example.com/a/very/long/path/that/does/not/inline",
+            "short",
+            "http://other.example.com/another/long/path/that/does/not/inline",
+            "short",
+        ]
+    )
+    var blank = strings_from_list(["", "", "", "", ""])
+    var direct = flags([1, 1, 1, 0, 0])
+
+    var src = text_pick(direct, referer, blank)
+    var series = List[Series]()
+    series.append(Series("src", src^))
+    series.append(Series("hits", numbers([1, 2, 4, 8, 16])))
+    var frame = DataFrame.from_series(series^)
+
+    var by = List[String]()
+    by.append("src")
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("hits", AggKind.SUM))
+    var out = frame.group_by(by, specs)
+
+    # Three groups: the long referer twice, "short" once, and the empty string
+    # the two false rows both took.
+    assert_equal(len(out), 3)
+    var keys = out.column("src").as_strings()
+    var sums = out.column("hits_sum").as_typed[DType.int64]()
+    for i in range(3):
+        if keys[i] == "short":
+            assert_equal(Int(sums[i]), 4, "the inline group")
+        elif keys[i] == "":
+            assert_equal(Int(sums[i]), 24, "the false side's group")
+        else:
+            assert_equal(Int(sums[i]), 3, "the long referer's group")
 
 
 def test_a_length_mismatch_is_refused() raises:
