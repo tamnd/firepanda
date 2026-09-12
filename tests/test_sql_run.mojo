@@ -40,6 +40,16 @@ def numbers(values: List[Int64]) raises -> AnyArray:
     return AnyArray(col^)
 
 
+def days(values: List[Int32]) raises -> ChunkedArray:
+    """Builds a one chunk date32 column out of counts of days since 1970."""
+    var col = Array[DType.int32](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    var out = ChunkedArray(LogicalType.DATE32)
+    out.append(AnyArray(col^.into_data(), LogicalType.DATE32))
+    return out^
+
+
 def sales() raises -> DataFrame:
     """Ten rows in three chunks: a quantity, a price and which shop sold it."""
     var qty = ChunkedArray(LogicalType.INT64)
@@ -244,6 +254,11 @@ def hits() raises -> DataFrame:
     is how that suite writes one. The tokenizer folds a bare name down, so
     nothing a query writes bare arrives spelled this way and the resolver is
     what has to bridge it.
+
+    `EventDate` is a date32 column and the four days it holds are a day either
+    side of July 2013 and two inside it, so a range written the way seven of
+    the ClickBench statements write one keeps the middle two and neither bound
+    is the whole column.
     """
     var engine = ChunkedArray(LogicalType.INT64)
     engine.append(numbers([0, 2, 2, 3]))
@@ -252,9 +267,11 @@ def hits() raises -> DataFrame:
     var columns = List[ChunkedArray]()
     columns.append(engine^)
     columns.append(region^)
+    columns.append(days([15886, 15887, 15901, 15918]))
     var fields = List[Field]()
     fields.append(Field("AdvEngineID", LogicalType.INT64))
     fields.append(Field("RegionID", LogicalType.INT64))
+    fields.append(Field("EventDate", LogicalType.DATE32))
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -3277,6 +3294,102 @@ def test_a_qualified_name_folds_as_well() raises:
 def test_a_name_nothing_has_still_says_so() raises:
     with assert_raises(contains="there is no column named"):
         _ = run("SELECT advengineidx FROM hits", session())
+
+
+def test_a_date_column_takes_a_string_literal_as_a_bound() raises:
+    # #680, and seven of the 43 ClickBench statements are this shape. The
+    # literal is text and the column holds days, and in SQL that pair is a date
+    # bound rather than a type error.
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= '2013-07-01'"
+                " AND eventdate <= '2013-07-31'"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "the two rows inside July",
+    )
+
+
+def test_a_date_bound_reads_the_same_written_either_way_round() raises:
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE '2013-07-31' >= eventdate"
+                " AND '2013-07-01' <= eventdate"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "the literal on the left says the same thing",
+    )
+
+
+def test_a_date_column_equals_a_string_literal() raises:
+    same(
+        answer(
+            "SELECT advengineid FROM hits WHERE eventdate = '2013-07-15'",
+            "AdvEngineID",
+        ),
+        [2],
+        "one day",
+    )
+
+
+def test_a_between_on_a_date_column_reads_both_of_its_bounds() raises:
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate BETWEEN"
+                " '2013-07-01' AND '2013-07-31'"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "a BETWEEN is the two comparisons",
+    )
+
+
+def test_an_in_list_of_date_literals_reads_every_one_of_them() raises:
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate IN ('2013-06-30',"
+                " '2013-08-01')"
+            ),
+            "AdvEngineID",
+        ),
+        [0, 3],
+        "a list is a comparison each",
+    )
+
+
+def test_text_that_is_not_a_date_is_refused_and_quoted() raises:
+    with assert_raises(contains="'the first of July'"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= 'the first of"
+                " July'"
+            ),
+            session(),
+        )
+
+
+def test_a_clock_reading_against_a_date_column_is_refused() raises:
+    # The literal is a real instant and the column has nowhere to put the time
+    # of day, so this is refused rather than truncated. A bound of `>=
+    # '2013-07-01 12:00:00'` read as midnight would quietly keep more rows than
+    # it was asked for.
+    with assert_raises(contains="carries a time of day"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= '2013-07-01"
+                " 12:00:00'"
+            ),
+            session(),
+        )
 
 
 def test_an_answer_of_no_rows_can_still_be_read() raises:

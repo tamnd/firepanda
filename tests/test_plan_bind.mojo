@@ -23,6 +23,7 @@ from std.testing import assert_true
 
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.dtype.schema import Field, Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
@@ -57,6 +58,20 @@ def _orders() -> Schema:
     out.append(Field("o_orderkey", LogicalType.INT64, False))
     out.append(Field("o_custkey", LogicalType.INT64, False))
     out.append(Field("o_totalprice", LogicalType.FLOAT64, True))
+    return out^
+
+
+def _dated() -> Schema:
+    """Returns a schema with a day, an instant and a piece of text in it.
+
+    Three columns is all a comparison against a literal needs, and the text one
+    is here because the rule is about a literal rather than about the text type
+    and the test for that needs a column of text to refuse.
+    """
+    var out = Schema()
+    out.append(Field("d", LogicalType.DATE32, False))
+    out.append(Field("t", LogicalType.timestamp(TimeUnit.SECOND), True))
+    out.append(Field("label", LogicalType.STRING, True))
     return out^
 
 
@@ -186,6 +201,86 @@ def test_a_cast_answers_what_it_was_asked_for() raises:
     assert_equal(tree.nodes[wider].type, LogicalType.FLOAT64, "as asked")
     assert_equal(
         tree.nodes[key].type, LogicalType.INT64, "under it, the column"
+    )
+
+
+def test_a_date_column_compared_against_a_text_literal_binds() raises:
+    var tree = Expressions()
+    var day = tree.column("d")
+    var july = tree.literal(Value(String("2013-07-01")))
+    var after = tree.binary(BinaryOp.GE, day, july)
+    bind_expr(tree, after, _dated(), [0, 0, 0])
+    assert_equal(
+        tree.nodes[after].type, LogicalType.BOOL, "a date bound is a question"
+    )
+    assert_equal(
+        tree.nodes[july].type,
+        LogicalType.STRING,
+        "and the literal is still the text the query wrote",
+    )
+
+
+def test_the_literal_reads_as_an_instant_on_either_side() raises:
+    var tree = Expressions()
+    var day = tree.column("d")
+    var july = tree.literal(Value(String("2013-07-01")))
+    var after = tree.binary(BinaryOp.LE, july, day)
+    bind_expr(tree, after, _dated(), [0, 0, 0])
+    assert_equal(tree.nodes[after].type, LogicalType.BOOL, "the same question")
+
+
+def test_a_timestamp_column_takes_a_literal_with_a_clock_on_it() raises:
+    var tree = Expressions()
+    var when = tree.column("t")
+    var noon = tree.literal(Value(String("2013-07-01 12:00:00")))
+    var after = tree.binary(BinaryOp.GT, when, noon)
+    bind_expr(tree, after, _dated(), [0, 0, 0])
+    assert_equal(tree.nodes[after].type, LogicalType.BOOL, "a moment")
+
+
+def test_a_text_literal_that_is_not_an_instant_is_refused_by_its_text() raises:
+    var tree = Expressions()
+    var day = tree.column("d")
+    var nonsense = tree.literal(Value(String("last Tuesday")))
+    var after = tree.binary(BinaryOp.GE, day, nonsense)
+    with assert_raises(contains="'last Tuesday'"):
+        bind_expr(tree, after, _dated(), [0, 0, 0])
+
+
+def test_a_date_column_against_a_column_of_text_is_still_refused() raises:
+    # The rule is about a literal, which is something somebody typed, and not
+    # about the text type. Nobody has said this column holds dates, and the
+    # refusal says whose cast it is.
+    var tree = Expressions()
+    var day = tree.column("d")
+    var said = tree.column("label")
+    var after = tree.binary(BinaryOp.GE, day, said)
+    with assert_raises(contains="cast the column"):
+        bind_expr(tree, after, _dated(), [0, 0, 0])
+
+
+def test_arithmetic_on_a_date_and_a_literal_is_refused_as_arithmetic() raises:
+    # Reading the literal first here would report a badly written date to
+    # somebody whose real problem is that a date and a piece of text do not
+    # add, so this one keeps the promotion's answer.
+    var tree = Expressions()
+    var day = tree.column("d")
+    var july = tree.literal(Value(String("2013-07-01")))
+    var summed = tree.binary(BinaryOp.ADD, day, july)
+    with assert_raises(contains="text is not an instant"):
+        bind_expr(tree, summed, _dated(), [0, 0, 0])
+
+
+def test_a_null_literal_against_a_date_column_still_binds() raises:
+    var tree = Expressions()
+    var day = tree.column("d")
+    var nothing = tree.literal(Value(null=LogicalType.NULL))
+    var after = tree.binary(BinaryOp.GE, day, nothing)
+    bind_expr(tree, after, _dated(), [0, 0, 0])
+    assert_equal(
+        tree.nodes[after].type,
+        LogicalType.BOOL,
+        "a comparison against nothing is still a comparison",
     )
 
 

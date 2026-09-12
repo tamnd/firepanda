@@ -646,9 +646,12 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
         # an answer too and pandas gives it, because scaling an elapsed time by
         # a factor is a sensible thing to do, and firepanda has no arithmetic on
         # these columns to give it with yet. An instant against a number has no
-        # answer at all. The messages are separate because a user who wrote
-        # `a - b` on two microsecond columns in different zones has a different
-        # problem from one who wrote `a - 1`.
+        # answer at all, and neither does an instant against text, which is the
+        # one of these a reader is most likely to have written on purpose: a
+        # date literal in SQL is written as a string and the comparison reads
+        # it, so that message says where the reading happens. The messages are
+        # separate because a user who wrote `a - b` on two microsecond columns
+        # in different zones has a different problem from one who wrote `a - 1`.
         if a.is_temporal() and b.is_temporal():
             if a.kind == TypeKind.DURATION and b.kind == TypeKind.DURATION:
                 return LogicalType.duration(finer_unit(a.unit, b.unit))
@@ -668,6 +671,16 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
                 + ", because the two differ in kind or in time"
                 " zone and"
                 " reconciling them is a conversion rather than a promotion"
+            )
+        if a.is_variable_width() or b.is_variable_width():
+            raise Error(
+                "no common type for "
+                + String(a)
+                + " and "
+                + String(b)
+                + ", because text is not an instant until something reads it as"
+                " one and a promotion does not read anything. A literal in a"
+                " comparison is read for you and a column of text is not"
             )
         if a.kind == TypeKind.DURATION or b.kind == TypeKind.DURATION:
             raise Error(

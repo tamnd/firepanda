@@ -16,6 +16,14 @@ There is an operator for it now. It reads a validity bit and moves a value in on
 
 `IFNULL` is the two argument coalesce under DuckDB's other name for it and is renamed at the point the query is lowered, since nothing after that point could tell the two apart. `NULLIF(a, b)` is written as the `CASE WHEN a = b THEN NULL ELSE a END` the standard defines it as, which is not a reading of it. Doing it that way makes the null case fall out rather than having to be arranged: a null on either side makes the comparison null, the conditional then takes its else side, and the answer is `a`.
 
+### Added: a date column compares against a string literal
+
+`WHERE EventDate >= '2013-07-01'` is how every SQL dialect writes a date bound and it is what seven of the 43 ClickBench statements are made of. It was refused with "no common type for date32[day] and string, because a point in time and a number are not the same kind of thing and pandas will not add them either", which is a sentence about arithmetic in front of somebody who wrote a comparison.
+
+The comparison runs now, and a `BETWEEN` and an `IN` list of dates run with it, since both of those are the same comparison written out. The rule is about a literal and not about the text type: a literal is something the person writing the query typed, and typing a date between quotes is how the language spells one, so reading it as a date is reading what they wrote. A column of text compared against a date column is still refused, because nobody has said those rows are dates, and the refusal now says whose cast it is rather than talking about addition.
+
+Binding is where the reading happens, through `resolve_constant`, which is already what declares and runs the comparison when the frame layer meets the same pair, so the literal is read in one place rather than in two and the type the plan declares is the type the loop answers. Text that is not an instant is refused with the text quoted, and a literal carrying a time of day against a column of whole days is refused rather than truncated, because a bound of `>= '2013-07-01 12:00:00'` read as midnight would quietly keep rows nobody asked for.
+
 ### Added: IS NULL, and the other three tests spelled with words
 
 `SELECT count(*) FROM orders WHERE o_comment IS NOT NULL` was refused with "firepanda has no kernel for the operator IS yet", which meant the most ordinary predicate in SQL did not run. The kernels behind it have been in `firepanda/kernel/nulls.mojo` since the array layer was written, and what was missing was the operator between them and a query.
