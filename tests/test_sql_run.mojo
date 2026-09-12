@@ -1023,6 +1023,41 @@ def test_a_subquery_inside_a_subquery_runs_too() raises:
     )
 
 
+def test_the_column_aliases_on_a_derived_table_run() raises:
+    # The list renames what the subquery produced, so the outer query reads
+    # `worth` and the name the subquery gave the column is gone.
+    same(
+        answer(
+            (
+                "SELECT worth FROM (SELECT qty * price AS total FROM sales)"
+                " v(worth) WHERE worth > 90"
+            ),
+            "worth",
+        ),
+        [100, 120],
+        "worth",
+    )
+
+
+def test_a_short_alias_list_on_a_derived_table_leaves_the_rest_alone() raises:
+    # Two columns and one name, so the first is renamed and the second keeps
+    # what it had, which is the prefix rule.
+    var out = run(
+        (
+            "SELECT much, price FROM (SELECT qty, price FROM sales) v(much)"
+            " WHERE much > 25"
+        ),
+        session(),
+    )
+    same(read_back(out, "much"), [40, 30], "much")
+    same(read_back(out, "price"), [1, 4], "price")
+
+
+def test_more_aliases_than_a_derived_table_produces_is_refused() raises:
+    with assert_raises(contains="has 1 columns available but 2 columns"):
+        _ = run("SELECT a FROM (SELECT qty FROM sales) v(a, b)", session())
+
+
 def test_a_with_hands_its_rows_to_the_query_that_names_it() raises:
     same(
         answer(

@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the column aliases on a subquery in a FROM
+
+`SELECT worth FROM (SELECT qty * price AS total FROM sales) v(worth)` was refused with a note that the list renames what the subquery produces rather than what it is called. It runs now, and the note was right about what the list is: it lowers to a projection over the statement's root, which renames the columns and leaves everything else where it was. The same list on a CTE has worked since the CTE went in, and this reuses the function that applies it.
+
+A list shorter than the statement is a prefix. `(SELECT qty, price FROM sales) v(much)` renames the first column and the second keeps the name it had, which is neither an error nor a silent drop. A list longer than the statement is an error, and this is the one place a derived table and a CTE disagree. `WITH v(x, y, z) AS (SELECT 1 a, 2 b)` drops the name it has no column for and answers, while `(SELECT 1 a, 2 b) v(x, y, z)` refuses in DuckDB with the count of both sides in the message. Both behaviours are DuckDB's and both are reproduced, since a query that ports is a query that gets the same answer or the same refusal.
+
+The name the list renamed away is gone. `SELECT a FROM (SELECT a FROM t) v(n)` cannot read `a`, because the projection the list built produces `n` and that is what the outer query binds against, so the scan underneath is not reachable around it. That is what DuckDB does too, down to listing the candidate names it did find.
+
+Part of #309.
+
 ### Added: the qualified star, and EXCLUDE, REPLACE and RENAME on either kind
 
 `SELECT * FROM t` was the only star firepanda ran. `SELECT t.* FROM t JOIN u ON t.a = u.k` was refused as needing the bindings rather than one schema, and any of the three modifiers was refused with a note that `firepanda/sql/star.mojo` was all three of them and nothing had wired it in. All four run now.

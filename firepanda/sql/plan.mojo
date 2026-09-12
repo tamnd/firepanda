@@ -2552,6 +2552,12 @@ def _subquery(
     the same name come back from binding as an ambiguity rather than as the
     wrong column, which is a refusal rather than a wrong answer.
 
+    The column aliases in `v(x, y)` rename the columns and not the thing they
+    came out of, so they lower to a projection over the statement's root. A
+    short list is a prefix, which is what `aliased` does and what a CTE gets,
+    but a list longer than the statement produced is refused here while a CTE
+    accepts it. That difference is DuckDB's and not an accident of this code.
+
     Args:
         ast: The arenas.
         at: The `REF_SUBQUERY`.
@@ -2565,8 +2571,8 @@ def _subquery(
         The statement's root and what it produces.
 
     Raises:
-        If it is `LATERAL`, if it carries column aliases, or if the statement
-        inside it is one this does not lower.
+        If it is `LATERAL`, if it names more columns than the statement
+        produces, or if the statement inside it is one this does not lower.
     """
     var source = ast.refs[Int(at)]
     if source.b == 1:
@@ -2576,12 +2582,6 @@ def _subquery(
             " per row of them rather than once for the query"
         )
     var named = ast.length(source.payload)
-    if named > 1:
-        raise Error(
-            "firepanda does not lower the column aliases on a subquery in a"
-            " FROM yet, which rename what the subquery produces rather than"
-            " what it is called"
-        )
 
     var inner = _Scope()
     var root = _statement(ast, source.a, catalog, plan, sources, inner, ctes)
@@ -2591,8 +2591,35 @@ def _subquery(
     # qualify one. DuckDB invents a name here and reading a column through the
     # name it invented is not a thing a query that ports would do.
     var called = String()
-    if named == 1:
+    if named >= 1:
         called = String(ast.text(ast.at(source.payload, 0)))
+
+    # The column aliases rename what the statement produced, so they are a
+    # projection over its root and not a note kept beside it. A list shorter
+    # than the statement is the prefix rule a CTE gets, but a list longer than
+    # it is an error here and is not one there, so the check is this one's and
+    # the wording is DuckDB's.
+    if named > 1:
+        var produced = _produces(plan, root)
+        if named - 1 > len(produced):
+            raise Error(
+                String(
+                    'Binder Error: table "',
+                    called,
+                    '" has ',
+                    len(produced),
+                    " columns available but ",
+                    named - 1,
+                    " columns specified",
+                )
+            )
+        var columns = List[String](capacity=named - 1)
+        for i in range(1, named):
+            columns.append(String(ast.text(ast.at(source.payload, i))))
+        var outputs = List[Int](capacity=len(produced))
+        for i in range(len(produced)):
+            outputs.append(plan.exprs.column(String(produced[i])))
+        root = plan.project(root, outputs^, aliased(produced, columns))
     return _derived(plan, root, called^, scope)
 
 
