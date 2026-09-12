@@ -31,6 +31,7 @@ import datetime
 import math
 import operator
 import re
+import sys
 import warnings
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, cast
@@ -1738,6 +1739,129 @@ def _category_fallback(column: Any, value: Any) -> Any:
         )
     one = Series([value]).astype("category")
     return one.cat.set_categories(categories, ordered=column.cat.ordered)._inner
+
+
+MAX_INFO_COLUMNS = 100
+"""How many columns a frame may have before `info` stops listing them one by one.
+
+pandas reads this off `display.max_info_columns` and its default is 100. There is no options
+system here, so it is a constant with pandas' default in it, and a caller who wants the other
+answer passes `max_cols` the way they would have to over there anyway once the option stopped
+being the one they wanted.
+"""
+
+INFO_UNITS = ("bytes", "KB", "MB", "GB", "TB")
+"""The ladder `info` prints a byte count on, which is pandas' ladder and is powers of 1024."""
+
+
+def _info_size(total: int) -> str:
+    """A byte count written the way `info` writes it.
+
+    Powers of 1024 with one decimal, `bytes` in lower case and everything above it in upper,
+    which is pandas' `_sizeof_fmt` and is copied rather than improved on, because the line it
+    ends up on is read beside pandas' own often enough that a different rounding would look
+    like a different measurement.
+
+    What is not copied is the trailing `+`. pandas puts one there when the number it printed
+    left something out, which is the object columns it did not follow pointers into, and there
+    is nothing here it leaves out.
+
+    Args:
+        total: The bytes.
+
+    Returns:
+        The number and its unit, as one string.
+    """
+    size = float(total)
+    for unit in INFO_UNITS:
+        if size < 1024.0:
+            return f"{size:3.1f} {unit}"
+        size /= 1024.0
+    return f"{size:3.1f} PB"
+
+
+def _info_index_line(index: Any, kind: str) -> str:
+    """The second line of `info`, which describes the labels.
+
+    A range says `RangeIndex` and its two ends, anything else says what class it is and its
+    first and last label, and an index with nothing in it says how many entries it has and
+    stops, because there is no first label to name.
+
+    The class name is read off the object rather than written down, so the day an index comes
+    back wrapped as a `DatetimeIndex` this line says so without being edited. Today every index
+    a frame hands out is an `Index`, which is the wrapping gap filed as issue 495 rather than
+    anything this line decides.
+
+    A label that is missing prints as `None`, where pandas prints `nan`. That is the value each
+    library actually holds there, so neither is rendering the other's.
+
+    Args:
+        index: The index being described.
+        kind: What to call it when it is not a range.
+
+    Returns:
+        One line, with no newline on it.
+    """
+    name = "RangeIndex" if index._inner.is_range() else kind
+    height = len(index)
+    if height == 0:
+        return f"{name}: 0 entries"
+    return f"{name}: {height} entries, {index[0]} to {index[-1]}"
+
+
+def _info_table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    """The column table `info` prints, header, rule and body.
+
+    Every column is as wide as the widest thing in it, the header included, with two spaces
+    between columns and none after the last one. The rule under the header is as long as the
+    header rather than as long as the column, which looks like an oversight and is pandas'
+    output exactly, so it is what a caller diffing the two will expect to see.
+
+    Args:
+        headers: The column headings, in order.
+        rows: One list of already rendered cells per row.
+
+    Returns:
+        The lines, with no newlines on them.
+    """
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows)) if rows else len(headers[i])
+        for i in range(len(headers))
+    ]
+    last = len(headers) - 1
+
+    def line(cells: list[str]) -> str:
+        parts = [cells[i].ljust(widths[i]) + ("" if i == last else "  ") for i in range(len(cells))]
+        return "".join(parts)
+
+    made = [line(headers), line(["-" * len(head) for head in headers])]
+    made.extend(line(row) for row in rows)
+    return made
+
+
+def _info_dtypes(printed: list[str]) -> str:
+    """The `dtypes:` line, which is each type once with how many columns have it.
+
+    In alphabetical order, which is pandas' order and is not the order the columns are in.
+
+    Args:
+        printed: Each column's type as `dtype` spells it, in the frame's order.
+
+    Returns:
+        The line, with no newline on it.
+    """
+    counted = collections.Counter(printed)
+    return "dtypes: " + ", ".join(f"{name}({counted[name]})" for name in sorted(counted))
+
+
+def _info_write(lines: list[str], buf: Any) -> None:
+    """Put the report somewhere and answer nothing.
+
+    Args:
+        lines: The report, one line per entry and no newlines on them.
+        buf: Where it goes, or None for standard output.
+    """
+    (sys.stdout if buf is None else buf).write("\n".join(lines) + "\n")
 
 
 def _labelled(labels: list[Any], values: list[Any]) -> Any:
@@ -3858,6 +3982,93 @@ class DataFrameMixin:
         made = _labelled(labels, counts)
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
+    def info(
+        self,
+        verbose: Any = None,
+        buf: Any = None,
+        max_cols: Any = None,
+        memory_usage: Any = None,
+        show_counts: Any = None,
+    ) -> None:
+        """Print what the frame holds, in the shape pandas prints it in.
+
+        The class, the labels, one line per column with its position and its
+        name and how many rows are not missing and its type, then the types
+        counted up and the memory the whole thing weighs. Every number in it
+        already existed as a member, so this is formatting and nothing else,
+        which is the reason it is written in Python rather than reaching for a
+        kernel: `shape`, `columns`, `count`, `dtypes`, `index` and
+        `memory_usage` are the report, and `info` is the layout.
+
+        Three lines differ from pandas' and all three are differences that are
+        already registered. The class is `firepanda.DataFrame`. The types are
+        spelled the way this library spells them, so a text column says `string`
+        where pandas 3 says `str`. And the memory number counts Arrow buffers
+        rather than a numpy representation, which also means there is never a
+        `+` after it, because pandas puts one there when it left the contents of
+        an object column out and there is nothing here it leaves out.
+
+        `verbose` chooses between the long form and the one line summary. Left
+        alone it is the long form up to `MAX_INFO_COLUMNS` columns and the
+        summary beyond that, which is pandas' rule read off an option this
+        library does not have, so `max_cols` is how a caller moves the line.
+
+        `show_counts` left alone counts the missing rows, always. pandas turns
+        that off for a frame above a million or so rows, because over there it
+        is a pass over every column, and here it is a number Arrow already keeps
+        against each chunk, so there is nothing to save by not asking.
+
+        Nothing here is checked for being a boolean, which is what pandas does
+        and is what `memory_usage` does next door. A `memory_usage` that is not
+        `"deep"` and is not False simply prints the number.
+
+        Args:
+            verbose: The long form, the summary, or None to decide by width.
+            buf: Where to write, or None for standard output.
+            max_cols: How many columns the long form is worth, or None for
+                `MAX_INFO_COLUMNS`.
+            memory_usage: Whether to print the memory line. `"deep"` is accepted
+                and is the same number, because every number here is deep.
+            show_counts: Whether to count the rows that are not missing, or None
+                to count them.
+
+        Returns:
+            None. The report is written rather than answered, which is pandas'
+            choice and is why a caller who wants it as a value passes a buffer.
+        """
+        names = list(self._inner.names())
+        labels = self.index
+        lines = [
+            "<class 'firepanda.DataFrame'>",
+            _info_index_line(labels, type(labels).__name__),
+        ]
+        if not names:
+            lines.append("Empty DataFrame")
+            _info_write(lines, buf)
+            return
+        printed = [str(name) for name in self._inner.dtypes()]
+        wide = len(names) > (MAX_INFO_COLUMNS if max_cols is None else max_cols)
+        if verbose is False or (verbose is None and wide):
+            lines.append(f"Columns: {len(names)} entries, {names[0]} to {names[-1]}")
+        else:
+            lines.append(f"Data columns (total {len(names)} columns):")
+            headers = [" # ", "Column"]
+            cells = [[f" {i}", str(names[i])] for i in range(len(names))]
+            if show_counts is None or show_counts:
+                headers.append("Non-Null Count")
+                filled = self._inner.null_counts()
+                height = self._inner.length()
+                for i, row in enumerate(cells):
+                    row.append(f"{height - filled[i]} non-null")
+            headers.append("Dtype")
+            for i, row in enumerate(cells):
+                row.append(printed[i])
+            lines.extend(_info_table(headers, cells))
+        lines.append(_info_dtypes(printed))
+        if memory_usage is None or memory_usage:
+            lines.append("memory usage: " + _info_size(int(self.memory_usage().sum())))
+        _info_write(lines, buf)
+
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
 
@@ -5845,6 +6056,62 @@ class SeriesMixin:
         if index:
             out += self.index.nbytes
         return out
+
+    def info(
+        self,
+        verbose: Any = None,
+        buf: Any = None,
+        max_cols: Any = None,
+        memory_usage: Any = None,
+        show_counts: Any = None,
+    ) -> None:
+        """Print what the column holds, in the shape pandas prints it in.
+
+        The frame's report with the two columns that name a column taken out,
+        so there is no position and no name in the table and there is a
+        `Series name:` line above it instead. That difference is pandas' and it
+        is the shape that makes the two reports readable side by side: what a
+        frame says once per column, a column says once.
+
+        `verbose` and `max_cols` are accepted and change nothing, which is what
+        pandas does with them here, because there is one column to list and no
+        width at which listing it is too much.
+
+        Everything else follows the frame's version, including the three lines
+        that differ from pandas', which are the class, the spelling of the type
+        and the memory being Arrow buffers.
+
+        Args:
+            verbose: Accepted and ignored, as in pandas.
+            buf: Where to write, or None for standard output.
+            max_cols: Accepted and ignored, as in pandas.
+            memory_usage: Whether to print the memory line. `"deep"` is
+                accepted and is the same number.
+            show_counts: Whether to count the rows that are not missing, or
+                None to count them.
+
+        Returns:
+            None. The report is written rather than answered.
+        """
+        printed = str(self._inner.dtype())
+        labels = self.index
+        lines = [
+            "<class 'firepanda.Series'>",
+            _info_index_line(labels, type(labels).__name__),
+            f"Series name: {self._inner.label()}",
+        ]
+        headers: list[str] = []
+        cells: list[str] = []
+        if show_counts is None or show_counts:
+            headers.append("Non-Null Count")
+            cells.append(f"{self._inner.length() - self._inner.null_count()} non-null")
+        headers.append("Dtype")
+        cells.append(printed)
+        lines.extend(_info_table(headers, [cells]))
+        lines.append(_info_dtypes([printed]))
+        if memory_usage is None or memory_usage:
+            lines.append("memory usage: " + _info_size(self.memory_usage()))
+        _info_write(lines, buf)
 
     def items(self) -> Iterator[tuple[Any, Any]]:
         """Each label with its value.
