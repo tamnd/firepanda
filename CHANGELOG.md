@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.74] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Reductions that were never wired up. `count(DISTINCT x)` answered `count(x)` in SQL, and ten more reductions including `median` and `stddev` planned correctly and then stopped at the operator with a refusal, because a reduction that does not fold had no code path at all rather than a slower one. Both are fixed, for the ungrouped form. The grouped form of the second one is still open. Two empty input cases are pinned alongside: a join whose build side has no rows, and a fold with no `GROUP BY` over no rows.
+
 ### Fixed: count(DISTINCT x) in SQL no longer answers count(x)
 
 `SELECT count(DISTINCT shop) FROM sales` returned the row count. The parser read the word and set `CALL_DISTINCT` on the call node, and the planner never looked at the flag, so `count` became a plain count whatever was inside the brackets. Nothing raised and nothing warned. The ClickBench driver never hit it because it calls `distinct_count_any` directly rather than going through SQL.
@@ -6003,7 +6009,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.73...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.74...HEAD
+[0.6.74]: https://github.com/tamnd/firepanda/releases/tag/v0.6.74
 [0.6.73]: https://github.com/tamnd/firepanda/releases/tag/v0.6.73
 [0.6.72]: https://github.com/tamnd/firepanda/releases/tag/v0.6.72
 [0.6.71]: https://github.com/tamnd/firepanda/releases/tag/v0.6.71
