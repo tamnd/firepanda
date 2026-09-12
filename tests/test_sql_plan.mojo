@@ -879,9 +879,64 @@ def test_a_lateral_subquery_is_refused_by_name() raises:
         _ = _plan("SELECT a FROM t, LATERAL (SELECT b FROM u WHERE b = t.a) v")
 
 
-def test_the_column_aliases_on_a_derived_table_are_refused_by_name() raises:
-    with assert_raises(contains="column aliases on a subquery"):
-        _ = _plan("SELECT n FROM (SELECT a FROM t) v(n)")
+def test_the_column_aliases_on_a_derived_table_rename_its_output() raises:
+    # The alias list is a projection over the statement's root, so the name the
+    # subquery handed out is gone and the one the list wrote is what the outer
+    # query reads.
+    assert_equal(
+        _plan("SELECT n FROM (SELECT a FROM t) v(n)"),
+        "PROJECT [n]\n  PROJECT [a as n]\n    PROJECT [a]\n      SCAN t []\n",
+    )
+
+
+def test_a_column_a_derived_table_renamed_away_is_not_reachable() raises:
+    # The list renamed `a` to `n`, and a name the source no longer produces is
+    # a name the query cannot read, the same as any other one it never had.
+    with assert_raises(contains="there is no column named 'a'"):
+        _ = _plan("SELECT a FROM (SELECT a FROM t) v(n)")
+
+
+def test_the_column_aliases_on_a_derived_table_are_a_prefix() raises:
+    # A list shorter than the statement renames what it reaches and leaves the
+    # rest alone, which is the rule a CTE's list gets as well.
+    assert_equal(
+        _plan("SELECT p, b FROM (SELECT a, b FROM t) v(p)"),
+        (
+            "PROJECT [p, b]\n"
+            "  PROJECT [a as p, b]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_more_column_aliases_than_a_derived_table_produces_is_refused() raises:
+    # This is the one place the derived table and the CTE disagree. A CTE drops
+    # the names it has no column for and a derived table refuses the whole
+    # query, and DuckDB's wording is what says so.
+    with assert_raises(contains="has 2 columns available but 3 columns"):
+        _ = _plan("SELECT p FROM (SELECT a, b FROM t) v(p, q, r)")
+
+
+def test_a_column_alias_on_a_derived_table_may_be_qualified() raises:
+    # The alias list runs before the name goes into reach, so `v.n` is the name
+    # the list wrote and not the one the statement produced.
+    assert_equal(
+        _plan("SELECT v.n FROM (SELECT a FROM t) v(n)"),
+        _plan("SELECT n FROM (SELECT a FROM t) v(n)"),
+    )
+
+
+def test_a_star_over_a_derived_table_reads_its_column_aliases() raises:
+    assert_equal(
+        _plan("SELECT * FROM (SELECT a, b FROM t) v(p, q)"),
+        (
+            "PROJECT [p, q]\n"
+            "  PROJECT [a as p, b as q]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+        ),
+    )
 
 
 def test_a_cte_is_the_plan_its_statement_lowers_to() raises:
