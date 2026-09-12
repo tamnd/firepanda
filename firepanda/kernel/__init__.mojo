@@ -116,9 +116,13 @@ from .group import (
 )
 from .logic import (
     LogicOp,
+    MaskRefs,
+    borrow_masks,
     conjoin,
+    connect_all,
     disjoin,
     is_logic_name,
+    logic_all_any,
     logic_any,
     logic_op,
     logic_type,

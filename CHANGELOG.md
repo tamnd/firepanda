@@ -46,6 +46,18 @@ A grouped product cannot be a grouped sum with the operator changed. A missing v
 The rule for what counts as true is now read from both paths rather than copied into the second one. `truthy` in `firepanda/kernel/agg.mojo` lost its underscore for that reason, since a whole column `any` and a grouped `any` disagreeing would be a difference that each half's own tests would pass.
 
 The signatures are pandas' own and were measured. A grouped product takes `numeric_only`, `min_count` and `skipna` and takes no `engine`, which a grouped sum does take, and a grouped truth takes nothing but `skipna`. `min_count` defaults to zero for `prod` as it does for `sum`, rather than to the minus one the four that pick a value out carry, and it is still held at its default here along with `skipna` and `numeric_only`. Specified in `docs/specs/54-reducing-a-group-with-a-product-and-with-a-truth.md`.
+### Changed: a conjunction or disjunction in a plan is one operator and not a chain of them
+
+The simplify pass flattens a nested and or or into a single call with every argument on it, and the lowering then folded that call back into pairs, one operator per pair. So `a OR b OR c OR d` in a query was three operators, and the two in the middle existed only to write a boolean column for the next one to read straight back. On a chunk that is a byte a row that nothing else ever looks at, and on a query with a wide disjunction in it there are several of them.
+
+The lowering now puts every operand's position into one `Connective` and the kernel reads them all in one pass. TPC-H q19 is the shape that motivated it: three groups of four comparisons under an or, which was eleven operators for twelve predicates and is now four.
+
+`Connective` holds a `List[Int]` rather than a left and a right. Its two column and negation constructors are unchanged, so nothing that built one needs editing, and there is a third that takes the list. Binding now checks the type of every operand rather than of the last pair, which is what the folding amounted to once it had checked each pair in turn.
+
+The kernel side of it is a borrow. `logic_all_any` takes the chunk's columns as `ColumnRefs` and the positions to read, so a conjunction of five predicates over a million rows allocates the one answer and copies nothing, where taking the operands by value would have copied all five out of the chunk first. `MaskRefs` and `borrow_masks` are the typed form of the same thing and `conjoin` and `disjoin` go through them now.
+
+There is no end to end number in this entry and the reason is worth writing down. The probe that would produce one builds both shapes in one binary, and compiling it ran for fifty five minutes on the two machines available without finishing, which is a compile time problem in the probe rather than anything about the change. What is measured is the mechanism, in the kernel probe the previous entry carries: five masks in one pass rather than four pairwise calls is 1.94x on six million rows, twelve masks is 2.74x, and 3.25x when the masks hold nulls. This change is what lets a query reach that.
+
 ### Fixed: ORDER BY 1 sorted on the number one rather than on the first column
 
 `SELECT qty FROM sales ORDER BY 1` came back unsorted and said nothing about it. The number lowered as the constant one, every row sorted on the same value, and the sort was a node that did no work. A query whose rows happened to arrive in the right order looked correct, which is the worst version of this: two tests in this repo were written with `ORDER BY 1` and passed for that reason.

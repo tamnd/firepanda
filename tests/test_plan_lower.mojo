@@ -642,7 +642,7 @@ def test_a_negation_in_a_filter_keeps_what_the_predicate_dropped() raises:
     same(read_back(out, "qty"), [5, 3, 8, 1], "the rows at ten or under")
 
 
-def test_a_chain_of_three_ors_is_two_operators_folded_left() raises:
+def test_a_chain_of_three_ors_is_one_operator_over_three_columns() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
@@ -661,10 +661,11 @@ def test_a_chain_of_three_ors_is_two_operators_folded_left() raises:
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
 
-    # A call with three arguments is not a node that takes three columns. Three
-    # comparisons, two connectives over the pairs, and the filter, which drops
-    # all five intermediates as it writes the way it drops one.
-    assert_equal(len(pipe.operators), 6, "operators")
+    # Three comparisons, one connective reading all three of them, and the
+    # filter, which drops all four intermediates as it writes the way it drops
+    # one. Folded into pairs this was six, and the extra node existed only to
+    # write a column for the next one to read straight back.
+    assert_equal(len(pipe.operators), 5, "operators")
 
     var out = pipe^.run()
     same(read_back(out, "qty"), [3, 40, 25, 30], "the rows any arm names")
@@ -716,6 +717,31 @@ def test_a_disjunction_over_nulls_follows_the_three_valued_rule() raises:
     # neither operand settles anything stay null.
     same(truths(out, "either"), [-1, 1, -1, -1, 1], "either")
     same(truths(out, "both"), [0, -1, 0, -1, 1], "both")
+
+
+def test_three_operands_follow_the_same_rule_as_two() raises:
+    var plan = Plan()
+    var scan = plan.scan("gauges", List[String](), 0)
+    var zero = plan.exprs.literal(Value(Int64(0)))
+    var five = plan.exprs.literal(Value(Int64(5)))
+    var a = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("a"), zero)
+    var b = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("b"), zero)
+    var big = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("a"), five)
+    var either = plan.exprs.call(String("or"), [a, b, big], rowwise=True)
+    var all_of = plan.exprs.call(String("and"), [a, b, big], rowwise=True)
+    var root = plan.project(scan, [either, all_of], ["either", "all"])
+
+    _ = bind(plan, root, gauge_schemas())
+    var pipe = lower(plan, root, gauge_frame())
+    var out = pipe^.run()
+
+    # One node reads all three, and the rule it applies is the one the pairwise
+    # chain applied: a single true settles the or wherever the nulls fall, a
+    # single false settles the and, and a row every operand is null on stays
+    # null. The third operand is false where it is present, so it decides the
+    # and on the last row that the other two agreed was true.
+    same(truths(out, "either"), [-1, 1, -1, -1, 1], "either")
+    same(truths(out, "all"), [0, -1, 0, -1, 0], "all")
 
 
 def test_a_filter_drops_the_rows_a_connective_could_not_decide() raises:
