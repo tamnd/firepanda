@@ -2398,6 +2398,36 @@ def test_an_in_of_one_is_one_comparison() raises:
     )
 
 
+def test_a_minus_in_front_of_a_column_is_a_unary() raises:
+    assert_equal(
+        _plan("SELECT -a FROM t"), "PROJECT [-a as __expr_0]\n  SCAN t []\n"
+    )
+
+
+def test_a_minus_in_front_of_an_expression_wraps_it() raises:
+    assert_equal(
+        _plan("SELECT -(a + 1) FROM t"),
+        "PROJECT [-(a + 1) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_a_minus_in_front_of_a_number_is_a_unary_until_it_is_folded() raises:
+    # This helper binds and stops, so what it shows is the plan before any pass
+    # has run, and at that point the sign is still an operation over a literal.
+    # The simplify pass answers it and the operator never sees one, which is why
+    # it has no constant form the way `Compute` does.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b > -5"),
+        "PROJECT [a]\n  FILTER b > (-5)\n    SCAN t []\n",
+    )
+
+
+def test_a_plus_in_front_of_a_column_is_a_unary_too() raises:
+    assert_equal(
+        _plan("SELECT +a FROM t"), "PROJECT [+a as __expr_0]\n  SCAN t []\n"
+    )
+
+
 def test_a_like_is_a_call_rather_than_an_operation() raises:
     # The right side is a pattern rather than an operand, and what runs it reads
     # that pattern once while the plan is being lowered, so it is a named call

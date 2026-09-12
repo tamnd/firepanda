@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a minus sign in front of a column
+
+`SELECT -qty FROM sales` was refused with "there is no operator that computes a unary expression yet", which was true and easy to miss, since a minus sign in front of a number folded away before lowering ever saw it and so `WHERE b > -5` always worked. What did not work was the sign in front of anything that varies per row, which is the ordinary case.
+
+There is an operator for it now. It reads one column and appends one of the same type, which is the one column counterpart of what `Compute` does with two, and it covers the negation, the plus sign, an absolute value and a bitwise inversion. It appends rather than converting the column where it lies, which is what a cast does and what this must not: `SELECT a, -a` wants both, and turning column zero over would change what every expression already bound against that position means.
+
+The type is worked out while the pipeline is being built rather than on the first chunk, so a negation of a column of text is refused by the plan instead of by the kernel ten seconds into a scan. A null stays null. The SQL front end reaches the negation and the plus sign, a query having no way to write the other two, and the dataframe plan path reaches all four.
+
 ### Added: LIKE
 
 `SELECT count(*) FROM hits WHERE URL LIKE '%google%'` is a shape several of the ClickBench statements are written in, and it was refused with "firepanda has no kernel for the operator LIKE yet", which was wrong about the kernel. The four substring searches a pattern turns into have been in `firepanda/kernel/pattern.mojo` for a while, and what was missing was everything between them and a query: nothing read a pattern, nothing chose between them, and the plan had no operator to put one in.

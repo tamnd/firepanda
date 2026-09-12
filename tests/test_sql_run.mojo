@@ -1181,6 +1181,49 @@ def test_a_not_between_keeps_the_rows_outside_both_bounds() raises:
     )
 
 
+def test_a_minus_in_front_of_a_column_turns_it_over() raises:
+    same(
+        read_back(run("SELECT -qty AS down FROM sales", session()), "down"),
+        [-5, -20, -3, -40, -12, -8, -25, -1, -30, -15],
+        "down",
+    )
+
+
+def test_a_minus_in_front_of_an_expression_turns_the_answer_over() raises:
+    same(
+        read_back(
+            run("SELECT -(qty * price) AS down FROM sales", session()), "down"
+        ),
+        [-50, -40, -21, -40, -60, -72, -75, -100, -120, -90],
+        "down",
+    )
+
+
+def test_a_minus_in_a_where_keeps_the_rows_it_says() raises:
+    # The same rows `qty > 10` keeps, written the way a reader would not, which
+    # is the point: the operator has to run over the column before the
+    # comparison rather than the comparison folding the sign away.
+    same(
+        answer("SELECT qty FROM sales WHERE -qty < -10", "qty"),
+        [20, 40, 12, 25, 30, 15],
+        "qty",
+    )
+
+
+def test_a_minus_over_a_null_is_a_null() raises:
+    # Ten is added before the sign is applied so that no row's real answer is
+    # minus one, which is what `gapped` writes a null as. `-mark` on its own
+    # would put a genuine minus one next to the two nulls and the assertion
+    # would pass whichever of the three the operator got wrong.
+    same(
+        gapped(
+            run("SELECT -(mark + 10) AS down FROM gappy", session()), "down"
+        ),
+        [-14, -14, -1, -19, -1, -11],
+        "down",
+    )
+
+
 def test_a_like_with_a_percent_at_the_end_is_a_prefix() raises:
     same(answer("SELECT n FROM words WHERE word LIKE 'a%'", "n"), [1, 2], "n")
 

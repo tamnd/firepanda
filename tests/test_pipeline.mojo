@@ -25,6 +25,7 @@ from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec import (
+    Apply,
     Cast,
     Chunk,
     Collect,
@@ -59,6 +60,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.pattern import MatchKind, Pattern
+from firepanda.kernel.unary import UnaryOp
 
 
 def numbers(values: List[Int64]) raises -> AnyArray:
@@ -694,6 +696,47 @@ def test_a_sink_that_saw_nothing_still_has_the_right_shape() raises:
     assert_equal(len(out), 0, "rows")
     assert_equal(out.width(), 2, "columns")
     assert_true(out.schema[0].dtype == LogicalType.INT64, "first dtype")
+
+
+def test_an_applied_column_goes_on_the_end_and_leaves_its_input() raises:
+    # The whole difference between this and a `Cast`, which converts where it
+    # lies. `SELECT a, -a` wants both, so turning column zero over would change
+    # what every expression already bound against that position means.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Apply(0, UnaryOp.NEG, "down")))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 3, "the answer was appended")
+    assert_equal(out.schema[2].name, "down", "the name it was given")
+    assert_true(out.schema[2].dtype == LogicalType.INT64, "the same type")
+    var got = read_back(out, "down")
+    var kept = read_back(out, "n")
+    for i in range(6):
+        assert_equal(got[i], Int64(-(i + 1)), "the negation at " + String(i))
+        assert_equal(kept[i], Int64(i + 1), "the input at " + String(i))
+
+
+def test_a_plus_applied_to_a_column_copies_it() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Apply(0, UnaryOp.POS, "same")))
+    var out = pipeline^.run()
+    var got = read_back(out, "same")
+    for i in range(6):
+        assert_equal(got[i], Int64(i + 1), "row " + String(i))
+
+
+def test_an_apply_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Apply(7, UnaryOp.NEG, "nope")))
+
+
+def test_an_apply_with_no_answer_on_that_type_is_caught_at_plan_time() raises:
+    # Column 1 of `word_frame` is text and there is no negation of a string, so
+    # the pipeline refuses to be built rather than raising on the first chunk.
+    var pipeline = Pipeline(word_frame())
+    with assert_raises():
+        pipeline.add(Node(Apply(1, UnaryOp.NEG, "nope")))
 
 
 def test_a_computed_column_goes_on_the_end_with_the_name_it_was_given() raises:
