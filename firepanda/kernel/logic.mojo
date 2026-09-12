@@ -446,21 +446,25 @@ def _connect_all[
     # pass, the same as in the pairwise case.
     var out = Array[DType.bool](overwritten=n)
 
-    def compute(start: Int, stop: Int) {mut out, imm}:
-        # The value pointers are derived once per morsel rather than once per
-        # vector. `columns[k].unsafe_ptr()` in the inner loop walks the column
-        # to its data to its buffer for a load that is otherwise one
-        # instruction, and the walk is the same answer every time.
-        var srcs = List[Pointer[Scalar[DType.bool], ImmUntrackedOrigin]](
-            capacity=count
+    # The value pointers are derived once for the whole call, not once per
+    # morsel and certainly not once per vector. `columns[k].unsafe_ptr()` walks
+    # the column to its data to its buffer for a load that is otherwise one
+    # instruction, and the walk is the same answer every time. Once per call
+    # rather than once per morsel because the list is a heap allocation, and a
+    # morsel of a chunk that is already only a hundred and twenty eight thousand
+    # rows does not have enough work in it to pay for a malloc: building this
+    # inside the closure made a three column conjunction slower than the two
+    # pairwise calls it replaced, on a machine where a twelve column one was
+    # nearly twice as fast.
+    var srcs = List[Pointer[Scalar[DType.bool], ImmUntrackedOrigin]](
+        capacity=count
+    )
+    for k in range(count):
+        srcs.append(
+            columns[k][].unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
         )
-        for k in range(count):
-            srcs.append(
-                columns[k][]
-                .unsafe_ptr()
-                .unsafe_origin_cast[ImmUntrackedOrigin]()
-            )
 
+    def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
