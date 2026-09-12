@@ -40,8 +40,8 @@ from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.hash.factorize import (
     DIRECT_LIMIT,
     direct_plan,
-    factorize,
-    factorize_strings,
+    distinct_hashed,
+    distinct_strings,
 )
 
 from .accum import accumulator
@@ -208,9 +208,13 @@ a surprise in anybody's memory budget.
 
 A slot here is one bit, because counting distinct values only needs to know a
 value has been seen and never needs to name it. So eight slots a row is the same
-one byte a row, against a factorize that would have allocated four bytes a row of
-ordinals this count then throws away. The bound is the same promise in different
-units, and it lets the direct route cover thirty two times the range.
+one byte a row, and the bound is the same promise in different units, which lets
+the direct route cover thirty two times the range.
+
+What it is being compared against is the hash route rather than a factorize.
+That route allocates nothing per row either, so this is no longer the difference
+between a bit set and four bytes a row; it is a bit set against a table, and the
+bit set wins on every column whose range this bound accepts.
 """
 
 
@@ -223,12 +227,13 @@ def distinct_count_any(col: AnyArray) raises -> Int:
     a question nobody asked: it is counting distinct values in each of a million
     groups, and here there is one.
 
-    What is left when there is one group is a question the hash layer already
-    answers on the way past. A factorize hands out an ordinal per distinct value
-    and the number it handed out is the answer, so the count is the part of a
-    factorize that gets thrown away everywhere else. An integer column with a
-    bounded range does not need even that, because a bit per possible value is
-    smaller than an ordinal per row and a population count is the answer.
+    What is left when there is one group is a question the hash layer answers on
+    the way past. A factorize hands out an ordinal per distinct value, and the
+    number it handed out is the answer, so the count is the part of a factorize
+    that gets thrown away everywhere else. `distinct_hashed` is that part on its
+    own, with the ordinals never written and the table the only allocation. An
+    integer column with a bounded range does not need even the table, because a
+    bit per possible value and a population count is the answer.
 
     Nulls are not a value, which is pandas' rule for `nunique` and the rule the
     grouped form here already follows. An empty string is a value. Those two
@@ -250,7 +255,7 @@ def distinct_count_any(col: AnyArray) raises -> Int:
     # Before the numeric dispatch, because uint8 is in ALL and a string column
     # would match it and count distinct first bytes.
     if col.is_string():
-        return len(factorize_strings(col.strings()).firsts)
+        return distinct_strings(col.strings())
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
@@ -271,7 +276,7 @@ def distinct_count[dt: DType](col: Array[dt]) raises -> Int:
         How many distinct non-null values it holds.
 
     Raises:
-        If one of the workers the factorize starts cannot be run.
+        If one of the workers the count starts cannot be run.
     """
     comptime if dt.is_integral():
         var ceiling = len(col) * DISTINCT_SHARE
@@ -280,10 +285,7 @@ def distinct_count[dt: DType](col: Array[dt]) raises -> Int:
         var plan = direct_plan[dt](col, ceiling)
         if plan.span >= 0:
             return _distinct_direct(col, plan.span, plan.base)
-    # `firsts` holds one row per non-null group and the null group is not in it,
-    # so its length is the count with the nulls already left out. `count()` is
-    # the one that includes them.
-    return len(factorize(col).firsts)
+    return distinct_hashed(col)
 
 
 def _distinct_direct[

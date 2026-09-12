@@ -240,6 +240,25 @@ that range anyway, while reading it high puts every worker's probes in memory,
 which is the thing this number exists to avoid.
 """
 
+comptime ORDINAL_BYTES = 4
+"""Bytes a factorize spends per row on the ordinals it hands back.
+
+A distinct count reads none of them, so this is the budget both of its sizing
+rules are written against. `_count_workers` measures its tables against it, and
+so does `_count_capacity`: a count that stays under it spends less memory than
+the route it replaced already spent on an array nobody read.
+"""
+
+comptime COUNT_SAMPLE_ROWS = 1 << 20
+"""Column height past which a distinct count samples before it sizes its table.
+
+Below this the table just doubles from nothing, because the sample costs a real
+pass over sixty five thousand rows and the doublings it saves are all on tables
+small enough that a rehash is a few microseconds. Past it the doublings are the
+larger of the two, and on a column whose keys are nearly all distinct they are
+most of the run.
+"""
+
 comptime CROWDED_SHARE = 2
 """Fraction of the cores taken when the tables cannot all fit in cache.
 
@@ -3222,3 +3241,469 @@ def _factorize_strings_serial(
         base += count
 
     return FactorizedStrings(codes^, firsts^, null_group)
+
+
+def _count_workers(groups: Int, n: Int) -> Int:
+    """Chooses how many workers a distinct count splits a column across.
+
+    `_parallel_workers` asks a different question from the same two numbers and
+    gives a different answer, because the two routines are spending different
+    budgets. A factorize has already committed to four bytes a row, so a table
+    per worker on top of that is a fraction of what it was going to allocate
+    anyway, and the rule there is free to take half the cores even once the
+    tables have left the cache. A count exists precisely so that nothing is
+    allocated per row, and the tables are the whole of its footprint, so it takes
+    the split only while the split is free.
+
+    Free means one of two things and the more generous of them wins. Either the
+    tables still fit in the shared cache, which is `_crowded`'s rule read as a
+    cap rather than as a halving, so every probe is a cache hit and the
+    duplicated work is bounded by the cache size whatever the column's height is.
+    Or they fit inside the four bytes a row the ordinals would have taken, which
+    is the weaker promise that the split never spends more than the thing this
+    route replaced was spending on an array it wrote and never read. The second
+    is the looser of the two on any column past eight million rows, which is
+    where a medium cardinality column has room for a dozen tables and the cache
+    rule alone would have given it one.
+
+    Past both, the answer is one worker, one table, and a footprint of the
+    distinct values and nothing else, which is the smallest the question has.
+
+    What that gives up is the long high cardinality column, where a factorize
+    would have gone partitioned and run on every core and this runs on one. The
+    route that would fix it is a count that partitions by hash as it goes, so the
+    tables stay disjoint and the footprint stays at one copy of the keys while
+    the work is still spread. That is filed rather than written.
+
+    Args:
+        groups: The estimated distinct key count of the whole column.
+        n: The column's length.
+
+    Returns:
+        A worker count of two or more, or one to stay on the serial route.
+    """
+    var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+    if most < 2 or groups < 1:
+        return 1
+    var budget = max(SHARED_CACHE_BYTES, n * ORDINAL_BYTES)
+    return max(1, min(most, budget // (groups * TABLE_BYTES_PER_GROUP)))
+
+
+def _count_capacity(groups: Int, rows: Int, tables: Int) -> Int:
+    """Sizes one of a distinct count's tables up front, from an estimate.
+
+    `tally` has no sizing schedule, so a table that is handed nothing grows by
+    doubling from sixteen slots, and on a column of ten million rows with a key
+    every six of them that is eighteen rehashes and close to a third of the run.
+    Handing it an estimate skips all but the last one or two. On the same column
+    with a key every two hundred it is more than half the run, because there the
+    estimate is right and the table never grows again at all.
+
+    The estimate comes from `_estimate_groups` rather than `project_groups`,
+    which is the opposite of what a factorize does and is the point. A factorize
+    projects high on purpose because its cost of guessing low is a rehash and it
+    had already committed to four bytes a row, so the memory was the cheaper
+    mistake. Here the table is the whole footprint and guessing high is the only
+    way to lose, so this takes the curve fit, which answers the actual key count
+    on a column whose keys repeat and gives up and says `n` on one whose keys do
+    not.
+
+    Saying `n` is what the bound is for. A table sized for ten million keys is
+    three hundred and twenty megabytes, which is more than the ordinals this
+    route exists to not write, so the reservation stops at the group count those
+    ordinals would have paid for and lets the table double from there. That
+    caps a wrong guess at one extra rehash and caps the footprint at what the
+    old route spent.
+
+    Args:
+        groups: The estimated distinct key count of the whole column.
+        rows: The column's length.
+        tables: How many tables the count is building. One if it is serial.
+
+    Returns:
+        A key count to size a table for, or zero to let it grow from nothing.
+    """
+    if groups < 1:
+        return 0
+    var bound = rows * ORDINAL_BYTES // (TABLE_BYTES_PER_GROUP * tables)
+    return min(groups, max(bound, 1))
+
+
+def distinct_hashed[
+    dt: DType
+](col: Array[dt], seed: UInt64 = DEFAULT_SEED) raises -> Int:
+    """Counts the distinct non-null values of a column through the hash table.
+
+    The part of a factorize that a count actually wanted. A factorize hands out
+    an ordinal per distinct value and writes one back for every row, and the
+    number it handed out is the answer here, so everything indexed by row is
+    written once and read never. This is the same probe with that side removed:
+    the table is the only allocation and it is sized by cardinality rather than
+    by height.
+
+    Nulls are not a value, so they are skipped rather than given a group, which
+    is why nothing here has an ordinal offset and why there is no null group to
+    subtract at the end.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+
+    Raises:
+        If one of the workers it starts cannot be run.
+    """
+    var n = len(col)
+    if n == 0:
+        return 0
+    var groups = 0
+    if n >= COUNT_SAMPLE_ROWS:
+        groups = _projected_groups[dt](col, seed, n)
+        if n >= PARALLEL_ROWS and worker_count() > 1:
+            var workers = _count_workers(groups, n)
+            if workers > 1:
+                return _distinct_hashed_parallel[dt](col, seed, workers, groups)
+    return _distinct_hashed_serial[dt](col, seed, groups)
+
+
+def _distinct_hashed_serial[
+    dt: DType
+](col: Array[dt], seed: UInt64, groups: Int = 0) -> Int:
+    """Counts a column's distinct values through one table on one thread.
+
+    `_factorize_hashed_serial` with the ordinals gone. The chunking is the same
+    and is there for the same reason: hashing a chunk ahead of probing it is what
+    gives the probe something to prefetch, and hashing the whole column ahead of
+    the probe would write it to memory and read it back for nothing.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        groups: An estimate of the column's key count, or zero if nobody took
+            one. See `_count_capacity` for what is done with it.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var hashes = Buffer(CHUNK_ROWS * 8)
+    var table = HashTable(_count_capacity(groups, n, 1), seed)
+
+    var base = 0
+    while base < n:
+        var count = min(CHUNK_ROWS, n - base)
+        hash_chunk(col, base, count, seed, hashes)
+        table.tally(hashes, col.data.validity, has_null, base, count)
+        base += count
+
+    return len(table)
+
+
+def _distinct_hashed_parallel[
+    dt: DType
+](col: Array[dt], seed: UInt64, workers: Int, groups: Int = 0) raises -> Int:
+    """Counts a column's distinct values on several threads and unions the sets.
+
+    The build half is `_factorize_hashed_parallel`'s, a contiguous slice and a
+    private table per worker with nothing shared and nothing locked. The other
+    half is much less work than a factorize's merge, because a count does not
+    care what the groups are called. There is no renumbering, no ranking pass and
+    no representative row to carry, only the question of how large the union of
+    the workers' tables is.
+
+    The keys are hashes already, which `HashTable.keys_by_ordinal` reads back out
+    of the slots, so nothing is hashed a second time. Bucketing them on their top
+    bits splits the union into independent pieces, because equal keys hash
+    equally and so cannot be split across two buckets, and the pieces' counts add
+    up to the whole. The workers' tables are dropped before the buckets build
+    theirs, so the two sets of tables are not resident at once.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to cut the column into. At least two.
+        groups: An estimate of the column's key count, or zero if nobody took
+            one. Every worker sees most of the key set, which is the premise
+            `_count_workers` sizes against, so each table is sized for the whole
+            estimate and the bound in `_count_capacity` is the one divided.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+
+    # Slices land on chunk boundaries so that every worker's inner loop is the
+    # same shape as the serial one's, with a short chunk only at the very end.
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var room = _count_capacity(groups, n, workers)
+    var tables = List[HashTable](capacity=workers)
+    for _ in range(workers):
+        tables.append(HashTable(room, seed))
+
+    def one(w: Int) raises {mut tables, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hashes = Buffer(CHUNK_ROWS * 8)
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            hash_chunk(col, base, count, seed, hashes)
+            tables[w].tally(hashes, col.data.validity, has_null, base, count)
+            base += count
+
+    parallel_for(one, workers)
+
+    var starts = List[Int](capacity=workers + 1)
+    var total = 0
+    for w in range(workers):
+        starts.append(total)
+        total += len(tables[w])
+    starts.append(total)
+    if total == 0:
+        return 0
+
+    var found = Buffer(total * 8)
+
+    def dump(w: Int) raises {mut found, imm}:
+        tables[w].keys_by_ordinal(found, starts[w])
+
+    if total <= MERGE_SERIAL_ENTRIES:
+        # Reading a few thousand keys out of the tables is not worth waking
+        # thirty two workers for, and neither is the fold behind it.
+        for w in range(workers):
+            tables[w].keys_by_ordinal(found, starts[w])
+        _ = tables^
+        var table = HashTable(total, seed)
+        var hashed = found.bitcast[DType.uint64]()
+        for e in range(total):
+            _ = table.insert(hashed.unsafe_offset(e).unsafe_load())
+        return len(table)
+
+    parallel_for(dump, workers)
+    var split = _bucket_entries(found, starts, workers, _merge_bits(workers))
+    _ = tables^
+
+    var buckets = len(split.offsets) - 1
+    var counts = List[Int](length=buckets, fill=0)
+
+    def fold(b: Int) raises {mut counts, imm}:
+        var at = split.offsets[b]
+        var size = split.offsets[b + 1] - at
+        var table = HashTable(size, seed)
+        table.tally_keys(found, split.order, at, size)
+        counts[b] = len(table)
+
+    parallel_for(fold, buckets)
+
+    var union = 0
+    for b in range(buckets):
+        union += counts[b]
+    return union
+
+
+def distinct_strings(
+    col: StringArray, seed: UInt64 = DEFAULT_SEED
+) raises -> Int:
+    """Counts the distinct non-null elements of a string column.
+
+    `distinct_hashed` for text, and the same two routes. An empty string is a
+    value and a null is not, which is pandas' rule and which matters more here
+    than it sounds like: a dataset that spells its missing text as an empty
+    string, which the ClickBench hits table does, turns the difference into a
+    wrong answer rather than a debate.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+
+    Returns:
+        How many distinct non-null elements it holds.
+
+    Raises:
+        If one of the workers it starts cannot be run.
+    """
+    var n = len(col)
+    if n == 0:
+        return 0
+    var groups = 0
+    if n >= COUNT_SAMPLE_ROWS:
+        groups = _projected_groups_strings(col, seed, n)
+        if n >= PARALLEL_STRING_ROWS and worker_count() > 1:
+            var workers = _count_workers(groups, n)
+            if workers > 1:
+                return _distinct_strings_parallel(col, seed, workers, groups)
+    return _distinct_strings_serial(col, seed, groups)
+
+
+def _distinct_strings_serial(
+    col: StringArray, seed: UInt64, groups: Int = 0
+) -> Int:
+    """Counts a string column's distinct elements through one table.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        groups: An estimate of the column's key count, or zero if nobody took
+            one. See `_count_capacity` for what is done with it.
+
+    Returns:
+        How many distinct non-null elements it holds.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var hashes = Buffer(CHUNK_ROWS * 8)
+    var firsts = List[Int]()
+    var keyviews = List[StringView]()
+    var table = HashTable(_count_capacity(groups, n, 1), seed)
+
+    var base = 0
+    while base < n:
+        var count = min(CHUNK_ROWS, n - base)
+        hash_strings_chunk(col, base, count, seed, hashes)
+        table.tally_strings(
+            hashes, col, has_null, base, count, firsts, keyviews
+        )
+        base += count
+
+    return len(table)
+
+
+def _distinct_strings_parallel(
+    col: StringArray, seed: UInt64, workers: Int, groups: Int = 0
+) raises -> Int:
+    """Counts a string column's distinct elements on several threads.
+
+    `_distinct_hashed_parallel` with the key comparison put back, in the build
+    and in the fold both. The fold needs it as much as the build does: two
+    different strings sharing sixty four bits would be two groups inside each
+    worker and one key in the union, so a fold that settled on the hash alone
+    would quietly answer one short. That is rare enough to pass every test
+    anybody wrote and is the reason the representative rows are carried here.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to cut the column into. At least two.
+        groups: An estimate of the column's key count, or zero if nobody took
+            one. See `_count_capacity` for what is done with it.
+
+    Returns:
+        How many distinct non-null elements it holds.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var room = _count_capacity(groups, n, workers)
+    var tables = List[HashTable](capacity=workers)
+    var founds = List[List[Int]](capacity=workers)
+    for _ in range(workers):
+        tables.append(HashTable(room, seed))
+        founds.append(List[Int]())
+
+    def one(w: Int) raises {mut tables, mut founds, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hashes = Buffer(CHUNK_ROWS * 8)
+        var keyviews = List[StringView]()
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            hash_strings_chunk(col, base, count, seed, hashes)
+            tables[w].tally_strings(
+                hashes, col, has_null, base, count, founds[w], keyviews
+            )
+            base += count
+
+    parallel_for(one, workers)
+
+    var starts = List[Int](capacity=workers + 1)
+    var total = 0
+    for w in range(workers):
+        starts.append(total)
+        total += len(tables[w])
+    starts.append(total)
+    if total == 0:
+        return 0
+
+    var found = Buffer(total * 8)
+
+    def dump(w: Int) raises {mut found, imm}:
+        tables[w].keys_by_ordinal(found, starts[w])
+
+    if total <= MERGE_SERIAL_ENTRIES:
+        for w in range(workers):
+            tables[w].keys_by_ordinal(found, starts[w])
+    else:
+        parallel_for(dump, workers)
+    _ = tables^
+
+    var reps = _flatten_reps(founds, starts, workers)
+    var hashed = found.bitcast[DType.uint64]()
+    var rep = reps.bitcast[DType.int64]()
+
+    if total <= MERGE_SERIAL_ENTRIES:
+        var table = HashTable(total, seed)
+        var local = List[Int]()
+        for e in range(total):
+            _ = table.insert_string(
+                hashed.unsafe_offset(e).unsafe_load(),
+                Int(rep.unsafe_offset(e).unsafe_load()),
+                col,
+                local,
+            )
+        return len(table)
+
+    var split = _bucket_entries(found, starts, workers, _merge_bits(workers))
+    var buckets = len(split.offsets) - 1
+    var counts = List[Int](length=buckets, fill=0)
+
+    def fold(b: Int) raises {mut counts, imm}:
+        var slot = split.order.bitcast[DType.uint32]()
+        var table = HashTable(split.offsets[b + 1] - split.offsets[b], seed)
+        var local = List[Int]()
+        for at in range(split.offsets[b], split.offsets[b + 1]):
+            var e = Int(slot.unsafe_offset(at).unsafe_load())
+            _ = table.insert_string(
+                hashed.unsafe_offset(e).unsafe_load(),
+                Int(rep.unsafe_offset(e).unsafe_load()),
+                col,
+                local,
+            )
+        counts[b] = len(table)
+
+    parallel_for(fold, buckets)
+
+    var union = 0
+    for b in range(buckets):
+        union += counts[b]
+    return union

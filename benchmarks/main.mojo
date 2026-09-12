@@ -992,6 +992,41 @@ def bench_kernel(mut harness: Harness) raises:
 
     harness.record("reduce/nunique_text", "rows", rows, nunique_text)
 
+    # The hashed route with the cardinality turned up, which is what q3 and q4
+    # of ClickBench actually are: `UserID` has about one distinct value for
+    # every six rows and `SearchPhrase` is not far behind. The rows above all
+    # repeat a thousand keys, so their tables live in cache and the probe never
+    # leaves it, and this is the one where the table is the footprint and the
+    # route's memory is the thing being measured.
+    var nu_wide_col = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        nu_wide_col[i] = Scalar[BENCH_DTYPE](i // 6) * 1_000_000_007
+    var nu_wide = AnyArray(nu_wide_col^)
+
+    def nunique_wide() raises {imm nu_wide}:
+        keep(len(nu_wide))
+        var found = distinct_count_any(nu_wide)
+        keep(found)
+
+    harness.record("reduce/nunique_wide", "rows", rows, nunique_wide)
+
+    # What the hashed count replaced, kept beside it for the reason
+    # `nunique_grouped` is kept. A factorize answers the same question and
+    # allocates four bytes a row of ordinals to do it, which the count then
+    # reads never, so this is the same probe plus an array the size of the
+    # column and the pass that fills it.
+    var nu_wide_twin = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        nu_wide_twin[i] = Scalar[BENCH_DTYPE](i // 6) * 1_000_000_007
+
+    def nunique_factorized() raises {imm nu_wide_twin}:
+        keep(len(nu_wide_twin))
+        keep(len(factorize(nu_wide_twin).firsts))
+
+    harness.record(
+        "reduce/nunique_factorized", "rows", rows, nunique_factorized
+    )
+
     # The route a whole column distinct count took before it had one of its own,
     # kept here for the same reason `kernel/sum_twin` is kept: it is the thing
     # the fast path is claiming to beat, and a claim with nothing beside it is

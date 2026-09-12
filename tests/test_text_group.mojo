@@ -50,6 +50,9 @@ from firepanda.hash.factorize import (
     _factorize_strings_parallel,
     _factorize_strings_partitioned,
     _factorize_strings_serial,
+    _distinct_strings_parallel,
+    _distinct_strings_serial,
+    distinct_strings,
     factorize_strings,
 )
 from firepanda.hash.function import DEFAULT_SEED, hash_bytes
@@ -847,6 +850,101 @@ def test_the_merge_agrees_with_itself_either_side_of_the_serial_bound() raises:
     assert_true(3000 * 8 > MERGE_SERIAL_ENTRIES)
     _merge_either_side(100)
     _merge_either_side(3000)
+
+
+def same_text_counts(col: StringArray, workers: Int, what: String) raises:
+    """Checks the two text count routes and the factorize against each other.
+
+    Args:
+        col: The column.
+        workers: How many slices the parallel route should cut.
+        what: What the column is, for the failure message.
+    """
+    # `firsts` holds one row per non-null group and the null group is not in
+    # it, so its length is the count with the nulls already left out.
+    var wanted = len(factorize_strings(col).firsts)
+    assert_equal(
+        _distinct_strings_serial(col, DEFAULT_SEED),
+        wanted,
+        "serial count, " + what,
+    )
+    assert_equal(
+        _distinct_strings_parallel(col, DEFAULT_SEED, workers),
+        wanted,
+        "parallel count, " + what,
+    )
+
+
+def test_the_text_count_agrees_with_the_factorize_it_replaces() raises:
+    same_text_counts(repeating_text(1 << 13, 9), 4, "a handful of keys")
+    same_text_counts(repeating_text(1 << 13, 700), 4, "seven hundred keys")
+    same_text_counts(repeating_text(4096, 4096), 4, "every row its own key")
+
+
+def test_the_text_count_leaves_the_nulls_out() raises:
+    var values = List[String]()
+    var present = List[Bool]()
+    for i in range(6000):
+        values.append(String("key_", i % 40))
+        present.append(i % 5 != 0)
+    same_text_counts(with_nulls(values, present), 4, "a fifth of it null")
+
+
+def test_the_text_count_keeps_the_empty_string_as_a_value() raises:
+    """An empty string is a value and a null is not, which is pandas' rule.
+
+    The hits table spells its missing text as an empty string, so a count that
+    treated the two the same would be wrong on the dataset this was written for
+    rather than on a corner case.
+    """
+    assert_equal(distinct_strings(text(["a", "", "b", "", "a"])), 3)
+    var values = List[String]()
+    values.append("a")
+    values.append("")
+    values.append("b")
+    var present = List[Bool]()
+    present.append(True)
+    present.append(True)
+    present.append(False)
+    assert_equal(distinct_strings(with_nulls(values, present)), 2)
+
+
+def test_the_parallel_text_count_folds_its_tables_on_one_thread() raises:
+    """Few enough entries that the fold stays under `MERGE_SERIAL_ENTRIES`."""
+    assert_true(4 * 64 <= MERGE_SERIAL_ENTRIES, "the serial fold")
+    same_text_counts(repeating_text(1 << 13, 64), 4, "a serial fold")
+
+
+def test_the_parallel_text_count_folds_its_tables_on_every_thread() raises:
+    """Enough entries that the fold buckets them by hash and runs in parallel.
+
+    Every slice sees every key here, so the entry count is the worker count
+    times the key count.
+    """
+    assert_true(8 * (1 << 12) > MERGE_SERIAL_ENTRIES, "the bucketed fold")
+    same_text_counts(repeating_text(1 << 16, 1 << 12), 8, "a bucketed fold")
+
+
+def test_the_parallel_text_count_settles_a_hash_match_on_the_bytes() raises:
+    """Keys too long to sit in a view, so the comparison reads the payload.
+
+    The fold compares as well as the build does, and on keys that share their
+    first sixteen bytes a fold that took a hash match as proof would be reading
+    nothing at all and would still agree with the serial route, which does the
+    same comparison. What it would disagree with is the key count the column was
+    built to have, so that is what this checks.
+    """
+    var col = repeating_long_text(1 << 14, 3000)
+    assert_equal(_distinct_strings_parallel(col, DEFAULT_SEED, 8), 3000)
+    same_text_counts(col, 8, "long keys")
+
+
+def test_the_parallel_text_count_agrees_on_an_uneven_slice_count() raises:
+    same_text_counts(repeating_text(10007, 97), 3, "a prime row count")
+
+
+def test_the_dispatched_text_count_of_an_empty_column_is_zero() raises:
+    assert_equal(distinct_strings(text([])), 0)
 
 
 def main() raises:

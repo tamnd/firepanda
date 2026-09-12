@@ -25,6 +25,30 @@ Two sides of different types are promoted at binding and the side that moves get
 Built against Mojo 1.0.0 (ed45d567).
 
 Subqueries that do not read the row asking about them. An uncorrelated `EXISTS` runs wherever it is written rather than only in the `AND` of a `WHERE`, and so does every quantified comparison, the six shapes of `ANY` and `ALL` that were refused by the planner. Two of those are exactly an `IN` and go to the joins one already used; the other four fold the subquery down to its smallest and largest row. What is left of subqueries is correlation, which is the dependent join. Alongside them, a grouped reduction whose state is the values now holds its key columns too, which finishes the operator half of the reductions 0.6.74 started.
+### Changed: a distinct count holds a set rather than four bytes a row it never reads
+
+`nunique` and `count(DISTINCT x)` went through `factorize`, which hands out an ordinal per distinct value and writes one back for every row. The count wants the number of ordinals handed out and nothing else, so on ten million rows that was forty megabytes written once and read never. `distinct_hashed` and `distinct_strings` are the same probe with that side removed, and `distinct_count` and `distinct_count_any` take them.
+
+The table underneath is `HashTable.tally`, which is `build` with the payload writes gone, plus `tally_keys` and `tally_strings` for the two folds. The sizing schedule went with the payload, on purpose. A build projects the group count and overshoots deliberately because it had already committed to four bytes a row, so guessing high costs a fraction of what it was spending anyway. For a count the table is the whole footprint and guessing high is the only way to lose, so the caller sizes it instead, from the curve fit in `_estimate_groups` rather than the projection, and `_count_capacity` stops the reservation at the group count the ordinals would have paid for. A wrong guess then costs one rehash rather than three hundred megabytes.
+
+Measured on ten million rows, minimum of five runs, peak RSS from an isolated binary:
+
+| column | count | factorize |
+| --- | --- | --- |
+| int64, a key every 6 rows | 74.3 ms, 153 MB | 53.3 ms, 434 MB |
+| int64, a key every 200 rows | 7.3 ms, 98 MB | 26.3 ms, 395 MB |
+| int64, a key every 2000 rows | 6.8 ms, 91 MB | 10.5 ms, 137 MB |
+| text, a key every 6 rows | 127.8 ms, 402 MB | 68.8 ms, 759 MB |
+| text, a key every 200 rows | 18.1 ms, 402 MB | 42.1 ms, 594 MB |
+| text, a key every 2000 rows | 14.7 ms, 402 MB | 20.7 ms, 403 MB |
+
+The text peaks sit at 402 MB for every count because that is the string column itself, which both routes read and neither allocates.
+
+The one case that gets slower is the column whose keys are nearly all distinct, and that is a decision rather than a regression. `_count_workers` takes the parallel split only while the tables fit either in the shared cache or inside the four bytes a row the ordinals would have taken, so on a very high cardinality column it gives one worker while a factorize goes partitioned across every core. The count is then about 1.4x the time at about a third of the memory. The route that would give that case its parallelism back is a count that partitions by hash as it goes, so the tables stay disjoint and the footprint stays at one copy of the keys, and that is filed rather than written.
+
+`benchmarks/main.mojo` gains `reduce/nunique_wide` and `reduce/nunique_factorized`, which run the two routes over the same column so the trade above is a number in the harness rather than a claim here.
+
+Closes #610, and with it the last of #617.
 
 ### Added: an uncorrelated EXISTS, wherever it is written
 
