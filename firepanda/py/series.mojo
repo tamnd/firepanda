@@ -215,6 +215,29 @@ struct PySeries(Movable, Writable):
         return PythonObject(String(Self._held(py_self)[].series[].logical()))
 
     @staticmethod
+    def nbytes(py_self: PythonObject) raises -> PythonObject:
+        """Reports the bytes the column's buffers occupy.
+
+        The values and the validity bitmap, and for text the views and the
+        payload, which `Array.nbytes` in `firepanda/array/any.mojo` counts and
+        documents. This is the bytes the data is actually stored in.
+
+        pandas answers the size of its numpy representation instead, and the two
+        are different measurements rather than the same one taken twice. A
+        column of three strings is 24 bytes of pointers there plus whatever the
+        strings weigh, and the labels of a frame that declared none are 132
+        bytes there and nothing here. `firepanda/py/index.mojo` says the same
+        about the index half of this.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            The size in bytes.
+        """
+        return PythonObject(Self._held(py_self)[].series[].values.nbytes())
+
+    @staticmethod
     def null_count(py_self: PythonObject) raises -> PythonObject:
         """Reports how many rows pandas would call missing.
 

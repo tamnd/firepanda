@@ -79,6 +79,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "null_counts",
         docstring="How many rows are missing from each column, in order.",
     )
+    _ = dataframe.def_method[PyDataFrame.column_nbytes](
+        "column_nbytes",
+        docstring="The bytes each column's buffers occupy, in order.",
+    )
     _ = dataframe.def_method[PyDataFrame.set_index](
         "set_index",
         docstring="The frame with one column moved into the row labels.",
@@ -251,6 +255,9 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.null_count](
         "null_count", docstring="How many rows are missing."
+    )
+    _ = series.def_method[PySeries.nbytes](
+        "nbytes", docstring="The bytes the column's buffers occupy."
     )
     _ = series.def_method[PySeries.head]("head", docstring="The first n rows.")
     _ = series.def_method[PySeries.tail]("tail", docstring="The last n rows.")

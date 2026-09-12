@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a frame and a column can say how much memory they are using
+
+`s.nbytes`, `df.memory_usage(index=True, deep=False)` and `s.memory_usage(index=True, deep=False)`. `Index.nbytes` was already here.
+
+The number is the Arrow buffers the data is actually stored in: the values, the validity bitmap, the views and the payload for text, and both the codes and the categories for a dictionary column. pandas counts the size of the numpy representation instead, so a column of three strings is twenty four bytes of pointers there and the labels of a frame that never declared any are one hundred and thirty two bytes, which is the size of the three Python integers a `RangeIndex` holds and is a fact about a Python object rather than about any data. Those are two different measurements under one name, neither is wrong, and the difference is registered as a divergence rather than papered over. A caller who wants pandas' number has `to_pandas().memory_usage()`. A caller who wants to know whether their data fits in memory wants this one.
+
+`df.memory_usage()` answers a column of byte counts labelled by column name, with the index first under the label `Index`, which is pandas' shape down to the capital letter. `s.memory_usage()` answers one number, because a frame has several things to report and a column has one. Each row is exactly what that column's `nbytes` answers and the index row is exactly what `Index.nbytes` answers, so the counting happens in one place and is reported in two.
+
+The default counts the index and `nbytes` never does. That is pandas' rule, it is the opposite of what the two names suggest, and it is the only reason both members exist. On a frame that declared no index the two agree exactly, which is the case most people will meet first.
+
+`deep` is accepted and changes nothing, because it means measuring the Python objects an object column points at and there are no object columns here, so every number answered is already the deep one. Refusing it would tell a caller something is unavailable when what is unavailable is the shallow answer.
+
 ### Added: a frame and a column can say how big they are and what they hold
 
 `df.empty`, `df.ndim`, `df.size`, `df.axes`, `df.dtypes`, `s.empty`, `s.ndim`, `s.axes` and `s.dtypes`. `shape` was already on both classes and `size` was already on a column.

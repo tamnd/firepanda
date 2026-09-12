@@ -262,6 +262,29 @@ struct PyDataFrame(Movable, Writable):
         return out
 
     @staticmethod
+    def column_nbytes(py_self: PythonObject) raises -> PythonObject:
+        """Reports the bytes each column's buffers occupy, in order.
+
+        One crossing of the boundary for the whole frame, the way `dtypes` and
+        `null_counts` above are, because asking each column separately would
+        copy every column in order to read a number off it and a frame of five
+        hundred columns should not have to move to answer a question about its
+        size. That is the same argument those two make and it is stronger here,
+        since the question being asked is literally how big the thing is.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A list of byte counts, one per column, in column order.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var out = Python.list()
+        for i in range(len(frame.columns)):
+            out.append(PythonObject(frame.columns[i].nbytes()))
+        return out
+
+    @staticmethod
     def head(py_self: PythonObject, n: PythonObject) raises -> PythonObject:
         """Takes the first `n` rows.
 

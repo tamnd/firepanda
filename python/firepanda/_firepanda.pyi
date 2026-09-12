@@ -28,6 +28,9 @@ class DataFrame:
     def null_counts(self) -> list[int]:
         """How many rows are missing from each column, in order."""
         ...
+    def column_nbytes(self) -> list[int]:
+        """The bytes each column's buffers occupy, in order."""
+        ...
     def set_index(self, name: str, drop: bool) -> DataFrame:
         """The frame with one column moved into the row labels."""
         ...
@@ -188,6 +191,9 @@ class Series:
         ...
     def null_count(self) -> int:
         """How many rows are missing."""
+        ...
+    def nbytes(self) -> int:
+        """The bytes the column's buffers occupy."""
         ...
     def head(self, n: int) -> Series:
         """The first n rows."""
