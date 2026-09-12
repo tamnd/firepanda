@@ -3391,11 +3391,20 @@ struct Series(Copyable, Movable, Sized, Writable):
         takes a `DisplayOptions` if a caller wants more or fewer rows than the
         ten this prints.
 
+        The labels down the left are this column's own labels, and the renderer
+        cannot reach them itself, so they are rendered here and handed over.
+
         Args:
             writer: The sink.
         """
+        var options = DisplayOptions()
         writer.write(
-            render_column(self.column_name(), self.values, DisplayOptions())
+            render_column(
+                self.column_name(),
+                self.values,
+                options,
+                self.index.display_cells(options),
+            )
         )
 
 

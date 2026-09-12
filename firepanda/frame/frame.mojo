@@ -5380,9 +5380,14 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # for to find out what went wrong, so the reason goes where the table
         # would have been.
         try:
+            var options = DisplayOptions()
             writer.write(
                 render_table(
-                    self.schema, self.column_refs(), self.rows, DisplayOptions()
+                    self.schema,
+                    self.column_refs(),
+                    self.rows,
+                    options,
+                    self.index.display_cells(options),
                 )
             )
         except e:

@@ -20,24 +20,41 @@ abandoned are all in here.
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
+from std.collections import Optional
+
 from firepanda.array.any import AnyArray
-from firepanda.array.array import Array
+from firepanda.array.array import Array, from_list
+from firepanda.array.strings import strings_from_list
 from firepanda.dtype.lists import ALL
 from firepanda.frame.display import (
     DisplayOptions,
     format_float,
+    pad_right,
     render_column,
     render_table,
     render_value,
     visible,
 )
 from firepanda.frame.frame import DataFrame
+from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 
 
 def has(text: String, needle: String) -> Bool:
     """Reports whether `needle` occurs in `text`."""
     return text.find(needle) != -1
+
+
+def unnamed() -> Optional[String]:
+    """A level name of `None`, spelled once because it is written a lot."""
+    return Optional[String]()
+
+
+def text_index(
+    values: List[String], var name: Optional[String]
+) raises -> Index:
+    """An index over text labels, which is what a `set_index` leaves behind."""
+    return Index(AnyArray(strings_from_list(values)), name^)
 
 
 def int_column(name: String, values: List[Int64]) raises -> Series:
@@ -296,6 +313,144 @@ def test_a_frame_can_still_report_its_schema_without_its_values() raises:
     assert_true(has(described, "bb: float64"), "second column")
     assert_true(has(described, "1 null"), "the null count")
     assert_false(has(described, "1.5"), "no values")
+
+
+def test_a_column_prints_its_labels_and_not_its_positions() raises:
+    var s = int_column("v", [Int64(1), Int64(2), Int64(3)])
+    s.index = text_index(["p", "qq", "r"], "k")
+    assert_equal(
+        String(s),
+        String("k\np     1\nqq    2\nr     3\nName: v, dtype: int64"),
+        "labelled column",
+    )
+
+
+def test_the_labels_are_left_aligned_and_the_values_are_not() raises:
+    # pandas puts the labels hard against the left edge whatever they are, so a
+    # column labelled 10, 200 and 3 does not line its labels up on the last
+    # digit the way it lines the values up.
+    var s = int_column("v", [Int64(1), Int64(2), Int64(3)])
+    s.index = Index(AnyArray(from_list[DType.int64]([10, 200, 3])), unnamed())
+    assert_equal(
+        String(s),
+        String("10     1\n200    2\n3      3\nName: v, dtype: int64"),
+        "widths differ",
+    )
+
+
+def test_an_unnamed_index_prints_no_line_above_the_listing() raises:
+    var s = int_column("v", [Int64(1), Int64(2)])
+    s.index = text_index(["p", "q"], None)
+    assert_equal(
+        String(s),
+        String("p    1\nq    2\nName: v, dtype: int64"),
+        "no name line",
+    )
+
+
+def test_a_range_that_was_named_still_prints_its_name() raises:
+    var s = int_column("v", [Int64(1), Int64(2)])
+    s.index = Index(0, 2, Optional[String]("ix"))
+    assert_equal(
+        String(s),
+        String("ix\n0    1\n1    2\nName: v, dtype: int64"),
+        "a named range",
+    )
+
+
+def test_a_range_that_does_not_start_at_zero_prints_its_own_labels() raises:
+    var s = int_column("v", [Int64(1), Int64(2)])
+    s.index = Index(7, 2, unnamed())
+    assert_equal(
+        String(s), String("7    1\n8    2\nName: v, dtype: int64"), "offset"
+    )
+
+
+def test_an_empty_column_says_nothing_about_its_labels() raises:
+    # pandas leaves the name line out here too, because there is no listing for
+    # it to sit above.
+    var s = int_column("v", List[Int64]())
+    s.index = Index(0, 0, Optional[String]("ix"))
+    assert_equal(
+        String(s), String("Series([], Name: v, dtype: int64)"), "nothing to say"
+    )
+
+
+def test_a_missing_label_prints_the_way_a_missing_value_does() raises:
+    var col = Array[DType.int64](2)
+    col.set_valid(0, Int64(10))
+    col.set_null(1)
+    var s = int_column("v", [Int64(1), Int64(2)])
+    s.index = Index(AnyArray(col^), unnamed())
+    assert_equal(
+        String(s),
+        String("10      1\n<NA>    2\nName: v, dtype: int64"),
+        "a null label",
+    )
+
+
+def test_the_label_elision_lines_up_with_the_row_elision() raises:
+    var values = List[Int64]()
+    var names = List[String]()
+    for i in range(12):
+        values.append(Int64(i))
+        names.append(String("r", i))
+    var s = int_column("v", values)
+    s.index = text_index(names, None)
+    var lines = String(s).split("\n")
+    assert_equal(len(lines), 12, "ten rows, the gap and the footer")
+    assert_true(has(String(lines[0]), "r0"), "the first label")
+    assert_true(has(String(lines[5]), "..."), "the gap is a gap on both sides")
+    assert_true(has(String(lines[6]), "r7"), "the tail resumes where rows do")
+    assert_true(has(String(lines[10]), "r11"), "the last label")
+
+
+def test_a_frame_prints_its_labels_down_the_left() raises:
+    var df = small_frame()
+    df.index = text_index(["p", "qq"], None)
+    assert_equal(
+        String(df),
+        String(
+            "     a    bb\np    1   1.5\nqq  20  <NA>\n\n[2 rows x 2 columns]"
+        ),
+        "labelled frame",
+    )
+
+
+def test_a_frame_puts_the_index_name_under_the_header() raises:
+    # The name row is blank in every column but the first, and pandas leaves the
+    # blanks in rather than trimming the line, so this one has trailing spaces.
+    var df = small_frame()
+    df.index = text_index(["p", "qq"], "k")
+    var lines = String(df).split("\n")
+    assert_equal(String(lines[0]), String("     a    bb"), "the header")
+    assert_equal(String(lines[1]), pad_right("k", 12), "the name")
+    assert_equal(String(lines[2]), String("p    1   1.5"), "the first row")
+
+
+def test_a_renderer_given_no_labels_prints_the_positions() raises:
+    # Every caller outside the frame layer passes no labels, and the fallback is
+    # what the whole file did before labels reached it.
+    var col = Array[DType.int64](2)
+    col.set_valid(0, Int64(1))
+    col.set_valid(1, Int64(2))
+    assert_equal(
+        render_column("v", AnyArray(col^), DisplayOptions()),
+        String("0    1\n1    2\nName: v, dtype: int64"),
+        "positions",
+    )
+
+
+def test_only_the_labels_that_will_be_printed_are_rendered() raises:
+    # The cost of rendering an index has to be the cost of the rows on screen
+    # and not the cost of the frame, or printing a large frame would be the
+    # slowest thing a prompt can do.
+    var cells = Index(1000000).display_cells(DisplayOptions())
+    assert_equal(len(cells.cells), 11, "ten labels and the gap")
+    assert_equal(cells.cells[0], String("0"), "the first label")
+    assert_equal(cells.cells[5], String("..."), "the gap")
+    assert_equal(cells.cells[10], String("999999"), "the last label")
+    assert_false(Bool(cells.name), "and the default range is unnamed")
 
 
 def main() raises:
