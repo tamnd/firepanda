@@ -44,6 +44,7 @@ from firepanda.exec import (
     Reduce,
     Scan,
     Sort,
+    Unique,
     Window,
     node_apply,
     node_computes_per_row,
@@ -389,6 +390,83 @@ def test_an_expansion_refuses_to_write_a_column_it_does_not_have() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="expand: column 7 is outside a schema of 2"):
         pipeline.add(Node(Expand(0, [7])))
+
+
+def shelf_frame() raises -> DataFrame:
+    """Six rows in chunks of two, three and one: a shop and what it held.
+
+    Shop 1 is written three times and shop 2 twice, and the repeats are split
+    over the chunk boundaries, so a distinct on the shop cannot answer from one
+    chunk. What each row held differs inside a group, so which row of a group
+    survived can be read off the answer.
+    """
+    var shop = ChunkedArray(LogicalType.INT64)
+    shop.append(numbers([1, 2]))
+    shop.append(numbers([1, 3, 2]))
+    shop.append(numbers([1]))
+    var held = ChunkedArray(LogicalType.INT64)
+    held.append(numbers([10, 20]))
+    held.append(numbers([30, 40, 50]))
+    held.append(numbers([60]))
+    var columns = List[ChunkedArray]()
+    columns.append(shop^)
+    columns.append(held^)
+    var fields = List[Field]()
+    fields.append(Field("shop", LogicalType.INT64))
+    fields.append(Field("held", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_unique_keeps_the_first_row_of_each_group() raises:
+    var pipeline = Pipeline(shelf_frame())
+    pipeline.add(Node(Unique([0])))
+    var out = pipeline^.run()
+
+    assert_equal(len(out), 3, "one row per shop")
+    var shops = read_back(out, "shop")
+    assert_equal(shops[0], 1, "the first shop")
+    assert_equal(shops[1], 2, "the second")
+    assert_equal(shops[2], 3, "the third")
+    # 10, 20 and 40 are the first rows of the three shops, so the rows that
+    # came out are whole rows and not a fold over each group.
+    var held = read_back(out, "held")
+    assert_equal(held[0], 10, "what the first shop held")
+    assert_equal(held[1], 20, "the second")
+    assert_equal(held[2], 40, "the third")
+
+
+def test_a_unique_on_a_column_with_no_repeats_keeps_everything() raises:
+    var pipeline = Pipeline(shelf_frame())
+    pipeline.add(Node(Unique([1])))
+    var out = pipeline^.run()
+
+    assert_equal(len(out), 6, "every row")
+    var held = read_back(out, "held")
+    for i in range(6):
+        assert_equal(held[i], Int64(10 * (i + 1)), "in the order they arrived")
+
+
+def test_a_unique_is_a_breaker() raises:
+    var node = Node(Unique([0]))
+    assert_true(node_is_breaker(node), "it holds every row it is given")
+    assert_false(node_is_row_local(node), "a group spans the chunks")
+
+
+def test_a_unique_refuses_a_column_it_does_not_have() raises:
+    var pipeline = Pipeline(shelf_frame())
+    with assert_raises(contains="unique: column 4 is outside a schema of 2"):
+        pipeline.add(Node(Unique([4])))
+
+
+def test_a_unique_refuses_the_same_column_twice() raises:
+    var pipeline = Pipeline(shelf_frame())
+    with assert_raises(contains="unique: column 0 was given twice"):
+        pipeline.add(Node(Unique([0, 0])))
+
+
+def test_a_unique_refuses_to_decide_on_nothing() raises:
+    with assert_raises(contains="unique: a distinct on no column at all"):
+        _ = Unique(List[Int]())
 
 
 def test_a_filter_keeps_the_chunk_boundaries() raises:

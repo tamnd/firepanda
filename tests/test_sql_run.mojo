@@ -603,14 +603,55 @@ def test_a_distinct_runs_after_the_where() raises:
     same(read_back(out, "shop"), [1, 2], "both shops sold a large order")
 
 
-def test_a_distinct_on_part_of_the_row_is_refused_by_name() raises:
-    # `DISTINCT ON` keeps whole rows chosen by some of their columns, and a
-    # group by carries its keys in front of what it reduced, so the answer would
-    # not be the columns in the order the query asked for them. The front end
-    # already has it in the unsupported table, so the refusal comes from there
-    # rather than from lowering, which is the earlier and better of the two.
-    with assert_raises(contains="does not lower DISTINCT ON yet"):
-        _ = run("SELECT DISTINCT ON (shop) shop, qty FROM sales", session())
+def test_a_distinct_on_keeps_the_first_row_of_each_key() raises:
+    # Ten rows and two shops, so this keeps two whole rows, and the quantity it
+    # carries out says which row of each shop survived.
+    var out = run("SELECT DISTINCT ON (shop) shop, qty FROM sales", session())
+    same(read_back(out, "shop"), [1, 2], "the shops")
+    same(read_back(out, "qty"), [5, 20], "the first row of each")
+
+
+def test_a_distinct_on_lets_the_order_by_choose_the_row() raises:
+    # The sort runs underneath, so the row that survives each shop is the one
+    # with the largest quantity rather than the first one written.
+    var out = run(
+        "SELECT DISTINCT ON (shop) shop, qty FROM sales ORDER BY qty DESC",
+        session(),
+    )
+    same(read_back(out, "shop"), [2, 1], "the busiest shop first")
+    same(read_back(out, "qty"), [40, 30], "the largest of each")
+
+
+def test_a_distinct_on_may_decide_on_a_column_it_does_not_return() raises:
+    var out = run("SELECT DISTINCT ON (shop) qty FROM sales", session())
+    assert_equal(len(out.schema), 1, "the shop was read and not returned")
+    same(read_back(out, "qty"), [5, 20], "the first row of each shop")
+
+
+def test_a_distinct_on_treats_a_null_key_as_a_value() raises:
+    # Two nulls in the marks, and they are the same key as each other, which is
+    # what SQL says for DISTINCT and is the opposite of a group by's rule.
+    var out = run("SELECT DISTINCT ON (mark) mark FROM gappy", session())
+    same(gapped(out, "mark"), [4, -1, 9, 1], "one row per mark, nulls counted")
+
+
+def test_a_distinct_on_inside_an_arm_stays_inside_it() raises:
+    var out = run(
+        (
+            "SELECT DISTINCT ON (shop) shop, qty FROM sales"
+            " UNION ALL SELECT DISTINCT ON (shop) shop, qty FROM sales"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2, 1, 2], "each arm kept two rows")
+    same(read_back(out, "qty"), [5, 20, 5, 20], "and the same two")
+
+
+def test_a_computed_distinct_on_key_is_refused() raises:
+    # A computed key is a column the row does not have, so the rows kept would
+    # not be the rows the plan said.
+    with assert_raises(contains="decides on a binary expression"):
+        _ = run("SELECT DISTINCT ON (qty % 2) qty FROM sales", session())
 
 
 def test_a_values_is_the_table_it_writes_out() raises:

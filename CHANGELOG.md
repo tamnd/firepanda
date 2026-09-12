@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DISTINCT ON
+
+`SELECT DISTINCT ON (shop) shop, qty FROM sales` keeps one whole row per shop, and the row it keeps is the first one the input handed over. It was refused by name, and the refusal said why: a plain `SELECT DISTINCT` lowers to a group by with every column as a key, and there every row of a group is the same row, so which one survives cannot be seen. Here it can, and a group by cannot answer it, because it carries its keys in front of what it reduced, which moves the columns the plan numbered, and because its first skips over a null.
+
+`Unique` is the operator that answers it. It holds every row it is given, stacks them when the input runs out, and asks the frame layer to drop the duplicates, which already reads each group's first row whole and already keeps a row whose key is null. `DataFrame.drop_duplicates` grew an overload that takes positions rather than names for it, since a frame that came out of a join can hold two columns called `qty` and a position is the only thing that says which one is meant. The cheaper streaming route stays for the whole row case, which is the common one.
+
+The ORDER BY runs underneath the distinct rather than over it. That is what DuckDB does and it is the only reading that makes the query useful: `ORDER BY qty DESC` with a `DISTINCT ON (shop)` means the largest order of each shop, so the sort chooses which row of each group survives as well as ordering the answer. A `DISTINCT ON` written inside one arm of a set operation stays inside that arm, since nothing can be written between an arm and the operation over it. The key may be a column the query does not return, which gets the same widening an `ORDER BY` on a column the query does not return already gets. A computed key is still refused by name.
+
 ## [0.6.82] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -41,7 +49,6 @@ The table is fine. At a hundred million rows the skewed column's probe lengths a
 What is not fine is the third phase. On the nearly unique column at a hundred million rows the group by spends 0.35 s hashing, 0.99 s probing and 1.53 s building the answer, and on the uniform column of the same shape it is 0.21, 1.17 and 4.84. The answer is more than half the query in both, and between 73.6 million groups and 100 million it grows by a factor of three for a third more groups, which is not a shape anything in the table explains. `group/frame_nearly_unique_key` is the new benchmark row that watches it: at a million rows it is 145 ms where `group/frame_one_key`, the same rows and the same reduction over a key with a thousand values, is 2.7 ms. `hash/factorize_skewed` and `hash/factorize_skewed_tail` are the factorize on its own over the same columns.
 
 Measured on an M4 laptop, which is not a publication machine, so read the ratios rather than the seconds.
-
 ## [0.6.81] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

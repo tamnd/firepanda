@@ -358,6 +358,55 @@ def test_an_order_by_adds_a_column_once_however_often_it_is_read() raises:
     )
 
 
+def test_a_distinct_on_sits_over_the_projection_it_was_written_in() raises:
+    assert_equal(
+        _plan("SELECT DISTINCT ON (a) a, b FROM t"),
+        "DISTINCT [a]\n  PROJECT [a, b]\n    SCAN t []\n",
+    )
+
+
+def test_a_distinct_on_runs_over_the_order_that_chose_the_row() raises:
+    # The sort is underneath, because an ORDER BY written with a DISTINCT ON
+    # picks which row of each group survives as well as ordering the answer.
+    assert_equal(
+        _plan("SELECT DISTINCT ON (a) a, b FROM t ORDER BY b DESC LIMIT 3"),
+        (
+            "LIMIT 3\n"
+            "  DISTINCT [a]\n"
+            "    SORT [b desc]\n"
+            "      PROJECT [a, b]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_a_distinct_on_may_decide_on_a_column_it_does_not_return() raises:
+    # The same widening an ORDER BY gets: the column is added below, read, and
+    # taken back off above, so it never leaves the query.
+    assert_equal(
+        _plan("SELECT DISTINCT ON (a) b FROM t"),
+        "PROJECT [b]\n  DISTINCT [a]\n    PROJECT [b, a]\n      SCAN t []\n",
+    )
+
+
+def test_a_distinct_on_in_an_arm_stays_inside_the_arm() raises:
+    # Nothing can be written between an arm and the set operation over it, so
+    # there is no order to run underneath and the arm applies its own.
+    assert_equal(
+        _plan(
+            "SELECT DISTINCT ON (a) a, b FROM t UNION ALL SELECT a, b FROM t"
+        ),
+        (
+            "UNION all\n"
+            "  DISTINCT [a]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+            "  PROJECT [a, b]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
 def test_an_order_by_over_a_distinct_may_only_name_what_it_returns() raises:
     with assert_raises(contains="there is no column named 'b'"):
         _ = _plan("SELECT DISTINCT a FROM t ORDER BY b")
