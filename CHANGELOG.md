@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.79] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three things an ORDER BY and a GROUP BY do in SQL and did not do here, none of which needed a node or a kernel. Two of them were refusals the planner made because of where a node had been put rather than because of anything it could not compute, and the third was a clause that was parsed and printed and then not read. That is the shape most of the SQL work has taken lately: the front end runs ahead of the planner, and the gap between them is where the refusals live.
+
 ### Added: an ORDER BY may name a column the query does not return
 
 `SELECT name FROM t ORDER BY score DESC LIMIT 10` was refused, because the sort was built over the projection and the projection had already dropped the column the sort wanted. So was `SELECT a AS z FROM t ORDER BY a`, where the name the sort wrote is the one the projection renamed away. SQL allows both and now so does this.
@@ -6256,7 +6262,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.78...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.79...HEAD
+[0.6.79]: https://github.com/tamnd/firepanda/releases/tag/v0.6.79
 [0.6.78]: https://github.com/tamnd/firepanda/releases/tag/v0.6.78
 [0.6.77]: https://github.com/tamnd/firepanda/releases/tag/v0.6.77
 [0.6.76]: https://github.com/tamnd/firepanda/releases/tag/v0.6.76
