@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a grouped reduction whose state is the values holds the column too
+
+The other half of what 0.6.74 did without a key. `SELECT shop, count(DISTINCT qty) FROM sales GROUP BY shop` and `SELECT shop, median(qty) FROM sales GROUP BY shop` answered "nunique cannot be computed a chunk at a time" and now answer per group.
+
+`Group` holds the same way `Reduce` does, with one addition: the key columns are held beside the values, because a reduction over a group needs to know which rows are in it. At `finish` the held keys are grouped once, each held column is reduced with those ordinals, and the answers go into the output beside the folded ones.
+
+The keys are grouped a second time rather than reused, and that is the one decision worth reading. There are two folding routes with two different ideas of an ordinal, `_push` keeps a map that lasts the whole query and `_absorb` makes a new table per chunk, and `_demote` can swap one for the other in the middle of a query when a null key turns up. What both of them agree on is the group order the output promises, which is the order the groups were first seen, and that is exactly what a group by over the held keys gives back. So one pass over the kept rows is correct whichever route the folds took, and `_settle` checks the two group counts against each other rather than assuming.
+
+Memory is the same trade as before and it is said in the docstring. The key columns and the columns a non folding reduction reads are resident for the length of the run, and nothing else is, so `sum(x), median(y) GROUP BY k` holds `k` and `y` and still folds `x` into one row per group a chunk at a time.
+
+A grouped `corr` or `cov` is still refused, now saying it reads two columns where a reduction here names one, which is the same sentence `Reduce` gives.
+
+This closes the operator half of #617. What is left in it is #610, a set shaped table so a distinct count holds a set rather than the values.
+
 ## [0.6.74] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
