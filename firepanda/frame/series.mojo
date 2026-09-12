@@ -429,7 +429,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         return out^
 
     def reindex(
-        self, labels: AnyArray, fill_value: Optional[Value] = None
+        self,
+        labels: AnyArray,
+        fill_value: Optional[Value] = None,
+        widen: Bool = True,
     ) raises -> Self:
         """Returns the series on a set of labels, whether it has them or not.
 
@@ -455,6 +458,8 @@ struct Series(Copyable, Movable, Sized, Writable):
                 does not have, which is the case this exists for.
             fill_value: What to put in a row whose label was not found, or
                 nothing to leave it missing.
+            widen: Whether a label that was not found widens the column's type
+                the way pandas' own `reindex` widens it.
 
         Returns:
             A series of `len(labels)` rows carrying those labels.
@@ -466,11 +471,16 @@ struct Series(Copyable, Movable, Sized, Writable):
                 text and the column is not or the other way round.
         """
         return self.reindex(
-            Index(AnyArray(copy=labels), self.index.name.copy()), fill_value
+            Index(AnyArray(copy=labels), self.index.name.copy()),
+            fill_value,
+            widen,
         )
 
     def reindex(
-        self, var target: Index, fill_value: Optional[Value] = None
+        self,
+        var target: Index,
+        fill_value: Optional[Value] = None,
+        widen: Bool = True,
     ) raises -> Self:
         """Returns the series on an index, whether it has those labels or not.
 
@@ -485,6 +495,13 @@ struct Series(Copyable, Movable, Sized, Writable):
             target: The index the result should have.
             fill_value: What to put in a row whose label was not found, or
                 nothing to leave it missing.
+            widen: Whether a label that was not found widens the column's type.
+                True is pandas' answer and is what a caller who asked for a
+                reindex gets. False is for a caller lining one column up against
+                another's labels on the way into an operation that is going to
+                put the values back into a column whose type has not changed,
+                where a gap is a gap in the type that is already there. `fillna`
+                is that caller.
 
         Returns:
             A series of `len(target)` rows carrying those labels.
@@ -527,7 +544,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 ),
                 positions,
             )
-        elif absent > 0:
+        elif absent > 0 and widen:
             gathered = widen_for_missing(take_any(self.values, positions))
         else:
             gathered = take_any(self.values, positions)

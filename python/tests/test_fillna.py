@@ -26,6 +26,13 @@ def frame(module):
     return module.DataFrame({"i": [1, None, 3], "f": [1.5, None, 3.5], "s": ["a", None, "c"]})
 
 
+def labelled(module, labels, values):
+    """A column carrying labels, built the way each library builds one."""
+    if module is pd:
+        return pd.Series(values, index=labels)
+    return module.DataFrame({"k": labels, "v": values}).set_index("k")["v"]
+
+
 def test_a_value_fills_the_column_it_was_offered_for(firepanda):
     assert frame(firepanda).fillna({"f": 0.0})["f"].tolist() == [1.5, 0.0, 3.5]
 
@@ -181,6 +188,13 @@ def test_a_column_with_nothing_missing_is_untouched_whatever_was_offered(firepan
     assert answered["s"].tolist() == ["a", "b", "c"]
 
 
+def test_a_nan_is_the_gap_that_the_validity_bits_do_not_show(firepanda):
+    """A column the bits call complete, with a NaN in it, is filled anyway."""
+    made = firepanda.DataFrame({"f": [float("nan"), 1.0, 2.0]})
+    assert made.fillna(9.0)["f"].tolist() == [9.0, 1.0, 2.0]
+    assert made["f"].fillna(9.0).tolist() == [9.0, 1.0, 2.0]
+
+
 def test_a_complete_column_on_its_own_is_untouched_too(firepanda):
     assert firepanda.Series([1.0, 2.0]).fillna("x").tolist() == [1.0, 2.0]
 
@@ -213,16 +227,112 @@ def test_the_second_axis_of_a_frame_is_the_same_answer(firepanda):
     assert frame(firepanda).fillna({"i": 0}, axis=1)["i"].tolist() == [1, 0, 3]
 
 
-def test_a_dict_on_a_column_maps_labels_and_is_refused(firepanda):
-    with pytest.raises(NotImplementedError, match="dict value"):
-        firepanda.Series([1.0, None]).fillna({0: 1.0})
+def test_a_dict_on_a_column_maps_row_labels(firepanda):
+    """The one shape that means something different on a column than on a frame."""
+    assert firepanda.Series([1.0, None, None]).fillna({1: 5.0}).tolist() == [1.0, 5.0, None]
 
 
-def test_a_fallback_that_carries_rows_is_refused(firepanda):
-    with pytest.raises(NotImplementedError, match="value is not supported yet"):
-        firepanda.Series([1.0, None]).fillna(firepanda.Series([9.0, 9.0]))
-    with pytest.raises(NotImplementedError, match="value is not supported yet"):
-        frame(firepanda).fillna(pd.Series({"i": 1}))
+def test_a_dict_key_the_column_does_not_have_fills_nothing(firepanda):
+    assert firepanda.Series([1.0, None]).fillna({7: 5.0}).tolist() == [1.0, None]
+
+
+def test_a_dict_with_nothing_in_it_is_nothing_to_do(firepanda):
+    assert firepanda.Series([1.0, None]).fillna({}).tolist() == [1.0, None]
+
+
+def test_a_column_is_lined_up_by_label_and_not_by_position(firepanda):
+    made = labelled(firepanda, ["a", "b", "c"], [1.0, None, None])
+    other = labelled(firepanda, ["c", "b", "a"], [7.0, 8.0, 9.0])
+    assert made.fillna(other).tolist() == [1.0, 8.0, 7.0]
+
+
+def test_a_label_the_fallback_does_not_have_stays_missing(firepanda):
+    made = labelled(firepanda, ["a", "b", "c"], [1.0, None, None])
+    other = labelled(firepanda, ["z", "b"], [7.0, 8.0])
+    assert made.fillna(other).tolist() == [1.0, 8.0, None]
+
+
+def test_a_fallback_row_with_nothing_in_it_fills_nothing(firepanda):
+    made = labelled(firepanda, ["a", "b"], [1.0, None])
+    assert made.fillna(labelled(firepanda, ["a", "b"], [None, None])).tolist() == [1.0, None]
+
+
+def test_a_column_handed_to_a_frame_names_columns_rather_than_rows(firepanda):
+    """The shape worth reading twice, and pandas reads it the same way."""
+    answered = frame(firepanda).fillna(labelled(firepanda, ["i", "f"], [9.0, 0.0]))
+    assert answered["i"].tolist() == [1, 9, 3]
+    assert answered["f"].tolist() == [1.5, 0.0, 3.5]
+    assert answered["s"].tolist() == ["a", None, "c"]
+
+
+def test_a_frame_handed_to_a_frame_lines_up_on_both_axes(firepanda):
+    made = firepanda.DataFrame({"a": [1.0, None], "b": [None, 2.0]})
+    answered = made.fillna(firepanda.DataFrame({"a": [0.0, 0.0]}))
+    assert answered["a"].tolist() == [1.0, 0.0]
+    assert answered["b"].tolist() == [None, 2.0]
+
+
+def test_a_frame_handed_to_a_column_is_refused_in_pandas_words(firepanda):
+    with pytest.raises(TypeError, match="must be a scalar, dict or Series"):
+        firepanda.Series([1.0, None]).fillna(firepanda.DataFrame({"a": [1.0, 2.0]}))
+
+
+def test_a_fallback_of_whole_numbers_fills_a_column_of_fractions(firepanda):
+    made = labelled(firepanda, ["a", "b"], [1.5, None])
+    assert made.fillna(labelled(firepanda, ["a", "b"], [9, 9])).tolist() == [1.5, 9.0]
+
+
+def test_a_fraction_cannot_go_into_a_column_of_whole_numbers(firepanda):
+    made = labelled(firepanda, ["a", "b"], [1, None])
+    with pytest.raises(TypeError, match="cannot safely cast non-equivalent"):
+        made.fillna(labelled(firepanda, ["a", "b"], [2.0, 2.5]))
+
+
+def test_a_fraction_in_a_row_nobody_reads_is_nobody_s_business(firepanda):
+    """pandas judges a fallback by the rows it takes out of it, and so does this."""
+    made = labelled(firepanda, ["a", "b"], [1, None])
+    assert made.fillna(labelled(firepanda, ["a", "b"], [2.5, 2.0])).tolist() == [1, 2]
+
+
+def test_a_word_that_is_not_a_number_says_what_it_could_not_read(firepanda):
+    made = labelled(firepanda, ["a", "b"], [1, None])
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        made.fillna(labelled(firepanda, ["a", "b"], ["2", "x"]))
+
+
+def test_a_column_of_numbers_cannot_fill_a_column_of_words(firepanda):
+    """The same refusal the scalar half makes, for the same missing type."""
+    made = labelled(firepanda, ["a", "b"], ["x", None])
+    with pytest.raises(TypeError, match="Invalid fill column of dtype 'int64'"):
+        made.fillna(labelled(firepanda, ["a", "b"], [1, 2]))
+
+
+def test_a_category_column_takes_words_from_its_own_list(firepanda):
+    made = firepanda.Series(["b", None, "c"]).astype("category")
+    answered = made.fillna(firepanda.Series(["c", "c", "c"]))
+    assert answered.tolist() == ["b", "c", "c"]
+    assert answered.dtype == "category"
+
+
+def test_a_word_off_the_list_in_a_row_that_is_read_is_refused(firepanda):
+    made = firepanda.Series(["b", None, "c"]).astype("category")
+    with pytest.raises(TypeError, match="Cannot setitem on a Categorical"):
+        made.fillna(firepanda.Series(["c", "nope", "c"]))
+
+
+def test_a_category_fallback_has_to_carry_the_same_list(firepanda):
+    made = firepanda.Series(["b", None]).astype("category")
+    other = firepanda.Series(["x", "x"]).astype("category")
+    with pytest.raises(TypeError, match="without identical categories"):
+        made.fillna(other)
+
+
+def test_a_fallback_whose_labels_repeat_has_no_one_row_to_answer_with(firepanda):
+    """pandas answers with the second of them. The alignment here refuses, in
+    the sentence pandas itself gives when a label in two rows is looked up."""
+    made = labelled(firepanda, ["a", "b"], [1.0, None])
+    with pytest.raises(ValueError, match="cannot reindex on an axis with duplicate labels"):
+        made.fillna(labelled(firepanda, ["a", "a"], [9.0, 9.0]))
 
 
 def test_the_original_is_untouched(firepanda):
@@ -248,6 +358,12 @@ def test_both_libraries_answer_the_same_things(firepanda):
         lambda d: d["s"].astype("category").fillna("a").tolist(),
         lambda d: d["f"].fillna(float("nan")).isna().tolist(),
         lambda d: list(d["s"].astype("category").fillna("a").cat.categories),
+        lambda d: d["f"].fillna({1: 0.0}).tolist(),
+        lambda d: d["f"].fillna(type(d["f"])([7.0, 7.0, 7.0])).tolist(),
+        lambda d: d.fillna(type(d)({"f": [7.0, 7.0, 7.0]}))["f"].tolist(),
+        lambda d: d.fillna(type(d)({"f": [7.0, 7.0, 7.0]}))["s"].isna().tolist(),
+        lambda d: d["s"].astype("category").fillna(d["s"].fillna("a")).tolist(),
+        lambda d: type(d)({"f": [float("nan"), 1.0]}).fillna(9.0)["f"].tolist(),
     ]
     for ask in questions:
         assert ask(frame(firepanda)) == ask(frame(pd))

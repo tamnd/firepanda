@@ -216,7 +216,7 @@ class Series:
     def renamed_axis(self, name: str | None) -> Series:
         """The series with its row labels under a different level name."""
         ...
-    def reindex(self, labels: object, fill_value: object) -> Series:
+    def reindex(self, labels: object, fill_value: object, widen: bool) -> Series:
         """The series on a set of labels, whether it has them or not."""
         ...
     def reindex_like(self, index: object) -> Series:

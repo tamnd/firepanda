@@ -522,6 +522,7 @@ struct PySeries(Movable, Writable):
         py_self: PythonObject,
         labels: PythonObject,
         fill_value: PythonObject,
+        widen: PythonObject,
     ) raises -> PythonObject:
         """Puts the series on a set of labels, whether it has them or not.
 
@@ -535,6 +536,10 @@ struct PySeries(Movable, Writable):
             labels: The labels the result should have, in order.
             fill_value: What to put in a row whose label was not found, or
                 `None` to leave it missing.
+            widen: Whether a label that was not found widens the column's type
+                the way pandas' `reindex` does. The method above the boundary
+                passes True and an alignment on the way into another operation
+                passes False.
 
         Returns:
             A new series of one row per label.
@@ -545,7 +550,9 @@ struct PySeries(Movable, Writable):
             return PythonObject(
                 alloc=Self(
                     ArcPointer(
-                        Self._held(py_self)[].series[].reindex(wanted, value)
+                        Self._held(py_self)[]
+                        .series[]
+                        .reindex(wanted, value, flag(widen, "widen"))
                     )
                 )
             )
