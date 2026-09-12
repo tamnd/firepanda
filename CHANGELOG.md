@@ -36,6 +36,7 @@ Memory is the same trade as before and it is said in the docstring. The key colu
 A grouped `corr` or `cov` is still refused, now saying it reads two columns where a reduction here names one, which is the same sentence `Reduce` gives.
 
 This closes the operator half of #617. What is left in it is #610, a set shaped table so a distinct count holds a set rather than the values.
+
 ### Added: `= ANY` and `<> ALL` over a subquery, which are the two that are an IN
 
 `SELECT qty FROM sales WHERE qty = ANY (SELECT band FROM tiers)` was refused, and so was `qty <> ALL (SELECT band FROM gaps)`. Both run now, and neither is new machinery. `x = ANY (S)` is true when some row of `S` equals `x`, which is the whole of `x IN (S)`, and `x <> ALL (S)` is true when no row does, which is the whole of `x NOT IN (S)`. So they are read as the `IN` they are and go to the same semi join and the same mark join rather than being lowered a second time.
