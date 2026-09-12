@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a distinct count with a lot of distinct values uses every core
+
+A distinct count holds a hash table and nothing else, which is the whole reason it exists, and until now splitting one across workers meant a table per worker. On a column whose values nearly all differ that is a copy of the key set per core, so the rule that chooses the split refused it and handed the column to one core. That is ClickBench q3 and q4, where `UserID` has about one distinct value for every six rows. Ten million rows of that shape counted in 49.7 milliseconds on one core, which is slower than the factorize the count had just replaced.
+
+Workers now own a range of the hash space instead of a range of the rows. A block of rows is hashed in parallel, each hash is scattered into the partition that owns it, and each partition's table is built by the one worker that owns it, so no two tables can hold the same key, the tables together hold one copy of the key set however many workers there are, and the answer is their sizes added up rather than a fold. The same column counts in 29.6 milliseconds. In the benchmark suite at ten million rows, `reduce/nunique_wide` was 65.2 milliseconds against `reduce/nunique_factorized`'s 60.8 and is now 46.6 against 62.0, so the count is the faster of the two rather than the slower.
+
+What it costs is the staging the scatter writes into, and that is a fixed two megabytes whatever the column's height, because the scatter runs a block at a time and the tables carry over from one block to the next. Only the hash is scattered and not the row it came from, because a count never asks which row a key came from, which is eight bytes a row against the partitioned factorize's twelve. Peak resident set on that column goes from 158.8 megabytes to 161.0, the difference being the staging and the rounding on the tables.
+
+The rule that refuses the old split is unchanged and refuses for the same reason it always did. Its refusal is now the signal to take this route instead of giving up and running on one core.
+
 ### Added: DataFrame.fillna and Series.fillna
 
 The coalesce these two are made of has been in the core since the fill family was written, and neither of the two calls that reach it had a binding, so `fillna` was the one member of that family that could be reached from Mojo and from nowhere else. It has the pandas 3.0 signature, which is `value` followed by `axis`, `inplace` and `limit`, and `method` and `downcast` are not declared because pandas 3.0 has deleted them.

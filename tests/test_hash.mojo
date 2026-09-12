@@ -41,6 +41,7 @@ from firepanda.hash import (
 )
 from firepanda.exec import MORSEL_ROWS, worker_count
 from firepanda.hash.factorize import (
+    COUNT_BLOCK_ROWS,
     DIRECT_SHARE,
     MERGE_SERIAL_ENTRIES,
     PARALLEL_MIN_SLICE,
@@ -55,6 +56,7 @@ from firepanda.hash.factorize import (
     _count_capacity,
     _count_workers,
     _distinct_hashed_parallel,
+    _distinct_hashed_partitioned,
     _distinct_hashed_serial,
     _estimate_groups,
     _factorize_direct_parallel,
@@ -63,6 +65,7 @@ from firepanda.hash.factorize import (
     _factorize_hashed_partitioned,
     _factorize_hashed_serial,
     _parallel_workers,
+    _projected_groups,
 )
 from firepanda.hash.table import (
     SIZING_EARLY,
@@ -1594,6 +1597,11 @@ def same_counts(col: Array[DType.int64], workers: Int, what: String) raises:
         wanted,
         "parallel count, " + what,
     )
+    assert_equal(
+        _distinct_hashed_partitioned(col, DEFAULT_SEED, workers),
+        wanted,
+        "partitioned count, " + what,
+    )
 
 
 def test_the_hashed_count_agrees_with_the_factorize_it_replaces() raises:
@@ -1737,6 +1745,45 @@ def test_the_dispatched_count_agrees_with_the_factorize() raises:
 
 def test_the_dispatched_count_of_an_empty_column_is_zero() raises:
     assert_equal(distinct_hashed(Array[DType.int64](0)), 0)
+
+
+def test_a_high_cardinality_column_takes_the_partitioned_count() raises:
+    """The column `_count_workers` refuses, dispatched and checked.
+
+    A key every six rows past `PARALLEL_ROWS` is a table far too large for the
+    slice route's budget, so `_count_workers` gives one worker and the dispatch
+    hands the column to the partitioned route instead. The assertion about the
+    worker count is what makes this a test of that route rather than a second
+    test of the serial one.
+    """
+    var n = PARALLEL_ROWS + 1001
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i // 6) * 1_000_000_007
+    var groups = _projected_groups(col, DEFAULT_SEED, n)
+    assert_equal(_count_workers(groups, n), 1, "the slice route is refused")
+    assert_equal(distinct_hashed(col), len(factorize(col).firsts))
+
+
+def test_the_partitioned_count_crosses_more_than_one_block() raises:
+    """A column taller than `COUNT_BLOCK_ROWS`, so the tables carry over.
+
+    The scatter buffers are reused block to block and the tables are not, and a
+    column of one block would not tell the difference between that and either
+    one being rebuilt each time.
+    """
+    var n = COUNT_BLOCK_ROWS * 2 + 7919
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i // 97) * 2_654_435_761
+    for i in range(0, n, 101):
+        col.set_null(i)
+    assert_true(n > COUNT_BLOCK_ROWS * 2, "more than two blocks")
+    assert_equal(
+        _distinct_hashed_partitioned(col, DEFAULT_SEED, 4),
+        len(factorize(col).firsts),
+        "every block's keys are in the same tables",
+    )
 
 
 def main() raises:

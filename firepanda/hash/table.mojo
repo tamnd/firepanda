@@ -968,6 +968,53 @@ struct HashTable(Movable, Sized):
 
         self._count = found
 
+    def tally_run(mut self, keys: Buffer, at: Int, count: Int):
+        """Inserts a contiguous run of keys that are already hashes.
+
+        `tally_keys` without the indirection. It exists for the partitioned
+        distinct count, which scatters each row's hash into the partition that
+        owns it and so has each partition's keys laid end to end before the
+        build starts. There is no list of positions to read because the scatter
+        already put them where they go, and an extra load and a dependent
+        address per key is most of what a probe this tight is doing.
+
+        Args:
+            keys: One hash per entry.
+            at: Where in `keys` this run starts.
+            count: How many keys the run holds.
+        """
+        var hash = keys.bitcast[DType.uint64]().unsafe_offset(at)
+        var slots = self._slots.mut_bitcast[DType.uint64]()
+        var mask = self._mask
+        var capacity = self._capacity
+        var found = self._count
+
+        for j in range(count):
+            if (found + 1) * 2 > capacity:
+                self._count = found
+                self._grow()
+                slots = self._slots.mut_bitcast[DType.uint64]()
+                mask = self._mask
+                capacity = self._capacity
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var to = wanted & mask
+            while True:
+                var slot = Int(to) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_write(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_write(
+                        UInt64(found + 1)
+                    )
+                    found += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    break
+                to = (to + 1) & mask
+
+        self._count = found
+
     def tally_keys(mut self, keys: Buffer, order: Buffer, at: Int, count: Int):
         """Inserts keys that came out of other tables' slots.
 
