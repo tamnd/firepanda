@@ -772,13 +772,19 @@ def _better[
     return a if a > b else b
 
 
-def _truthy[dt: DType](value: Scalar[dt]) -> Bool:
+def truthy[dt: DType](value: Scalar[dt]) -> Bool:
     """Says whether one value counts as true.
 
     The rule is numpy's and therefore pandas': anything that is not zero is
     true. Booleans are the same rule said in one fewer step, and they are
     written out rather than compared against a zero because a bool has no zero
     to be compared against without going through an integer first.
+
+    This has no underscore on it because `_truth_core` in
+    `firepanda/kernel/group.mojo` asks the same question one group at a time,
+    and a whole column `any` and a grouped `any` disagreeing about what counts
+    as true would be a difference nobody could explain. One function read from
+    both places is the only way to be sure of that.
 
     Args:
         value: The value.
@@ -935,7 +941,7 @@ def _truth_range[
                     if isnan(value):
                         i += 1
                         continue
-                var here = _truthy(value)
+                var here = truthy(value)
                 comptime if want_all:
                     if not here:
                         return False
@@ -952,7 +958,7 @@ def _truth_range[
             comptime if dt.is_floating_point():
                 if isnan(value):
                     continue
-            var here = _truthy(value)
+            var here = truthy(value)
             comptime if want_all:
                 if not here:
                     return False

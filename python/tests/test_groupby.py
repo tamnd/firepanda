@@ -45,7 +45,7 @@ DATA: dict[str, Any] = {"k": KEYS, "v": VALUES, "w": OTHER}
 """Floats rather than integers for the same reason `test_reductions.py` gives.
 
 Four rows per group, which is what `skew` needs before it has an answer at all,
-so the fifteen can be tested as one list rather than with an exception in it.
+so the eighteen can be tested as one list rather than with an exception in it.
 """
 
 OVER_A_FRAME = [
@@ -63,8 +63,11 @@ OVER_A_FRAME = [
     "sem",
     "skew",
     "quantile",
+    "prod",
+    "any",
+    "all",
 ]
-"""The fourteen that answer a frame. `size` answers a column and is its own test."""
+"""The seventeen that answer a frame. `size` answers a column and is its own test."""
 
 
 def same_values(mine: Any, theirs: Any) -> None:
@@ -138,7 +141,7 @@ def test_size_without_the_index_is_a_frame_with_a_count_column(firepanda: Module
 
 
 @needs_pandas
-@pytest.mark.parametrize("name", ["sum", "mean", "count", "nunique", "std"])
+@pytest.mark.parametrize("name", ["sum", "mean", "count", "nunique", "std", "prod", "all"])
 def test_one_column_of_a_grouping_answers_a_column(firepanda: ModuleType, name: str) -> None:
     """`df.groupby(k)[v]` reduces the one column and hands back a column named after it."""
     import pandas as pd
@@ -293,6 +296,10 @@ def test_a_declared_grouping_argument_that_is_not_implemented_refuses(
         ("nunique", {"dropna": False}, "dropna"),
         ("quantile", {"interpolation": "lower"}, "interpolation"),
         ("quantile", {"q": [0.1, 0.9]}, "single quantile"),
+        ("prod", {"min_count": 1}, "min_count"),
+        ("prod", {"numeric_only": True}, "numeric_only"),
+        ("any", {"skipna": False}, "skipna"),
+        ("all", {"skipna": False}, "skipna"),
     ],
 )
 def test_a_declared_reduction_argument_that_is_not_implemented_refuses(
@@ -304,6 +311,92 @@ def test_a_declared_reduction_argument_that_is_not_implemented_refuses(
         getattr(grouped, call)(**arguments)
     with pytest.raises(NotImplementedError, match=expected):
         getattr(grouped["v"], call)(**arguments)
+
+
+@needs_pandas
+def test_a_grouped_product_of_a_group_with_nothing_in_it_is_one(
+    firepanda: ModuleType,
+) -> None:
+    """The one row where a product and a sum part company.
+
+    A missing value is a zero underneath, which is what a sum wants it to be and
+    is the one number a product must not read, so a group of nothing but gaps
+    would come out zero if the product were written the way the sum is. pandas
+    answers one, because a product over no values is one, and so does this.
+    """
+    import pandas as pd
+
+    data = {"k": ["a", "a", "b", "b"], "v": [2.0, 3.0, None, None]}
+    mine = firepanda.DataFrame(data).groupby("k").prod()
+    theirs = pd.DataFrame(data).groupby("k").prod()
+    assert mine["v"].tolist() == theirs["v"].tolist() == [6.0, 1.0]
+
+
+@needs_pandas
+def test_a_grouped_truth_reads_a_zero_as_false_and_a_gap_as_neither(
+    firepanda: ModuleType,
+) -> None:
+    """Three groups that separate the three answers a truth reduction can give.
+
+    Group `a` holds a number and a zero, `b` holds nothing but gaps, and `c`
+    holds two numbers. A gap is neither true nor false and is stepped over, so
+    `b` falls back on the identity of whichever question was asked, which is
+    False for `any` and True for `all`.
+    """
+    import pandas as pd
+
+    data = {"k": ["a", "a", "b", "b", "c", "c"], "v": [0.0, 1.0, None, None, 2.0, 3.0]}
+    for name, expected in (("any", [True, False, True]), ("all", [False, True, True])):
+        mine = getattr(firepanda.DataFrame(data).groupby("k"), name)()
+        theirs = getattr(pd.DataFrame(data).groupby("k"), name)()
+        assert mine["v"].tolist() == theirs["v"].tolist() == expected
+
+
+@needs_pandas
+def test_a_grouped_truth_asks_a_text_column_whether_it_is_empty(
+    firepanda: ModuleType,
+) -> None:
+    """Which is the rule Python has for a string and the one pandas keeps.
+
+    `any` and `all` are the only two of the eighteen that read a column of words
+    and answer a number, so they are the only two that go over a whole frame
+    without the text column having to be taken out of it first.
+    """
+    import pandas as pd
+
+    data = {"k": ["a", "a", "b", "b"], "t": ["oslo", "", "", ""]}
+    mine = firepanda.DataFrame(data).groupby("k").any()
+    theirs = pd.DataFrame(data).groupby("k").any()
+    assert mine["t"].tolist() == theirs["t"].tolist() == [True, False]
+
+
+@needs_pandas
+def test_a_grouped_product_of_words_is_refused(firepanda: ModuleType) -> None:
+    """Because multiplying two strings together is not an operation in pandas
+    either, and the refusal names the column type rather than the reduction."""
+    import pandas as pd
+
+    data = {"k": ["a", "a"], "t": ["oslo", "lima"]}
+    with pytest.raises(Exception, match="string column"):
+        firepanda.DataFrame(data).groupby("k").prod()
+    with pytest.raises(TypeError):
+        pd.DataFrame(data).groupby("k").prod()
+
+
+def test_the_product_takes_a_min_count_of_zero_and_the_extremes_do_not(
+    firepanda: ModuleType,
+) -> None:
+    """pandas defaults this to zero for the two that combine values with an
+    operator and to minus one for the four that pick one out, so the value that
+    means nobody asked for anything is not the same number in both places and
+    passing the other one has to refuse rather than pass silently."""
+    grouped = firepanda.DataFrame(DATA).groupby("k")
+    grouped.prod(min_count=0)
+    with pytest.raises(NotImplementedError, match="min_count"):
+        grouped.prod(min_count=-1)
+    grouped.min(min_count=-1)
+    with pytest.raises(NotImplementedError, match="min_count"):
+        grouped.min(min_count=0)
 
 
 @pytest.mark.parametrize("name", ["groups", "indices", "get_group", "apply", "agg", "transform"])

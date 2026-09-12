@@ -117,7 +117,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
-from firepanda.kernel.agg import max_of
+from firepanda.kernel.agg import max_of, truthy
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.nulls import present_bitmap_of
 
@@ -602,10 +602,10 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Which reduction a grouped aggregation should run.
 
     This is a runtime tag rather than a parameter because the erased path
-    instantiates its body once per dtype. Thirteen single column entry points
-    over twelve dtypes would be a hundred and fifty six instantiations of one
-    loop; one entry point carrying a tag is twelve instantiations of thirteen
-    loops, which is the same code with one dispatch chain instead of thirteen.
+    instantiates its body once per dtype. Eighteen single column entry points
+    over twelve dtypes would be two hundred and sixteen instantiations of one
+    loop; one entry point carrying a tag is twelve instantiations of eighteen
+    loops, which is the same code with one dispatch chain instead of eighteen.
     `CORR` and `COV` read a pair of columns and so are not in that chain at all,
     for a reason `aggregate_group_pair_any` gives.
 
@@ -1219,6 +1219,185 @@ def _sum_core[
     return _merge_sums(partials, groups, workers)
 
 
+def group_prod[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    accumulator(dt)
+]:
+    """Multiplies together the values in each group that are there.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` products in the accumulator dtype, every one of
+        them present. A group with no non-null values multiplies out to one,
+        matching pandas at its default `min_count` of zero.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
+    """
+    return _prod_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+    )
+
+
+def _factor[
+    dt: DType, //, origin: ImmOrigin, acc: DType
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    i: Int,
+) -> Scalar[acc]:
+    """The value at row `i` as a product sees it, which is one where it is not
+    there.
+
+    This is `_addend` with the other identity, and the one place the two differ
+    is the reason a product cannot take the shortcut a sum takes. A null holds a
+    zero, which is exactly what a sum wants a missing row to contribute and is
+    the one number a product must never see, so this reads the bitmap where
+    `_addend` gets to ignore it. A NaN is missing on a float column and turns
+    into a one here for the same reason it turns into a zero there.
+    """
+    if not _there(source, validity, has_null, i):
+        return Scalar[acc](1)
+    return source.unsafe_offset(i).unsafe_load().cast[acc]()
+
+
+def _ones[acc: DType](count: Int) -> Array[acc]:
+    """A column of `count` ones, every one of them present.
+
+    Where a product starts, and the reason a grouped product needs no seen table.
+    A group no row ever reached holds the identity, and the identity is already
+    the right answer rather than a placeholder standing in for one.
+    """
+    comptime width = simd_width_of[acc]()
+
+    var out = Array[acc](overwritten=count)
+    var at = out.unsafe_mut_ptr()
+    var head = 0
+    while head + width <= count:
+        at.unsafe_offset(head).unsafe_store(SIMD[acc, width](Scalar[acc](1)))
+        head += width
+    while head < count:
+        at.unsafe_offset(head).unsafe_store(Scalar[acc](1))
+        head += 1
+    return out^
+
+
+def _prod_core[
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[acc]:
+    """Multiplies every row into its group, with one for the rows that are not
+    there.
+
+    `_sum_core` with the operator changed and two things it does left out. There
+    is no partitioned route, because the partitioned route exists for the
+    reduction that turned up in a profile with more groups than cache and that
+    reduction is the sum. There is no `as_float` parameter, because nothing is
+    built out of a product the way a mean is built out of a sum, so the natural
+    accumulator is the only one anybody asks for. A product over int64 wraps in
+    int64, which is what pandas does for the same reason its sum does.
+
+    What it does not share with `_extreme_core` is the seen table, and that is
+    worth saying because the two look alike otherwise. An extreme has to know
+    which groups were reached, since the identity it started from is a real value
+    of the dtype and would read as an answer. A product's identity is an answer:
+    a product over nothing is one, in pandas and in arithmetic, so the fill is
+    already correct for a group that no row reached and every group comes out
+    present.
+    """
+    var n = len(codes)
+    var workers = _private_workers[acc](n, groups)
+
+    if workers <= 1:
+        var out = _ones[acc](groups)
+        var totals = out.unsafe_mut_ptr()
+        var at = codes.unsafe_ptr()
+        for i in range(n):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                * _factor[acc=acc](source, validity, has_null, i)
+            )
+        return out^
+
+    var bounds = _row_bounds(n, workers)
+    var partials = _ones[acc](groups * workers)
+
+    def one(w: Int) raises {mut partials, imm}:
+        var totals = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                * _factor[acc=acc](source, validity, has_null, i)
+            )
+
+    parallel_for(one, workers)
+    return _merge_products(partials, groups, workers)
+
+
+def _merge_products[
+    acc: DType
+](partials: Array[acc], groups: Int, workers: Int) -> Array[acc]:
+    """Multiplies the private tables together into one.
+
+    `_merge_sums` with the other operator and the other starting value, and it
+    is the same vectorized walk of two contiguous arrays for the same reason.
+
+    Args:
+        partials: One table per worker, laid end to end.
+        groups: How wide one table is.
+        workers: How many tables there are.
+
+    Parameters:
+        acc: The accumulator dtype.
+
+    Returns:
+        A column of `groups` products, every one of them present.
+    """
+    comptime width = simd_width_of[acc]()
+
+    var out = _ones[acc](groups)
+    var totals = out.unsafe_mut_ptr()
+    var tables = partials.unsafe_ptr()
+    for w in range(workers):
+        var table = tables.unsafe_offset(w * groups)
+        var g = 0
+        while g + width <= groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load[width=width]()
+                * table.unsafe_offset(g).unsafe_load[width=width]()
+            )
+            g += width
+        while g < groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                * table.unsafe_offset(g).unsafe_load()
+            )
+            g += 1
+    return out^
+
+
 struct GroupTotals(Movable):
     """A grouped sum beside the count of the rows that went into it."""
 
@@ -1702,6 +1881,212 @@ def _extreme_core[
             if not out.data.validity.get(g):
                 best.unsafe_offset(g).unsafe_store(Scalar[dt](0))
     return out^
+
+
+def group_any[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    DType.bool
+]:
+    """Says, for each group, whether any value in it that is there is true.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` answers, every one of them present. A group with no
+        non-null values answers False, which is what an `any` over nothing is.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
+    """
+    return _truth_core[want_all=False](
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+    )
+
+
+def group_all[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    DType.bool
+]:
+    """Says, for each group, whether every value in it that is there is true.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` answers, every one of them present. A group with no
+        non-null values answers True, which is what an `all` over nothing is.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
+    """
+    return _truth_core[want_all=True](
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+    )
+
+
+def _truth_core[
+    dt: DType, //, origin: ImmOrigin, want_all: Bool
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[DType.bool]:
+    """Folds each group down to one answer with `or` or with `and`.
+
+    `any` and `all` differ by which way the fold goes, so they share a body the
+    way `truth_over` in `agg.mojo` lets them and the way the two extremes do.
+    What they read a row for is the same question in both cases and it is
+    `truthy`, which is that function and not a copy of it, because a whole
+    column `any` and a grouped `any` disagreeing would be indefensible.
+
+    A row that is not there is not read at all. A null is neither true nor false
+    and neither is a NaN, and stepping over both is what `_there` is for, which
+    is the same rule pandas follows and the same one `truth_over` follows.
+
+    Nothing here needs a seen table and nothing here needs a validity pass at the
+    end, which is what makes this the shortest of the grouped cores. The identity
+    of each operator is already the answer for a group with nothing in it: an
+    `any` over no values is False and an `all` over no values is True, so the
+    fill the loop starts from is correct where the loop never arrives and every
+    group comes out present.
+
+    The store is conditional rather than a read modify write, and that is the
+    whole of what makes this cheap. A row only writes when it would change the
+    slot, so an `any` over a column that is mostly false touches the table for
+    the few rows that are true and an `all` over a column that is mostly true
+    does the same, and the dependent store per row that a sum cannot avoid is
+    gone on the data either of these is usually asked about.
+    """
+    comptime identity = want_all
+    comptime width = simd_width_of[DType.bool]()
+
+    var n = len(codes)
+    var workers = _private_workers[DType.bool](n, groups)
+
+    var out = Array[DType.bool](overwritten=groups)
+    _fill_truth[identity](out.unsafe_mut_ptr(), groups)
+
+    if workers <= 1:
+        var flags = out.unsafe_mut_ptr()
+        var at = codes.unsafe_ptr()
+        for i in range(n):
+            if not _there(source, validity, has_null, i):
+                continue
+            var here = truthy(source.unsafe_offset(i).unsafe_load())
+            comptime if want_all:
+                if not here:
+                    flags.unsafe_offset(
+                        Int(at.unsafe_offset(i).unsafe_load())
+                    ).unsafe_store(False)
+            else:
+                if here:
+                    flags.unsafe_offset(
+                        Int(at.unsafe_offset(i).unsafe_load())
+                    ).unsafe_store(True)
+        return out^
+
+    var bounds = _row_bounds(n, workers)
+    var slots = groups * workers
+    var partials = Array[DType.bool](overwritten=slots)
+    _fill_truth[identity](partials.unsafe_mut_ptr(), slots)
+
+    def one(w: Int) raises {mut partials, imm}:
+        var flags = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            if not _there(source, validity, has_null, i):
+                continue
+            var here = truthy(source.unsafe_offset(i).unsafe_load())
+            comptime if want_all:
+                if not here:
+                    flags.unsafe_offset(
+                        Int(at.unsafe_offset(i).unsafe_load())
+                    ).unsafe_store(False)
+            else:
+                if here:
+                    flags.unsafe_offset(
+                        Int(at.unsafe_offset(i).unsafe_load())
+                    ).unsafe_store(True)
+
+    parallel_for(one, workers)
+
+    # The merge is the same operator a third time, over two contiguous arrays,
+    # sixty four groups an instruction on a bool that is stored a byte wide.
+    var answers = out.unsafe_mut_ptr()
+    var tables = partials.unsafe_ptr()
+    for w in range(workers):
+        var table = tables.unsafe_offset(w * groups)
+        var g = 0
+        while g + width <= groups:
+            var mine = answers.unsafe_offset(g).unsafe_load[width=width]()
+            var theirs = table.unsafe_offset(g).unsafe_load[width=width]()
+            comptime if want_all:
+                answers.unsafe_offset(g).unsafe_store(mine & theirs)
+            else:
+                answers.unsafe_offset(g).unsafe_store(mine | theirs)
+            g += width
+        while g < groups:
+            var mine = answers.unsafe_offset(g).unsafe_load()
+            var theirs = table.unsafe_offset(g).unsafe_load()
+            comptime if want_all:
+                answers.unsafe_offset(g).unsafe_store(mine & theirs)
+            else:
+                answers.unsafe_offset(g).unsafe_store(mine | theirs)
+            g += 1
+    return out^
+
+
+def _fill_truth[
+    origin: MutOrigin, //, value: Bool
+](at: Pointer[Scalar[DType.bool], origin], count: Int):
+    """Writes one answer into every slot of a truth table.
+
+    The identity of whichever fold is about to run, which is False for an `any`
+    and True for an `all`, and it is written wide because a bool is a byte here
+    and sixty four of them fit in a register.
+
+    Args:
+        at: The table.
+        count: How many slots it has.
+
+    Parameters:
+        origin: Where the table lives.
+        value: What to write.
+    """
+    comptime width = simd_width_of[DType.bool]()
+
+    var head = 0
+    while head + width <= count:
+        at.unsafe_offset(head).unsafe_store(SIMD[DType.bool, width](fill=value))
+        head += width
+    while head < count:
+        at.unsafe_offset(head).unsafe_store(Scalar[DType.bool](value))
+        head += 1
 
 
 def group_first[
@@ -3187,7 +3572,7 @@ def aggregate_group[
         A column of `groups` values in whatever dtype the reduction produces.
 
     Raises:
-        If the reduction is not one of the thirteen single column ones.
+        If the reduction is not one of the eighteen single column ones.
     """
     return _dispatch_core(
         values.unsafe_ptr(),
@@ -3210,7 +3595,7 @@ def _dispatch_core[
     groups: Int,
     as_float: Bool = False,
 ) raises -> AnyArray:
-    """Picks the reduction. One instantiation per dtype, thirteen loops inside.
+    """Picks the reduction. One instantiation per dtype, eighteen loops inside.
     """
     if kind == AggKind.SIZE:
         return AnyArray(group_size(codes, groups))
@@ -3279,6 +3664,20 @@ def _dispatch_core[
         return AnyArray(
             _quantile_core(
                 source, validity, has_null, codes, groups, kind.param
+            )
+        )
+    if kind == AggKind.PROD:
+        return AnyArray(_prod_core(source, validity, has_null, codes, groups))
+    if kind == AggKind.ANY:
+        return AnyArray(
+            _truth_core[want_all=False](
+                source, validity, has_null, codes, groups
+            )
+        )
+    if kind == AggKind.ALL:
+        return AnyArray(
+            _truth_core[want_all=True](
+                source, validity, has_null, codes, groups
             )
         )
     if kind == AggKind.NUNIQUE:
@@ -4207,11 +4606,13 @@ def aggregate_group_strings(
 ) raises -> AnyArray:
     """Runs one grouped reduction over a column of text.
 
-    Six of the thirteen reductions mean something over bytes and the rest do not.
+    Nine of the eighteen reductions mean something over bytes and the rest do not.
     `SIZE` and `COUNT` never look at a value, `FIRST`, `LAST`, `MIN` and `MAX`
-    report a value the column held, and `NUNIQUE` counts values without ordering
-    them. A sum of names is not a slow operation, it is not an operation, and the
-    other six raise saying so rather than returning something defensible.
+    report a value the column held, `NUNIQUE` counts values without ordering
+    them, and `ANY` and `ALL` ask whether a string is empty, which is a question
+    about bytes that has an answer. A sum of names is not a slow operation, it is
+    not an operation, and the other nine raise saying so rather than returning
+    something defensible.
 
     The four that report a value do it by keeping a row number per group and
     gathering at the end. Nothing is copied while the scan runs, which matters
@@ -4257,6 +4658,11 @@ def aggregate_group_strings(
             groups,
         )
 
+    if kind == AggKind.ANY or kind == AggKind.ALL:
+        return AnyArray(
+            _text_truth_per_group(col, kind == AggKind.ALL, codes, groups)
+        )
+
     var wants_edge = kind == AggKind.FIRST or kind == AggKind.LAST
     var wants_extreme = kind == AggKind.MIN or kind == AggKind.MAX
     if not (wants_edge or wants_extreme):
@@ -4275,6 +4681,58 @@ def aggregate_group_strings(
         else:
             builder.append(col.unsafe_bytes(row))
     return AnyArray(builder^.finish())
+
+
+def _text_truth_per_group(
+    col: StringArray, want_all: Bool, codes: Array[DType.uint32], groups: Int
+) raises -> Array[DType.bool]:
+    """Folds each group of strings down to one answer with `or` or with `and`.
+
+    `text_truth` in `agg.mojo` one group at a time, and the rule it reads a row
+    by is that function's rule rather than a copy of it: a string is true when it
+    is not empty, a null is stepped over, and a group with nothing left in it
+    takes the identity of its own operator. The empty string is the reason this
+    is a question at all, and `text_truth` says why.
+
+    Serial. The numeric core beside this one runs a table per worker past a row
+    count that pays for the merge, and that route would work here unchanged
+    because the accumulator is a byte per group either way. It has not been
+    written for the same reason `_text_rows_per_group` gives for its own serial
+    ceiling, which is that nothing has measured a query that wants it, and the
+    parallel version is a copy of `_truth_core` on the day something does.
+
+    Args:
+        col: The text column.
+        want_all: True to ask whether every value in a group is non-empty, False
+            to ask whether any of them is.
+        codes: One group ordinal per row.
+        groups: How many ordinals there are.
+
+    Returns:
+        A column of `groups` answers, every one of them present.
+
+    Raises:
+        If the answer column cannot be allocated.
+    """
+    var out = Array[DType.bool](overwritten=groups)
+    var flags = out.unsafe_mut_ptr()
+    if want_all:
+        _fill_truth[True](flags, groups)
+    else:
+        _fill_truth[False](flags, groups)
+
+    var at = codes.unsafe_ptr()
+    for i in range(len(codes)):
+        if not col.is_valid(i):
+            continue
+        var here = col.byte_length(i) > 0
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        if want_all:
+            if not here:
+                flags.unsafe_offset(g).unsafe_store(False)
+        elif here:
+            flags.unsafe_offset(g).unsafe_store(True)
+    return out^
 
 
 def _text_rows_per_group(

@@ -1196,14 +1196,17 @@ GROUPED: tuple[tuple[str, str, str], ...] = (
     ("sem", "The standard error of the mean within each group.", "sem"),
     ("skew", "The skewness within each group.", "skew"),
     ("quantile", "The value at one quantile within each group.", "quantile"),
+    ("prod", "The product of the values in each group.", "product"),
+    ("any", "Whether any value in each group is true.", "truth"),
+    ("all", "Whether every value in each group is true.", "truth"),
 )
-"""The fifteen grouped reductions, with the shape of each one's parameter list.
+"""The eighteen grouped reductions, with the shape of each one's parameter list.
 
-Ten shapes rather than fifteen signatures written out, because pandas gives the
-same list to several of them and the difference between the lists is what the
-parity test compares. Every signature below was measured against a running
+Twelve shapes rather than eighteen signatures written out, because pandas gives
+the same list to several of them and the difference between the lists is what
+the parity test compares. Every signature below was measured against a running
 pandas rather than copied out of the documentation, and the shapes exist to make
-a mismatch a one line change instead of a hunt through fifteen strings.
+a mismatch a one line change instead of a hunt through eighteen strings.
 
 `min` and `max` are `extreme` and `first` and `last` are `pick`, which are the
 same three parameters except that the first pair also takes an engine and the
@@ -1215,6 +1218,14 @@ difference and reported it the first time they were written as one.
 that cannot be asked to skip a missing value, since one counts rows and the
 other counts the values that are there, and pandas leaves the arguments off
 rather than declaring them and ignoring them.
+
+`prod` is `product` rather than `sum`, and the difference is one parameter: a
+grouped sum takes an engine and a grouped product does not. There is no reason
+for that in pandas, it is simply what the two signatures say, and writing them
+as one shape is the mismatch the board would report. `any` and `all` are
+`truth`, which is the shortest shape here and takes nothing but `skipna`, since
+asking whether a value is true is a question a text column answers as readily as
+a number and there is no `numeric_only` to offer.
 """
 
 
@@ -1568,7 +1579,7 @@ def _ewm_members() -> tuple[Member, ...]:
 
 
 def _group_members(py: str) -> tuple[Member, ...]:
-    """Writes the fifteen reduction members for one group by class.
+    """Writes the eighteen reduction members for one group by class.
 
     Same restriction as `_reductions`, which is that nothing here decides what a
     reduction does. The word crosses the boundary and
@@ -1605,6 +1616,8 @@ def _group_members(py: str) -> tuple[Member, ...]:
         "sem": "ddof: int = 1, numeric_only: bool = False, skipna: bool = True",
         "skew": "skipna: bool = True, numeric_only: bool = False, **kwargs: Any",
         "quantile": 'q: Any = 0.5, interpolation: str = "linear", numeric_only: bool = False',
+        "product": "numeric_only: bool = False, min_count: int = 0, skipna: bool = True",
+        "truth": "skipna: bool = True",
     }
     bodies = {
         "sum": 'self._reduce("sum", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)',
@@ -1621,6 +1634,8 @@ def _group_members(py: str) -> tuple[Member, ...]:
         "sem": 'self._reduce("sem", float(ddof), numeric_only, skipna)',
         "skew": 'self._reduce("skew", 0.0, numeric_only, skipna)',
         "quantile": "self._quantile(q, interpolation, numeric_only)",
+        "product": 'self._reduce("prod", 0.0, numeric_only, skipna, min_count)',
+        "truth": 'self._reduce("{name}", 0.0, False, skipna)',
     }
     out: list[Member] = []
     for name, what, shape in GROUPED:
@@ -3877,7 +3892,7 @@ ACCESSORS: tuple[Accessor, ...] = (
         owner="DataFrameGroupBy",
         doc=(
             "One column of a grouped frame, waiting for a reduction.\n\n"
-            "Reached from `df.groupby(...)[name]`. The same fifteen reductions over"
+            "Reached from `df.groupby(...)[name]`. The same eighteen reductions over"
             " one column instead of all of them, answering a column rather than a"
             " frame, which is the whole difference between the two classes."
         ),

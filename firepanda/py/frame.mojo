@@ -1422,19 +1422,19 @@ struct PyDataFrame(Movable, Writable):
     ) raises -> PythonObject:
         """Groups the rows by some columns and reduces every other column.
 
-        This is `df.groupby(keys).sum()` and its fourteen siblings, and it is one
-        method rather than fifteen for the same reason `reduce` is one method
+        This is `df.groupby(keys).sum()` and its seventeen siblings, and it is one
+        method rather than eighteen for the same reason `reduce` is one method
         rather than twelve. The reduction crosses as the word pandas spells it,
         the four that take a number carry it beside the word, and the Python
-        layer holds the vocabulary. A generator that wrote fifteen bindings here
-        would be writing fifteen copies of one call.
+        layer holds the vocabulary. A generator that wrote eighteen bindings
+        here would be writing eighteen copies of one call.
 
         `size` is the one word that does not reduce a column. It counts the rows
         in each group, so it answers one column called `size` and does not touch
         the others, which is why it goes to a different method in the core. It is
         still spelled here rather than given its own binding, because from
         Python it is `df.groupby(keys).size()` and looks exactly like the other
-        fourteen.
+        seventeen.
 
         The three flags are pandas' own and all three mean what they mean there.
         `as_index` is the one worth knowing about: it puts the key into the row
@@ -1458,7 +1458,7 @@ struct PyDataFrame(Movable, Writable):
 
         Raises:
             Error: Tagged `column`, if a key is missing or named twice, tagged
-                `value` if the name is not one of the fifteen or `as_index` was
+                `value` if the name is not one of the eighteen or `as_index` was
                 asked for with more than one key, and tagged `dtype` if a column
                 has a type the reduction cannot read.
         """

@@ -264,7 +264,7 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 ## 8. GroupBy
 
 - [ ] `sum`, `mean`, `min`, `max`, `count`, `size`, `first`, `last`, `nth` (M1)
-- [ ] `std`, `var`, `sem`, `median`, `quantile`, `nunique`, `prod` (M1)
+- [x] `std`, `var`, `sem`, `median`, `quantile`, `nunique`, `prod`, `any`, `all` (M1)
 - [ ] `agg` with a string, a list, a dict, named aggregation kwargs (M1 basic, M6 complete)
 - [x] `transform` with a built in aggregate, which is `group_broadcast` (M6)
 - [ ] `transform` with a Python callable (M6, and see document 04 section 7)

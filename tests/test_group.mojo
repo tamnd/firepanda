@@ -63,6 +63,8 @@ from firepanda.kernel.group import (
     aggregate_group_any,
     aggregate_group_many,
     aggregate_group_pair_any,
+    group_all,
+    group_any,
     group_corr,
     group_count,
     group_cov,
@@ -73,6 +75,7 @@ from firepanda.kernel.group import (
     group_median,
     group_min,
     group_nunique,
+    group_prod,
     group_quantile,
     group_sem,
     group_size,
@@ -174,6 +177,104 @@ def test_sum_of_an_all_null_group_is_zero_and_present() raises:
     var out = group_sum(all_null_group(), codes_of([0, 1, 0, 1]), 2)
     assert_equal(out[1], 0)
     assert_true(out.is_valid(1), "pandas gives 0 here, not NA")
+
+
+def test_prod_multiplies_the_values_that_are_there() raises:
+    var out = group_prod(sample_values(), sample_codes(), 3)
+    assert_equal(out[0], 300)
+    assert_equal(out[1], 1200, "20 times 60, with the null contributing one")
+    assert_equal(out[2], 50)
+
+
+def test_prod_of_an_all_null_group_is_one_and_present() raises:
+    """The difference between a product and a sum, in the one row that shows it.
+
+    A null holds a zero, which is what a sum wants it to hold and is the one
+    number a product must not read, so this is the test that fails if `_factor`
+    is ever written the way `_addend` is.
+    """
+    var out = group_prod(all_null_group(), codes_of([0, 1, 0, 1]), 2)
+    assert_equal(
+        out[1], 1, "pandas gives 1 here, which is a product of nothing"
+    )
+    assert_true(out.is_valid(1))
+
+
+def test_prod_steps_over_a_nan_the_way_it_steps_over_a_null() raises:
+    var values = from_list[DType.float64]([2.0, nan[DType.float64](), 4.0])
+    var out = group_prod(values, codes_of([0, 0, 0]), 1)
+    assert_almost_equal(out[0], 8.0)
+
+
+def test_prod_over_many_rows_agrees_with_the_serial_answer() raises:
+    """Enough rows to take the private table route, so the merge is exercised.
+
+    Ones everywhere but one row per group, because a product of a hundred
+    thousand numbers overflows whatever it is accumulated in and the question
+    here is whether the tables fold, not whether the arithmetic wraps.
+    """
+    var rows = PRIVATE_ROWS * 4
+    var values = List[Scalar[DType.int64]](capacity=rows)
+    var keys = List[Scalar[DType.uint32]](capacity=rows)
+    for i in range(rows):
+        values.append(Int64(3) if i < 8 else Int64(1))
+        keys.append(UInt32(i % 8))
+    var out = group_prod(from_list(values), from_list(keys), 8)
+    for g in range(8):
+        assert_equal(out[g], 3, String("group ", g, " saw one three"))
+
+
+def test_any_and_all_over_a_group_with_nothing_in_it() raises:
+    """The identity of each operator, which is also the answer pandas gives."""
+    var codes = codes_of([0, 1, 0, 1])
+    assert_equal(group_any(all_null_group(), codes, 2)[1], False)
+    assert_equal(group_all(all_null_group(), codes, 2)[1], True)
+    assert_true(group_any(all_null_group(), codes, 2).is_valid(1))
+    assert_true(group_all(all_null_group(), codes, 2).is_valid(1))
+
+
+def test_any_and_all_read_a_zero_as_false() raises:
+    var values = ints([0, 5, 0, 0])
+    var codes = codes_of([0, 0, 1, 1])
+    var truthy = group_any(values, codes, 2)
+    assert_equal(truthy[0], True, "group 0 holds a five")
+    assert_equal(truthy[1], False, "group 1 holds two zeros")
+    var every = group_all(values, codes, 2)
+    assert_equal(every[0], False, "group 0 holds a zero as well")
+    assert_equal(every[1], False)
+
+
+def test_all_takes_a_nan_as_missing_rather_than_as_true() raises:
+    """A NaN is not equal to zero, so a rule written about zero alone gets this
+    wrong in the direction that reports a column of gaps as holding something.
+    """
+    var values = from_list[DType.float64]([nan[DType.float64](), 0.0])
+    var codes = codes_of([0, 1])
+    assert_equal(group_any(values, codes, 2)[0], False)
+    assert_equal(group_all(values, codes, 2)[0], True)
+    assert_equal(group_any(values, codes, 2)[1], False)
+
+
+def test_any_and_all_over_many_rows_agree_with_the_serial_answer() raises:
+    """Past the private table route, where the merge is an or and an and."""
+    var rows = PRIVATE_ROWS * 4
+    var values = List[Scalar[DType.int64]](capacity=rows)
+    var keys = List[Scalar[DType.uint32]](capacity=rows)
+    for i in range(rows):
+        # Group 0 is all zeros, group 1 is all ones, and group 2 holds a single
+        # one at the very end so that the last worker is the only one that saw
+        # it and the fold has to carry it back.
+        var g = i % 3
+        values.append(Int64(0) if g == 0 else Int64(1))
+        keys.append(UInt32(g))
+    values[rows - 1] = 1
+    keys[rows - 1] = 0
+    var truthy = group_any(from_list(values), from_list(keys), 3)
+    assert_equal(truthy[0], True, "the one row in the last worker carries")
+    assert_equal(truthy[1], True)
+    var every = group_all(from_list(values), from_list(keys), 3)
+    assert_equal(every[0], False, "group 0 is zeros apart from that one row")
+    assert_equal(every[1], True)
 
 
 def test_count_of_an_all_null_group_is_zero_and_present() raises:
@@ -1878,6 +1979,9 @@ def test_the_new_reductions_agree_with_their_erased_spelling() raises:
     kinds.append(AggKind.NUNIQUE)
     kinds.append(AggKind.SEM)
     kinds.append(AggKind.SKEW)
+    kinds.append(AggKind.PROD)
+    kinds.append(AggKind.ANY)
+    kinds.append(AggKind.ALL)
     for k in range(len(kinds)):
         var erased = AnyArray(sample_values())
         var through = aggregate_group_any(erased, kinds[k], sample_codes(), 3)
@@ -2890,6 +2994,9 @@ def all_kinds() -> List[AggKind]:
     kinds.append(AggKind.COV)
     kinds.append(AggKind.SEM)
     kinds.append(AggKind.SKEW)
+    kinds.append(AggKind.PROD)
+    kinds.append(AggKind.ANY)
+    kinds.append(AggKind.ALL)
     return kinds^
 
 
