@@ -126,6 +126,7 @@ from firepanda.kernel.chars import (
     text_character_substring,
 )
 from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.edges import text_trim
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import LogicOp, logic_any, logic_type
 from firepanda.kernel.nulls import coalesce_any, is_not_null_any, is_null_any
@@ -1960,6 +1961,144 @@ struct Length(Movable):
                 + " columns"
             )
         var made = text_character_length(chunk.columns[self.at].strings())
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Trim(Movable):
+    """Appends a column holding each element with its ends taken off.
+
+    This is SQL's `TRIM`, `LTRIM` and `RTRIM`. Which ends to work on is two
+    flags rather than three nodes, because the kernel behind all three is the
+    one function with those two flags on it and nothing else differs.
+
+    It is a node rather than another code on `Apply` for the reason `Match` is
+    one. What comes off is not an operand. It is a set of characters read once
+    while the plan is built, and putting it on `Apply` would mean carrying a
+    string on every negation in every plan for the one node in a hundred that
+    is a trim.
+
+    The set is a constant and there is no column form. `trim(a, b)` over two
+    columns is a different kernel, one that reads a new set for every row, and
+    lowering refuses it rather than pretending this node can do it. The same
+    line `Cut` draws.
+
+    What comes off when no set is named is the Zs characters and not the ones
+    `str.strip` removes, which is what `is_sql_space` is for and is the one
+    place this and the pandas accessor answer different things about the same
+    column. A tab on the end of a value survives a `TRIM` and does not survive
+    a `.str.strip()`.
+
+    A null element gives a null answer, which the kernel already does, so
+    nothing here repairs anything.
+    """
+
+    var at: Int
+    """The position of the column being trimmed."""
+
+    var set: String
+    """The characters to take off, or empty when whitespace is what comes off."""
+
+    var by_set: Bool
+    """Whether the set was written, which an empty set is still a way to do."""
+
+    var from_left: Bool
+    """Whether to work on the near end."""
+
+    var from_right: Bool
+    """Whether to work on the far end."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(
+        out self,
+        at: Int,
+        set: String,
+        by_set: Bool,
+        from_left: Bool,
+        from_right: Bool,
+        name: String,
+    ):
+        """Constructs a trim over a column.
+
+        Args:
+            at: The position of the column being trimmed.
+            set: The characters to take off.
+            by_set: Whether the set was written rather than left out.
+            from_left: Whether to work on the near end.
+            from_right: Whether to work on the far end.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.set = set
+        self.by_set = by_set
+        self.from_left = from_left
+        self.from_right = from_right
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a text column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one text field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column that does
+            not hold text.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "trim: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype != LogicalType.STRING:
+            raise Error(
+                "trim: a trim reads text and column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+            )
+        out.append(Field(self.name, LogicalType.STRING, out[self.at].nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Runs the trim and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not text.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "trim: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = text_trim(
+            chunk.columns[self.at].strings(),
+            self.set.as_bytes(),
+            self.by_set,
+            self.from_left,
+            self.from_right,
+        )
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -5243,6 +5382,7 @@ comptime Node = Variant[
     Match,
     Cut,
     Length,
+    Trim,
     Part,
     Truncate,
     Presence,
@@ -5302,6 +5442,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cut].bind(input^)
     if node.isa[Length]():
         return node[Length].bind(input^)
+    if node.isa[Trim]():
+        return node[Trim].bind(input^)
     if node.isa[Part]():
         return node[Part].bind(input^)
     if node.isa[Truncate]():
@@ -5443,7 +5585,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Length`, `Part`, `Truncate`, `Presence`,
+        `Apply`, `Match`, `Cut`, `Length`, `Trim`, `Part`, `Truncate`,
+        `Presence`,
         `Fill`,
         `Choose`, `Constant`, `Cast` and `Join`.
     """
@@ -5457,6 +5600,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Match]()
         or node.isa[Cut]()
         or node.isa[Length]()
+        or node.isa[Trim]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Presence]()
@@ -5508,7 +5652,9 @@ def node_computes_per_row(node: Node) -> Bool:
     arithmetic in between, so there is nothing for a second core to speed up.
     `Cut` says no for a different reason: it builds a text column, and the
     payload offset every row writes at is a running total of the ones before it,
-    which is the serial thing `StringBuilder` exists to do.
+    which is the serial thing `StringBuilder` exists to do. `Trim` says no for
+    that same reason and would whatever its kernel cost, since it builds a text
+    column too.
 
     `Length` says no for a third reason. Counting characters is a compare and an
     add per byte of payload, so it is memory bound rather than waiting on
@@ -5616,6 +5762,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Trim]():
+        return node[Trim].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():
@@ -5689,6 +5837,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Trim]():
+        return node[Trim].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():

@@ -436,6 +436,29 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 )
             )
         return LogicalType.INT64
+    if name == "trim" or name == "ltrim" or name == "rtrim":
+        if len(args) != 1 and len(args) != 2:
+            raise Error(
+                String(
+                    "'",
+                    name,
+                    "' takes one or two arguments and was given ",
+                    len(args),
+                )
+            )
+        for i in range(len(args)):
+            if args[i] != LogicalType.STRING and args[i] != LogicalType.NULL:
+                raise Error(
+                    String(
+                        "'",
+                        name,
+                        "' reads text and argument ",
+                        i,
+                        " is ",
+                        args[i],
+                    )
+                )
+        return LogicalType.STRING
     if name == "substring":
         if len(args) != 2 and len(args) != 3:
             raise Error(

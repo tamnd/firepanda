@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: TRIM, LTRIM and RTRIM in SQL
+
+`TRIM` was refused by name because the grammar gives it a rule of its own, and being refused by name meant plain `trim(s)` was refused too. All three calls run now, in both spellings: `TRIM(s)`, `TRIM(s, 'xy')`, `TRIM(BOTH 'xy' FROM s)`, `TRIM(LEADING FROM s)` and `TRIM(TRAILING 'xy' FROM s)`, plus `LTRIM` and `RTRIM` as ordinary calls. The keyword form becomes the call form while the query is read, which is what DuckDB's own parser does with it, so nothing downstream carries two shapes.
+
+The second argument is a set of characters and not a prefix, which is DuckDB's reading as well: `trim('abcxcba', 'abc')` is `x`. It has to be written out in the query, because a set that came from a column would mean a new set per row and there is no kernel for that.
+
+What comes off when no set is named is the Unicode Zs characters and nothing else, which is seventeen code points and is a narrower set than the twenty nine `str.strip` removes. A tab, a newline, a carriage return or a form feed on the end of a value survives a `TRIM` and does not survive a `.str.strip()`. That divergence is deliberate and is what DuckDB does, so `is_sql_space` sits beside `is_python_space` in `firepanda.kernel.edges` and `text_trim` sits beside `text_strip`.
+
 ### Added: a group can be reduced with a product and asked whether it is true
 
 `df.groupby("k").prod()`, `.any()` and `.all()` are here, on a frame's group by and on a column's, and so are the three matching entry points on the kernel. The words had crossed the boundary since the whole column forms landed and stopped at the dispatch chain in the grouped kernel, which said in as many words that the reduction had a whole column implementation and no grouped one yet. The eighteen reductions `AggKind` carries for a single column are now eighteen the chain answers.
@@ -19,7 +27,6 @@ A grouped product cannot be a grouped sum with the operator changed. A missing v
 The rule for what counts as true is now read from both paths rather than copied into the second one. `truthy` in `firepanda/kernel/agg.mojo` lost its underscore for that reason, since a whole column `any` and a grouped `any` disagreeing would be a difference that each half's own tests would pass.
 
 The signatures are pandas' own and were measured. A grouped product takes `numeric_only`, `min_count` and `skipna` and takes no `engine`, which a grouped sum does take, and a grouped truth takes nothing but `skipna`. `min_count` defaults to zero for `prod` as it does for `sum`, rather than to the minus one the four that pick a value out carry, and it is still held at its default here along with `skipna` and `numeric_only`. Specified in `docs/specs/54-reducing-a-group-with-a-product-and-with-a-truth.md`.
-
 ### Fixed: ORDER BY 1 sorted on the number one rather than on the first column
 
 `SELECT qty FROM sales ORDER BY 1` came back unsorted and said nothing about it. The number lowered as the constant one, every row sorted on the same value, and the sort was a node that did no work. A query whose rows happened to arrive in the right order looked correct, which is the worst version of this: two tests in this repo were written with `ORDER BY 1` and passed for that reason.

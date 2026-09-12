@@ -228,6 +228,9 @@ comptime _SUBSTRING: UInt8 = 75
 comptime _EXTRACT: UInt8 = 76
 """`ExtractExpression`, which is `date_part` written with a keyword."""
 
+comptime _TRIM: UInt8 = 77
+"""`TrimExpression`, which is three calls with two ways of spelling each."""
+
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
 comptime _NULL: UInt8 = 21
@@ -681,6 +684,7 @@ struct Transform(Movable):
         self._set(names, "NullIfExpression", _NULLIF)
         self._set(names, "SubstringExpression", _SUBSTRING)
         self._set(names, "ExtractExpression", _EXTRACT)
+        self._set(names, "TrimExpression", _TRIM)
         self._set(names, "StringLiteral", _STRING)
         self._set(names, "NumberLiteral", _NUMBER)
         self._set(names, "NullLiteral", _NULL)
@@ -845,7 +849,6 @@ struct Transform(Movable):
         # The functions SQL spells with keywords inside the parentheses. The
         # message fills in whichever one it was, so they share an entry.
         var special: List[StaticString] = [
-            "TrimExpression",
             "PositionExpression",
             "OverlayExpression",
             "TryExpression",
@@ -1670,6 +1673,9 @@ struct Transform(Movable):
 
         if action == _EXTRACT:
             return self._extract(tree, sql, node, ast, work, at)
+
+        if action == _TRIM:
+            return self._trim(tree, sql, node, ast, work, at)
 
         if action == _NULLIF:
             # `NULLIF Parens(NullIfArguments)`, and the arguments rule holds
@@ -2624,6 +2630,103 @@ struct Transform(Movable):
         arguments.append(ast.literal(LITERAL_STRING, field.lower(), at))
         arguments.append(column)
         return ast.call("date_part", arguments, 0, at)
+
+    def _trim(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        at: UInt32,
+    ) raises -> UInt32:
+        """Builds a `TRIM` out of either of the two ways it is written.
+
+        `TRIM(BOTH 'x' FROM s)` and `TRIM(s, 'x')` are the same call and both
+        become the second one, which is what DuckDB's own parser does with the
+        keyword form, so nothing after this point has to know which spelling a
+        query used. The direction picks the name rather than riding along as an
+        argument, because `LTRIM` and `RTRIM` are already the names of the two
+        one sided calls and a query is free to write either.
+
+        The grammar reads the characters to take off as the `TrimSource`, which
+        is the part before the `FROM`, and reads the string as the list after
+        it. That is the opposite order from the one the call takes, which is
+        why they are not simply appended in the order they were written.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TrimExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the arguments.
+            at: The token the call starts at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the call was given a count of arguments no trim takes.
+        """
+        # Past `TRIM` and past the parentheses, to `TrimDirection? TrimSource?
+        # List(Expression)`. The list is always there and is always last, so
+        # anything before it is one of the two optional parts, in that order.
+        var inside = self._only(tree, self._only(tree, node))
+        var kids = tree.children(inside)
+        var last = len(kids) - 1
+        var items = tree.children(kids[last])
+
+        var name = StaticString("trim")
+        var step = 0
+        if step < last:
+            var word = _word(tree, sql, kids[step])
+            if word == "LEADING":
+                name = "ltrim"
+                step += 1
+            elif word == "TRAILING":
+                name = "rtrim"
+                step += 1
+            elif word == "BOTH":
+                step += 1
+
+        # `TrimSource <- Expression? 'FROM'`, so `TRIM(BOTH FROM s)` is a source
+        # with nothing under it and means the same as `TRIM(s)`.
+        var set = NO_NODE
+        if step < last:
+            if tree.nodes[Int(kids[step])].first_child != NO_NODE:
+                set = self._only(tree, kids[step])
+
+        if len(items) == 0 or len(items) > 2:
+            raise Error(
+                String(
+                    (
+                        "a TRIM reads a column and the characters to take off"
+                        " it, so one or two arguments, and this one was written"
+                        " with "
+                    ),
+                    len(items),
+                )
+            )
+        if set != NO_NODE and len(items) != 1:
+            raise Error(
+                "a TRIM that says what to take off before the FROM cannot say"
+                " it again after it"
+            )
+
+        var order = List[UInt32]()
+        for i in range(len(items)):
+            order.append(items[i])
+        if set != NO_NODE:
+            order.append(set)
+
+        # Every argument is asked for before anything is built, for the reason
+        # `_substring` asks for its own first.
+        work.warm(order)
+
+        var arguments = List[UInt32]()
+        for i in range(len(order)):
+            arguments.append(work.value(order[i]))
+        return ast.call(name, arguments, 0, at)
 
     def _named_call(
         self,

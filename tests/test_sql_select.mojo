@@ -734,8 +734,6 @@ def test_a_call_spelled_with_keywords_refuses_under_its_own_name() raises:
     # it was, which is what the `{}` slot is for.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="TRIM yet"):
-        _ = _printed("SELECT TRIM(BOTH ' ' FROM a)", g, rules)
     with assert_raises(contains="POSITION yet"):
         _ = _printed("SELECT POSITION(a IN b)", g, rules)
     with assert_raises(contains="OVERLAY yet"):
@@ -755,6 +753,14 @@ def test_the_keyword_calls_that_no_longer_refuse() raises:
     assert_equal(
         _printed("SELECT EXTRACT(YEAR FROM a) FROM t", g, rules),
         "SELECT date_part('year', a) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT TRIM(BOTH ' ' FROM a) FROM t", g, rules),
+        "SELECT trim(a, ' ') FROM t",
+    )
+    assert_equal(
+        _printed("SELECT TRIM(LEADING FROM a) FROM t", g, rules),
+        "SELECT ltrim(a) FROM t",
     )
 
 

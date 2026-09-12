@@ -52,6 +52,7 @@ from firepanda.exec import (
     Reduce,
     Scan,
     Sort,
+    Trim,
     Truncate,
     Unique,
     Window,
@@ -178,6 +179,27 @@ def word_frame() raises -> DataFrame:
     fields.append(Field("n", LogicalType.INT64))
     fields.append(Field("status", LogicalType.STRING))
     fields.append(Field("wanted", LogicalType.STRING))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def spaced_frame() raises -> DataFrame:
+    """Six rows of text with something on the ends of most of them.
+
+    Row one has tabs on it rather than spaces, which is the row that says which
+    whitespace table a trim is asking. Row three is empty and row four is
+    nothing but spaces, which are the two rows that come out empty and are the
+    ones an off by one in the scan over the ends would get wrong.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(
+        AnyArray(
+            strings_from_list(["  hi  ", "\tgo\t", "xxaxx", "", "   ", "end  "])
+        )
+    )
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("padded", LogicalType.STRING))
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -976,6 +998,76 @@ def test_a_length_over_a_column_that_holds_no_text_is_refused() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="a character count reads text"):
         pipeline.add(Node(Length(0, "nope")))
+
+
+def test_a_trim_takes_the_spaces_off_both_ends() raises:
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "", False, True, True, "cut")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the answer was appended")
+    assert_true(out.schema[2].dtype == LogicalType.STRING, "text out")
+    var got = out.column("cut").as_strings()
+    assert_equal(got[0], "hi", "both ends came off")
+    assert_equal(got[2], "xxaxx", "a row with nothing on its ends is as it was")
+    assert_equal(got[3], "", "an empty row stays empty")
+    assert_equal(got[4], "", "and a row that is nothing but spaces becomes one")
+    assert_equal(got[5], "end", "and the last row")
+
+
+def test_a_trim_leaves_a_tab_where_sql_leaves_it() raises:
+    # The one row that says which whitespace table this is asking. A tab is
+    # whitespace to Python and is not one of the Zs characters, so DuckDB hands
+    # this row back exactly as it arrived.
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "", False, True, True, "cut")))
+    var out = pipeline^.run()
+    assert_equal(out.column("cut").as_strings()[1], "\tgo\t", "tabs stay on")
+
+
+def test_a_trim_works_on_the_near_end_alone() raises:
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "", False, True, False, "cut")))
+    var out = pipeline^.run()
+    var got = out.column("cut").as_strings()
+    assert_equal(got[0], "hi  ", "the far end was left alone")
+    assert_equal(got[5], "end  ", "and so was this one")
+
+
+def test_a_trim_works_on_the_far_end_alone() raises:
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "", False, False, True, "cut")))
+    var out = pipeline^.run()
+    var got = out.column("cut").as_strings()
+    assert_equal(got[0], "  hi", "the near end was left alone")
+    assert_equal(got[5], "end", "and the far end came off")
+
+
+def test_a_trim_of_a_set_takes_any_of_those_characters_off() raises:
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "x", True, True, True, "cut")))
+    var out = pipeline^.run()
+    var got = out.column("cut").as_strings()
+    assert_equal(got[2], "a", "the characters in the set came off")
+    assert_equal(got[0], "  hi  ", "and a set does not mean whitespace as well")
+
+
+def test_a_trim_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(spaced_frame())
+    pipeline.add(Node(Trim(1, "", False, True, True, "cut")))
+    var out = pipeline^.run()
+    assert_equal(out.column("padded").as_strings()[0], "  hi  ", "as it was")
+
+
+def test_a_trim_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(spaced_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Trim(9, "", False, True, True, "nope")))
+
+
+def test_a_trim_over_a_column_that_holds_no_text_is_refused() raises:
+    var pipeline = Pipeline(spaced_frame())
+    with assert_raises(contains="a trim reads text"):
+        pipeline.add(Node(Trim(0, "", False, True, True, "nope")))
 
 
 def test_a_part_appends_the_field_it_was_asked_for() raises:
