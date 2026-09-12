@@ -30,13 +30,27 @@ cannot repair against a bitmap that is still being written.
 
 from std.sys.info import simd_width_of
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
 from firepanda.exec import parallel_morsels
 
 from .mask import apply_validity, combined_validity, repair_range
+
+
+comptime MaskRefs[o: ImmOrigin] = List[Pointer[Array[DType.bool], o]]
+"""A borrowed set of boolean columns, for the connectives that read many.
+
+`ColumnRefs` for masks, and there for the same reason. A conjunction of five
+predicates in an execution plan reads five columns that are already sitting in a
+chunk, and a `List[Array[DType.bool]]` argument would mean copying every one of
+them out of the chunk first. The copy is a byte a row per column, which is the
+whole of what the conjunction was going to cost.
+
+The origin is carried rather than erased, so a chunk cannot be destroyed between
+the argument being built and the callee reading it.
+"""
 
 comptime LOGIC_AND = 0
 """Operation code for the conjunction."""
@@ -205,7 +219,7 @@ def conjoin(columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
     Raises:
         Error: If no columns were given or they are not all the same length.
     """
-    return _connect_all[LOGIC_AND](columns)
+    return _connect_all[LOGIC_AND](borrow_masks(columns))
 
 
 def disjoin(columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
@@ -227,6 +241,59 @@ def disjoin(columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
     Raises:
         Error: If no columns were given or they are not all the same length.
     """
+    return _connect_all[LOGIC_OR](borrow_masks(columns))
+
+
+def borrow_masks[
+    o: ImmOrigin
+](ref[o] masks: List[Array[DType.bool]]) -> MaskRefs[o]:
+    """Borrows every mask in a list, for handing to a connective.
+
+    Parameters:
+        o: The origin of the list, which the references inherit.
+
+    Args:
+        masks: The masks.
+
+    Returns:
+        One reference per mask, in order.
+    """
+    var out = MaskRefs[o](capacity=len(masks))
+    for i in range(len(masks)):
+        out.append(Pointer(to=masks[i]).unsafe_origin_cast[o]())
+    return out^
+
+
+def connect_all[
+    o: ImmOrigin
+](columns: MaskRefs[o], op: LogicOp) raises -> Array[DType.bool]:
+    """Applies a connective to borrowed masks, the connective chosen at runtime.
+
+    What `conjoin` and `disjoin` are underneath, for the callers that have the
+    columns somewhere they cannot give up and do not know until they run which
+    of the two they are applying. An execution plan is both of those: the masks
+    are columns of a chunk it is holding, and the node carries its connective as
+    a value.
+
+    Parameters:
+        o: The origin the borrowed masks come from.
+
+    Args:
+        columns: The masks, borrowed. Must all be the same length, and there
+            must be at least one.
+        op: The connective, which must be one that reads more than one column.
+
+    Returns:
+        A bool column, null only on the rows no mask settles.
+
+    Raises:
+        Error: If the connective is negation, no masks were given, or they are
+            not all the same length.
+    """
+    if not op.reads_two_columns():
+        raise Error("logic: not reads one column and was given a list")
+    if op == LogicOp.AND:
+        return _connect_all[LOGIC_AND](columns)
     return _connect_all[LOGIC_OR](columns)
 
 
@@ -334,15 +401,16 @@ def _connect[
 
 
 def _connect_all[
-    op: Int
-](columns: List[Array[DType.bool]]) raises -> Array[DType.bool]:
+    op: Int, o: ImmOrigin
+](columns: MaskRefs[o]) raises -> Array[DType.bool]:
     """Applies one of the two connectives across any number of columns.
 
     Args:
-        columns: The columns.
+        columns: The columns, borrowed.
 
     Parameters:
         op: One of the `LOGIC_` codes.
+        o: The origin the borrowed columns come from.
 
     Returns:
         A bool column.
@@ -356,13 +424,13 @@ def _connect_all[
     if count == 0:
         raise Error("logic: a connective over no columns has no answer")
     if count == 1:
-        return columns[0].copy()
+        return columns[0][].copy()
     if count == 2:
-        return _connect[op](columns[0], columns[1])
+        return _connect[op](columns[0][], columns[1][])
 
-    var n = len(columns[0])
+    var n = len(columns[0][])
     for k in range(1, count):
-        if len(columns[k]) != n:
+        if len(columns[k][]) != n:
             raise Error(
                 String(
                     "logic: column 0 has ",
@@ -370,7 +438,7 @@ def _connect_all[
                     " rows and column ",
                     k,
                     " has ",
-                    len(columns[k]),
+                    len(columns[k][]),
                 )
             )
 
@@ -388,7 +456,9 @@ def _connect_all[
         )
         for k in range(count):
             srcs.append(
-                columns[k].unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
+                columns[k][]
+                .unsafe_ptr()
+                .unsafe_origin_cast[ImmUntrackedOrigin]()
             )
 
         var dst = out.unsafe_mut_ptr()
@@ -406,11 +476,11 @@ def _connect_all[
 
     parallel_morsels(compute, n)
 
-    var validity = Bitmap(copy=columns[0].data.validity)
-    var any_null = columns[0].null_count() != 0
+    var validity = Bitmap(copy=columns[0][].data.validity)
+    var any_null = columns[0][].null_count() != 0
     for k in range(1, count):
-        validity.and_with(columns[k].data.validity)
-        if columns[k].null_count() != 0:
+        validity.and_with(columns[k][].data.validity)
+        if columns[k][].null_count() != 0:
             any_null = True
     if any_null:
         _settle_all[op](columns, out, validity, n)
@@ -420,9 +490,9 @@ def _connect_all[
 
 
 def _settle_all[
-    op: Int
+    op: Int, o: ImmOrigin
 ](
-    columns: List[Array[DType.bool]],
+    columns: MaskRefs[o],
     mut out: Array[DType.bool],
     mut validity: Bitmap,
     n: Int,
@@ -435,7 +505,7 @@ def _settle_all[
     search stops there.
 
     Args:
-        columns: The columns.
+        columns: The columns, borrowed.
         out: The values, already computed for the rows where every column is
             present.
         validity: The intersection on the way in, the answer's validity on the
@@ -444,6 +514,7 @@ def _settle_all[
 
     Parameters:
         op: One of the `LOGIC_` codes.
+        o: The origin the borrowed columns come from.
     """
     comptime decisive = op == LOGIC_OR
 
@@ -462,8 +533,8 @@ def _settle_all[
             var settled = False
             for k in range(count):
                 if (
-                    columns[k].is_valid(row)
-                    and Bool(columns[k][row]) == decisive
+                    columns[k][].is_valid(row)
+                    and Bool(columns[k][][row]) == decisive
                 ):
                     settled = True
                     break
@@ -593,6 +664,70 @@ def logic_any(a: AnyArray, op: LogicOp) raises -> AnyArray:
             String("logic: not reads a boolean column, and was given ", a.type)
         )
     return AnyArray(logical_not(a.as_typed[DType.bool]()))
+
+
+def logic_all_any[
+    o: ImmOrigin
+](columns: ColumnRefs[o], at: List[Int], op: LogicOp) raises -> AnyArray:
+    """Applies a connective to several of a borrowed set of columns at once.
+
+    The entry point an execution plan uses, and the reason the positions are an
+    argument rather than the caller slicing the list first: what it has is every
+    column of a chunk, and the operands are some of them.
+
+    Nothing is copied. The columns are read through their own storage, so a
+    conjunction of five predicates over a million rows allocates the one answer
+    and nothing else.
+
+    Parameters:
+        o: The origin the borrowed columns come from.
+
+    Args:
+        columns: Every column available, borrowed.
+        at: The positions of the operands, in the order the query wrote them.
+        op: The connective, which must be one that reads more than one column.
+
+    Returns:
+        A bool column.
+
+    Raises:
+        Error: If a position is outside the list, an operand is not boolean,
+            the connective is negation, or the operands are different lengths.
+    """
+    if not op.reads_two_columns():
+        raise Error("logic: not reads one column and was given a list")
+    if len(at) == 0:
+        raise Error("logic: a connective over no columns has no answer")
+
+    var masks = MaskRefs[o](capacity=len(at))
+    for i in range(len(at)):
+        var k = at[i]
+        if k < 0 or k >= len(columns):
+            raise Error(
+                String(
+                    "logic: column ",
+                    k,
+                    " is outside a set of ",
+                    len(columns),
+                    " columns",
+                )
+            )
+        if columns[k][].dtype() != DType.bool:
+            raise Error(
+                String(
+                    "logic: ",
+                    op,
+                    " reads boolean columns, and was given ",
+                    columns[k][].type,
+                )
+            )
+        masks.append(
+            Pointer(
+                to=columns[k][].as_typed_view[DType.bool]()
+            ).unsafe_origin_cast[o]()
+        )
+
+    return AnyArray(connect_all(masks, op))
 
 
 def logic_type(op: LogicOp, operand: LogicalType) raises -> LogicalType:

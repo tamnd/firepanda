@@ -662,14 +662,22 @@ def _lower_connective(
     The three are calls rather than binary operations, because their rule for a
     null is not the one the operations share, and a conjunction or a disjunction
     is written with as many arguments as the query had rather than as a tree of
-    pairs. So this is where the tree comes back: the arguments are folded left to
-    right, one `Connective` per pair, which is what an `a AND b AND c` in a
-    select list ends up as.
+    pairs. It stays that way through here: the arguments are lowered in the
+    order they were written and all of their positions go into one
+    `Connective`, so `a AND b AND c` in a select list is one node.
 
-    Left to right is not arbitrary even though the two connectives are
-    associative. It is the order the query was written in, which is the order a
-    reader of the plan expects to see, and once there is a cost model to reorder
-    on, reordering something is better than having to recover what was written.
+    It used to fold them into pairs, one node per pair, and that was work the
+    simplify pass had already undone. Flattening a nested and chain into a
+    single call is one of its rewrites, and re-expanding it here meant the
+    middle of a four way disjunction was three nodes where two of them existed
+    only to write a boolean column for the next one to read straight back. A
+    chunk's worth of that is a byte a row that nothing else ever looks at, and
+    the kernel can take all of the operands at once, so it does.
+
+    The order is kept even though the two connectives are associative. It is the
+    order the query was written in, which is the order a reader of the plan
+    expects to see, and once there is a cost model to reorder on, reordering
+    something is better than having to recover what was written.
 
     Args:
         exprs: The arena.
@@ -712,15 +720,14 @@ def _lower_connective(
             )
         )
 
-    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
-    for i in range(1, len(args)):
-        var other = _lower_expr(
-            exprs, args[i], pipe, base, name, memo, reuse=True
+    var at = List[Int](capacity=len(args))
+    for i in range(len(args)):
+        at.append(
+            _lower_expr(exprs, args[i], pipe, base, name, memo, reuse=True)
         )
-        pipe.add(Node(Connective(at, other, connective, name)))
-        at = len(pipe.schema) - 1
-    memo.remember(root, at)
-    return at
+    pipe.add(Node(Connective(at^, connective, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
 
 
 def _lower_like(
