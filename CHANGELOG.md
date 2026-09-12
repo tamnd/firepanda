@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: EXCEPT and INTERSECT
+
+`SELECT qty FROM sales EXCEPT SELECT band FROM tiers` and the same query written `INTERSECT` were both refused with a note saying a difference is not a stack of its inputs. They run now. Lowering stacks the two arms with a column saying which arm each row came from, groups over the query's own columns so that every copy of a row lands in one group whichever arm it came from, and reads the smallest and the largest tag in each group back to say which arms had it. Both arms is a smallest of zero and a largest of one, the left arm alone is zero and zero, and the right arm alone is one and one, so an intersection keeps a group whose two tags differ and a difference keeps a group whose largest tag is zero.
+
+The shape is a group by rather than an anti join or a semi join on purpose. SQL compares two rows of a set operation with a null equal to a null, and a join key is never equal to a null, so a difference written as an anti join drops every row with a null in it and does it quietly. A group by puts the nulls of a column in one group, which is the rule SQL asked for.
+
+`EXCEPT ALL` and `INTERSECT ALL` are still refused, and the message now says why rather than saying the operation is not lowered. Both of them count the copies of a row on each side and emit as many rows as those two counts say, a difference for one and the thinner of the two for the other, and a group by answers one row per group rather than a number of them.
+
 ## [0.6.77] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

@@ -2449,25 +2449,118 @@ def test_a_union_whose_inputs_are_different_widths_is_refused_by_name() raises:
         _ = bind(plan, root, two_schemas())
 
 
-def test_a_difference_is_refused_by_name() raises:
+def test_a_difference_keeps_the_rows_the_other_side_lacks() raises:
+    # The bands are 3, 20, 40 and 99, so the three quantities that are also
+    # bands go and the rest stay in the order the left side had them.
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_EXCEPT, all=False)
+    var out = run_two(plan, root)
+
+    assert_equal(out.width(), 1, "the tag the stack carried is gone")
+    same(read_back(out, "qty"), [5, 12, 8, 25, 1, 30, 15], "what is left")
+
+
+def test_a_difference_keeps_one_copy_of_a_row_it_keeps() raises:
+    # A difference is over sets, so a quantity the left side wrote twice comes
+    # back once. The tens of the quantities repeat and none of them is a band.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var ones = plan.exprs.binary(
+        BinaryOp.MOD,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(10))),
+    )
+    var top = plan.project(scan, [ones], [String("ones")])
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_EXCEPT, all=False)
+    var out = run_two(plan, root)
+
+    same(read_back(out, "ones"), [5, 0, 2, 8, 1], "the threes went with 3")
+
+
+def test_an_intersection_keeps_the_rows_both_sides_have() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_INTERSECT, all=False)
+    var out = run_two(plan, root)
+
+    assert_equal(out.width(), 1, "the tag the stack carried is gone")
+    same(read_back(out, "qty"), [20, 3, 40], "99 is a band and not a quantity")
+
+
+def test_a_set_operation_decides_on_every_column_of_the_row() raises:
+    # Two columns rather than one, so a row that matches on the first and not
+    # on the second is a row the other side does not have.
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty", "price"], 0)
+    var bottom = plan.values(
+        [
+            plan.exprs.literal(Value(Int64(20))),
+            plan.exprs.literal(Value(Int64(2))),
+            plan.exprs.literal(Value(Int64(40))),
+            plan.exprs.literal(Value(Int64(7))),
+        ],
+        [String("qty"), String("price")],
+    )
+    var root = plan.setop([top, bottom], SET_INTERSECT, all=False)
+    var out = run_two(plan, root)
+
+    same(read_back(out, "qty"), [20], "40 goes with a price of 1 and not 7")
+    same(read_back(out, "price"), [2], "and the price came along")
+
+
+def test_a_difference_treats_two_nulls_as_the_same_row() raises:
+    # Which is the rule a set operation has and a join does not, and the reason
+    # this is a group by over a stack rather than an anti join.
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_EXCEPT, all=False)
+    var frames = List[DataFrame]()
+    frames.append(holey("qty", [5, 0, 20], [1]))
+    frames.append(holey("band", [0, 20], [0]))
+    var out = run_frames(plan, root, frames^)
+
+    assert_equal(len(out), 1, "the null went with the other side's null")
+    same(read_back(out, "qty"), [5], "and 5 is all that is left")
+
+
+def test_an_intersection_keeps_a_null_both_sides_have() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_INTERSECT, all=False)
+    var frames = List[DataFrame]()
+    frames.append(holey("qty", [5, 0, 20], [1]))
+    frames.append(holey("band", [0, 20], [0]))
+    var out = run_frames(plan, root, frames^)
+
+    valid(present(out, "qty"), [False, True], "the null is one of the two")
+    assert_equal(read_back(out, "qty")[1], 20, "and 20 is the other")
+
+
+def test_a_difference_written_all_is_refused_by_name() raises:
     var plan = Plan()
     var top = plan.scan("sales", ["qty"], 0)
     var bottom = plan.scan("tiers", ["band"], 1)
     var root = plan.setop([top, bottom], SET_EXCEPT, all=True)
     _ = bind(plan, root, two_schemas())
 
-    with assert_raises(contains="a difference is not a stack of its inputs"):
+    with assert_raises(contains="EXCEPT ALL counts the copies of a row"):
         _ = lower(plan, root, two_frames())
 
 
-def test_an_intersection_is_refused_by_name() raises:
+def test_an_intersection_written_all_is_refused_by_name() raises:
     var plan = Plan()
     var top = plan.scan("sales", ["qty"], 0)
     var bottom = plan.scan("tiers", ["band"], 1)
     var root = plan.setop([top, bottom], SET_INTERSECT, all=True)
     _ = bind(plan, root, two_schemas())
 
-    with assert_raises(contains="an intersection is not a stack of its inputs"):
+    with assert_raises(contains="INTERSECT ALL counts the copies of a row"):
         _ = lower(plan, root, two_frames())
 
 
