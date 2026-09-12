@@ -2534,6 +2534,40 @@ def test_an_is_not_false_keeps_the_value_half_as_it_was_written() raises:
     )
 
 
+def test_a_coalesce_is_a_call_of_its_own() raises:
+    assert_equal(
+        _plan("SELECT coalesce(a, b) FROM t"),
+        "PROJECT [coalesce(a, b) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_an_ifnull_is_the_two_argument_coalesce_under_another_name() raises:
+    assert_equal(
+        _plan("SELECT ifnull(a, b) FROM t"),
+        _plan("SELECT coalesce(a, b) FROM t"),
+    )
+
+
+def test_an_ifnull_that_is_not_a_pair_says_what_it_fills() raises:
+    with assert_raises(contains="fills one column from one other"):
+        _ = _plan("SELECT ifnull(a, b, 1) FROM t")
+
+
+def test_a_nullif_is_the_conditional_the_standard_defines_it_as() raises:
+    # Not an operator of its own. `NULLIF(a, b)` is defined as the CASE, and
+    # writing it as the CASE is what makes a null on either side come out right
+    # without anything here arranging for it.
+    assert_equal(
+        _plan("SELECT nullif(a, b) FROM t"),
+        "PROJECT [if a == b then null else a as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_a_coalesce_over_a_number_and_some_text_is_refused() raises:
+    with assert_raises(contains="have to agree on a type"):
+        _ = _plan("SELECT coalesce(a, g) FROM t")
+
+
 def test_a_not_in_negates_the_chain_rather_than_inverting_it() raises:
     # The one that matters. `b <> 1 AND b <> 2` answers true for a row that a
     # null in the list should have made null, which is the classic wrong answer

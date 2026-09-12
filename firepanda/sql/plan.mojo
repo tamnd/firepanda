@@ -700,6 +700,44 @@ def _lower_is(
     )
 
 
+def _lower_nullif(mut plan: Plan, args: List[Int]) raises -> Int:
+    """Builds what a `NULLIF` means.
+
+    `NULLIF(a, b)` is `CASE WHEN a = b THEN NULL ELSE a END`, and that is not a
+    reading of it, it is what the standard defines it as. So it is written as
+    the conditional it already is rather than given an operator, and the null
+    side takes its type from the other side the way a `CASE` with no `ELSE`
+    already does.
+
+    A null on either side makes the comparison null, the conditional then takes
+    its else side, and the answer is `a`, which is a null when `a` was one. That
+    is what DuckDB answers and it falls out rather than being arranged.
+
+    Args:
+        plan: The plan, whose arena the pieces go in.
+        args: The two arguments, already lowered.
+
+    Returns:
+        The expression that answers the call.
+
+    Raises:
+        Error: If the call was not given two arguments.
+    """
+    if len(args) != 2:
+        raise Error(
+            String(
+                "nullif compares two values and was given ",
+                len(args),
+                " arguments",
+            )
+        )
+    return plan.exprs.conditional(
+        plan.exprs.binary(BinaryOp.EQ, args[0], args[1]),
+        plan.exprs.literal(Value(null=LogicalType.NULL)),
+        args[0],
+    )
+
+
 def _agg_kind(name: String, distinct: Bool = False) raises -> AggKind:
     """The fold a function name is, or nothing if the name is not an aggregate.
 
@@ -1683,6 +1721,22 @@ def _lower_expr(
             lowered.append(
                 _lower_expr(ast, args[i], plan, walk, scope, grouped)
             )
+        if name == "ifnull":
+            # The two argument `COALESCE` under another name, which is what
+            # DuckDB calls it and what it does. Renamed here rather than given
+            # its own entry everywhere below, since nothing after this point
+            # would be able to tell the two apart anyway.
+            if len(lowered) != 2:
+                raise Error(
+                    String(
+                        "ifnull fills one column from one other and was given ",
+                        len(lowered),
+                        " arguments",
+                    )
+                )
+            return plan.exprs.call("coalesce", lowered^, True)
+        if name == "nullif":
+            return _lower_nullif(plan, lowered)
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

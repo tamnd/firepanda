@@ -261,6 +261,7 @@ from firepanda.exec.node import (
     Connective,
     Constant,
     Expand,
+    Fill,
     Filter,
     Group,
     GroupAgg,
@@ -546,6 +547,9 @@ def _lower_expr(
     ):
         return _lower_presence(exprs, root, pipe, base, name, memo)
 
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "coalesce":
+        return _lower_coalesce(exprs, root, pipe, base, name, memo)
+
     if kind == ExprKind.CONDITIONAL:
         return _lower_conditional(exprs, root, pipe, base, name, memo)
 
@@ -821,6 +825,63 @@ def _lower_presence(
     pipe.add(Node(Presence(at, exprs.nodes[root].name == "is_null", name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
+
+
+def _lower_coalesce(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `COALESCE`.
+
+    A line of `Fill` nodes, each one reading what the one before it wrote, so
+    three arguments are two nodes and one intermediate. A node that took the
+    whole list would be one node and no intermediate, and it would not be
+    better: the kernel fills from one column at a time either way, and the
+    intermediates are dropped by the projection at the end the way every other
+    expression's are.
+
+    Every argument is converted to the type binding worked out for the call
+    before it goes in, which is what `_lower_side` does for the two sides of a
+    conditional and for the same reason. `COALESCE(a, 0)` over a float column is
+    the ordinary case: the literal is the side that moves.
+
+    A `COALESCE` of one argument is that argument. It is legal to write and
+    DuckDB allows it, and there is nothing to fill from, so no node is added.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call was given no arguments, or one of them has a kind no
+            operator computes.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) == 0:
+        raise Error(
+            "lower: a coalesce answers the first of its arguments that is not"
+            " null, and was given none to choose from"
+        )
+
+    var want = exprs.nodes[root].type
+    var at = _lower_side(exprs, args[0], pipe, base, name, memo, want)
+    for i in range(1, len(args)):
+        var next = _lower_side(exprs, args[i], pipe, base, name, memo, want)
+        pipe.add(Node(Fill(at, next, name)))
+        at = len(pipe.schema) - 1
+    memo.remember(root, at)
+    return at
 
 
 def _lower_conditional(

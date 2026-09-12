@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: COALESCE, IFNULL and NULLIF
+
+`SELECT coalesce(o_comment, 'none') FROM orders` was refused with "there is no function named coalesce", which is a gap worth naming because filling a gap is most of what anybody does with a nullable column. The kernel behind it has been in `firepanda/kernel/nulls.mojo` since the array layer was written, and again what was missing was the plumbing between it and a query.
+
+There is an operator for it now. It reads a validity bit and moves a value in one pass, rather than building a mask, reading it and throwing it away, which is what a conditional over an `IS NULL` would have cost. A coalesce over more than two arguments is a line of them, each reading what the one before it wrote, and that is the right shape rather than a compromise: the kernel fills from one column at a time whichever way it is written, and the intermediate columns are dropped by the projection at the end like every other expression's are. The arguments are moved to the type they agree on before any of this, so `coalesce(qty, 1.5)` answers a float column and `coalesce(qty, 'a')` is refused with the two types named. A fallback with nothing missing in it makes the answer a column that cannot hold a null, which is the ordinary `coalesce(x, 0)` and is worth having in the schema.
+
+`IFNULL` is the two argument coalesce under DuckDB's other name for it and is renamed at the point the query is lowered, since nothing after that point could tell the two apart. `NULLIF(a, b)` is written as the `CASE WHEN a = b THEN NULL ELSE a END` the standard defines it as, which is not a reading of it. Doing it that way makes the null case fall out rather than having to be arranged: a null on either side makes the comparison null, the conditional then takes its else side, and the answer is `a`.
+
 ### Added: IS NULL, and the other three tests spelled with words
 
 `SELECT count(*) FROM orders WHERE o_comment IS NOT NULL` was refused with "firepanda has no kernel for the operator IS yet", which meant the most ordinary predicate in SQL did not run. The kernels behind it have been in `firepanda/kernel/nulls.mojo` since the array layer was written, and what was missing was the operator between them and a query.
