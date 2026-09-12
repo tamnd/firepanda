@@ -199,9 +199,7 @@ the null aware anti join is a mark join and a `NOT`, with nothing written for it
 rather than being lowered a second time. The nulls line up exactly as well:
 `<> ALL` over a subquery holding a null is null
 on every row that matched nothing, which is what the mark join and the `NOT`
-over it already answer. The other four quantified comparisons are refused, since
-each asks whether a comparison holds against some row or every row, which is a
-minimum and a maximum over the subquery rather than a key to join on.
+over it already answer. The other four are the section after next.
 
 The subquery lowers against a scope of its own, which is the ordinary rule, and
 here it is also what makes the rewrite safe: a subquery that reads no outer
@@ -255,6 +253,38 @@ be three valued because it compares values and a null compares to nothing;
 `EXISTS` counts rows without looking in them, so it is true or false and a
 `NOT EXISTS` is the plain opposite of it.
 
+### The other four quantified comparisons are a range under a cross join
+
+`x > ANY (SELECT k FROM u)` asks whether any `k` is under `x`, which is whether
+the smallest one is, and `x > ALL (...)` asks whether every `k` is, which is
+whether the largest one is. `<` and `<=` ask the same two questions the other
+way round, and `= ALL` and `<> ANY` ask about both ends at once, since every row
+equals `x` when both ends do and some row differs from `x` when either end does.
+So none of the four reads the subquery more than a fold does.
+
+The fold has four columns in it and no `GROUP BY`, so it is one row whatever the
+subquery read: the smallest value, the largest, how many rows there were and how
+many of those were not null. That row is cross joined on above the `FROM`, the
+way the count an `EXISTS` goes through is, and the comparison itself is done
+where it was written, because that is the side `x` is on.
+
+Two of the four columns are the three valued rule and neither is spare. A null
+in the subquery makes the two counts differ, and it is what turns a false into a
+null: `x > ALL (S)` is not true just because `x` beat every row that was there
+to beat, since the null might have been larger, and it is not false either. So
+the answer is the comparison joined to a padding by the quantifier's own
+operator, `OR` for `ANY` and `AND` for `ALL`, where the padding is a null when
+the counts differ and is that operator's identity when they do not. Joined on by
+the other operator is the filling, which is the quantifier's answer over an
+empty subquery and is the identity of that operator otherwise, so it decides a
+subquery with no rows in it and decides nothing anywhere else. A null `x` needs
+nothing written for it, because comparing it against either end is null already.
+
+Nothing in any of that is a `CASE`, and that is not a stylistic choice. The
+physical lowering has no conditional yet, so a plan with one in it lowers and
+then does not run, while `AND` and `OR` over a null are the three valued
+operators the engine already has and are what the whole rule is made of anyway.
+
 ### A subquery that answers one value is a cross join onto one row
 
 An uncorrelated subquery written where a value goes answers the same value for
@@ -282,11 +312,8 @@ refusal a correlated `IN` gets and the same dependent join behind it.
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. Four of the six quantified comparisons are refused:
-`= ANY` and `<> ALL` are the membership tests above and run, while `<`, `<=`,
-`>` and `>=` under either quantifier, and `= ALL` and `<> ANY`, each carry a
-comparison that neither the mark join nor the counting above is given. So are
-the column aliases on a derived table and a `LATERAL` one.
+and the joins over them. So are the column aliases on a derived table and a
+`LATERAL` one.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
 value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
@@ -997,6 +1024,11 @@ struct _Walk(Movable):
     var asked_names: List[String]
     """What the boolean column each of those produced is called."""
 
+    var compared: List[UInt32]
+    """The quantified comparisons a cross join has already been built for, as
+    they are written in the SQL arena. What each one's four columns are called
+    is read off its position here rather than kept beside it."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -1010,6 +1042,7 @@ struct _Walk(Movable):
         self.mark_names = List[String]()
         self.asked = List[UInt32]()
         self.asked_names = List[String]()
+        self.compared = List[UInt32]()
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -1053,6 +1086,22 @@ struct _Walk(Movable):
         """
         for i in range(len(self.asked)):
             if self.asked[i] == at:
+                return i
+        return -1
+
+    def _compared(self, at: UInt32) -> Int:
+        """Where a quantified comparison's row landed, if one was built for it.
+
+        Args:
+            at: The comparison, in the SQL arena.
+
+        Returns:
+            Its position among the ones taken out, which is also the number in
+            the names of its four columns, or -1 if this is not one of them and
+            so is a comparison the lowering still refuses.
+        """
+        for i in range(len(self.compared)):
+            if self.compared[i] == at:
                 return i
         return -1
 
@@ -1312,14 +1361,18 @@ def _lower_expr(
     if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_QUANTIFIED:
         var shape = _in_shape(ast, at)
         if shape < 0:
+            var row = walk._compared(at)
+            if row >= 0:
+                return _quantified_read(
+                    ast, at, plan, walk, scope, grouped, row
+                )
             raise Error(
-                "firepanda lowers the two quantified comparisons that are a"
-                " membership test, since `= ANY` is an IN and `<> ALL` is a NOT"
-                " IN, and does not lower the other four yet. Those ask whether"
-                " a comparison holds against some row or every row, which is a"
-                " minimum and a maximum over the subquery rather than a key to"
-                " join on, and neither the mark join nor the counting an EXISTS"
-                " goes through is given a comparison"
+                "firepanda lowers a quantified comparison where it is written"
+                " in a WHERE, or in the select list of a query that does not"
+                " aggregate, and this one is written somewhere else. The answer"
+                " is read off a row cross joined on above the FROM, which is"
+                " under the aggregate, and an aggregate hands up its keys and"
+                " its folds rather than everything it read"
             )
         var place = walk._mark(at)
         if place >= 0:
@@ -1729,7 +1782,11 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]) raises:
         return
     var node = ast.exprs[Int(at)]
     if node.kind == kind:
-        found.append(at)
+        # A quantified comparison that is a membership test is an `IN`, so it is
+        # collected when the mark join's kind is asked for and not when the
+        # quantified kind is, and the two pre-passes do not both take it.
+        if kind != EXPR_QUANTIFIED or _in_shape(ast, at) < 0:
+            found.append(at)
         return
     if (
         kind == EXPR_IN_SUBQUERY
@@ -1829,6 +1886,24 @@ def _askings(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
         If the text of a quantified comparison is not there to read.
     """
     _taken(ast, at, EXPR_EXISTS, found)
+
+
+def _comparisons(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
+    """Collects every quantified comparison that is not a membership test.
+
+    `= ANY` and `<> ALL` are not collected. Each is an `IN` and goes to the mark
+    join, which has a key pair to join on and so needs none of the counting the
+    other four go through.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the comparisons are written.
+
+    Raises:
+        If the text of a quantified comparison is not there to read.
+    """
+    _taken(ast, at, EXPR_QUANTIFIED, found)
 
 
 comptime _NEITHER = -2
@@ -3680,6 +3755,248 @@ def _exists_value(
     return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
 
 
+def _quantified_value(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    left: Int,
+) raises -> Int:
+    """Puts the row a quantified comparison is answered against under the query.
+
+    `x > ANY (SELECT k FROM u)` asks whether any `k` is under `x`, which is
+    whether the smallest one is, and `x > ALL (...)` asks whether every `k` is,
+    which is whether the largest one is. So the whole of the subquery that the
+    comparison needs is four numbers, and they are a fold with no `GROUP BY`
+    over it: the smallest `k`, the largest one, how many rows there were and how
+    many of those were not null. That row is cross joined on above the `FROM`
+    the way an `EXISTS` written as a value is, and the comparison itself is done
+    where it was written, because that is the side `x` is on.
+
+    Four is what the three valued rule costs, and none of the four is spare. The
+    two counts are not the same number when the subquery holds a null, and a
+    null in there is what turns a false into a null: `x > ALL (S)` is not true
+    just because `x` beat every `k` that was there to beat, since the null might
+    have been larger. It is also not false, so the answer is neither. That is
+    `__pad`, a null when the two counts differ and the operator's identity when
+    they agree, joined to the comparison by the quantifier's own operator.
+    `__fill` is the other end, the subquery with no rows at all, where `ANY` is
+    false and `ALL` is true whatever `x` is, and it is joined on by the other
+    operator so that it decides the answer there and nothing anywhere else.
+
+    A correlated one is not taken, and it is refused by where it lowers rather
+    than by a check, which is what happens to an `EXISTS` written as a value
+    too. The subquery gets a scope of its own, so an outer name written inside
+    it is a name nothing in that query has.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_QUANTIFIED`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told that the row is there, so that the expression around it can
+            read the four columns back.
+        left: What the cross join is put over.
+
+    Returns:
+        The cross join, which produces what the left side produced and the four
+        columns the fold answered.
+
+    Raises:
+        If the subquery does not lower, or hands out other than one column.
+    """
+    var node = ast.exprs[Int(at)]
+    var inner = _Scope()
+    var root: Int
+    try:
+        root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+    except failed:
+        raise Error(
+            String(
+                "the subquery of a quantified comparison did not lower: ",
+                failed,
+                (
+                    ". It is lowered against a scope of its own, so a name it"
+                    " takes from the query around it is a name nothing in it"
+                    " has, and a correlated ANY or ALL is the dependent join"
+                ),
+            )
+        )
+
+    var names = _produces(plan, root)
+    if len(names) != 1:
+        raise Error(
+            String(
+                "an ANY or an ALL whose subquery hands out ",
+                len(names),
+                " columns, and what a value is compared against is one column",
+            )
+        )
+
+    var over = plan.exprs.column(String(names[0]))
+    var folded = List[Int]()
+    folded.append(plan.exprs.aggregate(AggKind.MIN, over))
+    folded.append(plan.exprs.aggregate(AggKind.MAX, over))
+    folded.append(
+        plan.exprs.aggregate(AggKind.COUNT, plan.exprs.literal(Value(Int64(1))))
+    )
+    folded.append(plan.exprs.aggregate(AggKind.COUNT, over))
+    var under = List[String]()
+    under.append(String("__low"))
+    under.append(String("__high"))
+    under.append(String("__rows"))
+    under.append(String("__seen"))
+    var row = plan.aggregate(root, List[Int](), folded^, under^)
+
+    # Numbered by how many were taken out before, the way the mark join's column
+    # is, so two comparisons in one query read two rows rather than one name
+    # meaning both.
+    var place = len(walk.compared)
+    var every = node.children == 1
+    var other = String("or") if every else String("and")
+
+    # Both of these are worked out here rather than at the comparison, because
+    # each is the same value for every outer row and doing it under the cross
+    # join does it once.
+    #
+    # The padding says what a null in the subquery did. For `ALL` it is a true
+    # when the two counts agree and a null when they do not, so joining it on
+    # with `AND` leaves a false alone and turns a true into a null, which is
+    # exactly what a null the comparison never saw is worth. For `ANY` it is a
+    # false and a null the same way, joined on with `OR`.
+    var pad = plan.exprs.call(
+        other,
+        [
+            plan.exprs.binary(
+                BinaryOp.EQ if every else BinaryOp.NE,
+                plan.exprs.column("__rows"),
+                plan.exprs.column("__seen"),
+            ),
+            plan.exprs.literal(Value(null=LogicalType.BOOL)),
+        ],
+        True,
+    )
+    # The filling is the empty subquery, where `ALL` is true and `ANY` is false
+    # whatever is on the other side. It is joined on with the operator the
+    # padding was not, so over an empty subquery it decides the answer and over
+    # any other it is the operator's identity and decides nothing.
+    var fill = plan.exprs.binary(
+        BinaryOp.EQ if every else BinaryOp.GT,
+        plan.exprs.column("__rows"),
+        plan.exprs.literal(Value(Int64(0))),
+    )
+    var values = List[Int]()
+    values.append(plan.exprs.column("__low"))
+    values.append(plan.exprs.column("__high"))
+    values.append(pad)
+    values.append(fill)
+    var renamed = List[String]()
+    renamed.append(String("__low_", place))
+    renamed.append(String("__high_", place))
+    renamed.append(String("__pad_", place))
+    renamed.append(String("__fill_", place))
+    var one_row = plan.project(row, values^, renamed^)
+    walk.compared.append(at)
+    return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
+
+
+def _quantified_read(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+    place: Int,
+) raises -> Int:
+    """Reads a quantified comparison off the row that was cross joined on.
+
+    The comparison is done here rather than under the join because `x` is on
+    this side of it. Which of the two ends of the subquery `x` is compared
+    against is the whole of the rewrite: `> ANY` and `>= ANY` ask about the
+    smallest row and `> ALL` and `>= ALL` about the largest, and `<` and `<=`
+    ask the other way round under each quantifier.
+
+    `= ALL` and `<> ANY` are not one comparison, because neither end of the
+    range answers them on its own: every row equals `x` when both ends do, and
+    some row differs from `x` when either end does. So each is the two ends
+    joined, which is still two comparisons rather than a scan of the subquery.
+
+    What is built over that is the three valued rule, and it is two operators
+    wide. The comparison is joined to the padding by the quantifier's own
+    operator, `OR` for `ANY` and `AND` for `ALL`, which is what the quantifier
+    means read across the rows: a true out of `ANY` survives a null and so does
+    a false out of `ALL`, and everything the null was going to decide becomes a
+    null. The filling is joined on by the other operator, where it is that
+    operator's identity unless the subquery was empty and so decides the answer
+    there and nowhere else. A null `x` needs nothing written for it, since
+    comparing it against either end is null already.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_QUANTIFIED`.
+        plan: Where the nodes go.
+        walk: The walk the operand is lowered against.
+        scope: What the `FROM` put in reach, which the operand reads.
+        grouped: Whether the query aggregates, for the operand.
+        place: Which of the rows taken out is this one's.
+
+    Returns:
+        The expression, which is a boolean and may be null.
+
+    Raises:
+        If the comparison is not one this answers, or the operand does not
+        lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var every = node.children == 1
+    var written = ast.text(node.payload)
+    var value = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+    var low = plan.exprs.column(String("__low_", place))
+    var high = plan.exprs.column(String("__high_", place))
+
+    var core: Int
+    if written == "=" or written == "==":
+        core = plan.exprs.call(
+            "and",
+            [
+                plan.exprs.binary(BinaryOp.EQ, value, low),
+                plan.exprs.binary(BinaryOp.EQ, value, high),
+            ],
+            True,
+        )
+    elif written == "<>" or written == "!=":
+        core = plan.exprs.call(
+            "or",
+            [
+                plan.exprs.binary(BinaryOp.NE, value, low),
+                plan.exprs.binary(BinaryOp.NE, value, high),
+            ],
+            True,
+        )
+    else:
+        var under = written == "<" or written == "<="
+        core = plan.exprs.binary(
+            _binary_op(written), value, low if under == every else high
+        )
+
+    var joined = plan.exprs.call(
+        "and" if every else "or",
+        [core, plan.exprs.column(String("__pad_", place))],
+        True,
+    )
+    return plan.exprs.call(
+        "or" if every else "and",
+        [joined, plan.exprs.column(String("__fill_", place))],
+        True,
+    )
+
+
 def _exists_join(
     ast: Ast,
     at: UInt32,
@@ -4023,6 +4340,26 @@ def _block(
     for i in range(len(wanting)):
         at = _exists_value(
             ast, wanting[i], catalog, plan, sources, ctes, walk, at
+        )
+
+    # A quantified comparison other than the two that are an `IN` goes to the
+    # cross join as well, and for the same reason: the smallest and the largest
+    # row of the subquery are the same two values whichever outer row is asking.
+    # The comparison against them is not put here, because `x` is on the other
+    # side of the join, so only the row is built and the comparison is made
+    # where it was written.
+    var ranged = List[UInt32]()
+    if restriction != NO_NODE:
+        var parts = List[UInt32]()
+        _conjuncts(ast, restriction, parts)
+        for i in range(len(parts)):
+            _comparisons(ast, parts[i], ranged)
+    if not grouped:
+        for one in items:
+            _comparisons(ast, ast.stmts[Int(one)].a, ranged)
+    for i in range(len(ranged)):
+        at = _quantified_value(
+            ast, ranged[i], catalog, plan, sources, ctes, walk, at
         )
 
     if restriction != NO_NODE:

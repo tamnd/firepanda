@@ -45,7 +45,19 @@ The nulls come along with them, which is the point of doing it this way. `<> ALL
 
 `==` and `!=` are other spellings of the two comparisons and go the same way. `SOME` is another spelling of `ANY` and does not, because the DuckDB PEG grammar this vendors has `SubqueryAny <- 'ANY'` and no word for `SOME`, while DuckDB's own parser takes it. That is an upstream gap rather than something to patch into a verbatim copy, and `= SOME` is a syntax error here until it is fixed. There is a test that says so.
 
-The other four quantified comparisons are still refused, and by a better sentence. `> ANY`, `>= ALL` and the rest ask whether a comparison holds against some row or every row, and `= ALL` and `<> ANY` are not membership either, since one matching row does not answer whether every row matches. Those are a minimum and a maximum worked out over the subquery and cross joined on, which is the shape an uncorrelated `EXISTS` already uses, and it is a change of its own.
+The other four quantified comparisons are not membership and do not come here. `> ANY`, `>= ALL` and the rest ask whether a comparison holds against some row or every row, and `= ALL` and `<> ANY` are not membership either, since one matching row does not answer whether every row matches. Those take a different shape and are the entry below.
+
+Part of #309.
+
+### Added: the other four quantified comparisons, over a minimum and a maximum
+
+`> ANY`, `>= ALL`, `< ANY`, `<= ALL`, `= ALL`, `<> ANY` and the rest of the spellings are lowered now, so every quantified comparison over an uncorrelated subquery runs. `SELECT qty FROM sales WHERE qty > ANY (SELECT band FROM tiers)` keeps the rows that beat at least one band, and `qty >= ALL (SELECT band FROM tiers)` keeps the rows that reach the top one.
+
+None of them reads the subquery once per outer row. A comparison against every row of a set only ever needs the two ends of that set, because `x > ANY (S)` is `x > min(S)` and `x > ALL (S)` is `x > max(S)`, and the less than ones read the other end. So the subquery is folded once into a single row holding `min`, `max`, `count(*)` and `count(col)`, and that row is cross joined on above the `FROM`, which is the shape an uncorrelated `EXISTS` and a scalar subquery already use. The two comparisons that are not monotone read both ends at once: `= ALL` is true when the smallest and the largest both equal `x`, and `<> ANY` is true when either one differs from it.
+
+The two counts are there for the nulls and for the empty subquery, and both were read off DuckDB 1.5.1 first. A subquery with no rows in it answers the quantifier itself, false for `ANY` and true for `ALL`, which is why `count(*)` is compared against zero. A subquery holding a null cannot say false, only null, because the null might have been the row that would have matched, so `count(*)` and `count(col)` disagreeing turns a false into a null and leaves a true alone. That is Kleene's `AND` and `OR` and nothing more, so it is written as `AND` and `OR` over a null literal rather than as a `CASE`, which also means it runs: the physical lowering has no operator for a conditional yet, so a plan built around one plans and prints and then stops.
+
+What is still refused is a correlated one, which is the dependent join, and one written in the `HAVING` or the select list of a query that aggregates, because the row it reads is cross joined on under the aggregate and an aggregate hands up its keys and its folds rather than everything it read. A subquery handing out more than one column is refused by name. Both say so in the message.
 
 Part of #309.
 

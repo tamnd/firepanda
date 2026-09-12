@@ -1333,12 +1333,170 @@ def test_an_equals_any_answers_on_every_row() raises:
     )
 
 
-def test_a_quantified_comparison_over_an_order_is_refused() raises:
-    with assert_raises(contains="does not lower the other four"):
-        _ = run(
-            "SELECT qty FROM sales WHERE qty > ANY (SELECT band FROM tiers)",
-            session(),
-        )
+def test_a_greater_than_any_keeps_what_beat_the_smallest_row() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > ANY"
+                " (SELECT band FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_greater_than_any_answers_on_every_row() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty > ANY (SELECT band FROM tiers) AS over FROM sales",
+                session(),
+            ),
+            "over",
+        ),
+        [1, 1, 0, 1, 1, 1, 1, 0, 1, 1],
+        "over",
+    )
+
+
+def test_a_greater_or_equal_all_is_false_where_nothing_reaches_the_top() raises:
+    # The largest band is 99 and no sale reaches it, so every row is false and
+    # none of them is null, because the subquery holds no null.
+    same(
+        truths(
+            run(
+                "SELECT qty >= ALL (SELECT band FROM tiers) AS top FROM sales",
+                session(),
+            ),
+            "top",
+        ),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "top",
+    )
+
+
+def test_a_less_than_all_is_true_only_under_the_smallest_row() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty < ALL (SELECT band FROM tiers) AS under FROM sales",
+                session(),
+            ),
+            "under",
+        ),
+        [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+        "under",
+    )
+
+
+def test_a_not_equals_any_is_true_wherever_the_two_ends_differ() raises:
+    same(
+        truths(
+            run(
+                (
+                    "SELECT qty <> ANY (SELECT band FROM tiers) AS other"
+                    " FROM sales"
+                ),
+                session(),
+            ),
+            "other",
+        ),
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "other",
+    )
+
+
+def test_an_equals_all_is_false_over_a_subquery_of_several_rows() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty = ALL (SELECT band FROM tiers) AS only FROM sales",
+                session(),
+            ),
+            "only",
+        ),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "only",
+    )
+
+
+def test_a_null_in_the_subquery_turns_a_false_into_a_null() raises:
+    # The answer this shape is for. A row that beat every band there was to
+    # beat did not beat the null, so it is neither true nor false, while a row
+    # that lost to a band it could see is false whatever the null was.
+    same(
+        truths(
+            run(
+                "SELECT qty > ALL (SELECT band FROM gaps) AS over FROM sales",
+                session(),
+            ),
+            "over",
+        ),
+        [0, 0, 0, -1, 0, 0, -1, 0, -1, 0],
+        "over",
+    )
+
+
+def test_a_null_in_the_subquery_leaves_a_true_alone() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty > ANY (SELECT band FROM gaps) AS over FROM sales",
+                session(),
+            ),
+            "over",
+        ),
+        [1, 1, -1, 1, 1, 1, 1, -1, 1, 1],
+        "over",
+    )
+
+
+def test_a_quantified_comparison_over_no_rows_is_the_quantifier() raises:
+    # `ANY` over nothing is false and `ALL` over nothing is true, whatever is
+    # on the other side of the comparison, and the fold hands out the one row
+    # that says the subquery was empty.
+    same(
+        truths(
+            run(
+                (
+                    "SELECT qty > ANY (SELECT band FROM tiers WHERE band >"
+                    " 1000) AS over FROM sales"
+                ),
+                session(),
+            ),
+            "over",
+        ),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "over",
+    )
+    same(
+        truths(
+            run(
+                (
+                    "SELECT qty > ALL (SELECT band FROM tiers WHERE band >"
+                    " 1000) AS over FROM sales"
+                ),
+                session(),
+            ),
+            "over",
+        ),
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "over",
+    )
+
+
+def test_a_where_keeps_a_row_on_true_and_not_on_a_null() raises:
+    assert_equal(
+        len(
+            run(
+                "SELECT qty FROM sales WHERE qty > ALL (SELECT band FROM gaps)",
+                session(),
+            )
+        ),
+        0,
+    )
 
 
 def test_an_in_over_a_subquery_that_kept_no_rows_keeps_no_rows() raises:
