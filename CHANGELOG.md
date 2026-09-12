@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a group can be reduced with a product and asked whether it is true
+
+`df.groupby("k").prod()`, `.any()` and `.all()` are here, on a frame's group by and on a column's, and so are the three matching entry points on the kernel. The words had crossed the boundary since the whole column forms landed and stopped at the dispatch chain in the grouped kernel, which said in as many words that the reduction had a whole column implementation and no grouped one yet. The eighteen reductions `AggKind` carries for a single column are now eighteen the chain answers.
+
+A grouped product cannot be a grouped sum with the operator changed. A missing value is a zero in the values buffer, which is the invariant the sum spends to read no validity bitmap at all, and zero is the one number a product must never see, so the product reads the bitmap and a missing row contributes one. It does not need the seen table the grouped minimum and maximum carry, which is a byte per group per worker, because a product over nothing is one and one is already the answer rather than a placeholder for it.
+
+`any` and `all` share a body the way the two extremes do, and they store only when a row would change the group's answer, so a column that is mostly one way touches the accumulator on the few rows that are not. They are also the only two of the eighteen that a text column can answer: a string is true when it is not empty, which is Python's rule and the one pandas keeps, so a frame of a key, a number and a label can be asked whether it holds anything without the label being taken out first. A product over words is refused, because multiplying two strings together is not an operation in pandas either.
+
+The rule for what counts as true is now read from both paths rather than copied into the second one. `truthy` in `firepanda/kernel/agg.mojo` lost its underscore for that reason, since a whole column `any` and a grouped `any` disagreeing would be a difference that each half's own tests would pass.
+
+The signatures are pandas' own and were measured. A grouped product takes `numeric_only`, `min_count` and `skipna` and takes no `engine`, which a grouped sum does take, and a grouped truth takes nothing but `skipna`. `min_count` defaults to zero for `prod` as it does for `sum`, rather than to the minus one the four that pick a value out carry, and it is still held at its default here along with `skipna` and `numeric_only`. Specified in `docs/specs/54-reducing-a-group-with-a-product-and-with-a-truth.md`.
+
 ### Fixed: ORDER BY 1 sorted on the number one rather than on the first column
 
 `SELECT qty FROM sales ORDER BY 1` came back unsorted and said nothing about it. The number lowered as the constant one, every row sorted on the same value, and the sort was a node that did no work. A query whose rows happened to arrive in the right order looked correct, which is the worst version of this: two tests in this repo were written with `ORDER BY 1` and passed for that reason.

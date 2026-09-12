@@ -7931,7 +7931,7 @@ class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
     `Answer` is what the reductions hand back. A frame's group by answers a frame
-    and a column's answers a column, and the fifteen reductions are otherwise the
+    and a column's answers a column, and the eighteen reductions are otherwise the
     same call written twice, so the shared half is written once against the
     parameter and each subclass says which it is. That is not decoration: without
     it every reduction on both classes is declared to answer one thing and
@@ -7941,7 +7941,7 @@ class GroupByMixin[Answer]:
     A group by object holds a frame, some key column names and three flags, and
     it computes nothing until a reduction is asked for. That is pandas' own
     arrangement and it is the reason the two classes have so little in them: the
-    fifteen reductions are one call each with a different word in it, and the
+    eighteen reductions are one call each with a different word in it, and the
     word is the pandas method name, which is the same string the boundary reads.
 
     The keys are checked here rather than at the first reduction. pandas raises
@@ -8077,7 +8077,7 @@ class GroupByMixin[Answer]:
     ) -> Answer:
         """Runs one reduction over the groups, after refusing what is declared.
 
-        Every one of the fifteen comes through here and the five arguments below
+        Every one of the eighteen comes through here and the five arguments below
         are the ones pandas puts on their signatures and firepanda does not
         honour. They are declared rather than left out because the parity test
         compares the whole parameter list against a running pandas, and they
@@ -8093,8 +8093,8 @@ class GroupByMixin[Answer]:
             numeric_only: Declared and held at False.
             skipna: Declared and held at True.
             min_count: Declared and held at its default, which is zero for `sum`
-                and minus one for the four that pick a value rather than combine
-                them. None for the reductions that do not have it.
+                and `prod` and minus one for the four that pick a value rather
+                than combine them. None for the reductions that do not have it.
             engine: Declared and refused.
             engine_kwargs: Declared and refused.
 
@@ -8118,13 +8118,14 @@ class GroupByMixin[Answer]:
             " second pass the kernels do not make",
         )
         if min_count is not None:
-            # pandas defaults this to zero for `sum` and to minus one for the
-            # four that pick a value rather than combining them, so the value
-            # that means "nobody asked for anything" depends on the reduction.
+            # pandas defaults this to zero for the two that combine values with
+            # an operator and to minus one for the four that pick one out, so
+            # the value that means "nobody asked for anything" depends on the
+            # reduction.
             _held_at(
                 "min_count",
                 min_count,
-                0 if kind == "sum" else -1,
+                0 if kind in ("sum", "prod") else -1,
                 "answering nothing for a group that is too small is a check on"
                 " the count after the reduction, and the count is not kept",
             )
@@ -8154,7 +8155,7 @@ class GroupByMixin[Answer]:
 
         A door of its own only because the generated body has to fit on one
         line, and `float(ddof)` written there rather than here pushed the two
-        widest of the fifteen past the line limit. The conversion is the whole
+        widest of the eighteen past the line limit. The conversion is the whole
         of what it adds: the kinds store the parameter as a float because it is
         a number in a formula rather than a length.
 
@@ -8292,7 +8293,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         """Counts the rows in each group, which is the one reduction with two shapes.
 
         A door of its own rather than a branch in `_shape`, because it is the one
-        of the fifteen that does not answer what the other fourteen answer.
+        of the eighteen that does not answer what the other seventeen answer.
         pandas makes it a series when the key is in the index, since the answer is
         one column either way, and leaves it a two column frame when the key is
         not, and the shape is as much the answer as the numbers are.

@@ -202,6 +202,32 @@ def test_an_empty_column_produces_no_groups() raises:
     assert_equal(len(out), 0)
 
 
+def test_any_and_all_read_an_empty_string_as_false() raises:
+    """The whole reason a truth over text is a question rather than a constant.
+
+    A dataset that spells its missing text as an empty string gets a different
+    answer here from one that spells it as a null, and both answers are right.
+    That is `text_truth`'s rule and this is the same rule one group at a time.
+    """
+    var col = with_nulls(["oslo", "", "", "lima"], [True, True, True, True])
+    var truthy = reduce(StringArray(copy=col), AggKind.ANY, [0, 0, 1, 1], 2)
+    var every = reduce(col^, AggKind.ALL, [0, 0, 1, 1], 2)
+    var found = truthy.as_typed[DType.bool]()
+    var all_of = every.as_typed[DType.bool]()
+    assert_equal(found[0], True, "group 0 holds a name")
+    assert_equal(found[1], True, "group 1 holds a name too")
+    assert_equal(all_of[0], False, "group 0 also holds an empty string")
+    assert_equal(all_of[1], False, "and so does group 1")
+
+
+def test_any_and_all_step_over_a_null_in_the_text() raises:
+    var col = with_nulls(["x", "y"], [False, False])
+    var truthy = reduce(StringArray(copy=col), AggKind.ANY, [0, 1], 2)
+    var every = reduce(col^, AggKind.ALL, [0, 1], 2)
+    assert_equal(truthy.as_typed[DType.bool]()[0], False, "an any over nothing")
+    assert_equal(every.as_typed[DType.bool]()[0], True, "an all over nothing")
+
+
 def test_summing_text_names_the_reduction() raises:
     var col = text(["a", "b"])
     with assert_raises(contains="sum is not defined for a string column"):
@@ -215,6 +241,7 @@ def test_the_other_numeric_reductions_are_refused_too() raises:
     kinds.append(AggKind.STD)
     kinds.append(AggKind.MEDIAN)
     kinds.append(AggKind.quantile_at(0.9))
+    kinds.append(AggKind.PROD)
     for k in range(len(kinds)):
         var col = text(["a", "b"])
         with assert_raises(contains="not defined for a string column"):

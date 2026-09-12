@@ -1507,11 +1507,34 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def prod(
+        self, numeric_only: bool = False, min_count: int = 0, skipna: bool = True
+    ) -> DataFrame:
+        """The product of the values in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("prod", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def any(self, skipna: bool = True) -> DataFrame:
+        """Whether any value in each group is true. Over every column that is not a key."""
+        try:
+            return self._reduce("any", 0.0, False, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def all(self, skipna: bool = True) -> DataFrame:
+        """Whether every value in each group is true. Over every column that is not a key."""
+        try:
+            return self._reduce("all", 0.0, False, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class SeriesGroupBy(SeriesGroupByMixin):
     """One column of a grouped frame, waiting for a reduction.
 
-    Reached from `df.groupby(...)[name]`. The same fifteen reductions over one column
+    Reached from `df.groupby(...)[name]`. The same eighteen reductions over one column
     instead of all of them, answering a column rather than a frame, which is the whole
     difference between the two classes.
     """
@@ -1671,6 +1694,29 @@ class SeriesGroupBy(SeriesGroupByMixin):
         """The value at one quantile within each group. Over the column."""
         try:
             return self._quantile(q, interpolation, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def prod(
+        self, numeric_only: bool = False, min_count: int = 0, skipna: bool = True
+    ) -> DataFrame | Series:
+        """The product of the values in each group. Over the column."""
+        try:
+            return self._reduce("prod", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def any(self, skipna: bool = True) -> DataFrame | Series:
+        """Whether any value in each group is true. Over the column."""
+        try:
+            return self._reduce("any", 0.0, False, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def all(self, skipna: bool = True) -> DataFrame | Series:
+        """Whether every value in each group is true. Over the column."""
+        try:
+            return self._reduce("all", 0.0, False, skipna)
         except Exception as error:
             raise translate(error) from None
 
