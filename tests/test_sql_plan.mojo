@@ -454,9 +454,85 @@ def test_the_two_arms_of_a_set_operation_bind_against_their_own_tables() raises:
     assert_equal(schema[0].name, "a", "named by the left arm")
 
 
-def test_a_set_operation_written_by_name_is_refused_by_name() raises:
-    with assert_raises(contains="BY NAME"):
-        _ = _plan("SELECT a FROM t UNION BY NAME SELECT b FROM t")
+def test_a_union_by_name_lines_the_arms_up_by_column_name() raises:
+    # The left arm's order is the output's order, so the left needs nothing and
+    # the right gets a projection that puts its two columns the other way round.
+    assert_equal(
+        _plan("SELECT a, b FROM t UNION ALL BY NAME SELECT b, a FROM t"),
+        (
+            "UNION all\n"
+            "  PROJECT [a, b]\n"
+            "    SCAN t []\n"
+            "  PROJECT [a, b]\n"
+            "    PROJECT [b, a]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_union_by_name_fills_a_column_an_arm_lacks_with_null() raises:
+    # Neither arm has the other's column, so both get a projection and the one
+    # that is missing writes a null. The null is untyped and promotes to the
+    # other arm's type, which is how the union settles on one.
+    assert_equal(
+        _plan("SELECT a FROM t UNION ALL BY NAME SELECT k FROM u"),
+        (
+            "UNION all\n"
+            "  PROJECT [a, null as k]\n"
+            "    PROJECT [a]\n"
+            "      SCAN t []\n"
+            "  PROJECT [null as a, k]\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_union_by_name_over_arms_that_agree_is_the_positional_plan() raises:
+    # An arm that already produces the output list in order gets no projection,
+    # which is what makes the two spellings comparable rather than merely equal
+    # in their answers.
+    assert_equal(
+        _plan("SELECT a, b FROM t UNION BY NAME SELECT a, b FROM t"),
+        _plan("SELECT a, b FROM t UNION SELECT a, b FROM t"),
+    )
+
+
+def test_a_union_by_name_matches_a_name_whatever_its_case() raises:
+    # The names line up folded and the left arm's spelling is what comes out,
+    # which is the same rule every other name in this front end gets.
+    assert_equal(
+        _plan("SELECT a FROM t UNION ALL BY NAME SELECT b AS A FROM t"),
+        (
+            "UNION all\n"
+            "  PROJECT [a]\n"
+            "    SCAN t []\n"
+            "  PROJECT [b as a]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_union_by_name_refuses_an_arm_that_names_a_column_twice() raises:
+    # Position is what tells two columns of the same name apart, and lining up
+    # by name throws position away, so there is no answer to give. DuckDB's
+    # wording, since it refuses the same thing.
+    with assert_raises(contains="occurs multiple times"):
+        _ = _plan(
+            "SELECT a AS x, b AS x FROM t UNION BY NAME SELECT b AS x FROM t"
+        )
+
+
+def test_by_name_on_a_difference_is_refused() raises:
+    # DuckDB's grammar only hangs the words off a UNION. This grammar hangs
+    # them off EXCEPT as well, so the refusal is here instead of in the parser,
+    # with the reason in it. INTERSECT has its own rule with no room for them
+    # and stops one step earlier, in the parser, which is why only one of the
+    # two is written here.
+    with assert_raises(contains="does not take BY NAME"):
+        _ = _plan("SELECT a FROM t EXCEPT BY NAME SELECT b FROM t")
+    with assert_raises(contains="syntax error"):
+        _ = _plan("SELECT a FROM t INTERSECT BY NAME SELECT b FROM t")
 
 
 def test_two_arms_of_different_widths_do_not_stack() raises:

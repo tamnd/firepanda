@@ -51,6 +51,17 @@ and not as the other reading, which is a different answer and not a different
 spelling of the same one. Each arm brings its own table into `sources`, so a scan
 carries the offset of its own schema rather than always zero.
 
+`UNION BY NAME` lines the two arms up by column name instead of by position, and
+it is a projection on each arm rather than a different node. The output columns
+are the left arm's names in its order, then the right arm's names the left did
+not have in its order, and an arm missing one of them writes a null in its place,
+at the type the arm that does have the column gave it. That type is why both arms
+are bound here rather than read for their names: nothing at run time carries a
+column of nulls with no type, so a null has to be written down at one.
+An arm whose names already are that list, in that order, gets no projection, so
+two arms that agree lower to the same plan the positional spelling gives. Only
+`UNION` takes the words, which is DuckDB's grammar rather than a limit here.
+
 ### A join condition becomes key pairs, and what is left becomes a filter
 
 `plan.join` holds a left key and a right key per pair rather than a predicate,
@@ -346,16 +357,12 @@ Checked against DuckDB both ways.
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. So are the column aliases on a derived table and a
-`LATERAL` one.
+and the joins over them. So is a `LATERAL` derived table.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
 value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
 refused as well, since the merged name is on both sides and a column a subquery
-computed carries no table to tell the two apart. A set
-operation written `BY NAME` is refused too, since lining two arms up by column
-name is a projection on each arm rather than a different node, and that needs
-each arm's output names threaded back out of the block. Each is a refusal by
+computed carries no table to tell the two apart. Each is a refusal by
 name rather than a silence, so `pixi run sql-support` lists them and the
 conformance harness can tell a missing feature from a crash.
 
@@ -375,6 +382,7 @@ from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
+from firepanda.plan.bind import bind
 from firepanda.plan.cse import key_for
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
@@ -3132,7 +3140,7 @@ def _words(text: StringSlice) -> List[String]:
     return words^
 
 
-def _set_operation(text: StringSlice) raises -> Tuple[Int, Bool]:
+def _set_operation(text: StringSlice) raises -> Tuple[Int, Bool, Bool]:
     """Reads the words a set operation was written with.
 
     The AST keeps the operator as the source span it came from, so
@@ -3145,10 +3153,12 @@ def _set_operation(text: StringSlice) raises -> Tuple[Int, Bool]:
         text: The operator as it was written.
 
     Returns:
-        The `SET_` code, and whether duplicates survive.
+        The `SET_` code, whether duplicates survive, and whether `BY NAME` was
+        written.
 
     Raises:
-        If the operator is not one of the three, or carries `BY NAME`.
+        If the operator is not one of the three, or if `BY NAME` was written on
+        one of the other two.
     """
     var words = _words(text)
     if len(words) == 0:
@@ -3167,23 +3177,39 @@ def _set_operation(text: StringSlice) raises -> Tuple[Int, Bool]:
     # Absent means DISTINCT, which is the one place in SQL where leaving a word
     # out asks for the slower answer.
     var all = False
-    for i in range(1, len(words)):
+    var by_name = False
+    var i = 1
+    while i < len(words):
         if words[i] == "all":
             all = True
         elif words[i] == "distinct":
             all = False
         elif words[i] == "by":
-            raise Error(
-                "firepanda does not lower a set operation written BY NAME yet,"
-                " which lines the two sides up by column name rather than by"
-                " position and is a projection on each side rather than a"
-                " different node"
-            )
+            # Two words and one meaning, so the second is read here rather than
+            # being left to fall through as a word nobody takes.
+            if i + 1 >= len(words) or words[i + 1] != "name":
+                raise Error("a set operation written BY without NAME after it")
+            by_name = True
+            i += 1
         else:
             raise Error(
                 String(words[i], " is not a word a set operation takes")
             )
-    return (op, all)
+        i += 1
+    if by_name and op != SET_UNION:
+        raise Error(
+            String(
+                words[0],
+                (
+                    " does not take BY NAME. Only a UNION does, because the two"
+                    " sides of a difference or an intersection have to hold the"
+                    " same rows to be compared and filling a missing column"
+                    " with nulls would decide that comparison rather than"
+                    " answer it"
+                ),
+            )
+        )
+    return (op, all, by_name)
 
 
 def _combine(
@@ -3230,10 +3256,157 @@ def _combine(
         var left = _combine(ast, node.a, catalog, plan, sources, arm, ctes)
         arm = _Scope()
         var right = _combine(ast, node.b, catalog, plan, sources, arm, ctes)
+        if read[2]:
+            var lined = _by_name(plan, left, right, sources)
+            left = lined[0]
+            right = lined[1]
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
     return _block(ast, body, catalog, plan, sources, scope, ctes)
+
+
+def _by_name(
+    mut plan: Plan, left: Int, right: Int, sources: List[Schema]
+) raises -> Tuple[Int, Int]:
+    """Lines the two arms of a `UNION BY NAME` up, and returns both of them.
+
+    The output columns are the left arm's names in its own order and then the
+    right arm's names the left did not have, in its order, which is what DuckDB
+    does and is the only ordering that leaves `a UNION BY NAME b` looking like
+    `a` when the two arms agree.
+
+    Both arms are bound here rather than being read for their names alone. A
+    column one arm lacks is filled with a null, and there is no column at run
+    time that carries the null type, so the null has to be written down at the
+    type of the arm that does have the column. That is the same rule the two
+    sides of a `CASE` already get. Binding an arm is a forward pass that writes
+    types onto expressions that had none, so the pass over the whole plan that
+    runs later reaches the same answer over it.
+
+    Neither arm may name a column twice. Position is what tells two columns of
+    the same name apart in an ordinary union, and lining up by name throws
+    position away, so a duplicate is a question with no answer rather than a
+    choice to make. DuckDB refuses it in these words and so does this.
+
+    Args:
+        plan: The plan both arms were lowered into.
+        left: The left arm's root.
+        right: The right arm's root.
+        sources: One schema per scan, which binding resolves columns against.
+
+    Returns:
+        The two arms, each projected onto the output columns if it needed it.
+
+    Raises:
+        If either arm names a column twice, or if either arm does not bind.
+    """
+    var mine = bind(plan, left, sources)
+    var theirs = bind(plan, right, sources)
+    _no_repeats(mine)
+    _no_repeats(theirs)
+
+    var names = List[String]()
+    var types = List[LogicalType]()
+    for i in range(len(mine)):
+        names.append(String(mine[i].name))
+        types.append(mine[i].dtype)
+    for i in range(len(theirs)):
+        var wanted = fold(theirs[i].name)
+        var seen = False
+        for j in range(len(names)):
+            if fold(names[j]) == wanted:
+                seen = True
+                break
+        if not seen:
+            names.append(String(theirs[i].name))
+            types.append(theirs[i].dtype)
+    return (
+        _aligned(plan, left, mine, names, types),
+        _aligned(plan, right, theirs, names, types),
+    )
+
+
+def _no_repeats(schema: Schema) raises:
+    """Refuses an arm of a `UNION BY NAME` that names a column twice.
+
+    Args:
+        schema: What the arm produces.
+
+    Raises:
+        If two of its columns fold to the same name.
+    """
+    for i in range(len(schema)):
+        for j in range(i + 1, len(schema)):
+            if fold(schema[i].name) == fold(schema[j].name):
+                raise Error(
+                    String(
+                        (
+                            "Binder Error: UNION (ALL) BY NAME operation"
+                            " doesn't support duplicate names in the SELECT"
+                            ' list - the name "'
+                        ),
+                        schema[i].name,
+                        '" occurs multiple times',
+                    )
+                )
+
+
+def _aligned(
+    mut plan: Plan,
+    at: Int,
+    schema: Schema,
+    names: List[String],
+    types: List[LogicalType],
+) raises -> Int:
+    """Projects one arm of a `UNION BY NAME` onto the columns both arms produce.
+
+    A column the arm has is read by the name the arm gave it and handed out
+    under the name the output list holds, which is the left arm's spelling. A
+    column the arm does not have is a null at the type the other arm's column
+    has, since the union would promote the two to that type anyway and nothing
+    at run time carries a column of nulls with no type.
+
+    An arm that already produces the list, in order and spelled the same way,
+    is returned as it is. Two arms that agree then lower to the plan the
+    positional spelling gives, which is worth more than the one node it saves,
+    because it is what makes the two spellings comparable.
+
+    Args:
+        plan: The plan the arm was lowered into.
+        at: The arm's root.
+        schema: What the arm produces.
+        names: The output names, in order.
+        types: The type of the arm that has each of those columns, in order.
+
+    Returns:
+        The arm, projected if it needed it.
+
+    Raises:
+        If the projection is one the plan refuses to build.
+    """
+    var same = len(schema) == len(names)
+    if same:
+        for i in range(len(names)):
+            if schema[i].name != names[i]:
+                same = False
+                break
+    if same:
+        return at
+
+    var outputs = List[Int](capacity=len(names))
+    for i in range(len(names)):
+        var wanted = fold(names[i])
+        var found = -1
+        for j in range(len(schema)):
+            if fold(schema[j].name) == wanted:
+                found = j
+                break
+        if found == -1:
+            outputs.append(plan.exprs.literal(Value(null=types[i])))
+        else:
+            outputs.append(plan.exprs.column(String(schema[found].name)))
+    return plan.project(at, outputs^, names.copy())
 
 
 def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
