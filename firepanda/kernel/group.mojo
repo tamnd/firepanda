@@ -789,6 +789,19 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     coefficient pandas uses. Null for a group of fewer than three, and zero
     rather than null for a group whose values are all the same."""
 
+    comptime PROD = Self(17)
+    """The non-null values multiplied together. One for a group with none, the
+    way a sum is zero for one."""
+
+    comptime ANY = Self(18)
+    """Whether any non-null value is true, meaning not zero and not an empty
+    string. False for a group with no values."""
+
+    comptime ALL = Self(19)
+    """Whether every non-null value is true. True for a group with no values,
+    which is the identity of the operator rather than a claim about the
+    group."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds, by reduction and not by parameter.
 
@@ -837,8 +850,9 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
 
         Returns:
             The dtype the reduction produces, which is int64 for the two
-            counts, float64 for a mean, the accumulator dtype for a sum, and
-            `dt` itself for the four that report a value the column held.
+            counts, float64 for a mean, bool for the two truth values, the
+            accumulator dtype for a sum and a product, and `dt` itself for the
+            four that report a value the column held.
         """
         if self == Self.COUNT or self == Self.SIZE or self == Self.NUNIQUE:
             return DType.int64
@@ -854,7 +868,9 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             or self == Self.COV
         ):
             return DType.float64
-        if self == Self.SUM:
+        if self == Self.ANY or self == Self.ALL:
+            return DType.bool
+        if self == Self.SUM or self == Self.PROD:
             return accumulator(dt)
         return dt
 
@@ -896,8 +912,16 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("corr")
         elif self == Self.COV:
             writer.write("cov")
-        else:
+        elif self == Self.PROD:
+            writer.write("prod")
+        elif self == Self.ANY:
+            writer.write("any")
+        elif self == Self.ALL:
+            writer.write("all")
+        elif self == Self.NUNIQUE:
             writer.write("nunique")
+        else:
+            writer.write("an unknown reduction")
 
 
 def _there[
@@ -3261,7 +3285,12 @@ def _dispatch_core[
         return AnyArray(
             _nunique_core(source, validity, has_null, codes, groups)
         )
-    raise Error("group by: unsupported aggregation")
+    raise Error(
+        "group by: "
+        + String(kind)
+        + " has a whole column implementation and no grouped one yet, so it"
+        " reaches this chain only by being asked for per group"
+    )
 
 
 comptime FUSE_BLOCK = 1 << 15
@@ -3856,7 +3885,9 @@ def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
         or kind == AggKind.COV
     ):
         return LogicalType.FLOAT64
-    if kind == AggKind.SUM:
+    if kind == AggKind.ANY or kind == AggKind.ALL:
+        return LogicalType.BOOL
+    if kind == AggKind.SUM or kind == AggKind.PROD:
         var acc = accumulator(input.physical)
         if acc == DType.float64:
             return LogicalType.FLOAT64
@@ -3896,6 +3927,14 @@ def temporal_agg_type(
     because a user comparing the two libraries is comparing whichever one they
     wrote and not the rule behind it.
 
+    The fourth was measured later, against 3.0.5, and is that a length of time
+    has a truth value and a point in time does not. `pd.to_timedelta([0, 5],
+    unit="D").any()` is True and the same column's `all()` is False, because a
+    zero length is false the way a zero is, while `any` on a column of
+    timestamps raises. That is the right way round: a duration has a natural
+    zero and an instant does not, since the one an instant appears to have is
+    only the epoch and the epoch is a choice of origin rather than a nothing.
+
     The counting reductions are not in the table at all. A count, a size and a
     distinct count are numbers about the column rather than values out of it, so
     they answer int64 for a column of times exactly as they do for a column of
@@ -3925,6 +3964,25 @@ def temporal_agg_type(
             + " has no answer, because adding two points in time has none"
             " either and a total is additions in a row"
         )
+
+    if kind == AggKind.PROD:
+        raise Error(
+            "reduce: a product over "
+            + String(t)
+            + " would be in units of time multiplied by itself, and there is no"
+            " dtype to put such an answer in"
+        )
+
+    if kind == AggKind.ANY or kind == AggKind.ALL:
+        if t.kind != TypeKind.DURATION:
+            raise Error(
+                "reduce: asking whether "
+                + String(t)
+                + " is true has no answer, because a point in time has no zero"
+                " to be measured against, while a length of time does and"
+                " answers for a zero length"
+            )
+        return LogicalType.BOOL
 
     if kind == AggKind.STD or (kind == AggKind.SEM and not whole_column):
         if t.kind == TypeKind.DATE:

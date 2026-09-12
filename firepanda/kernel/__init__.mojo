@@ -36,10 +36,14 @@ from .agg import (
     mean_of,
     mean_over,
     min_of,
+    prod_of,
+    prod_over,
     sum_of,
     sum_over,
     text_edge_row,
     text_extreme_row,
+    text_truth,
+    truth_over,
 )
 from .arith import (
     add,
