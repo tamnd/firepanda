@@ -227,6 +227,7 @@ def accumulate_any(
     kind: AggKind,
     codes: Array[DType.uint32],
     rows: Int,
+    as_float: Bool = False,
 ) raises:
     """Folds a chunk's rows into the slots their groups already own.
 
@@ -238,6 +239,10 @@ def accumulate_any(
         codes: The group ordinal of every row, in the running table's numbering
             rather than the chunk's.
         rows: How many rows of `values` to fold.
+        as_float: True when the slots are float64 because the sum being folded
+            is the numerator of a mean rather than a sum in its own right. The
+            state's dtype is not the natural accumulator for the values' dtype
+            then, so this has to be told rather than worked out.
 
     Raises:
         If the dtype has no physical layout, or if the reduction is one this does
@@ -245,7 +250,7 @@ def accumulate_any(
     """
     comptime for source in ALL:
         if values.dtype() == source:
-            _accumulate[source](state, values, kind, codes, rows)
+            _accumulate[source](state, values, kind, codes, rows, as_float)
             return
     raise Error(
         "running: dtype " + String(values.dtype()) + " has no physical layout"
@@ -260,6 +265,7 @@ def _accumulate[
     kind: AggKind,
     codes: Array[DType.uint32],
     rows: Int,
+    as_float: Bool = False,
 ) raises:
     """Folds a chunk of a known dtype, one loop per reduction.
 
@@ -273,6 +279,19 @@ def _accumulate[
     var has_null = column.null_count() > 0
 
     if kind == AggKind.SUM:
+        if as_float:
+            # The same loop against float64 slots, which is where the numerator
+            # of a mean accumulates so that a million large int64 values do not
+            # wrap on the way to being divided.
+            ref widened = state.as_typed_view[DType.float64]()
+            var running = widened.unsafe_mut_ptr()
+            for i in range(rows):
+                var g = Int(at.unsafe_offset(i).unsafe_load())
+                running.unsafe_offset(g).unsafe_store(
+                    running.unsafe_offset(g).unsafe_load()
+                    + src.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                )
+            return
         comptime acc = accumulator(dt)
         ref into = state.as_typed_view[acc]()
         var total = into.unsafe_mut_ptr()

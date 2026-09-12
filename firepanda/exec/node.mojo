@@ -2617,6 +2617,30 @@ def _merge_kind(kind: AggKind) -> AggKind:
     return kind
 
 
+def _sum_wraps(source: LogicalType) -> Bool:
+    """Reports whether a sum over this type accumulates in something that wraps.
+
+    Which is the question a mean has to ask, because a mean keeps a running sum
+    and divides it at the end, and a total that wrapped on the way is not the
+    numerator of anything. An integer column is the case: a million values near
+    1.9e18 add up to 1.9e24 and int64 stops two hundred thousand times short of
+    that. A float column already accumulates in float64 and has nothing to fix.
+
+    A column of times is left alone even though it counts units in an integer,
+    because a sum over instants is a question with no answer and the reductions
+    below already have their own opinion about what to do with one. See #552.
+
+    Args:
+        source: The column's type.
+
+    Returns:
+        True when the natural accumulator is not float64.
+    """
+    if source.is_temporal():
+        return False
+    return accumulator(source.physical) != DType.float64
+
+
 def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
     """Divides a running sum by a running count, one group at a time.
 
@@ -2796,6 +2820,12 @@ struct Group(Movable):
     var _merge: List[AggKind]
     """Per state slot, the reduction that combines two partial answers."""
 
+    var _as_float: List[Bool]
+    """Per state slot, whether its sum accumulates in float64 rather than in the
+    natural accumulator. True only for the sum half of a mean over a column of
+    integers, where the natural accumulator wraps and a mean divided out of the
+    wrapped total is not the mean of anything. See #673."""
+
     var _at: List[Int]
     """Per aggregate, the slot it starts at. A state slot when it folds and a
     held slot when it does not. A mean folds and owns two state slots."""
@@ -2859,6 +2889,7 @@ struct Group(Movable):
         self._source = List[Int]()
         self._produce = List[AggKind]()
         self._merge = List[AggKind]()
+        self._as_float = List[Bool]()
         self._at = List[Int]()
         self._holds = List[Bool]()
         self.held = List[ChunkedArray]()
@@ -2981,16 +3012,26 @@ struct Group(Movable):
                 # two apart is what lets the merge be an addition, and dividing
                 # earlier would make the running value a mean of means, which is
                 # only the mean when every group is the same size.
+                #
+                # The sum is not the sum a user could have asked for, though,
+                # and it does not get the accumulator that one gets. That one
+                # wraps over int64 because pandas wraps. This one is a numerator
+                # and has to survive to be divided, so it goes in float64, which
+                # is what `_mean_core` does when it computes the whole mean in
+                # one pass and what this has to match.
                 self._source.append(at)
                 self._produce.append(AggKind.SUM)
                 self._merge.append(AggKind.SUM)
+                self._as_float.append(_sum_wraps(source))
                 self._source.append(at)
                 self._produce.append(AggKind.COUNT)
                 self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
             else:
                 self._source.append(at)
                 self._produce.append(kind)
                 self._merge.append(_merge_kind(kind))
+                self._as_float.append(False)
 
         # One fixed width key is the shape the persistent table is exact for,
         # and a fixed width value is the shape a running slot can accumulate.
@@ -3087,6 +3128,7 @@ struct Group(Movable):
                     local.codes,
                     local.groups,
                     trusted=True,
+                    as_float=self._as_float[s],
                 )
             )
         self._absorb(made^)
@@ -3138,6 +3180,7 @@ struct Group(Movable):
                     codes,
                     after,
                     trusted=True,
+                    as_float=self._as_float[s],
                 )
                 widen_any(made, self._room, self._produce[s])
                 self._values.append(made^)
@@ -3162,6 +3205,7 @@ struct Group(Movable):
                 self._produce[s],
                 codes,
                 rows,
+                self._as_float[s],
             )
 
     def _gather(mut self) raises:
@@ -3492,6 +3536,12 @@ struct Reduce(Movable):
     var _merge: List[AggKind]
     """Per state slot, the reduction that combines two partial answers."""
 
+    var _as_float: List[Bool]
+    """Per state slot, whether its sum accumulates in float64 rather than in the
+    natural accumulator. True only for the sum half of a mean over a column of
+    integers, where the natural accumulator wraps and a mean divided out of the
+    wrapped total is not the mean of anything. See #673."""
+
     var _at: List[Int]
     """Per aggregate, the slot it starts at. A state slot when it folds and a
     held slot when it does not. A mean folds and owns two state slots."""
@@ -3532,6 +3582,7 @@ struct Reduce(Movable):
         self._shifts = List[GroupAgg]()
         self._produce = List[AggKind]()
         self._merge = List[AggKind]()
+        self._as_float = List[Bool]()
         self._at = List[Int]()
         self._holds = List[Bool]()
         self.held = List[ChunkedArray]()
@@ -3627,19 +3678,24 @@ struct Reduce(Movable):
             self._holds.append(False)
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
+                # Split into a sum and a count for the reason `Group.start`
+                # gives, and the sum takes float64 for the reason it gives too.
                 self._source.append(at)
                 self._shift.append(shift)
                 self._produce.append(AggKind.SUM)
                 self._merge.append(AggKind.SUM)
+                self._as_float.append(_sum_wraps(source))
                 self._source.append(at)
                 self._shift.append(shift)
                 self._produce.append(AggKind.COUNT)
                 self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
             else:
                 self._source.append(at)
                 self._shift.append(shift)
                 self._produce.append(kind)
                 self._merge.append(_merge_kind(kind))
+                self._as_float.append(False)
 
         self.output = Schema(fields^)
         return Schema(copy=self.output)
@@ -3703,7 +3759,11 @@ struct Reduce(Movable):
         for s in range(len(self._source)):
             if self._shift[s] < 0:
                 made.append(
-                    reduce_any(columns[self._source[s]], self._produce[s])
+                    reduce_any(
+                        columns[self._source[s]],
+                        self._produce[s],
+                        self._as_float[s],
+                    )
                 )
                 continue
             # Computed, reduced and dropped inside the one iteration, which is
@@ -3718,7 +3778,9 @@ struct Reduce(Movable):
                 it.op.value(),
                 it.value_on_left,
             )
-            made.append(reduce_any(made_here, self._produce[s]))
+            made.append(
+                reduce_any(made_here, self._produce[s], self._as_float[s])
+            )
         for k in range(len(self._kept)):
             if self._kept_shift[k] < 0:
                 made.append(AnyArray(copy=columns[self._kept[k]]))
@@ -3816,7 +3878,9 @@ struct Reduce(Movable):
             self.state = List[AnyArray](capacity=len(self._source))
             for s in range(len(self._source)):
                 var none = empty_any(self.input[self._source[s]].dtype)
-                self.state.append(reduce_any(none, self._produce[s]))
+                self.state.append(
+                    reduce_any(none, self._produce[s], self._as_float[s])
+                )
 
         var out = List[AnyArray](capacity=len(self.aggs))
         for a in range(len(self.aggs)):
