@@ -3679,14 +3679,9 @@ def test_a_field_read_in_a_where_keeps_the_rows_it_names() raises:
 
 
 def test_a_field_read_in_a_group_by_folds_on_what_it_answers() raises:
-    # The field is read in the derived table and grouped on by name, rather than
-    # written out twice in the one statement, because a GROUP BY of an
-    # expression does not lower yet whatever the expression is. The select list
-    # is lowered above the aggregate over the columns the aggregate produces,
-    # and nothing there compares an item against the group keys, so only a key
-    # that is a plain column survives, since that one the aggregate carries
-    # through under the name it already had. That is a gap in grouping and not
-    # one in EXTRACT.
+    # The field is read in the derived table and grouped on by name, which is
+    # one of the three ways of writing this query and was for a while the only
+    # one that lowered.
     var out = run(
         (
             "SELECT m, count(*) AS n FROM (SELECT EXTRACT(MONTH FROM eventdate)"
@@ -3696,6 +3691,36 @@ def test_a_field_read_in_a_group_by_folds_on_what_it_answers() raises:
     )
     same(read_back(out, "m"), [6, 7, 8], "one row per month")
     same(read_back(out, "n"), [1, 2, 1], "and the count in each")
+
+
+def test_the_field_read_written_out_in_both_clauses_folds_the_same() raises:
+    # The second of the three ways, and the one ClickBench q18 is written as.
+    # The expression is computed once, as the key, and the select list reads the
+    # column the aggregate put it in.
+    var out = run(
+        (
+            "SELECT EXTRACT(MONTH FROM eventdate) AS m, count(*) AS n FROM hits"
+            " GROUP BY EXTRACT(MONTH FROM eventdate) ORDER BY 1"
+        ),
+        session(),
+    )
+    same(read_back(out, "m"), [6, 7, 8], "one row per month")
+    same(read_back(out, "n"), [1, 2, 1], "and the count in each")
+
+
+def test_a_having_may_write_out_what_the_group_by_wrote() raises:
+    # One clause further up and the same rule: the filter over the aggregate
+    # reads the key's column rather than a date the aggregate no longer has.
+    var out = run(
+        (
+            "SELECT EXTRACT(MONTH FROM eventdate) AS m, count(*) AS n FROM hits"
+            " GROUP BY EXTRACT(MONTH FROM eventdate) HAVING EXTRACT(MONTH FROM"
+            " eventdate) = 7"
+        ),
+        session(),
+    )
+    same(read_back(out, "m"), [7], "the one month the HAVING kept")
+    same(read_back(out, "n"), [2], "and its count")
 
 
 def test_an_extract_answers_a_whole_number_the_width_duckdb_answers() raises:
@@ -3792,12 +3817,32 @@ def test_a_truncation_answers_a_timestamp_even_off_a_date() raises:
 
 
 def test_a_truncation_read_in_a_group_by_folds_on_what_it_answers() raises:
-    # Grouped through a derived table, for the reason the same test on a field
-    # read is: a GROUP BY of an expression does not lower yet.
+    # Grouped through a derived table, which is the way the same test on a field
+    # read writes it.
     var out = run(
         (
             "SELECT m, count(*) AS n FROM (SELECT date_trunc('month',"
             " eventdate) AS m FROM hits) GROUP BY m ORDER BY 1"
+        ),
+        session(),
+    )
+    same(
+        read_back(out, "m"),
+        [1370044800000000, 1372636800000000, 1375315200000000],
+        "one row per month",
+    )
+    same(read_back(out, "n"), [1, 2, 1], "and the count in each")
+
+
+def test_the_truncation_written_out_in_all_three_clauses_folds_once() raises:
+    # ClickBench q42's shape, which writes the same truncation in the select
+    # list, the GROUP BY and the ORDER BY. One column is computed and read three
+    # times, and the answer is the derived table's above.
+    var out = run(
+        (
+            "SELECT date_trunc('month', eventdate) AS m, count(*) AS n FROM"
+            " hits GROUP BY date_trunc('month', eventdate) ORDER BY"
+            " date_trunc('month', eventdate)"
         ),
         session(),
     )
