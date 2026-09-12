@@ -508,6 +508,100 @@ def test_an_item_that_is_not_the_key_is_refused_as_it_always_was() raises:
         _ = _plan("SELECT b, count(*) FROM t GROUP BY a + 1")
 
 
+def test_an_order_by_of_a_position_sorts_on_that_column() raises:
+    # The number counts the columns the query returns rather than being the
+    # number itself, which is what DuckDB reads it as.
+    assert_equal(
+        _plan("SELECT a, b FROM t ORDER BY 2"),
+        "SORT [b asc nulls last]\n  PROJECT [a, b]\n    SCAN t []\n",
+    )
+
+
+def test_an_order_by_of_a_position_counts_a_star_after_it_expands() raises:
+    # The names come off the plan rather than out of the select list, which is
+    # where a star that has already become four columns is four columns to
+    # count through.
+    assert_equal(
+        _plan("SELECT * FROM t ORDER BY 3"),
+        "SORT [g asc nulls last]\n  PROJECT [a, b, g, f]\n    SCAN t []\n",
+    )
+
+
+def test_an_order_by_of_a_position_takes_the_direction_written_on_it() raises:
+    assert_equal(
+        _plan("SELECT a, b FROM t ORDER BY 1 DESC"),
+        "SORT [a desc]\n  PROJECT [a, b]\n    SCAN t []\n",
+    )
+
+
+def test_an_order_by_of_a_position_past_the_end_says_how_many() raises:
+    with assert_raises(contains="positions this query has are 1 to 2"):
+        _ = _plan("SELECT a, b FROM t ORDER BY 3")
+
+
+def test_an_order_by_of_position_zero_is_past_the_end_too() raises:
+    # The count starts at one, so a zero is not the first column and is not a
+    # constant either. DuckDB refuses it the same way.
+    with assert_raises(contains="an ORDER BY of position 0"):
+        _ = _plan("SELECT a FROM t ORDER BY 0")
+
+
+def test_an_order_by_of_arithmetic_is_a_constant_and_not_a_position() raises:
+    # Only a number written on its own is a position. `1 + 1` is the number two
+    # in DuckDB as well, so it sorts every row on the same value and leaves
+    # them where they were.
+    var out = _plan("SELECT a, b FROM t ORDER BY 1 + 1")
+    assert_true(out.startswith("SORT ["), "the sort node is still built")
+    assert_true(
+        not out.startswith("SORT [b"),
+        "on a constant and not on the second column",
+    )
+
+
+def test_a_group_by_of_a_position_is_the_item_it_counts_to() raises:
+    # The same plan the query writing the expression out in both places gets,
+    # and the same one the alias route gets. Three spellings, one aggregate.
+    assert_equal(
+        _plan("SELECT a + 1, count(*) FROM t GROUP BY 1"),
+        (
+            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [a + 1] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_group_by_of_a_position_keeps_the_alias_the_item_wrote() raises:
+    assert_equal(
+        _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY 1"),
+        _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY k"),
+    )
+
+
+def test_a_group_by_of_a_position_on_a_plain_column_is_the_column() raises:
+    assert_equal(
+        _plan("SELECT g, count(*) FROM t GROUP BY 1"),
+        _plan("SELECT g, count(*) FROM t GROUP BY g"),
+    )
+
+
+def test_a_group_by_of_a_position_past_the_end_says_how_many() raises:
+    with assert_raises(contains="the select list has are 1 to 2"):
+        _ = _plan("SELECT g, count(*) FROM t GROUP BY 4")
+
+
+def test_a_group_by_of_a_position_that_lands_on_a_fold_says_so() raises:
+    # The same refusal the alias of a fold gets, since a position is another
+    # way of pointing at the same item.
+    with assert_raises(contains="computed over the groups"):
+        _ = _plan("SELECT g, count(*) FROM t GROUP BY 2")
+
+
+def test_a_group_by_of_a_position_that_lands_on_a_star_says_so() raises:
+    with assert_raises(contains="wrote a star there"):
+        _ = _plan("SELECT *, count(*) FROM t GROUP BY 1")
+
+
 def test_an_order_by_may_name_a_column_the_query_does_not_return() raises:
     # The projection under the sort is one column wider than the query asked
     # for and the one above it takes the query's own columns back.

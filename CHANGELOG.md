@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: ORDER BY 1 sorted on the number one rather than on the first column
+
+`SELECT qty FROM sales ORDER BY 1` came back unsorted and said nothing about it. The number lowered as the constant one, every row sorted on the same value, and the sort was a node that did no work. A query whose rows happened to arrive in the right order looked correct, which is the worst version of this: two tests in this repo were written with `ORDER BY 1` and passed for that reason.
+
+A bare number in `ORDER BY`, `GROUP BY` and `DISTINCT ON` is a position now, which is what DuckDB reads it as and what most generated SQL relies on. `ORDER BY 2` sorts on the second column the query returns, `GROUP BY 1` groups by the first select list item, and a position past the end is refused with the range it had to be in rather than being quietly ignored.
+
+The positions come off the plan for the `ORDER BY` and the `DISTINCT ON`, which is where `ORDER BY ALL` already reads them, so a star counts as the columns it expanded to and a set operation counts the columns it stacked. The `GROUP BY` counts the select list itself, because the key has to be the item's own expression lowered once rather than a reference to a column that does not exist yet, which is the same route the key named by its alias takes. A position that lands on a fold is refused the way its alias already was, and one that lands on a star is refused for standing for more than one column.
+
+Only a number written on its own is a position. `ORDER BY 1 + 1` is the number two in DuckDB as well, so it sorts every row on the same value and is left as it was.
+
 ## [0.8.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
