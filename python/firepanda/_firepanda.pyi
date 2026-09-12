@@ -170,17 +170,17 @@ class DataFrame:
         ...
 
 class Series:
-    def __init__(self, data: object, name: str) -> None:
+    def __init__(self, data: object, name: str | None) -> None:
         """Builds one. The Python layer owns the pandas signature."""
         ...
 
     def length(self) -> int:
         """The number of rows."""
         ...
-    def label(self) -> str:
-        """The name of the column."""
+    def label(self) -> str | None:
+        """The name of the column, or None."""
         ...
-    def relabel(self, name: str) -> Series:
+    def relabel(self, name: str | None) -> Series:
         """A copy of the column under a different name."""
         ...
     def dtype(self) -> str:

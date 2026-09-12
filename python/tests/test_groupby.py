@@ -113,7 +113,7 @@ def test_size_counts_rows_and_answers_a_column(firepanda: ModuleType) -> None:
     theirs = pd.DataFrame(DATA).groupby("k").size()
     assert isinstance(mine, firepanda.Series)
     assert mine.tolist() == theirs.tolist()
-    assert mine.name == ""
+    assert mine.name is theirs.name is None
 
 
 @needs_pandas

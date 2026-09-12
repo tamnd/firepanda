@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a column with no name reported that it was called nothing
+
+`pd.Series([1]).name` is `None` and `pd.Series([1], name="").name` is `""`, and pandas has told the two apart all along. This library held a name as a Mojo `String`, which has no absent value, so the empty string was doing both jobs and every column that had never been given a name answered `""`. The difference is visible well past the attribute: `to_frame` calls the first one's column `0` and the second one's column `""`, `reset_index` does the same, an operation between two columns that disagree on a name lands on `None`, and a frame reduction, which is about none of the columns it read, hands back a column with no name at all.
+
+`Series.name` is `Optional[String]` now, which is what `Index.name` has been since it was written. `Series.label` across the boundary answers `None` rather than a string, `relabel` takes `None` and means it, so `rename(None)` clears the name and `rename("")` sets an empty one, and the constructor's `name=None` is no name rather than an empty one.
+
+The care is in one place. A frame column is a schema field and a field's name is a `String`, so a column with no name becomes one called `""` when it is put into a frame, and `Series.column_name` says that once. Seven members on a column are implemented by going out to a frame of one and coming back, so every one of them renames its answer to what the column was called, absence included, rather than putting the absence back by asking whether the name came out empty. That last would be this same bug written a second time in a smaller place.
+
+Six tests changed and every one of them was asserting the old conflation on purpose, which is what a divergence written down honestly is for. `python/tests/test_arith.py` listed this as the third of three known divergences with a note that the day one was fixed this file would have to say so, and the count is two now. Specified in `docs/specs/53-a-column-with-no-name.md`.
+
 ### Added: a GROUP BY may write its key out rather than name it
 
 `SELECT DATE_TRUNC('minute', EventTime) AS m, COUNT(*) FROM hits GROUP BY DATE_TRUNC('minute', EventTime) ORDER BY DATE_TRUNC('minute', EventTime)` is ClickBench q42 and it was refused. Writing the key out again in every clause that mentions it is how the published text writes it and it is how most SQL gets written, and the only two spellings that lowered were the key named by its alias and the key read in a derived table.

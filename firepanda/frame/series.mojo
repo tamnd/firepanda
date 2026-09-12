@@ -134,8 +134,16 @@ from firepanda.kernel.window import (
 struct Series(Copyable, Movable, Sized, Writable):
     """A named, positional, immutable column."""
 
-    var name: String
-    """The column name. Not unique by construction; a `DataFrame` enforces that."""
+    var name: Optional[String]
+    """The column name, and an absence when it has none.
+
+    Not unique by construction; a `DataFrame` enforces that. Optional rather
+    than a `String` because pandas tells a column called nothing apart from a
+    column with no name at all: `pd.Series([1], name="").name` is `""` and
+    `pd.Series([1]).name` is `None`, and the two print differently and land in
+    different places when the column becomes a frame. `Index.name` in
+    `firepanda/frame/index.mojo` has been optional for the same reason since it
+    was written."""
 
     var values: AnyArray
     """The data, with the dtype carried as a field."""
@@ -144,39 +152,41 @@ struct Series(Copyable, Movable, Sized, Writable):
     """The row labels, defaulting to the range zero to n minus one, which is two
     integers and no memory. See `firepanda/frame/index.mojo`."""
 
-    def __init__(out self, name: String, var values: AnyArray):
+    def __init__(out self, var name: Optional[String], var values: AnyArray):
         """Constructs a series over a column the caller already built.
 
         Args:
-            name: The column name.
+            name: The column name, and an absence for a column with none.
             values: The data. Consumed, with no copy of the buffers.
         """
-        self.name = name
+        self.name = name^
         self.values = values^
         self.index = Index(len(self.values))
 
-    def __init__[dt: DType](out self, name: String, var values: Array[dt]):
+    def __init__[
+        dt: DType
+    ](out self, var name: Optional[String], var values: Array[dt]):
         """Constructs a series from a typed column.
 
         Args:
-            name: The column name.
+            name: The column name, and an absence for a column with none.
             values: The data. Consumed, with no copy of the buffers.
 
         Parameters:
             dt: The dtype being erased.
         """
-        self.name = name
+        self.name = name^
         self.values = AnyArray(values^)
         self.index = Index(len(self.values))
 
-    def __init__(out self, name: String, var values: StringArray):
+    def __init__(out self, var name: Optional[String], var values: StringArray):
         """Constructs a series from a string column.
 
         Args:
-            name: The column name.
+            name: The column name, and an absence for a column with none.
             values: The data. Consumed, with no copy of the buffers.
         """
-        self.name = name
+        self.name = name^
         self.values = AnyArray(values^)
         self.index = Index(len(self.values))
 
@@ -186,9 +196,24 @@ struct Series(Copyable, Movable, Sized, Writable):
         Args:
             copy: The series to copy.
         """
-        self.name = copy.name
+        self.name = copy.name.copy()
         self.values = AnyArray(copy=copy.values)
         self.index = Index(copy=copy.index)
+
+    def column_name(self) -> String:
+        """The name this series would carry as a column of a frame.
+
+        A frame column has a name because the schema is a list of fields and a
+        field has one, so a series with no name has to become something when it
+        is put into a frame, and the something is the empty string. That is not a
+        loss of information the way it would be on a standalone column, because
+        the frame is what owns the name from then on and nobody asks the frame
+        whether the column it calls `""` used to be called nothing instead.
+
+        Returns:
+            The name, or the empty string when there is none.
+        """
+        return self.name.value() if self.name else String()
 
     def into_values(deinit self) -> AnyArray:
         """Gives up the column without copying it, dropping the name.
@@ -377,7 +402,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         var converted = cast_any(self.values, to, strict)
         if self.values.type.is_variable_width():
             converted = nan_over_nulls(converted^)
-        return self._relabelled(self.name, converted^)
+        return self._relabelled(self.name.copy(), converted^)
 
     def cast(self, to: LogicalType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another logical type.
@@ -409,7 +434,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         var converted = cast_any(self.values, to, strict)
         if self.values.type.is_variable_width():
             converted = nan_over_nulls(converted^)
-        return self._relabelled(self.name, converted^)
+        return self._relabelled(self.name.copy(), converted^)
 
     def take(self, indices: List[Int]) raises -> Self:
         """Returns rows gathered by position.
@@ -424,7 +449,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype has no physical layout.
         """
-        var out = Self(self.name, take_any(self.values, indices))
+        var out = Self(self.name.copy(), take_any(self.values, indices))
         out.index = self.index.take(indices)
         return out^
 
@@ -549,7 +574,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         else:
             gathered = take_any(self.values, positions)
 
-        var out = Self(self.name, gathered^)
+        var out = Self(self.name.copy(), gathered^)
         out.index = target^
         return out^
 
@@ -579,7 +604,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 "reindex: fill_value is ",
                 fill.type,
                 " and ",
-                self.name,
+                self.name.copy(),
                 " holds ",
                 self.values.type,
                 ", so there is nothing to put in the row",
@@ -609,7 +634,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 + " rows and mask has "
                 + String(len(mask))
             )
-        var out = Self(self.name, filter_any(self.values, mask))
+        var out = Self(self.name.copy(), filter_any(self.values, mask))
         out.index = self.index.filter(mask)
         return out^
 
@@ -627,7 +652,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the range is reversed or runs past either end of the series.
         """
         _check_range(start, end, len(self), "series")
-        var out = Self(self.name, self.values.slice(start, end))
+        var out = Self(self.name.copy(), self.values.slice(start, end))
         out.index = self.index.slice(start, end)
         return out^
 
@@ -831,7 +856,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             row nor as tall as the condition.
         """
         return self._relabelled(
-            self.name, pick_any(cond, self.values, otherwise.values)
+            self.name.copy(), pick_any(cond, self.values, otherwise.values)
         )
 
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
@@ -931,7 +956,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(text_substring(self.values.strings(), offset, length)),
         )
 
@@ -962,7 +987,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name, AnyArray(text_character_length(self.values.strings()))
+            self.name.copy(),
+            AnyArray(text_character_length(self.values.strings())),
         )
 
     def chars_slice(
@@ -987,7 +1013,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text, or the step is zero.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_character_slice(self.values.strings(), start, stop, step)
             ),
@@ -1007,7 +1033,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name, AnyArray(text_character_get(self.values.strings(), at))
+            self.name.copy(),
+            AnyArray(text_character_get(self.values.strings(), at)),
         )
 
     def chars_find(
@@ -1035,7 +1062,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_find(
                     self.values.strings(), sub.as_bytes(), start, stop, from_end
@@ -1061,7 +1088,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_slice_replace(
                     self.values.strings(), start, stop, repl.as_bytes()
@@ -1083,7 +1110,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_remove_prefix(self.values.strings(), prefix.as_bytes())
             ),
@@ -1103,7 +1130,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_remove_suffix(self.values.strings(), suffix.as_bytes())
             ),
@@ -1132,7 +1159,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_strip(
                     self.values.strings(),
@@ -1163,7 +1190,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             AnyArray(
                 text_pad(
                     self.values.strings(),
@@ -1188,7 +1215,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name, AnyArray(text_zfill(self.values.strings(), width))
+            self.name.copy(), AnyArray(text_zfill(self.values.strings(), width))
         )
 
     def chars_repeat(self, times: Int) raises -> Self:
@@ -1204,7 +1231,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name, AnyArray(text_repeat(self.values.strings(), times))
+            self.name.copy(),
+            AnyArray(text_repeat(self.values.strings(), times)),
         )
 
     def chars_starts_with(self, prefix: StringSlice) raises -> Self:
@@ -1225,7 +1253,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the series is not text.
         """
         return self._relabelled(
-            self.name, AnyArray(self.str_starts_with(prefix))
+            self.name.copy(), AnyArray(self.str_starts_with(prefix))
         )
 
     def chars_ends_with(self, suffix: StringSlice) raises -> Self:
@@ -1240,7 +1268,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
-        return self._relabelled(self.name, AnyArray(self.str_ends_with(suffix)))
+        return self._relabelled(
+            self.name.copy(), AnyArray(self.str_ends_with(suffix))
+        )
 
     def cat_is_category(self) -> Bool:
         """Answers whether this column holds categories at all.
@@ -1321,7 +1351,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the column is not a category column.
         """
-        return self._relabelled(self.name, set_ordered(self.values, ordered))
+        return self._relabelled(
+            self.name.copy(), set_ordered(self.values, ordered)
+        )
 
     def cat_rename_categories(
         self, var names: StringArray, ordered: Bool = False
@@ -1350,7 +1382,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 repeat.
         """
         return self._relabelled(
-            self.name, rename_categories(self.values, names^, ordered)
+            self.name.copy(), rename_categories(self.values, names^, ordered)
         )
 
     def cat_set_categories(
@@ -1375,7 +1407,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 categories are not distinct.
         """
         return self._relabelled(
-            self.name, set_categories(self.values, names^, ordered)
+            self.name.copy(), set_categories(self.values, names^, ordered)
         )
 
     def cat_drop_unused_categories(self) raises -> Self:
@@ -1391,7 +1423,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the column is not a category column.
         """
-        return self._relabelled(self.name, drop_unused_categories(self.values))
+        return self._relabelled(
+            self.name.copy(), drop_unused_categories(self.values)
+        )
 
     def drop_nulls(self) raises -> Self:
         """Returns the series with the missing rows removed.
@@ -1435,11 +1469,13 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         if not self.values.type.is_float():
             return self._relabelled(
-                self.name, coalesce_any(self.values, other.values)
+                self.name.copy(), coalesce_any(self.values, other.values)
             )
         var mine = AnyArray(copy=self.values)
         mine.data.validity = present_bitmap_any(self.values)
-        return self._relabelled(self.name, coalesce_any(mine, other.values))
+        return self._relabelled(
+            self.name.copy(), coalesce_any(mine, other.values)
+        )
 
     def fill_forward(self, limit: Int = 0) raises -> Self:
         """Returns the series with each null taking the last present value before it.
@@ -1459,7 +1495,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype has no physical layout.
         """
-        return self._relabelled(self.name, fill_forward_any(self.values, limit))
+        return self._relabelled(
+            self.name.copy(), fill_forward_any(self.values, limit)
+        )
 
     def fill_backward(self, limit: Int = 0) raises -> Self:
         """Returns the series with each null taking the next present value after it.
@@ -1475,7 +1513,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the dtype has no physical layout.
         """
         return self._relabelled(
-            self.name, fill_backward_any(self.values, limit)
+            self.name.copy(), fill_backward_any(self.values, limit)
         )
 
     def shift(self, periods: Int = 1) raises -> Self:
@@ -1506,7 +1544,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the dtype has no physical layout.
         """
         return self._relabelled(
-            self.name, widen_for_missing(shift_any(self.values, periods))
+            self.name.copy(), widen_for_missing(shift_any(self.values, periods))
         )
 
     def shift(self, periods: Int, fill_value: Value) raises -> Self:
@@ -1531,7 +1569,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 be read as the column's type.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             widen_for_missing(shift_any(self.values, periods, fill_value)),
         )
 
@@ -1560,7 +1598,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 cannot be subtracted from itself.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             widen_for_missing(
                 binary_any(
                     self.values,
@@ -1597,7 +1635,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         var before = widen_for_missing(shift_any(self.values, periods))
         var ratio = binary_any(self.values, before, BinaryOp.DIV)
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             widen_for_missing(
                 binary_value_any(
                     ratio, Value(Float64(1)).weakened(), BinaryOp.SUB
@@ -1628,7 +1666,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the operation has no answer on the column's type.
         """
-        return self._relabelled(self.name, cumulative_any(self.values, op))
+        return self._relabelled(
+            self.name.copy(), cumulative_any(self.values, op)
+        )
 
     def cumsum(self) raises -> Self:
         """Returns the running total down the column.
@@ -1777,7 +1817,9 @@ struct Series(Copyable, Movable, Sized, Writable):
                 factor is out of range, or if a total was asked for with
                 `adjust` off, which pandas also refuses.
         """
-        return self._relabelled(self.name, ewm_agg(self.values, op, spec))
+        return self._relabelled(
+            self.name.copy(), ewm_agg(self.values, op, spec)
+        )
 
     def _windowed(
         self, op: WindowOp, shape: Shape, settings: WindowSettings
@@ -1803,11 +1845,11 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         var values = window_agg(self.values, op, shape, settings)
         if shape.step == 1:
-            return self._relabelled(self.name, values^)
+            return self._relabelled(self.name.copy(), values^)
         var sampled = List[Int](capacity=len(values))
         for k in range(len(values)):
             sampled.append(k * shape.step)
-        var answer = Self(self.name, values^)
+        var answer = Self(self.name.copy(), values^)
         answer.index = self.index.take(sampled)
         return answer^
 
@@ -1835,7 +1877,9 @@ struct Series(Copyable, Movable, Sized, Writable):
             stored instants are UTC and reading an hour off them would give the
             wrong hour under the right name.
         """
-        return self._relabelled(self.name, temporal_field(self.values, field))
+        return self._relabelled(
+            self.name.copy(), temporal_field(self.values, field)
+        )
 
     def dt(self, name: StringSlice) raises -> Self:
         """Returns one part of a datetime series, looked up by its pandas name.
@@ -1878,7 +1922,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a date or a naive timestamp.
         """
-        return self._relabelled(self.name, temporal_date(self.values))
+        return self._relabelled(self.name.copy(), temporal_date(self.values))
 
     def dt_normalize(self) raises -> Self:
         """Returns the series with every clock moved back to midnight.
@@ -1893,7 +1937,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a date or a naive timestamp.
         """
-        return self._relabelled(self.name, temporal_normalize(self.values))
+        return self._relabelled(
+            self.name.copy(), temporal_normalize(self.values)
+        )
 
     def dt_floor(self, freq: StringSlice) raises -> Self:
         """Returns the series with every instant moved back to a whole period.
@@ -1911,7 +1957,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name, temporal_round(self.values, freq, ROUND_DOWN)
+            self.name.copy(), temporal_round(self.values, freq, ROUND_DOWN)
         )
 
     def dt_ceil(self, freq: StringSlice) raises -> Self:
@@ -1928,7 +1974,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name, temporal_round(self.values, freq, ROUND_UP)
+            self.name.copy(), temporal_round(self.values, freq, ROUND_UP)
         )
 
     def dt_round(self, freq: StringSlice) raises -> Self:
@@ -1951,7 +1997,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name, temporal_round(self.values, freq, ROUND_HALF_EVEN)
+            self.name.copy(), temporal_round(self.values, freq, ROUND_HALF_EVEN)
         )
 
     def dt_as_unit(self, unit: StringSlice) raises -> Self:
@@ -1968,7 +2014,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             four, or if going up in precision would put an instant out of range.
         """
         return self._relabelled(
-            self.name, temporal_as_unit(self.values, unit_named(unit))
+            self.name.copy(), temporal_as_unit(self.values, unit_named(unit))
         )
 
     def dt_tz(self) raises -> String:
@@ -2007,7 +2053,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             from.
         """
         return self._relabelled(
-            self.name, temporal_tz_convert(self.values, zone)
+            self.name.copy(), temporal_tz_convert(self.values, zone)
         )
 
     def dt_tz_localize(self, zone: StringSlice) raises -> Self:
@@ -2028,7 +2074,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             rather than a number.
         """
         return self._relabelled(
-            self.name, temporal_tz_localize(self.values, zone)
+            self.name.copy(), temporal_tz_localize(self.values, zone)
         )
 
     def dt_tz_localize_none(self) raises -> Self:
@@ -2042,7 +2088,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             zone names a rule rather than a number.
         """
         return self._relabelled(
-            self.name, temporal_tz_localize_none(self.values)
+            self.name.copy(), temporal_tz_localize_none(self.values)
         )
 
     def dt_day_name(self, locale: StringSlice = "") raises -> Self:
@@ -2065,7 +2111,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             named.
         """
         return self._relabelled(
-            self.name, AnyArray(temporal_day_name(self.values, locale))
+            self.name.copy(), AnyArray(temporal_day_name(self.values, locale))
         )
 
     def dt_month_name(self, locale: StringSlice = "") raises -> Self:
@@ -2083,7 +2129,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             named.
         """
         return self._relabelled(
-            self.name, AnyArray(temporal_month_name(self.values, locale))
+            self.name.copy(), AnyArray(temporal_month_name(self.values, locale))
         )
 
     def dt_strftime(self, fmt: StringSlice) raises -> Self:
@@ -2107,7 +2153,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             has a directive this does not have.
         """
         return self._relabelled(
-            self.name, AnyArray(temporal_strftime(self.values, fmt))
+            self.name.copy(), AnyArray(temporal_strftime(self.values, fmt))
         )
 
     def dt_total_seconds(self) raises -> Self:
@@ -2124,7 +2170,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a duration.
         """
-        return self._relabelled(self.name, temporal_total_seconds(self.values))
+        return self._relabelled(
+            self.name.copy(), temporal_total_seconds(self.values)
+        )
 
     def dt_days(self) raises -> Self:
         """Returns the number of whole days in every elapsed time.
@@ -2140,7 +2188,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a duration.
         """
-        return self._relabelled(self.name, temporal_duration_days(self.values))
+        return self._relabelled(
+            self.name.copy(), temporal_duration_days(self.values)
+        )
 
     def to_timedelta(self, unit: StringSlice = "ns") raises -> Self:
         """Reads a series of whole numbers as a series of elapsed times.
@@ -2162,7 +2212,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             the unit is not one of the four.
         """
         return self._relabelled(
-            self.name, temporal_to_duration(self.values, unit_named(unit))
+            self.name.copy(),
+            temporal_to_duration(self.values, unit_named(unit)),
         )
 
     def to_datetime(
@@ -2207,7 +2258,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             return Self(copy=self)
         if self.logical().kind == TypeKind.STRING:
             return self._relabelled(
-                self.name,
+                self.name.copy(),
                 parse_timestamps(
                     self.values.strings(),
                     fmt,
@@ -2217,10 +2268,13 @@ struct Series(Copyable, Movable, Sized, Writable):
                 ),
             )
         return self._relabelled(
-            self.name, numbers_to_timestamps(self.values, unit_named(unit))
+            self.name.copy(),
+            numbers_to_timestamps(self.values, unit_named(unit)),
         )
 
-    def _relabelled(self, name: String, var values: AnyArray) raises -> Self:
+    def _relabelled(
+        self, var name: Optional[String], var values: AnyArray
+    ) raises -> Self:
         """Builds a result that has this series' row labels.
 
         Every operation that answers one row per input row keeps the labels,
@@ -2229,7 +2283,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         takes a column with nothing attached and has to invent a range.
 
         Args:
-            name: The result's name.
+            name: The result's name, and an absence for none.
             values: The result's column. Must be as tall as this series.
 
         Returns:
@@ -2292,7 +2346,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         if fill_value:
             keep_rows(out, keep)
 
-        var result = Self(_shared_name(self.name, other.name), out^)
+        var result = Self(
+            _shared_name(self.name.copy(), other.name.copy()), out^
+        )
         result.index = pair^.into_index()
         return result^
 
@@ -2315,7 +2371,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the operation is not defined on the two types.
         """
         return self._relabelled(
-            self.name,
+            self.name.copy(),
             binary_value_any(self.values, value, op, value_on_left),
         )
 
@@ -2349,7 +2405,7 @@ struct Series(Copyable, Movable, Sized, Writable):
                 " on the union of their labels instead"
             )
         return self._relabelled(
-            _shared_name(self.name, other.name),
+            _shared_name(self.name.copy(), other.name.copy()),
             binary_any(self.values, other.values, op),
         )
 
@@ -3247,7 +3303,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the operation has no meaning on this type, which is `-`
                 and `abs` on a text column and `~` on a float one.
         """
-        return self._relabelled(self.name, unary_any(self.values, op))
+        return self._relabelled(self.name.copy(), unary_any(self.values, op))
 
     def __neg__(self) raises -> Self:
         """Flips the sign of every row.
@@ -3338,26 +3394,29 @@ struct Series(Copyable, Movable, Sized, Writable):
         Args:
             writer: The sink.
         """
-        writer.write(render_column(self.name, self.values, DisplayOptions()))
+        writer.write(
+            render_column(self.column_name(), self.values, DisplayOptions())
+        )
 
 
-def _shared_name(a: String, b: String) -> String:
+def _shared_name(
+    var a: Optional[String], var b: Optional[String]
+) -> Optional[String]:
     """The name a result of two series should carry.
 
     pandas keeps the name when both operands agree on it and drops it when they
     do not, on the reasoning that a column called `price` plus a column called
-    `tax` is neither of those things. An unnamed series is the empty string
-    here, so two differently named operands and two unnamed ones land on the
-    same answer, which is what pandas does with `None` as well.
+    `tax` is neither of those things. Two unnamed operands agree on having no
+    name, so the result has none either, which is also what pandas answers.
 
     Args:
-        a: The left name.
-        b: The right name.
+        a: The left name. Consumed.
+        b: The right name. Consumed.
 
     Returns:
-        The shared name, or the empty string if they differ.
+        The shared name, or an absence if they differ.
     """
-    return a if a == b else String()
+    return a^ if a == b else Optional[String]()
 
 
 def _head_end(n: Int, length: Int) -> Int:

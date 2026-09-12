@@ -2770,8 +2770,8 @@ class Series(SeriesMixin):
             raise translate(error) from None
 
     @property
-    def name(self) -> str:
-        """The name of the series."""
+    def name(self) -> str | None:
+        """The name of the series, and None when it has none."""
         try:
             return self._inner.label()
         except Exception as error:

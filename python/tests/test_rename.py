@@ -171,10 +171,15 @@ def test_the_mapping_form_of_a_column_rename_is_the_label_half(firepanda):
 
 
 def test_a_column_rename_to_nothing_clears_the_name(firepanda):
-    """Empty is how the core spells no name, and pandas spells the same state None."""
+    """`rename(None)` takes the name off and `rename("")` sets an empty one.
+
+    Two different states, because pandas tells them apart, and they were one
+    state here until a series name became an `Optional[String]`.
+    """
     answered = frame(firepanda)["v"].rename(None)
-    assert answered.name == ""
+    assert answered.name is None
     assert answered.tolist() == frame(firepanda)["v"].tolist()
+    assert frame(firepanda)["v"].rename("").name == ""
 
 
 def test_a_column_can_name_its_row_labels(firepanda):

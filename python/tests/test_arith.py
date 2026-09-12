@@ -19,15 +19,16 @@ the same signature. Nothing here repeats that. What is here is what the calls do
 
 ### Where firepanda and pandas disagree
 
-Three of these are asserted as they are rather than as pandas has them, and each
+Two of these are asserted as they are rather than as pandas has them, and each
 is a known gap with an issue rather than something this file is choosing:
 
   - A comparison against a row only one side has answers null. pandas answers
     False, on the ground that a row that is not there is not equal to anything.
   - Integer division by zero answers null. pandas answers zero with a warning.
-  - Two series whose names differ produce a series named `""`. pandas produces
-    one named `None`, which firepanda has no way to spell because a name here is
-    a `String` and not an `Optional[String]`.
+
+There used to be a third, which is that two series whose names differ produced a
+series named `""` where pandas produces one named `None`. A name is an
+`Optional[String]` now and that one is gone.
 
 Asserting the current answer is deliberate. A test that skipped them would let
 them change silently, and the point of writing them down is that the day one is
@@ -366,16 +367,17 @@ def test_two_columns_with_no_operation_between_them_say_so_pandas_way(
 def test_a_result_keeps_a_name_only_when_both_sides_agree_on_it(
     firepanda: ModuleType,
 ) -> None:
-    """The third divergence, and the smallest.
+    """pandas drops the name when the two operands disagree on it.
 
-    pandas drops the name to `None` when the two operands disagree. A firepanda
-    series name is a `String` rather than an `Optional[String]`, so the nearest
-    thing it can say is the empty one, and there is no spelling of `None` to
-    return. The agreeing case is the one that matters and it matches.
+    A column called `price` plus a column called `tax` is neither of those
+    things, so the result has no name at all rather than one of the two. This
+    used to be the smallest of the divergences in this file, because a name was
+    a `String` here and the nearest thing to an absence it could say was the
+    empty one. It is `Optional[String]` now and the absence is an absence.
     """
     left, _ = _pair(firepanda)
     assert (left + firepanda.Series([1, 2, 3], name="x")).name == "x"
-    assert (left + firepanda.Series([1, 2, 3], name="y")).name == ""
+    assert (left + firepanda.Series([1, 2, 3], name="y")).name is None
 
 
 def test_the_dtype_of_a_result_follows_the_operation(firepanda: ModuleType) -> None:

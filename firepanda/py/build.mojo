@@ -200,7 +200,9 @@ def empty_column(count: Int) raises -> AnyArray:
     return AnyArray(out^)
 
 
-def column_from(name: String, values: PythonObject) raises -> Series:
+def column_from(
+    var name: Optional[String], values: PythonObject
+) raises -> Series:
     """Builds one named column out of a Python sequence.
 
     This is `array_from` with a name put on it. The two are separate because an
@@ -208,7 +210,7 @@ def column_from(name: String, values: PythonObject) raises -> Series:
     routes is exactly the drift this file exists to prevent.
 
     Args:
-        name: The column name.
+        name: The column name, and an absence for a column with none.
         values: The values.
 
     Returns:
@@ -217,7 +219,12 @@ def column_from(name: String, values: PythonObject) raises -> Series:
     Raises:
         Error: Whatever `array_from` raises.
     """
-    return Series(name, array_from(name, values))
+    # `array_from` names the column only to put it in an error message, and a
+    # column with no name reads better in a message as `""` than as the word
+    # `None`, so the absence flattens on the way in and survives on the way out.
+    return Series(
+        name.copy(), array_from(name.value() if name else String(), values)
+    )
 
 
 def array_from(name: String, values: PythonObject) raises -> AnyArray:

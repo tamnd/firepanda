@@ -90,13 +90,16 @@ struct PySeries(Movable, Writable):
                 Python layer has already turned them into positional ones.
         """
         check_arguments_arity(2, args, "Series")
-        var name = String(args[1])
+        var name = Optional[String]()
+        if args[1] is not Python.none():
+            name = Optional[String](words(args[1], "name"))
         # A firepanda series arriving here is copied rather than iterated.
         # `pd.Series(a_series)` is ordinary pandas, and going out through a
         # Python list and back would infer the type again off the values, which
         # loses a column of instants entirely and is slow for the columns it
-        # does not lose. An empty name means the caller passed none, so the
-        # source keeps the name it had, which is what pandas does too.
+        # does not lose. No name means the caller passed none, so the source
+        # keeps the name it had, which is what pandas does too. `""` is a name
+        # and overwrites one, because pandas lets a column be called nothing.
         var held = Optional[ArcPointer[Series]]()
         try:
             held = args[0].downcast_value_ptr[Self]()[].series
@@ -105,13 +108,13 @@ struct PySeries(Movable, Writable):
 
         if held:
             var copied = Series(copy=held.value()[])
-            if name.byte_length() != 0:
-                copied.name = name
+            if name:
+                copied.name = name^
             self = Self(ArcPointer(copied^))
         elif args[0] is Python.none():
-            self = Self(ArcPointer(Series(name, empty_column(0))))
+            self = Self(ArcPointer(Series(name^, empty_column(0))))
         else:
-            self = Self(ArcPointer(column_from(name, args[0])))
+            self = Self(ArcPointer(column_from(name^, args[0])))
 
     @staticmethod
     def _held(py_self: PythonObject) -> Pointer[Self, MutAnyOrigin]:
@@ -156,9 +159,12 @@ struct PySeries(Movable, Writable):
             py_self: The series.
 
         Returns:
-            The name, as a string.
+            The name as a string, or `None` when the column has none.
         """
-        return PythonObject(Self._held(py_self)[].series[].name)
+        ref series = Self._held(py_self)[].series[]
+        if series.name:
+            return PythonObject(series.name.value())
+        return Python.none()
 
     @staticmethod
     def relabel(
@@ -171,20 +177,23 @@ struct PySeries(Movable, Writable):
         shared with whoever else is holding it, so renaming in place would rename
         somebody else's column.
 
-        Empty means no name. A pandas series with no name has `None` there and
-        this side has a `String` with nothing in it, which is the same
-        arrangement `label` reports through and is turned back into `None` in
-        Python.
+        `None` means no name, and it is a different thing from `""`. pandas
+        tells a column called nothing apart from a column with no name, so this
+        takes the absence as an absence rather than reading it off the length of
+        a string, and `label` reports it back the same way.
 
         Args:
             py_self: The series.
-            name: The new name, and empty for none.
+            name: The new name, or `None` for none.
 
         Returns:
             A copy carrying the new name.
         """
+        var wanted = Optional[String]()
+        if name is not Python.none():
+            wanted = Optional[String](words(name, "name"))
         var out = Series(copy=Self._held(py_self)[].series[])
-        out.name = words(name, "name")
+        out.name = wanted^
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
@@ -1786,7 +1795,9 @@ struct PySeries(Movable, Writable):
         """
         ref series = Self._held(py_self)[].series[]
         try:
-            return schema_capsule(export_schema(series.logical(), series.name))
+            return schema_capsule(
+                export_schema(series.logical(), series.column_name())
+            )
         except cause:
             raise retagged(UNSUPPORTED, cause)
 

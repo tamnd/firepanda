@@ -311,6 +311,24 @@ def _renamings(names: Any, mapping: Any, errors: str) -> tuple[list[str], list[s
     )
 
 
+def _carried(label: str | None) -> str:
+    """The name a column takes when it is put into a frame of its own.
+
+    A frame column is a schema field and a field has a name, so a series with no
+    name has to become something on the way in and the something is the empty
+    string. That is not a loss on the frame's side, because the frame owns the
+    name from then on. It is a loss on the way back, which is why every caller
+    that takes the column out again renames it to what it was.
+
+    Args:
+        label: The column's name, or None when it has none.
+
+    Returns:
+        The name to look the column up by.
+    """
+    return "" if label is None else label
+
+
 def _one_name(value: Any) -> str | None:
     """The single level name a rename was given, out of the shapes it comes in.
 
@@ -5185,7 +5203,9 @@ class SeriesMixin:
 
         Same shape as the frame constructor and refusing the same way, with the
         one difference that `name` is honoured, since a series carries its name
-        and there is nothing to implement.
+        and there is nothing to implement. `name=None` is no name rather than a
+        name that is empty, and the two are different states because pandas
+        tells them apart.
 
         A series arriving as the data is unwrapped and handed across as the
         extension object it holds, so the extension can copy the column instead
@@ -5202,7 +5222,7 @@ class SeriesMixin:
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         source = data._inner if isinstance(data, SeriesMixin) else data
         try:
-            self._inner = _firepanda.Series(source, "" if name is None else str(name))
+            self._inner = _firepanda.Series(source, None if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:
@@ -5263,7 +5283,7 @@ class SeriesMixin:
             A frame of one column.
         """
         wanted = self._inner.label() if name is NO_DEFAULT else name
-        return self._framed("0" if not wanted else str(wanted))
+        return self._framed("0" if wanted is None else str(wanted))
 
     def duplicated(self, keep: Any = "first") -> Series:
         """Which values repeat one that another row already carries.
@@ -5390,11 +5410,11 @@ class SeriesMixin:
 
     def nlargest(self, n: int = 5, keep: Any = "first") -> Series:
         """The largest values, in order, with ties settled by a rule."""
-        return self._through(lambda frame: frame.nlargest(n, self._inner.label(), keep))
+        return self._through(lambda frame: frame.nlargest(n, _carried(self._inner.label()), keep))
 
     def nsmallest(self, n: int = 5, keep: Any = "first") -> Series:
         """The smallest values, in order, with ties settled by a rule."""
-        return self._through(lambda frame: frame.nsmallest(n, self._inner.label(), keep))
+        return self._through(lambda frame: frame.nsmallest(n, _carried(self._inner.label()), keep))
 
     def reset_index(
         self,
@@ -5421,11 +5441,18 @@ class SeriesMixin:
         if inplace:
             raise TypeError(_RESET_INDEX_INPLACE)
         wanted = self._inner.label() if name is NO_DEFAULT else name
-        made = self._framed("0" if not wanted else str(wanted))
+        made = self._framed("0" if wanted is None else str(wanted))
         return made.reset_index(level, drop=False, allow_duplicates=allow_duplicates)
 
-    def _framed(self, name: str) -> DataFrame:
-        """This column in a frame of one column, under a name of the caller's."""
+    def _framed(self, name: str | None) -> DataFrame:
+        """This column in a frame of one column, under a name of the caller's.
+
+        `None` here means the column keeps whatever name it has, which for a
+        column with no name at all is the empty string, because a frame column
+        is a schema field and a field has a name. The absence does not survive
+        the trip and has to be put back by hand on the way out, which is what
+        `_carried` is for.
+        """
         from ._frame import _series_to_frame
 
         return _series_to_frame(self._inner, name)
@@ -5444,7 +5471,7 @@ class SeriesMixin:
         label = self._inner.label()
         answered = run(self._framed(label))
         try:
-            return Series._wrap(answered._inner.column(label))
+            return Series._wrap(answered._inner.column(_carried(label)).relabel(label))
         except Exception as error:
             raise translate(error) from None
 
@@ -5848,11 +5875,11 @@ class SeriesMixin:
         lookup for every row and raises, with the same message
         `DataFrame.rename(index=...)` gives, because it is the same operation.
 
-        `rename(None)` clears the name, which here means setting it to the empty
-        string, because the core holds a name as a `String` and empty is how it
-        spells having none. That is the same state a column built without a name
-        is in, so this is not a new difference, but it is the reason `name`
-        answers `""` here where pandas answers `None`.
+        `rename(None)` clears the name and `rename("")` sets it to a name that
+        happens to be empty, which are two different states because pandas tells
+        them apart: `pd.Series([1]).name` is `None` and
+        `pd.Series([1], name="").name` is `""`, and the two land in different
+        places when the column becomes a frame.
 
         `errors` is declared and does nothing, because the only thing it
         describes in pandas is what happens to a key of the mapping that is not
@@ -5869,7 +5896,7 @@ class SeriesMixin:
         try:
             return _kept(
                 self,
-                Series._wrap(self._inner.relabel("" if index is None else str(index))),
+                Series._wrap(self._inner.relabel(None if index is None else str(index))),
                 inplace,
             )
         except Exception as error:
@@ -6797,7 +6824,7 @@ def _grouped(
     return DataFrameGroupBy(frame, keys, as_index, sort, dropna)
 
 
-def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
+def _relabelled(frame: DataFrame, name: str, label: str | None) -> Series:
     """Takes one column out of a frame and puts a different name on it.
 
     A group by reduction comes back as a frame, and turning it into the series
@@ -6816,7 +6843,7 @@ def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
     Args:
         frame: The frame the reduction produced.
         name: The column to take out.
-        label: The new name, and empty for none.
+        label: The new name, and None for none.
 
     Returns:
         The column, carrying the new name.
@@ -8279,7 +8306,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         # The name goes because a pandas `size` has none, and the frame's one
         # column is called `size` here only because a column has to be called
         # something.
-        return _relabelled(out, out.columns[0], "")
+        return _relabelled(out, out.columns[0], None)
 
 
 class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
@@ -8337,7 +8364,7 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         # column it counted, because it did not read that column. Either way
         # there is exactly one column left once the keys have gone into the
         # labels, so the answer is the column that is there.
-        return _relabelled(out, out.columns[-1], "" if kind == "size" else self._column)
+        return _relabelled(out, out.columns[-1], None if kind == "size" else self._column)
 
 
 class IndexMixin:
@@ -8906,8 +8933,8 @@ class IndexMixin:
         `index` names the labels the answer carries and defaults to the ones it
         was read from, which is what makes the labels come back twice and is
         what pandas does. `name` names the column and defaults to the index's
-        own name, which is the empty string when the index has none, where
-        pandas leaves the series unnamed.
+        own name, which is an absence when the index has none, so an unnamed
+        index gives an unnamed series the way pandas does.
         """
         from ._frame import _index_to_series
 
@@ -9245,9 +9272,9 @@ def _label_of(data: Any) -> str | None:
     built out of another index keeps the name that one had. Anything else, a
     list or a tuple or a range, has no name to take and answers None.
 
-    A series here is named by a string and the empty string is what unnamed
-    looks like on one, so a series named that way gives an unnamed index rather
-    than a level called nothing. That is the same rule read backwards that
+    Both classes report an absence as `None` and a column called nothing as the
+    empty string, so the two cases come across as they are and neither has to be
+    read off the other. That is the same rule read backwards that
     `Index.to_series` follows going the other way.
 
     Args:
@@ -9256,10 +9283,8 @@ def _label_of(data: Any) -> str | None:
     Returns:
         The name, or None.
     """
-    if isinstance(data, IndexMixin):
+    if isinstance(data, (IndexMixin, SeriesMixin)):
         return data._inner.label()
-    if isinstance(data, SeriesMixin):
-        return data._inner.label() or None
     return None
 
 
