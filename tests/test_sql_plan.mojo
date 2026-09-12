@@ -368,8 +368,10 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="one row by construction"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
-    with assert_raises(contains="does not lower the other four"):
-        _ = _plan("SELECT a FROM t WHERE a > ANY (SELECT b FROM u)")
+    with assert_raises(contains="written somewhere else"):
+        _ = _plan(
+            "SELECT g FROM t GROUP BY g HAVING sum(a) > ANY (SELECT k FROM u)"
+        )
     with assert_raises(contains="TRY_CAST"):
         _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
 
@@ -1253,16 +1255,127 @@ def test_an_equals_any_under_an_or_is_a_mark_join() raises:
     )
 
 
-def test_a_quantified_comparison_that_is_not_membership_is_refused() raises:
-    # Each of the four asks whether a comparison holds against some row or every
-    # row, which is a minimum and a maximum over the subquery rather than a key
-    # to join on, and no join here is given a comparison.
-    with assert_raises(contains="does not lower the other four"):
-        _ = _plan("SELECT a FROM t WHERE b >= ALL (SELECT k FROM u)")
-    with assert_raises(contains="does not lower the other four"):
-        _ = _plan("SELECT a FROM t WHERE b = ALL (SELECT k FROM u)")
-    with assert_raises(contains="does not lower the other four"):
-        _ = _plan("SELECT a FROM t WHERE b <> ANY (SELECT k FROM u)")
+def test_a_greater_than_any_reads_the_smallest_row_of_the_subquery() raises:
+    # Some row is under `a` when the smallest one is, so the whole of what the
+    # subquery has to say is a fold over it.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a > ANY (SELECT b FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER and(or(a > __low_0, __pad_0), __fill_0)\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__low as __low_0, __high as __high_0,"
+            " and(__rows != __seen, null) as __pad_0, __rows > 0 as"
+            " __fill_0]\n"
+            "        AGGREGATE [] -> [min(b), max(b), count(1), count(b)]\n"
+            "          PROJECT [b]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_a_greater_than_all_reads_the_largest_row_instead() raises:
+    # And pads with a true rather than a false, since `ALL` over nothing is
+    # true and `ANY` over nothing is false.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b >= ALL (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER or(and(b >= __high_0, __pad_0), __fill_0)\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__low as __low_0, __high as __high_0,"
+            " or(__rows == __seen, null) as __pad_0, __rows == 0 as"
+            " __fill_0]\n"
+            "        AGGREGATE [] -> [min(k), max(k), count(1), count(k)]\n"
+            "          PROJECT [k]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_a_less_than_any_and_a_less_than_all_read_the_other_end() raises:
+    assert_true(
+        _plan("SELECT a FROM t WHERE b < ANY (SELECT k FROM u)").startswith(
+            "PROJECT [a]\n  FILTER and(or(b < __high_0, __pad_0), __fill_0)\n"
+        )
+    )
+    assert_true(
+        _plan("SELECT a FROM t WHERE b <= ALL (SELECT k FROM u)").startswith(
+            "PROJECT [a]\n  FILTER or(and(b <= __low_0, __pad_0), __fill_0)\n"
+        )
+    )
+
+
+def test_an_equals_all_asks_about_both_ends_at_once() raises:
+    # Every row equals `b` when both ends do, which is the one comparison that
+    # neither end answers on its own.
+    assert_true(
+        _plan("SELECT a FROM t WHERE b = ALL (SELECT k FROM u)").startswith(
+            "PROJECT [a]\n  FILTER or(and(and(b == __low_0, b =="
+            " __high_0), __pad_0), __fill_0)\n"
+        )
+    )
+
+
+def test_a_not_equals_any_asks_about_both_ends_the_other_way() raises:
+    assert_true(
+        _plan("SELECT a FROM t WHERE b <> ANY (SELECT k FROM u)").startswith(
+            "PROJECT [a]\n  FILTER and(or(or(b != __low_0, b !="
+            " __high_0), __pad_0), __fill_0)\n"
+        )
+    )
+
+
+def test_a_quantified_comparison_in_a_select_list_is_the_same_row() raises:
+    assert_equal(
+        _plan("SELECT a, b < ALL (SELECT k FROM u) AS small FROM t"),
+        (
+            "PROJECT [a, or(and(b < __low_0, __pad_0), __fill_0) as"
+            " small]\n"
+            "  JOIN cross []\n"
+            "    SCAN t []\n"
+            "    PROJECT [__low as __low_0, __high as __high_0, or(__rows =="
+            " __seen, null) as __pad_0, __rows == 0 as __fill_0]\n"
+            "      AGGREGATE [] -> [min(k), max(k), count(1), count(k)]\n"
+            "        PROJECT [k]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_two_quantified_comparisons_each_get_a_row() raises:
+    assert_true(
+        _plan(
+            "SELECT a FROM t WHERE b > ANY (SELECT k FROM u)"
+            " AND b < ALL (SELECT b FROM u)"
+        ).startswith(
+            "PROJECT [a]\n  FILTER and(and(or(b > __low_0, __pad_0),"
+            " __fill_0), or(and(b < __low_1, __pad_1), __fill_1))\n"
+        )
+    )
+
+
+def test_a_correlated_quantified_comparison_says_why_it_is_refused() raises:
+    with assert_raises(contains="dependent join"):
+        _ = _plan(
+            "SELECT a FROM t WHERE b > ALL (SELECT k FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_a_quantified_subquery_of_two_columns_is_refused() raises:
+    with assert_raises(contains="hands out 2 columns"):
+        _ = _plan("SELECT a FROM t WHERE b > ANY (SELECT k, z FROM u)")
+
+
+def test_a_quantified_comparison_over_an_aggregate_is_refused() raises:
+    # The row goes above the FROM, which is under the aggregate, and an
+    # aggregate hands up its keys and its folds rather than everything it read.
+    with assert_raises(contains="written somewhere else"):
+        _ = _plan(
+            "SELECT g FROM t GROUP BY g HAVING max(a) < ALL (SELECT k FROM u)"
+        )
 
 
 def test_an_exists_written_under_an_or_is_counted_under_a_cross_join() raises:
