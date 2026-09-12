@@ -1288,6 +1288,59 @@ def test_an_in_under_an_or_keeps_what_either_side_keeps() raises:
     )
 
 
+def test_an_equals_any_keeps_what_an_in_keeps() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty = ANY"
+                " (SELECT band FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 20, 40],
+        "qty",
+    )
+
+
+def test_a_not_equals_all_over_a_null_keeps_nothing() raises:
+    # The same null aware answer a NOT IN gets, because it is the same lowering
+    # and there is nothing written for this case anywhere.
+    assert_equal(
+        len(
+            run(
+                (
+                    "SELECT qty FROM sales WHERE qty <> ALL"
+                    " (SELECT band FROM gaps)"
+                ),
+                session(),
+            )
+        ),
+        0,
+    )
+
+
+def test_an_equals_any_answers_on_every_row() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty = ANY (SELECT band FROM tiers) AS hit FROM sales",
+                session(),
+            ),
+            "hit",
+        ),
+        [0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        "hit",
+    )
+
+
+def test_a_quantified_comparison_over_an_order_is_refused() raises:
+    with assert_raises(contains="does not lower the other four"):
+        _ = run(
+            "SELECT qty FROM sales WHERE qty > ANY (SELECT band FROM tiers)",
+            session(),
+        )
+
+
 def test_an_in_over_a_subquery_that_kept_no_rows_keeps_no_rows() raises:
     # The build side is a column no rows reached, which has no chunks at all
     # rather than one empty chunk, and the join used to raise on that. #611.

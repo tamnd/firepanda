@@ -13,6 +13,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 `EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
 
 An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
+An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold shipped in 0.6.74 and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
 
 There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
 
@@ -35,6 +36,17 @@ Memory is the same trade as before and it is said in the docstring. The key colu
 A grouped `corr` or `cov` is still refused, now saying it reads two columns where a reduction here names one, which is the same sentence `Reduce` gives.
 
 This closes the operator half of #617. What is left in it is #610, a set shaped table so a distinct count holds a set rather than the values.
+### Added: `= ANY` and `<> ALL` over a subquery, which are the two that are an IN
+
+`SELECT qty FROM sales WHERE qty = ANY (SELECT band FROM tiers)` was refused, and so was `qty <> ALL (SELECT band FROM gaps)`. Both run now, and neither is new machinery. `x = ANY (S)` is true when some row of `S` equals `x`, which is the whole of `x IN (S)`, and `x <> ALL (S)` is true when no row does, which is the whole of `x NOT IN (S)`. So they are read as the `IN` they are and go to the same semi join and the same mark join rather than being lowered a second time.
+
+The nulls come along with them, which is the point of doing it this way. `<> ALL` over a subquery holding a null is null on every row that matched nothing rather than true, exactly as `NOT IN` is, and nothing is written anywhere for that case because it is the mark join and the `NOT` over its column answering as they already did. Checked against DuckDB 1.5.1 column by column.
+
+`==` and `!=` are other spellings of the two comparisons and go the same way. `SOME` is another spelling of `ANY` and does not, because the DuckDB PEG grammar this vendors has `SubqueryAny <- 'ANY'` and no word for `SOME`, while DuckDB's own parser takes it. That is an upstream gap rather than something to patch into a verbatim copy, and `= SOME` is a syntax error here until it is fixed. There is a test that says so.
+
+The other four quantified comparisons are still refused, and by a better sentence. `> ANY`, `>= ALL` and the rest ask whether a comparison holds against some row or every row, and `= ALL` and `<> ANY` are not membership either, since one matching row does not answer whether every row matches. Those are a minimum and a maximum worked out over the subquery and cross joined on, which is the shape an uncorrelated `EXISTS` already uses, and it is a change of its own.
+
+Part of #309.
 
 ## [0.6.74] - 2026-09-12
 
