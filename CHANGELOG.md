@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.77] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three SQL surfaces that were wired gaps rather than missing logic, and two kernels the ClickBench suite asks for. The star modifiers, the column aliases on a subquery in a FROM and `UNION BY NAME` were each a refusal with a note attached saying what the feature really was, and in each case the note was right and the work was to do what it said. On the kernel side, ninety sums over one column no longer build ninety copies of it, and a conditional over text now runs on every core.
+
 ### Added: UNION BY NAME
 
 `SELECT shop, qty FROM sales UNION ALL BY NAME SELECT qty, shop FROM sales` was refused with a note saying that lining two arms up by column name is a projection on each arm rather than a different node. It runs now, and it is that projection.
@@ -6194,7 +6200,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.76...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.77...HEAD
+[0.6.77]: https://github.com/tamnd/firepanda/releases/tag/v0.6.77
 [0.6.76]: https://github.com/tamnd/firepanda/releases/tag/v0.6.76
 [0.6.75]: https://github.com/tamnd/firepanda/releases/tag/v0.6.75
 [0.6.74]: https://github.com/tamnd/firepanda/releases/tag/v0.6.74
