@@ -332,6 +332,74 @@ def test_a_group_by_all_with_no_fold_is_a_distinct() raises:
     )
 
 
+def test_a_group_by_may_name_an_alias_the_select_list_wrote() raises:
+    # The expression is in the aggregate once, as the key, and the projection
+    # reads the column back by the name the query gave it. Computing it again
+    # up there is not a slower way of getting the same answer: `a` is not a
+    # column the aggregate hands out, so there would be nothing to compute it
+    # over.
+    assert_equal(
+        _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY k"),
+        (
+            "PROJECT [k, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [a + 1] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_an_alias_of_a_plain_column_as_a_key_is_the_column() raises:
+    # The same plan as the query that wrote the column itself, with the
+    # renaming where it always was, in the projection. The key keeps the
+    # column's own name because a physical group by hands the key field through
+    # as it found it, so a key named anything else is a refusal two stages
+    # down rather than a rename.
+    assert_equal(
+        _plan("SELECT g AS k, count(*) FROM t GROUP BY k"),
+        (
+            "PROJECT [g as k, __agg_0 as __expr_1]\n"
+            "  AGGREGATE [g] -> [count(1)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_table_column_wins_over_an_alias_of_the_same_name() raises:
+    # `g` is a column of `t` and also the name this select list gives to `b`,
+    # and the table is asked first, so the keys are `g` and `b` and not `b`
+    # twice. Nothing that bound before this rule existed binds to anything else
+    # because of it, which is what writing the qualified name beside it says:
+    # `t.g` can only be the column and the two plans are the same plan.
+    var out = _plan("SELECT b AS g, count(*) FROM t GROUP BY g, b")
+    assert_equal(out, _plan("SELECT b AS g, count(*) FROM t GROUP BY t.g, b"))
+    assert_true("AGGREGATE [g, b]" in out, "the column and not the alias")
+
+
+def test_the_same_alias_named_twice_is_one_key() raises:
+    assert_equal(
+        _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY k, k"),
+        _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY k"),
+    )
+
+
+def test_a_group_by_that_names_the_alias_of_a_fold_says_so() raises:
+    with assert_raises(contains="computed over the groups"):
+        _ = _plan("SELECT g, count(*) AS c FROM t GROUP BY c")
+
+
+def test_two_items_with_one_alias_do_not_say_which_is_the_key() raises:
+    with assert_raises(contains="does not say which"):
+        _ = _plan("SELECT a AS k, b AS k, count(*) FROM t GROUP BY k")
+
+
+def test_a_group_by_name_that_is_neither_still_says_it_is_neither() raises:
+    # The refusal a name that is nothing was always given, unchanged, because
+    # the select list is searched second and finding nothing there leaves the
+    # name to be lowered as it was written.
+    with assert_raises(contains="no column named 'nope'"):
+        _ = _plan("SELECT g, count(*) FROM t GROUP BY nope")
+
+
 def test_an_order_by_may_name_a_column_the_query_does_not_return() raises:
     # The projection under the sort is one column wider than the query asked
     # for and the one above it takes the query's own columns back.

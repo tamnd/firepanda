@@ -485,6 +485,66 @@ def test_a_group_by_folds_the_rows_into_groups() raises:
     same(read_back(out, "total"), [75, 84], "total")
 
 
+def test_a_group_by_folds_by_a_name_the_select_list_gave() raises:
+    # The same two groups as the query above, which wrote the column itself.
+    var out = run(
+        "SELECT shop AS k, SUM(qty) AS total FROM sales GROUP BY k ORDER BY k",
+        session(),
+    )
+    same(read_back(out, "k"), [1, 2], "the alias")
+    same(read_back(out, "total"), [75, 84], "total")
+
+
+def test_a_group_by_folds_by_an_expression_a_name_stands_for() raises:
+    # Ten rows and nine sums, because two of them come to the same number, so
+    # a grouping that quietly grouped by something else would be visible in
+    # the row count before it was visible in the sums.
+    var out = run(
+        (
+            "SELECT qty + price AS k, COUNT(*) AS c FROM sales GROUP BY k"
+            " ORDER BY k"
+        ),
+        session(),
+    )
+    same(read_back(out, "k"), [10, 15, 17, 21, 22, 28, 34, 41, 101], "the sums")
+    same(read_back(out, "c"), [1, 1, 2, 1, 1, 1, 1, 1, 1], "how many rows")
+
+
+def test_several_keys_and_one_of_them_is_a_name() raises:
+    # The shape q39 of ClickBench is written in: a case expression and a plain
+    # column both given names in the select list and both named again in the
+    # GROUP BY, with a fold beside them.
+    var out = run(
+        (
+            "SELECT shop AS s, CASE WHEN qty > 10 THEN 1 ELSE 0 END AS big,"
+            " COUNT(*) AS n FROM sales GROUP BY s, big ORDER BY s, big"
+        ),
+        session(),
+    )
+    same(read_back(out, "s"), [1, 1, 2, 2], "shop")
+    same(read_back(out, "big"), [0, 1, 0, 1], "over ten or not")
+    same(read_back(out, "n"), [2, 3, 2, 3], "how many rows")
+
+
+def test_a_column_of_the_table_wins_over_a_name_of_the_same_spelling() raises:
+    # `qty` is a column of sales and the name this select list gives to `shop`,
+    # and the ten quantities are all different, so grouping by the column gives
+    # ten groups where grouping by the shop would give two. The table is asked
+    # first, so ten is the answer. The shop is written in the GROUP BY as well
+    # because a query that reads it has to group by it either way, and that is
+    # what leaves the row count as the only thing the two readings differ on.
+    var out = run(
+        "SELECT shop AS qty, COUNT(*) AS c FROM sales GROUP BY qty, shop",
+        session(),
+    )
+    assert_equal(len(out), 10, "one group per quantity")
+
+
+def test_a_group_by_that_names_a_fold_says_why_not() raises:
+    with assert_raises(contains="computed over the groups"):
+        _ = run("SELECT shop, COUNT(*) AS c FROM sales GROUP BY c", session())
+
+
 def test_a_group_by_all_folds_the_same_groups() raises:
     var out = run(
         "SELECT shop, SUM(qty) AS total FROM sales GROUP BY ALL ORDER BY shop",

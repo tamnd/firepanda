@@ -53,6 +53,16 @@ The positions have to be written out. A column in either of them would mean a di
 
 Six of them answer properly now. `sum`, `prod`, `min`, `max`, `any` and `all` are each the same question asked again of their own answers, so the fold runs the reduction a second time over the column it produced, and for a frame mixing an integer column with a float one that lands on the `-0.0` pandas gives rather than on `0.0`. `mean`, `median`, `std`, `var`, `sem` and `skew` cannot be built that way and refuse with a sentence saying so, since a mean of means is not a mean. `count`, `quantile` and `nunique` have no whole frame form in pandas either and are refused here with the message pandas uses.
 
+### Added: a GROUP BY may name a column the select list named
+
+`SELECT CASE WHEN ... END AS Src, COUNT(*) FROM hits GROUP BY Src` was refused with "there is no column named 'src' here", which is true of the table and not of the query. Two of the 43 ClickBench statements group by a name their own select list introduced, DuckDB and Postgres both read it, and docs/specs/sql/05-ast-and-binder.md has asked for it since it was written.
+
+The rule is one line and it is about where the name is looked up rather than about what the name is: a `GROUP BY` goes to the table first and to the select list second. So a table column called `k` still wins over a select list `k`, and nothing that bound before this binds to anything else now. Naming the alias of a fold is refused rather than followed, because a fold is computed over the groups and cannot also be one of them, and two select items written with the same name are refused too, since then the query does not say which of them is the key.
+
+What makes this the same clause lowered once rather than twice is where the key is named. The expression goes into the aggregate as a key under the name the select list gave it, so the projection above reads that column back instead of computing the same expression a second time over columns the aggregate no longer hands out. A key that is a plain column keeps the column's own name and the projection does the renaming, because a physical group by hands the key field through as it found it.
+
+This is also the shortest way around the gap the EXTRACT entry above names. `GROUP BY EXTRACT(MONTH FROM d)` written out in full is still refused, because nothing compares a select item against the group keys, but the same query with the field read under a name and the name written in the `GROUP BY` runs, which is how most people write it anyway.
+
 ### Added: COALESCE, IFNULL and NULLIF
 
 `SELECT coalesce(o_comment, 'none') FROM orders` was refused with "there is no function named coalesce", which is a gap worth naming because filling a gap is most of what anybody does with a nullable column. The kernel behind it has been in `firepanda/kernel/nulls.mojo` since the array layer was written, and again what was missing was the plumbing between it and a query.
