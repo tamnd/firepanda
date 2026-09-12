@@ -36,6 +36,7 @@ from firepanda.exec import (
     GroupAgg,
     Join,
     Limit,
+    Match,
     Materialize,
     Node,
     NodeStatus,
@@ -57,6 +58,7 @@ from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.pattern import MatchKind, Pattern
 
 
 def numbers(values: List[Int64]) raises -> AnyArray:
@@ -722,6 +724,74 @@ def test_a_comparison_makes_the_mask_a_filter_then_reads() raises:
     # is that the mask was found at position 3 because the plan counted.
     assert_equal(out.width(), 1, "the intermediates were projected away")
     assert_equal(len(out), 6, "rows kept")
+
+
+def _matched(
+    kind: MatchKind, first: String, second: String
+) raises -> List[Int64]:
+    """Runs one search over `wanted` and reads back the numbers it kept.
+
+    Args:
+        kind: Which search to run.
+        first: The run of bytes to look for.
+        second: The run that has to follow it, empty for the other three.
+
+    Returns:
+        The `n` of every row the pattern matched.
+    """
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Match(2, Pattern(kind, first, second), "hit")))
+    pipeline.add(Node(Filter(3)))
+    pipeline.add(Node(Project([0])))
+    return read_back(pipeline^.run(), "n")
+
+
+def test_a_match_appends_a_column_saying_which_rows_it_found() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Match(2, Pattern(MatchKind.STARTS_WITH, "o", ""), "hit")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "the answer was appended")
+    assert_equal(out.schema[3].name, "hit", "the name it was given")
+    assert_true(out.schema[3].dtype == LogicalType.BOOL, "a yes or no")
+
+
+def test_each_of_the_four_searches_keeps_a_different_set() raises:
+    # `wanted` is ok, ok, ok, fail, fail, no. Four answers that differ is the
+    # point: a node that read the pattern and then ran one kernel whatever the
+    # pattern said would give the same rows four times.
+    var starts = _matched(MatchKind.STARTS_WITH, "o", "")
+    assert_equal(len(starts), 3, "starts with o")
+    var contains = _matched(MatchKind.CONTAINS, "o", "")
+    assert_equal(len(contains), 4, "contains an o")
+    var ends = _matched(MatchKind.ENDS_WITH, "o", "")
+    assert_equal(len(ends), 1, "ends with o")
+    assert_equal(ends[0], Int64(6), "the row that ends with an o")
+    var order = _matched(MatchKind.IN_ORDER, "f", "l")
+    assert_equal(len(order), 2, "an f and then an l")
+    assert_equal(order[0], Int64(4), "the first of them")
+
+
+def test_a_match_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="is outside a schema of 3 columns"):
+        pipeline.add(
+            Node(Match(9, Pattern(MatchKind.CONTAINS, "o", ""), "nope"))
+        )
+
+
+def test_a_match_over_a_column_that_is_not_text_is_caught() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="a LIKE reads text and column 0 holds"):
+        pipeline.add(
+            Node(Match(0, Pattern(MatchKind.CONTAINS, "o", ""), "nope"))
+        )
+
+
+def test_a_match_on_a_pattern_with_no_wildcard_is_refused() raises:
+    # There is a kernel for it and it is the one an equality already uses, so
+    # the node says which node to build rather than growing a fifth branch.
+    with assert_raises(contains="is an equality against a constant"):
+        _ = Match(2, Pattern(MatchKind.EQUALS, "ok", ""), "nope")
 
 
 def test_a_computed_column_keeps_the_chunk_boundaries() raises:

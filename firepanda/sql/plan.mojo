@@ -1479,6 +1479,46 @@ def _lower_expr(
             return plan.exprs.call("and", [left, right], True)
         if op == "OR":
             return plan.exprs.call("or", [left, right], True)
+        # The LIKE family reaches here as the text it was written with, the
+        # grammar having folded the word and the operator spelling of each one
+        # into the same shape. Only the case sensitive match has kernels behind
+        # it. The rest are named here rather than left to fall through to the
+        # operator table, so that what comes back says which of them was
+        # written and why it is not answered.
+        if op == "LIKE" or op == "~~":
+            return plan.exprs.call("like", [left, right], True)
+        if op == "!~~":
+            # `NOT LIKE` written the other way. The grammar reads it as one
+            # token, so the negation that `x NOT LIKE p` gets for free has to
+            # be put back on by hand here.
+            return plan.exprs.call(
+                "not", [plan.exprs.call("like", [left, right], True)], True
+            )
+        if op == "ILIKE" or op == "~~*" or op == "!~~*":
+            raise Error(
+                "firepanda matches a LIKE pattern byte for byte, and doing it"
+                " without regard to case needs a case fold it does not have"
+                " yet, so ILIKE is refused rather than answered wrongly"
+            )
+        if op == "GLOB" or op == "~~~":
+            raise Error(
+                "firepanda has no GLOB yet, whose wildcards are not the ones a"
+                " LIKE pattern is written with"
+            )
+        if (
+            op == "SIMILAR TO"
+            or op == "~"
+            or op == "~*"
+            or op == "!~"
+            or op == "!~*"
+        ):
+            raise Error(
+                String(
+                    "firepanda has no regular expression engine, so ",
+                    op,
+                    " is refused",
+                )
+            )
         return plan.exprs.binary(_binary_op(op), left, right)
 
     if node.kind == EXPR_CASE:

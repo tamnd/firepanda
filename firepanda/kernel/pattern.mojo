@@ -67,6 +67,183 @@ The same number `_bytes_equal` uses in `strings.mojo` and for the same reason.
 """
 
 
+struct MatchKind(Equatable, ImplicitlyCopyable, Movable, Writable):
+    """Which of the searches a `LIKE` pattern turned out to be.
+
+    Equality is in here with the other four although it is not a search at all,
+    because what reads a pattern hands back one thing and the caller decides
+    what to do with it. A pattern with no wildcard in it is an equality against
+    a constant, and saying so here is one place rather than one per caller.
+    """
+
+    var code: UInt8
+    """The search, as a small integer."""
+
+    comptime EQUALS = Self(0)
+    """No wildcard, so the whole element has to be the pattern."""
+
+    comptime CONTAINS = Self(1)
+    """A run wrapped in wildcards, so `%green%`."""
+
+    comptime STARTS_WITH = Self(2)
+    """A run with a wildcard after it, so `forest%`."""
+
+    comptime ENDS_WITH = Self(3)
+    """A run with a wildcard before it, so `%BRASS`."""
+
+    comptime IN_ORDER = Self(4)
+    """Two runs each wrapped in wildcards, so `%special%requests%`."""
+
+    def __init__(out self, code: UInt8):
+        """Constructs a search from its code.
+
+        Args:
+            code: The search.
+        """
+        self.code = code
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compares two searches.
+
+        Args:
+            other: The search to compare against.
+
+        Returns:
+            True if they are the same one.
+        """
+        return self.code == other.code
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compares two searches.
+
+        Args:
+            other: The search to compare against.
+
+        Returns:
+            True if they are different ones.
+        """
+        return self.code != other.code
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Writes the search as the name of the kernel that answers it.
+
+        Args:
+            writer: Where the text goes.
+        """
+        if self == Self.EQUALS:
+            writer.write("equals")
+        elif self == Self.CONTAINS:
+            writer.write("contains")
+        elif self == Self.STARTS_WITH:
+            writer.write("starts with")
+        elif self == Self.ENDS_WITH:
+            writer.write("ends with")
+        else:
+            writer.write("contains in order")
+
+
+struct Pattern(ImplicitlyCopyable, Movable):
+    """A `LIKE` pattern with its wildcards read off it.
+
+    The runs are what is left once the wildcards are gone, so the pattern is not
+    kept. `second` is empty for every search but the one that reads two runs,
+    and an empty run is a real answer for the others: `%` reads as an ends with
+    against nothing, which every element ends with and no null does, and that is
+    what `LIKE '%'` means.
+    """
+
+    var kind: MatchKind
+    """Which search answers it."""
+
+    var first: String
+    """The run of bytes to look for, or the whole element for an equality."""
+
+    var second: String
+    """The run that has to follow the first one, and empty otherwise."""
+
+    def __init__(
+        out self, kind: MatchKind, var first: String, var second: String
+    ):
+        """Constructs a read pattern.
+
+        Args:
+            kind: Which search answers it.
+            first: The first run. Consumed.
+            second: The second run, empty unless the search reads two. Consumed.
+        """
+        self.kind = kind
+        self.first = first^
+        self.second = second^
+
+
+def read_pattern(pattern: StringSlice) raises -> Pattern:
+    """Reads a `LIKE` pattern into the search that answers it.
+
+    The five shapes in `MatchKind` are the ones with a kernel, and the module
+    docstring above says why those five and not a matcher. Anything else is
+    refused here rather than answered approximately, because a pattern read as a
+    weaker one silently returns rows the query did not ask for.
+
+    There is no escape character. DuckDB has none by default either, so a
+    backslash in a pattern is an ordinary byte to both, and `ESCAPE` is refused
+    by the SQL front end before anything gets here.
+
+    Args:
+        pattern: The pattern as the query wrote it, wildcards and all.
+
+    Returns:
+        The search and the runs of bytes it reads.
+
+    Raises:
+        Error: If the pattern is a shape none of the five kernels answers.
+    """
+    var text = String(pattern)
+    var bytes = text.as_bytes()
+    for i in range(len(bytes)):
+        if bytes[i] == UInt8(ord("_")):
+            raise Error(
+                String(
+                    "like: the _ in '",
+                    text,
+                    (
+                        "' stands for any one character, and firepanda reads a"
+                        " LIKE pattern as a substring search so far, which has"
+                        " no way to say that"
+                    ),
+                )
+            )
+
+    var runs = List[String]()
+    for piece in text.split("%"):
+        runs.append(String(piece))
+
+    if len(runs) == 1:
+        return Pattern(MatchKind.EQUALS, runs[0].copy(), String(""))
+    if len(runs) == 2:
+        if runs[0] == "":
+            return Pattern(MatchKind.ENDS_WITH, runs[1].copy(), String(""))
+        if runs[1] == "":
+            return Pattern(MatchKind.STARTS_WITH, runs[0].copy(), String(""))
+    elif len(runs) == 3:
+        if runs[0] == "" and runs[2] == "":
+            return Pattern(MatchKind.CONTAINS, runs[1].copy(), String(""))
+    elif len(runs) == 4:
+        if runs[0] == "" and runs[3] == "" and runs[1] != "" and runs[2] != "":
+            return Pattern(MatchKind.IN_ORDER, runs[1].copy(), runs[2].copy())
+
+    raise Error(
+        String(
+            (
+                "like: firepanda reads a pattern that is literal text, text"
+                " with a % at one end or at both, or two runs each wrapped in"
+                " one, and '"
+            ),
+            text,
+            "' is none of those",
+        )
+    )
+
+
 def _match_at(
     hay: Span[UInt8, _], needle: Span[UInt8, _], at: Int, count: Int
 ) -> Bool:

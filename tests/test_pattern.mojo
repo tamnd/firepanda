@@ -26,7 +26,13 @@ into the test is a count, so a failure anywhere in a hundred thousand rows is
 one assertion rather than a hundred thousand.
 """
 
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.array import Array
 from firepanda.array.strings import (
@@ -39,7 +45,9 @@ from firepanda.kernel.agg import sum_of
 from firepanda.kernel.compare import not_equal
 from firepanda.kernel.concat import concat_strings
 from firepanda.kernel.pattern import (
+    MatchKind,
     find_bytes,
+    read_pattern,
     text_contains,
     text_contains_in_order,
     text_ends_with,
@@ -332,6 +340,61 @@ def test_a_column_either_side_of_the_morsel_split_matches_the_twin() raises:
     # one hold the needle and rows two and three do not, and doubling keeps that
     # true, so exactly half the column matches.
     assert_equal(Int(sum_of(want).value), len(col) // 2)
+
+
+def _read(pattern: String) raises -> String:
+    """Reads a pattern and writes back which search it is and what it holds.
+
+    Args:
+        pattern: The pattern as a query would write it.
+
+    Returns:
+        The search, then the runs it reads, in brackets.
+    """
+    var got = read_pattern(pattern)
+    return String(got.kind, " [", got.first, "] [", got.second, "]")
+
+
+def test_a_pattern_with_no_wildcard_is_an_equality() raises:
+    assert_equal(_read("abc"), "equals [abc] []")
+    # The empty pattern too, which matches the empty element and nothing else.
+    assert_equal(_read(""), "equals [] []")
+
+
+def test_a_percent_at_one_end_is_a_prefix_or_a_suffix() raises:
+    assert_equal(_read("abc%"), "starts with [abc] []")
+    assert_equal(_read("%abc"), "ends with [abc] []")
+
+
+def test_a_percent_at_both_ends_is_a_substring() raises:
+    assert_equal(_read("%abc%"), "contains [abc] []")
+
+
+def test_two_runs_each_wrapped_in_a_percent_are_read_in_order() raises:
+    assert_equal(_read("%ab%cd%"), "contains in order [ab] [cd]")
+
+
+def test_a_lone_percent_is_a_suffix_of_nothing() raises:
+    # Which every element ends with and no null does, and that is what
+    # `LIKE '%'` means. Two of them is the same thing said twice.
+    assert_equal(_read("%"), "ends with [] []")
+    assert_equal(_read("%%"), "contains [] []")
+
+
+def test_an_underscore_says_it_stands_for_any_one_character() raises:
+    with assert_raises(contains="stands for any one character"):
+        _ = read_pattern("a_c")
+
+
+def test_a_run_in_the_middle_is_refused_rather_than_widened() raises:
+    # Reading `a%c` as the prefix alone would keep every row starting with an a,
+    # which is more rows than the query asked for and nothing would say so.
+    with assert_raises(contains="is none of those"):
+        _ = read_pattern("a%c")
+    with assert_raises(contains="is none of those"):
+        _ = read_pattern("%a%b")
+    with assert_raises(contains="is none of those"):
+        _ = read_pattern("%a%%b%")
 
 
 def main() raises:

@@ -289,12 +289,16 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the three that exist.
+    """Returns what a named function answers, for the four that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of three entries instead. When the registry arrives this function
+    table of four entries instead. When the registry arrives this function
     becomes a lookup in it and the table goes away.
+
+    `like` is here with them because a pattern match is not a binary operation
+    either. Its right side is a pattern rather than an operand, and the node
+    that runs it reads that pattern once at plan time.
 
     Args:
         name: The function name.
@@ -304,8 +308,27 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the three, or an argument is not a boolean.
+        If the name is not one of the four, or an argument has the wrong type.
     """
+    if name == "like":
+        # The pattern is a constant and lowering refuses it as anything else,
+        # but that is lowering's rule rather than a typing one, so what is
+        # checked here is only that both sides are text.
+        if len(args) != 2:
+            raise Error(
+                String("'like' takes 2 arguments and was given ", len(args))
+            )
+        for i in range(2):
+            if args[i] != LogicalType.STRING and args[i] != LogicalType.NULL:
+                raise Error(
+                    String(
+                        "'like' reads text and argument ",
+                        i,
+                        " is ",
+                        args[i],
+                    )
+                )
+        return LogicalType.BOOL
     if name != "and" and name != "or" and name != "not":
         raise Error(
             String(
