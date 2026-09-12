@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a frame and a column can print what they hold
+
+`df.info()` and `s.info()`, with `verbose`, `buf`, `max_cols`, `memory_usage` and `show_counts`.
+
+Every number in the report already existed as a member, so this is formatting and nothing else and it is written in Python with no kernel behind it. What took the work is the layout, which is pandas' down to the trailing spaces: every column of the table is as wide as the widest thing in it, the header included, the rule under a header is as long as the header rather than as long as the column, and the position column is five characters wide on a narrow frame and six on one with three digit positions. That was read off a running pandas rather than out of its source, and the tests compare the two reports line for line on a frame of numbers.
+
+Three lines differ and all three are registered divergences rather than new ones. The class says `firepanda.DataFrame`. The types are spelled the way this library spells them, so a text column says `string` where pandas 3 says `str`. And the memory number counts Arrow buffers, which also means there is never a `+` after it, since pandas puts one there when it left the contents of an object column out and there is nothing here that gets left out. A fourth difference shows only on an index with a gap in it, where a missing label prints `None` here and `nan` there, because that is the value each library actually holds.
+
+Two rules are this library's rather than pandas'. The width at which the table becomes a one line summary is a constant with pandas' default of 100 in it, because there is no options system here, and `max_cols` is how a caller moves it. And the missing counts are always taken, at any size, where pandas stops taking them above about 1.69 million rows: over there counting is a pass over every column and here it is a number Arrow already keeps against each chunk.
+
+Nothing in the signature is refused. `memory_usage="bogus"` prints the number in pandas rather than raising, and `verbose="yes"` and `show_counts=1` are simply truthy, so they are here too.
+
 ### Added: a frame and a column can say how much memory they are using
 
 `s.nbytes`, `df.memory_usage(index=True, deep=False)` and `s.memory_usage(index=True, deep=False)`. `Index.nbytes` was already here.
