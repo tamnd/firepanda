@@ -231,6 +231,38 @@ def test_nullif_becomes_an_ordinary_call() raises:
     assert_equal(_printed("NULLIF(a, b)", g, rules), "nullif(a, b)")
 
 
+def test_an_extract_prints_as_the_call_it_is() raises:
+    # The keyword form is not a call in the grammar and `date_part` is the name
+    # DuckDB itself shows in a plan, so the one turns into the other here and
+    # nothing after this point has two shapes to read.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("EXTRACT(YEAR FROM x)", g, rules), "date_part('year', x)"
+    )
+
+
+def test_the_field_comes_out_in_lower_case_however_it_was_written() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("EXTRACT(Year FROM x)", g, rules), "date_part('year', x)"
+    )
+    assert_equal(
+        _printed("extract('YEAR' FROM x)", g, rules), "date_part('year', x)"
+    )
+
+
+def test_a_field_the_grammar_has_no_keyword_for_is_still_read() raises:
+    # Thirteen of them are keywords in the grammar and the rest arrive as
+    # ordinary identifiers. Both reach the call as the same text.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("EXTRACT(isodow FROM x)", g, rules), "date_part('isodow', x)"
+    )
+
+
 def test_the_three_spellings_of_a_substring_print_as_the_one_call() raises:
     # The keyword form is not a call in the grammar, it is a rule with a `FROM`
     # and a `FOR` under it, and the comma form goes through the same rule. Both

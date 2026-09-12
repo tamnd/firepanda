@@ -169,7 +169,7 @@ comptime TYPE_LITERAL: UInt16 = 29
 """A type name in front of a string, as in `DATE '2020-01-01'`."""
 
 comptime SPECIAL_CALL: UInt16 = 30
-"""A function the grammar gives a rule of its own, such as `EXTRACT`."""
+"""A function the grammar gives a rule of its own, such as `TRIM`."""
 
 comptime LAMBDA: UInt16 = 31
 """`lambda x: x + 1`, a function written in the query."""

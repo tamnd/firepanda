@@ -143,6 +143,11 @@ from firepanda.kernel.running import (
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.temporal import (
+    TemporalField,
+    field_dtype,
+    temporal_field,
+)
 from firepanda.kernel.unary import UnaryOp, unary_any, unary_type
 
 from .chunk import Chunk
@@ -1856,6 +1861,123 @@ struct Cut(Movable):
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Part(Movable):
+    """Appends a column holding one calendar or clock field of every element.
+
+    This is SQL's `EXTRACT` and `date_part`, and it is a node for the reason
+    `Cut` is one: which field is being read is decided once while the plan is
+    built and is not an operand, so a general expression node would be carrying
+    a field code around for every arithmetic node in every plan.
+
+    The answer is a whole number whatever the field, because that is what DuckDB
+    answers and a query that groups on `EXTRACT(year FROM d)` and joins that
+    against a count wants the two to be the same width. The kernel answers the
+    narrower types pandas answers with, so the widening happens here, in the
+    same pass, rather than by putting a cast node behind every one of these.
+
+    The seven fields that are predicates are not reachable from here. They are
+    names on `dt` and SQL has no spelling for any of them, so a plan asking for
+    one is a bug in whatever built the plan rather than a query somebody wrote,
+    and it is refused while the plan binds.
+
+    A null element gives a null answer, which the kernel already does.
+    """
+
+    var at: Int
+    """The position of the column being read."""
+
+    var field: TemporalField
+    """Which field."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, field: TemporalField, name: String):
+        """Constructs a field read over a column.
+
+        Args:
+            at: The position of the column being read.
+            field: Which field.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.field = field
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a whole number column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one int64 field on the end.
+
+        Raises:
+            If the position is outside the schema, if the column is not a date
+            or a timestamp, or if the field is one of the predicates.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "part: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        var read = out[self.at].copy()
+        if (
+            read.dtype.kind != TypeKind.DATE
+            and read.dtype.kind != TypeKind.TIMESTAMP
+        ):
+            raise Error(
+                "part: a field is read out of a date or a timestamp and column "
+                + String(self.at)
+                + " holds "
+                + String(read.dtype)
+            )
+        if field_dtype(Int(self.field.code)) == DType.bool:
+            raise Error(
+                "part: "
+                + String(self.field)
+                + " answers yes or no rather than a number, and nothing in SQL"
+                + " asks for it"
+            )
+        out.append(Field(self.name, LogicalType.INT64, read.nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Reads the field and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not temporal.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "part: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = cast_any(
+            temporal_field(chunk.columns[self.at], self.field),
+            LogicalType.INT64,
+        )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
         return Chunk(columns^, rows)
 
 
@@ -4891,6 +5013,7 @@ comptime Node = Variant[
     Apply,
     Match,
     Cut,
+    Part,
     Presence,
     Fill,
     Choose,
@@ -4946,6 +5069,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Match].bind(input^)
     if node.isa[Cut]():
         return node[Cut].bind(input^)
+    if node.isa[Part]():
+        return node[Part].bind(input^)
 
     if node.isa[Presence]():
         return node[Presence].bind(input^)
@@ -5083,8 +5208,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Presence`, `Fill`, `Choose`, `Constant`,
-        `Cast` and `Join`.
+        `Apply`, `Match`, `Cut`, `Part`, `Presence`, `Fill`, `Choose`,
+        `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -5095,6 +5220,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Cut]()
+        or node.isa[Part]()
         or node.isa[Presence]()
         or node.isa[Fill]()
         or node.isa[Choose]()
@@ -5146,12 +5272,17 @@ def node_computes_per_row(node: Node) -> Bool:
     payload offset every row writes at is a running total of the ones before it,
     which is the serial thing `StringBuilder` exists to do.
 
+    `Part` says yes. Turning a day number into a year is a run of multiplies and
+    shifts per row and not a load and a store, which is the one thing on this
+    list that is arithmetic rather than memory, so it is on the side `Compute`
+    is on.
+
     Args:
         node: The node.
 
     Returns:
-        True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Choose`
-        and `Join`.
+        True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Part`,
+        `Choose` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -5159,6 +5290,7 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Connective]()
         or node.isa[Apply]()
         or node.isa[Match]()
+        or node.isa[Part]()
         or node.isa[Choose]()
         or node.isa[Join]()
     )
@@ -5238,6 +5370,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
+    if node.isa[Part]():
+        return node[Part].process(chunk^)
 
     if node.isa[Presence]():
         return node[Presence].process(chunk^)
@@ -5305,6 +5439,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
+    if node.isa[Part]():
+        return node[Part].process(chunk^)
 
     if node.isa[Presence]():
         return node[Presence].process(chunk^)

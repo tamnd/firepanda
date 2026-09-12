@@ -43,6 +43,7 @@ from firepanda.exec import (
     Materialize,
     Node,
     NodeStatus,
+    Part,
     Pipeline,
     Presence,
     Project,
@@ -63,6 +64,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.pattern import MatchKind, Pattern
+from firepanda.kernel.temporal import TemporalField
 from firepanda.kernel.unary import UnaryOp
 
 
@@ -201,6 +203,35 @@ def gappy_frame() raises -> DataFrame:
     columns.append(n^)
     var fields = List[Field]()
     fields.append(Field("n", LogicalType.INT64, True))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def dated_frame() raises -> DataFrame:
+    """Four days, one of them missing, and a number beside them.
+
+    The days are the 30th of June 2013, the 1st and the 15th of July and the 1st
+    of August, counted from the epoch, which is a month boundary either side of
+    a month and one day inside it. The missing row is there because a field read
+    off nothing has to come back as nothing.
+    """
+    var d = ChunkedArray(LogicalType.DATE32)
+    var days = Array[DType.int32](4)
+    days.set_valid(0, Int32(15886))
+    days.set_valid(1, Int32(15887))
+    days.set_null(2)
+    days.set_valid(3, Int32(15918))
+    d.append(AnyArray(days^.into_data(), LogicalType.DATE32))
+    var n = ChunkedArray(LogicalType.INT64)
+    var counts = Array[DType.int64](4)
+    for i in range(4):
+        counts.set_valid(i, Int64(i))
+    n.append(AnyArray(counts^))
+    var columns = List[ChunkedArray]()
+    columns.append(d^)
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("d", LogicalType.DATE32, True))
+    fields.append(Field("n", LogicalType.INT64, False))
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -904,6 +935,59 @@ def test_a_cut_over_a_column_that_is_not_text_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="a substring reads text"):
         pipeline.add(Node(Cut(0, 1, 2, "nope")))
+
+
+def test_a_part_appends_the_field_it_was_asked_for() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Part(0, TemporalField.MONTH, "m")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the answer was appended")
+    assert_true(
+        out.schema[2].dtype == LogicalType.INT64,
+        "a whole number of the width DuckDB answers",
+    )
+    var got = read_back(out, "m")
+    assert_equal(len(got), 4, "one answer per row")
+    assert_equal(got[0], 6, "the last day of June")
+    assert_equal(got[1], 7, "the first of July")
+    assert_equal(got[3], 8, "and the first of August")
+
+
+def test_a_part_of_a_missing_day_is_missing() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Part(0, TemporalField.YEAR, "y")))
+    var out = pipeline^.run()
+    var there = present(out, "y")
+    assert_true(there[0], "a day that is there")
+    assert_true(not there[2], "and one that is not")
+
+
+def test_a_part_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Part(0, TemporalField.DAY, "dd")))
+    var out = pipeline^.run()
+    assert_true(out.schema[0].dtype == LogicalType.DATE32, "the days are days")
+    assert_equal(read_back(out, "dd")[0], 30, "and the field is new")
+
+
+def test_a_part_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Part(9, TemporalField.YEAR, "nope")))
+
+
+def test_a_part_over_a_column_that_is_not_temporal_is_caught() raises:
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="a date or a timestamp"):
+        pipeline.add(Node(Part(1, TemporalField.YEAR, "nope")))
+
+
+def test_a_part_asked_for_a_yes_or_no_field_is_refused() raises:
+    # The seven predicates are names on `dt` and SQL has no spelling for any of
+    # them, so a plan that asks for one was not built from a query.
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="answers yes or no rather than a number"):
+        pipeline.add(Node(Part(0, TemporalField.IS_LEAP_YEAR, "nope")))
 
 
 def test_a_null_test_appends_a_column_of_yes_and_no() raises:

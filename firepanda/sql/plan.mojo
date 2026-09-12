@@ -407,6 +407,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.temporal import sql_field_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
@@ -735,6 +736,72 @@ def _lower_nullif(mut plan: Plan, args: List[Int]) raises -> Int:
         plan.exprs.binary(BinaryOp.EQ, args[0], args[1]),
         plan.exprs.literal(Value(null=LogicalType.NULL)),
         args[0],
+    )
+
+
+def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
+    """Builds what a `date_part` means, and rewrites the one field that differs.
+
+    Most of the fields are the same number in both systems and go straight
+    through. The day of the week is not. DuckDB numbers it from zero for Sunday
+    and every other part of firepanda numbers it from zero for Monday, which is
+    what pandas does, so one of the two has to move and it is this one, because
+    this is the side that knows a query asked the question.
+
+    It moves by taking the ISO day, which runs from one for Monday to seven for
+    Sunday and agrees with DuckDB's `isodow` exactly, and reading it modulo
+    seven. Monday is one either way and Sunday comes back as zero, which is the
+    whole of the difference. Doing it that way means there is no second field
+    code for the same field and no chance of the two drifting apart.
+
+    The field is read and checked here rather than left to the engine, because
+    this is where the query is still close enough to say `EXTRACT(EPOCH FROM x)`
+    back to whoever wrote it. The engine checks it again when it builds the
+    operator, which is the check that covers a plan nobody wrote in SQL.
+
+    Args:
+        plan: The plan, whose arena the pieces go in.
+        args: The two arguments, already lowered. Consumed.
+
+    Returns:
+        The expression that answers the call.
+
+    Raises:
+        Error: If the call was not given two arguments, or the field is not a
+            name written in the query, or nothing is called that.
+    """
+    if len(args) != 2:
+        raise Error(
+            String(
+                "date_part reads one field out of one column and was given ",
+                len(args),
+                " arguments",
+            )
+        )
+    if plan.exprs.nodes[args[0]].kind != ExprKind.LITERAL:
+        raise Error(
+            "the field an EXTRACT reads has to be written out, and this one is"
+            " an expression, which would mean a different field for every row"
+            " and there is no kernel that does that"
+        )
+    if plan.exprs.nodes[args[0]].value.is_null():
+        raise Error(
+            "an EXTRACT of a null field is null for every row, and there is no"
+            " operator that answers a column of nulls yet"
+        )
+
+    var field = plan.exprs.nodes[args[0]].value.as_string().lower()
+    if field != "dow" and field != "dayofweek":
+        _ = sql_field_named(field)
+        return plan.exprs.call("date_part", args^, True)
+
+    var iso = List[Int]()
+    iso.append(plan.exprs.literal(Value(String("isodow"))))
+    iso.append(args[1])
+    return plan.exprs.binary(
+        BinaryOp.MOD,
+        plan.exprs.call("date_part", iso^, True),
+        plan.exprs.literal(Value(Int64(7))),
     )
 
 
@@ -1743,6 +1810,8 @@ def _lower_expr(
             # here, so this is the last of the three ways of writing it turning
             # into the one the plan holds.
             return plan.exprs.call("substring", lowered^, True)
+        if name == "date_part" or name == "datepart":
+            return _lower_date_part(plan, lowered^)
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

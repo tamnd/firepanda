@@ -54,7 +54,7 @@ the same node gets bound twice with the same answer, which is why binding writes
 rather than accumulates.
 """
 
-from firepanda.dtype.logical import LogicalType, promote
+from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.dtype.schema import Field, Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp, binary_type, resolve_constant
@@ -291,14 +291,14 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the eight that exist.
+    """Returns what a named function answers, for the nine that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of eight entries instead. When the registry arrives this function
-    becomes a lookup in it and the table goes away. Eight is about as far as a
-    chain of comparisons should be asked to go, so the registry is the next
-    thing to build here rather than the ninth entry.
+    table of nine entries instead. When the registry arrives this function
+    becomes a lookup in it and the table goes away. Nine is past where a chain
+    of comparisons should have stopped, and the registry is now the thing to
+    build here rather than the tenth entry.
 
     `like` is here with them because a pattern match is not a binary operation
     either. Its right side is a pattern rather than an operand, and the node
@@ -318,6 +318,11 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     it reads is typed here. Whether the two numbers are constants is lowering's
     rule rather than a typing one, the same way the pattern of a `like` is.
 
+    `date_part` answers a whole number whatever field it is asked for, which is
+    what DuckDB answers, so its type does not depend on the specifier and the
+    specifier is not read here. Which fields exist is lowering's rule, again for
+    the same reason.
+
     Args:
         name: The function name.
         args: What each argument binds to.
@@ -326,8 +331,40 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the eight, or an argument has the wrong type.
+        If the name is not one of the nine, or an argument has the wrong type.
     """
+    if name == "date_part":
+        if len(args) != 2:
+            raise Error(
+                String(
+                    "'date_part' takes 2 arguments and was given ", len(args)
+                )
+            )
+        if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
+            raise Error(
+                String(
+                    (
+                        "'date_part' is told which field by name and argument 0"
+                        " is "
+                    ),
+                    args[0],
+                )
+            )
+        if (
+            args[1].kind != TypeKind.DATE
+            and args[1].kind != TypeKind.TIMESTAMP
+            and args[1] != LogicalType.NULL
+        ):
+            raise Error(
+                String(
+                    (
+                        "'date_part' reads a date or a timestamp and argument 1"
+                        " is "
+                    ),
+                    args[1],
+                )
+            )
+        return LogicalType.INT64
     if name == "substring":
         if len(args) != 2 and len(args) != 3:
             raise Error(

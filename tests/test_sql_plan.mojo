@@ -19,6 +19,7 @@ from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame import DataFrame
 from firepanda.kernel.binary import BinaryOp
 from firepanda.plan.bind import bind
@@ -61,8 +62,25 @@ def _other() -> Schema:
     return out^
 
 
+def _dated() -> Schema:
+    """A day and a clock reading, for the queries that read a calendar field.
+
+    A third table rather than two more columns on `t`, because ten tests in here
+    name every column of `t` in the text they expect and a query about a date
+    has nothing to do with any of them.
+
+    Returns:
+        The schema.
+    """
+    var out = Schema()
+    out.append(Field("d", LogicalType.DATE32, True))
+    out.append(Field("ts", LogicalType.timestamp(TimeUnit.MICRO), True))
+    out.append(Field("n", LogicalType.INT64, False))
+    return out^
+
+
 def _catalog() raises -> Catalog:
-    """A session holding a frame called `t` and one called `u`.
+    """A session holding a frame called `t`, one called `u` and one called `w`.
 
     Returns:
         The catalog.
@@ -77,6 +95,9 @@ def _catalog() raises -> Catalog:
     var second = DataFrame()
     second.schema = _other()
     catalog.register("u", second^)
+    var third = DataFrame()
+    third.schema = _dated()
+    catalog.register("w", third^)
     return catalog^
 
 
@@ -2564,6 +2585,66 @@ def test_a_substring_with_no_length_keeps_the_one_number() raises:
 def test_a_substring_of_a_number_is_refused_while_it_binds() raises:
     with assert_raises(contains="'substring' reads text"):
         _ = _plan("SELECT substring(a, 1, 2) FROM t")
+
+
+def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
+    assert_equal(
+        _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),
+        "PROJECT [date_part(year, d) as __expr_0]\n  SCAN w []\n",
+    )
+
+
+def test_the_three_spellings_of_a_field_build_the_same_plan() raises:
+    var want = _plan("SELECT EXTRACT(YEAR FROM d) FROM w")
+    assert_equal(_plan("SELECT date_part('year', d) FROM w"), want)
+    assert_equal(_plan("SELECT datepart('year', d) FROM w"), want)
+
+
+def test_the_field_is_folded_down_the_way_a_name_is() raises:
+    var want = _plan("SELECT EXTRACT(YEAR FROM d) FROM w")
+    assert_equal(_plan("SELECT extract(Year FROM d) FROM w"), want)
+    assert_equal(_plan("SELECT extract('YEAR' FROM d) FROM w"), want)
+
+
+def test_a_day_of_week_is_written_as_the_iso_day_read_modulo_seven() raises:
+    # The one field the two systems number differently. DuckDB starts the week
+    # at Sunday and everything else in here starts it at Monday, so the query
+    # asks for the ISO day, which both agree on, and moves it.
+    assert_equal(
+        _plan("SELECT EXTRACT(DOW FROM d) FROM w"),
+        "PROJECT [(date_part(isodow, d)) % 7 as __expr_0]\n  SCAN w []\n",
+    )
+    assert_equal(
+        _plan("SELECT EXTRACT(DAYOFWEEK FROM d) FROM w"),
+        _plan("SELECT EXTRACT(DOW FROM d) FROM w"),
+    )
+
+
+def test_a_field_read_off_a_timestamp_is_the_same_call() raises:
+    assert_equal(
+        _plan("SELECT EXTRACT(HOUR FROM ts) FROM w"),
+        "PROJECT [date_part(hour, ts) as __expr_0]\n  SCAN w []\n",
+    )
+
+
+def test_an_extract_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="reads a date or a timestamp"):
+        _ = _plan("SELECT EXTRACT(YEAR FROM n) FROM w")
+
+
+def test_a_field_nobody_has_a_kernel_for_is_refused_by_name() raises:
+    with assert_raises(contains="no field SQL calls epoch"):
+        _ = _plan("SELECT EXTRACT(EPOCH FROM ts) FROM w")
+
+
+def test_a_field_that_is_not_a_name_at_all_is_refused() raises:
+    with assert_raises(contains="no field SQL calls nosuch"):
+        _ = _plan("SELECT EXTRACT(NOSUCH FROM d) FROM w")
+
+
+def test_a_field_worked_out_per_row_is_refused() raises:
+    with assert_raises(contains="has to be written out"):
+        _ = _plan("SELECT date_part(g, d) FROM w, t")
 
 
 def test_a_coalesce_is_a_call_of_its_own() raises:

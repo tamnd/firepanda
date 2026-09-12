@@ -3455,6 +3455,135 @@ def test_a_clock_reading_against_a_date_column_is_refused() raises:
         )
 
 
+def test_an_extract_reads_the_field_off_every_row() raises:
+    same(
+        answer("SELECT EXTRACT(YEAR FROM eventdate) AS y FROM hits", "y"),
+        [2013, 2013, 2013, 2013],
+        "the year of each of the four days",
+    )
+    same(
+        answer("SELECT EXTRACT(MONTH FROM eventdate) AS m FROM hits", "m"),
+        [6, 7, 7, 8],
+        "and the month",
+    )
+    same(
+        answer("SELECT EXTRACT(DAY FROM eventdate) AS d FROM hits", "d"),
+        [30, 1, 15, 1],
+        "and the day of the month",
+    )
+
+
+def test_the_three_spellings_answer_the_same_column() raises:
+    var want: List[Int64] = [2013, 2013, 2013, 2013]
+    same(
+        answer("SELECT EXTRACT(YEAR FROM eventdate) AS y FROM hits", "y"),
+        want,
+        "the keyword spelling",
+    )
+    same(
+        answer("SELECT date_part('year', eventdate) AS y FROM hits", "y"),
+        want,
+        "the function DuckDB names it",
+    )
+    same(
+        answer("SELECT datepart('year', eventdate) AS y FROM hits", "y"),
+        want,
+        "and its other spelling",
+    )
+
+
+def test_the_fields_that_count_across_a_year() raises:
+    same(
+        answer("SELECT EXTRACT(QUARTER FROM eventdate) AS q FROM hits", "q"),
+        [2, 3, 3, 3],
+        "the quarter the day falls in",
+    )
+    same(
+        answer("SELECT EXTRACT(DOY FROM eventdate) AS n FROM hits", "n"),
+        [181, 182, 196, 213],
+        "the day of the year",
+    )
+    same(
+        answer("SELECT EXTRACT(WEEK FROM eventdate) AS w FROM hits", "w"),
+        [26, 27, 29, 31],
+        "and the week, which DuckDB counts the ISO way",
+    )
+
+
+def test_a_day_of_week_is_numbered_the_way_duckdb_numbers_it() raises:
+    # Sunday is zero here and Monday is zero everywhere else in firepanda, so
+    # this is the one field that is rewritten rather than read straight off. The
+    # first of the four days is a Sunday, which is what makes the difference
+    # visible at all.
+    same(
+        answer("SELECT EXTRACT(DOW FROM eventdate) AS n FROM hits", "n"),
+        [0, 1, 1, 4],
+        "Sunday is a zero",
+    )
+    same(
+        answer("SELECT EXTRACT(ISODOW FROM eventdate) AS n FROM hits", "n"),
+        [7, 1, 1, 4],
+        "and the ISO numbering makes it a seven",
+    )
+
+
+def test_a_field_read_in_a_where_keeps_the_rows_it_names() raises:
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE EXTRACT(MONTH FROM"
+                " eventdate) = 7"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "the two days inside July",
+    )
+
+
+def test_a_field_read_in_a_group_by_folds_on_what_it_answers() raises:
+    # The field is read in the derived table and grouped on by name, rather than
+    # written out twice in the one statement, because a GROUP BY of an
+    # expression does not lower yet whatever the expression is. The select list
+    # is lowered above the aggregate over the columns the aggregate produces,
+    # and nothing there compares an item against the group keys, so only a key
+    # that is a plain column survives, since that one the aggregate carries
+    # through under the name it already had. That is a gap in grouping and not
+    # one in EXTRACT.
+    var out = run(
+        (
+            "SELECT m, count(*) AS n FROM (SELECT EXTRACT(MONTH FROM eventdate)"
+            " AS m FROM hits) GROUP BY m ORDER BY 1"
+        ),
+        session(),
+    )
+    same(read_back(out, "m"), [6, 7, 8], "one row per month")
+    same(read_back(out, "n"), [1, 2, 1], "and the count in each")
+
+
+def test_an_extract_answers_a_whole_number_the_width_duckdb_answers() raises:
+    # The kernel under this answers the narrower types pandas answers with and
+    # DuckDB answers a BIGINT, so the widening happens in the operator. A query
+    # that groups on a year and joins that against a count needs the two to be
+    # the same width.
+    var out = run(
+        "SELECT EXTRACT(YEAR FROM eventdate) AS y FROM hits", session()
+    )
+    assert_true(
+        out.schema[0].dtype == LogicalType.INT64, "the width DuckDB answers"
+    )
+
+
+def test_a_field_nobody_has_a_kernel_for_says_so_by_name() raises:
+    with assert_raises(contains="no field SQL calls epoch"):
+        _ = run("SELECT EXTRACT(EPOCH FROM eventdate) FROM hits", session())
+
+
+def test_an_extract_off_a_column_that_is_not_a_date_is_refused() raises:
+    with assert_raises(contains="reads a date or a timestamp"):
+        _ = run("SELECT EXTRACT(YEAR FROM qty) FROM sales", session())
+
+
 def test_an_answer_of_no_rows_can_still_be_read() raises:
     var out = run("SELECT qty, price FROM sales WHERE qty = 999", session())
     assert_equal(len(out), 0, "no rows")
