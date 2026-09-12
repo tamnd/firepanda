@@ -132,6 +132,31 @@ def test_a_number_does_not_go_into_a_column_of_text(firepanda):
         frame(firepanda).fillna({"s": 0})
 
 
+def test_a_category_column_takes_one_of_its_own_categories(firepanda):
+    made = firepanda.Series(["b", "a", None, "c"]).astype("category")
+    answered = made.fillna("a")
+    assert answered.tolist() == ["b", "a", "a", "c"]
+    assert answered.dtype == "category"
+    assert list(answered.cat.categories) == ["a", "b", "c"]
+
+
+def test_a_category_column_keeps_its_order_through_a_fill(firepanda):
+    made = firepanda.Series(["b", "a", None]).astype("category").cat.as_ordered()
+    assert made.fillna("a").cat.ordered is True
+
+
+def test_a_category_column_in_a_frame_is_filled_the_same_way(firepanda):
+    made = firepanda.DataFrame({"c": ["b", None]}).astype({"c": "category"})
+    assert made.fillna({"c": "b"})["c"].tolist() == ["b", "b"]
+
+
+def test_a_value_that_is_not_a_category_is_refused_in_pandas_words(firepanda):
+    """A code is a position in a list, so a value off the list has no code."""
+    made = firepanda.Series(["b", "a", None]).astype("category")
+    with pytest.raises(TypeError, match="Cannot setitem on a Categorical"):
+        made.fillna("nope")
+
+
 def test_a_column_with_nothing_missing_is_untouched_whatever_was_offered(firepanda):
     made = firepanda.DataFrame({"i": [1, None, 3], "s": ["a", "b", "c"]})
     answered = made.fillna(0)
@@ -203,6 +228,8 @@ def test_both_libraries_answer_the_same_things(firepanda):
         lambda d: d.set_index("i").fillna({"f": 0.0}).index.name,
         lambda d: d["f"].fillna(0.0).tolist(),
         lambda d: d["s"].fillna("z").tolist(),
+        lambda d: d["s"].astype("category").fillna("a").tolist(),
+        lambda d: list(d["s"].astype("category").fillna("a").cat.categories),
     ]
     for ask in questions:
         assert ask(frame(firepanda)) == ask(frame(pd))
