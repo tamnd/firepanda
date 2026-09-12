@@ -84,6 +84,55 @@ jobs:
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  # An index answers an upload with 429 when too many have gone out in too short
+  # a time, and the tag is then published nowhere with nothing said about it.
+  # This writes down that it happened and when the window opens again, and the
+  # publish watch says so on the same issue once that time has passed.
+  rate-limit:
+    name: Note an index rate limit
+    needs: [testpypi, pypi]
+    if: always() && (needs.testpypi.result == 'failure' || needs.pypi.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Open or update the waiting issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # PyPI does not publish the length of its window or say when the one
+          # it refused you reopens, so an hour is a guess that is long enough to
+          # be worth waiting and short enough to be worth rechecking.
+          COOLDOWN_MINUTES: "60"
+        run: |
+          set -euo pipefail
+          gh run view "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --log-failed > failed.log || true
+          if ! grep -Eqi '429|too many requests|rate.?limit' failed.log; then
+            echo "the publish failed for some other reason, so there is no window to wait for"
+            exit 0
+          fi
+          opens=$(date -u -d "+${COOLDOWN_MINUTES} minutes" +%Y-%m-%dT%H:%M:%SZ)
+          title="Publishing ${GITHUB_REF_NAME} hit the index rate limit"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body=$(printf '%s\n' \
+            "\`${GITHUB_REF_NAME}\` did not reach the index, which refused the upload as too many in too short a time. Nothing is lost and nothing is half published, so the fix is to wait and run the Release workflow again for the same tag." \
+            "" \
+            "retry-after: ${opens}" \
+            "" \
+            "The publish watch reads that time every hour and comments here when it has passed. The run that hit the limit is ${run_url}.")
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+            --label blocked --search "\"${title}\" in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" \
+              --body "Hit again by ${run_url}. The wait now runs to ${opens}."
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" \
+              --label "blocked,release,packaging" --body "${body}"
+          fi
+
   # Runs for every version tag, whether or not there were wheels, because the
   # release notes are the point of it and they exist either way.
   github-release:

@@ -1,0 +1,59 @@
+name: Publish watch
+
+# A release that ran into the index rate limit leaves an open issue saying when
+# the window opens again. Nobody sits watching a clock for an hour, so this
+# reads that time off the issue once an hour and says so when it has passed.
+#
+# It says so rather than republishing by itself. Pushing a version to an index
+# is the one thing in this repository that cannot be taken back, so the last
+# step stays a person deciding to take it.
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  waiting:
+    name: Say when the window has passed
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Comment on every issue whose wait is over
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          numbers=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+            --label blocked --label release \
+            --json number --jq '.[].number')
+          if [ -z "${numbers}" ]; then
+            echo "nothing is waiting on an index"
+            exit 0
+          fi
+          for number in ${numbers}; do
+            body=$(gh issue view "${number}" --repo "${GITHUB_REPOSITORY}" \
+              --json body --jq '.body')
+            # The time is written by the release workflow as a line of its own,
+            # so an issue that is blocked on something else has no such line and
+            # is passed over rather than guessed about.
+            opens=$(printf '%s' "${body}" \
+              | grep -Eo 'retry-after: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z' \
+              | tail -1 | cut -d' ' -f2)
+            if [ -z "${opens}" ]; then
+              echo "#${number} is blocked on something with no time on it"
+              continue
+            fi
+            if [ "${now}" -lt "$(date -u -d "${opens}" +%s)" ]; then
+              echo "#${number} is still waiting until ${opens}"
+              continue
+            fi
+            gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body \
+              "The window closed at ${opens} and it is now past that, so the index should take the upload again. Run the Release workflow against the same tag to send it. The blocked label is off this issue, so nothing will comment here again until a run hits the limit a second time."
+            gh issue edit "${number}" --repo "${GITHUB_REPOSITORY}" \
+              --remove-label blocked
+          done
