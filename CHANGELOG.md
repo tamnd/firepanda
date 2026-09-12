@@ -14,6 +14,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 The kernel is unchanged and is not wrong. A coalesce reads a validity bit and nothing else, which is Arrow's question and also SQL's, where `COALESCE` over a NaN answers the NaN. The fix is in `Series.fill_null`, which clears the validity of the NaN rows before calling it, using `present_bitmap`, the one function here that knows what missing means for a float. It costs one pass and no copy of the values, since a buffer is shared until something writes through it and only the bitmap beside them is new. `Frame.fill_null` now goes through the series call rather than to the kernel, so there is one place this happens rather than two.
 
+### Added: a correlated subquery that folds is decorrelated
+
+`SELECT shop, floor FROM shops WHERE floor < (SELECT sum(qty) FROM sales WHERE sales.shop = shops.shop)` was refused, and the refusal came from the scope the subquery lowered against rather than from a rule: the subquery got a scope of its own, so `shops.shop` written inside it was a name nothing in that query had. It lowers now, and it lowers to one aggregate and one join rather than to a question asked once per outer row.
+
+The rewrite is the one the correlated `EXISTS` already got, with an aggregate in the middle and a left join at the top instead of a semi join. The subquery's `FROM` is lowered into the scope the outer query is using, which puts both sides in reach at once, and its `WHERE` is split the way a join condition is split. A part with one side in and one side out is a key pair, and it becomes both the group key of the aggregate and the join key above it. A part that reads the subquery's own tables and nothing else is a filter under the aggregate, where it runs once over that table rather than once per outer row. A part that reads the outer query any other way is refused by name, because it is the dependent join that a pass over the plan removes rather than something this rewrite can.
+
+The join is a left one because an outer row whose group has no rows in it still has to come out, with a null where the subquery's value goes. Null is what SQL says a fold over nothing answers, and that is exactly true of a sum, a minimum, a maximum and an average and exactly false of a count, which answers zero. So a correlated subquery that counts is refused by name rather than answered wrong. That is the count bug, named after the wrong answer decorrelation gives when nobody checks for it, and the refusal goes away when the plan can say `coalesce`.
+
+Correlation written anywhere but a `WHERE` is still refused, and so is correlation written as anything but an equality. Both are the dependent join.
+
 ## [0.6.80] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -41,16 +51,6 @@ A column with nothing missing is untouched whatever the value is, which is panda
 `axis` is checked and not used, since with one value per column the two axes name the same answer. `inplace` is refused with the standing sentence. `limit` is validated pandas' way and then refused, because a coalesce reads a validity bit without knowing how many rows came before it. A dict on a column, and a fallback that itself carries rows, are refused with a message naming the alignment that would build them.
 
 Three bindings are new. Two are the fill itself and the third is `null_counts`, which reads a frame's validity bitmaps and nothing else, so asking which columns have a gap does not copy the columns to find out.
-
-### Added: a correlated subquery that folds is decorrelated
-
-`SELECT shop, floor FROM shops WHERE floor < (SELECT sum(qty) FROM sales WHERE sales.shop = shops.shop)` was refused, and the refusal came from the scope the subquery lowered against rather than from a rule: the subquery got a scope of its own, so `shops.shop` written inside it was a name nothing in that query had. It lowers now, and it lowers to one aggregate and one join rather than to a question asked once per outer row.
-
-The rewrite is the one the correlated `EXISTS` already got, with an aggregate in the middle and a left join at the top instead of a semi join. The subquery's `FROM` is lowered into the scope the outer query is using, which puts both sides in reach at once, and its `WHERE` is split the way a join condition is split. A part with one side in and one side out is a key pair, and it becomes both the group key of the aggregate and the join key above it. A part that reads the subquery's own tables and nothing else is a filter under the aggregate, where it runs once over that table rather than once per outer row. A part that reads the outer query any other way is refused by name, because it is the dependent join that a pass over the plan removes rather than something this rewrite can.
-
-The join is a left one because an outer row whose group has no rows in it still has to come out, with a null where the subquery's value goes. Null is what SQL says a fold over nothing answers, and that is exactly true of a sum, a minimum, a maximum and an average and exactly false of a count, which answers zero. So a correlated subquery that counts is refused by name rather than answered wrong. That is the count bug, named after the wrong answer decorrelation gives when nobody checks for it, and the refusal goes away when the plan can say `coalesce`.
-
-Correlation written anywhere but a `WHERE` is still refused, and so is correlation written as anything but an equality. Both are the dependent join.
 
 ## [0.6.79] - 2026-09-12
 
