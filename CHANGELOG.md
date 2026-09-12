@@ -26,6 +26,16 @@ A row the condition says nothing in is replaced by both methods, not kept by eit
 
 The kernel grew a false side of one row for it, so a scalar other side costs one row rather than a column of copies, and a one row side that holds nothing is the pass that builds a validity bitmap rather than copying one. `Series.pick`, `DataFrame.pick` and `Series.missing_row` are the bindings over it.
 
+### Fixed: a column name folded in the tokenizer and nowhere else
+
+`SELECT AdvEngineID FROM hits` could not find a column called `AdvEngineID`. The tokenizer folds a bare identifier down, which is the dialect's rule, and the lowering then handed the folded word to the binder, which compares against the frame's schema byte for byte. So a frame whose columns are spelled the way a parquet file spells them could only be queried by quoting every name, and the refusal said as much without meaning to: it offered `AdvEngineID` as a near miss to `advengineid`, an edit distance of zero on everything but case.
+
+What resolves a name now is the fold, which is what the catalog has always done for a table name. The scope keeps each scan's column spellings beside the relation it put in reach, lowering looks a folded name up there, and the plan carries the schema's spelling, so nothing below the front end sees a name the schema does not have. A name that two relations in reach spell differently is left as it was written and comes back from binding as the ambiguity it is.
+
+The answer keeps the schema's spelling too. `SELECT advengineid FROM hits` returns a column called `AdvEngineID`, which is DuckDB's answer, and the alternative would be an answer whose column names change with how the question was typed. A quoted name folds as well, because in this dialect quoting changes what a name is rather than how it is compared.
+
+This was measured on ClickBench, where every one of the 43 published statements writes its columns in mixed case. Through the SQL front end, 1 of the 43 ran before this and 25 run after it, at 1M rows in the firepanda-bench driver. What the other 18 are waiting on is an aggregate written in `ORDER BY`, `EXTRACT`, `LIKE`, `STRLEN`, comparing a date against a string literal, and a filter that keeps no rows at all.
+
 ## [0.6.82] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
