@@ -42,6 +42,11 @@ a tree and a tree is a line of these, so `(a + b) < c` is one node that appends
 end to drop the intermediate. That is why it appends rather than replaces, and
 why `Filter` can name its mask by position: the plan counted the appends.
 
+`Expand` is the odd one beside them. It reads one column and writes each row as
+many times as that column says, which is a filter whose mask is a number rather
+than a yes or a no, and it is the only operator here that can turn a number into
+rows. `EXCEPT ALL` and `INTERSECT ALL` are what needed one.
+
 `Group` is the first breaker that is not the fallback, and it is the one that
 shows what the interface buys. A materialised group by needs memory the size of
 its input because it holds every row until the last one arrives. This one holds
@@ -310,6 +315,120 @@ struct Filter(Movable):
         if rows == 0:
             return None
         return Chunk(kept^, rows)
+
+
+struct Expand(Movable):
+    """Writes each row of a chunk as many times as a column of the chunk says.
+
+    The opposite of a filter, and the same shape as one. A filter reads a
+    boolean column and writes each row once or not at all, and this reads a
+    whole number column and writes each row that many times. A filter is the
+    case where the number is only ever zero or one, which is why the two take
+    the same arguments and why this one also says which positions to write.
+
+    It exists for `EXCEPT ALL` and `INTERSECT ALL`. Both of those count the
+    copies of a row on each side and answer some number of copies that the two
+    counts work out, and until there was an operator that could turn a number
+    into that many rows, a group by could work the number out and had no way to
+    say it. Nothing else here repeats a row: a join does, but only as many times
+    as its table happens to hold, which is not a number a plan can name.
+
+    A count of zero or less writes nothing, which is the rule rather than an
+    edge case. `EXCEPT ALL` asks for the copies on the left minus the copies on
+    the right, and that difference is negative whenever the right side has more,
+    so clamping here is what saves the lowering from building a maximum against
+    a constant for every set difference. A null count writes nothing too, for
+    the same reason a filter drops a row its mask is null on.
+
+    The gather is one call per column with one index list shared between them,
+    so a row written five times is five reads of the same cache line rather than
+    five passes over the chunk.
+    """
+
+    var counts: Int
+    """The position of the whole number column saying how many copies."""
+
+    var keep: List[Int]
+    """The input positions to write, in output order."""
+
+    def __init__(out self, counts: Int, var keep: List[Int]):
+        """Constructs an expansion.
+
+        Args:
+            counts: The position of the count column, which must be `Int64`.
+            keep: The input positions to write, in output order. May repeat,
+                and need not include the count column.
+        """
+        self.counts = counts
+        self.keep = keep^
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the schema of the kept positions, in the order given.
+
+        Args:
+            input: The schema of the chunks coming in. Consumed.
+
+        Returns:
+            The schema that comes out.
+
+        Raises:
+            Error: If a position is outside the input.
+        """
+        if self.counts < 0 or self.counts >= len(input):
+            raise Error(
+                "expand: column "
+                + String(self.counts)
+                + " is outside a schema of "
+                + String(len(input))
+                + " columns"
+            )
+        return _narrow(self.keep, input, "expand")
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Writes each row as many times as the count column says.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The rows written out, or None if the counts asked for none, since a
+            chunk of no rows is work for everything downstream and no
+            information.
+
+        Raises:
+            Error: If a position is out of range or the count column is not a
+                whole number of sixty four bits.
+        """
+        if self.counts < 0 or self.counts >= chunk.width():
+            raise Error(
+                "expand: column "
+                + String(self.counts)
+                + " is outside a chunk of "
+                + String(chunk.width())
+                + " columns"
+            )
+        ref how_many = chunk.columns[self.counts].as_typed_view[DType.int64]()
+        var indices = List[Int]()
+        for i in range(len(how_many)):
+            if not how_many.is_valid(i):
+                continue
+            var copies = Int(how_many[i])
+            for _ in range(copies):
+                indices.append(i)
+        if len(indices) == 0:
+            return None
+        var written = List[AnyArray](capacity=len(self.keep))
+        for i in range(len(self.keep)):
+            if self.keep[i] < 0 or self.keep[i] >= chunk.width():
+                raise Error(
+                    "expand: column "
+                    + String(self.keep[i])
+                    + " is outside a chunk of "
+                    + String(chunk.width())
+                    + " columns"
+                )
+            written.append(take_any(chunk.columns[self.keep[i]], indices))
+        return Chunk(written^, len(indices))
 
 
 struct Project(Movable):
@@ -3949,6 +4068,7 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
 
 comptime Node = Variant[
     Filter,
+    Expand,
     Project,
     Compute,
     Connective,
@@ -4015,6 +4135,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
             node[Project].names,
             _narrow(node[Project].keep, input, "project"),
         )
+    if node.isa[Expand]():
+        return node[Expand].bind(input^)
     if node.isa[Filter]() and node[Filter].narrows:
         return _narrow(node[Filter].keep, input, "filter")
     return input^
@@ -4108,9 +4230,10 @@ def node_status(node: Node) -> NodeStatus:
 def node_is_row_local(node: Node) -> Bool:
     """Reports whether a node's output row depends only on its own input row.
 
-    The five elementwise operators say yes, and so does `Join`, whose output row
-    depends on its own input row and on a table that was finished before the
-    first chunk arrived. What that buys is that the node reads itself and never
+    The elementwise operators say yes, and so do `Expand`, whose output rows are
+    copies of the input row it is on, and `Join`, whose output row depends on
+    its own input row and on a table that was finished before the first chunk
+    arrived. What that buys is that the node reads itself and never
     writes itself, so one of them can be handed to every core at once without a
     copy per worker and without a lock. `Limit` counts rows, `Sort` holds every
     row until it knows where the first one goes, `Window` holds every row until
@@ -4122,11 +4245,12 @@ def node_is_row_local(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Project`, `Compute`, `Connective`, `Choose`,
-        `Constant`, `Cast` and `Join`.
+        True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
+        `Choose`, `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
+        or node.isa[Expand]()
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Connective]()
@@ -4246,6 +4370,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         chunk.flatten()
     if node.isa[Filter]():
         return node[Filter].process(chunk^)
+    if node.isa[Expand]():
+        return node[Expand].process(chunk^)
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():
@@ -4298,6 +4424,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         chunk.flatten(False)
     if node.isa[Filter]():
         return node[Filter].process(chunk^)
+    if node.isa[Expand]():
+        return node[Expand].process(chunk^)
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():

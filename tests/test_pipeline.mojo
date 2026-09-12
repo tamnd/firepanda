@@ -30,6 +30,7 @@ from firepanda.exec import (
     Collect,
     Compute,
     Constant,
+    Expand,
     Filter,
     Group,
     GroupAgg,
@@ -339,6 +340,55 @@ def test_a_narrowing_filter_refuses_a_column_it_does_not_have() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="outside a schema of 2 columns"):
         pipeline.add(Node(Filter(1, [5])))
+
+
+def test_an_expansion_writes_each_row_as_many_times_as_it_is_told() raises:
+    # The counting column is its own count, so the one is written once, the two
+    # twice and so on, which is twenty one rows out of six.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Expand(0, [0])))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 1, "only the column that was asked for")
+    assert_equal(
+        len(out), 21, "one plus two plus three plus four plus five plus six"
+    )
+    var got = read_back(out, "n")
+    assert_equal(got[0], 1, "the one, once")
+    assert_equal(got[1], 2, "the two")
+    assert_equal(got[2], 2, "and again")
+    assert_equal(got[3], 3, "the three")
+    assert_equal(got[20], 6, "the last of the sixes")
+
+
+def test_an_expansion_writes_nothing_for_a_count_of_none() raises:
+    var counts = List[AnyArray]()
+    counts.append(numbers([2, 0, -3, 1]))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    var pipeline = Pipeline(DataFrame(Schema(fields^), counts^))
+    pipeline.add(Node(Expand(0, [0])))
+    var out = pipeline^.run()
+
+    # Zero and a negative both write no copies, which is what a difference of
+    # two counts asks for when the right side had more of the row.
+    assert_equal(len(out), 3, "two twos and one one")
+    var got = read_back(out, "n")
+    assert_equal(got[0], 2, "first")
+    assert_equal(got[1], 2, "second")
+    assert_equal(got[2], 1, "third")
+
+
+def test_an_expansion_refuses_a_column_it_does_not_have() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="expand: column 5 is outside a schema of 2"):
+        pipeline.add(Node(Expand(5, [0])))
+
+
+def test_an_expansion_refuses_to_write_a_column_it_does_not_have() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="expand: column 7 is outside a schema of 2"):
+        pipeline.add(Node(Expand(0, [7])))
 
 
 def test_a_filter_keeps_the_chunk_boundaries() raises:

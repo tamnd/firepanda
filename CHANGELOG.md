@@ -14,6 +14,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 The kernel is unchanged and is not wrong. A coalesce reads a validity bit and nothing else, which is Arrow's question and also SQL's, where `COALESCE` over a NaN answers the NaN. The fix is in `Series.fill_null`, which clears the validity of the NaN rows before calling it, using `present_bitmap`, the one function here that knows what missing means for a float. It costs one pass and no copy of the values, since a buffer is shared until something writes through it and only the bitmap beside them is new. `Frame.fill_null` now goes through the series call rather than to the kernel, so there is one place this happens rather than two.
 
+### Added: EXCEPT ALL and INTERSECT ALL
+
+Both were refused by name, and the refusal said what was missing: the two of them count the copies of a row on each side and answer as many rows as those two counts work out, and the group by they are built on answers one row per group rather than a number of them. Nothing in the engine could turn a number into that many rows.
+
+`Expand` is the operator that can, and it is the opposite of a filter and the same shape as one. A filter reads a boolean column and writes each row once or not at all, and this reads a whole number column and writes each row that many times, so a filter is the case where the number is only ever zero or one. Both take the positions to write, so both narrow and gather in the pass they were going to make anyway.
+
+The set operations get there by counting rather than comparing. The stack already carries a tag saying which arm each row came from, zero on the left and one on the right, and the distinct answer takes the smallest and the largest of that tag per group to find out which arms were in it. `ALL` adds the tag up instead, which is the right arm's count, and counts the rows, which is both arms together, so the left arm's count is the second less the first. A difference then asks for the left's count less the right's and an intersection asks for the smaller of the two, and `Expand` turns whichever number that is into rows. The tag is a byte for the distinct answer and a whole number of sixty four bits for `ALL`, because a sum of a byte runs out on a group of more than a hundred and twenty seven rows.
+
+A difference of counts goes negative whenever the right arm has more copies than the left, and that is left alone rather than clamped. `Expand` writes nothing for a count of zero or less, which is the same rule a filter has for a row its mask is null on, and leaning on it here is what saves the lowering from building a maximum against a constant for every set difference in every query.
+
 ### Added: a correlated subquery that folds is decorrelated
 
 `SELECT shop, floor FROM shops WHERE floor < (SELECT sum(qty) FROM sales WHERE sales.shop = shops.shop)` was refused, and the refusal came from the scope the subquery lowered against rather than from a rule: the subquery got a scope of its own, so `shops.shop` written inside it was a name nothing in that query had. It lowers now, and it lowers to one aggregate and one join rather than to a question asked once per outer row.

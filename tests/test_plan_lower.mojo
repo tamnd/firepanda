@@ -253,6 +253,22 @@ def echoes() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def copies() raises -> DataFrame:
+    """Four bands with one of them written twice.
+
+    For the set operations written `ALL`, which answer the same rows as the
+    set answer on a frame whose rows all differ. A frame with a row on it twice
+    is the only thing that tells the two apart.
+    """
+    var band = ChunkedArray(LogicalType.INT64)
+    band.append(numbers([3, 3, 20, 77]))
+    var columns = List[ChunkedArray]()
+    columns.append(band^)
+    var fields = List[Field]()
+    fields.append(Field("band", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def crates() raises -> DataFrame:
     """Four rows keyed by a shop and a quantity together, the probe side."""
     var shop = ChunkedArray(LogicalType.INT64)
@@ -330,6 +346,26 @@ def run_two(mut plan: Plan, root: Int) raises -> DataFrame:
     """Binds, lowers and runs a plan over both frames."""
     _ = bind(plan, root, two_schemas())
     var pipe = lower(plan, root, two_frames())
+    return pipe^.run()
+
+
+def run_pair(
+    mut plan: Plan, root: Int, var left: DataFrame, var right: DataFrame
+) raises -> DataFrame:
+    """Binds, lowers and runs a plan over two frames the caller built.
+
+    `run_frames` below takes the frames and needs the schemas separately, and
+    a set operation's two arms are two relations, so this is the same call with
+    the schemas read off the frames rather than handed in twice.
+    """
+    var schemas = List[Schema]()
+    schemas.append(Schema(copy=left.schema))
+    schemas.append(Schema(copy=right.schema))
+    _ = bind(plan, root, schemas)
+    var frames = List[DataFrame]()
+    frames.append(left^)
+    frames.append(right^)
+    var pipe = lower(plan, root, frames^)
     return pipe^.run()
 
 
@@ -2542,26 +2578,50 @@ def test_an_intersection_keeps_a_null_both_sides_have() raises:
     assert_equal(read_back(out, "qty")[1], 20, "and 20 is the other")
 
 
-def test_a_difference_written_all_is_refused_by_name() raises:
+def test_a_difference_written_all_subtracts_a_copy_at_a_time() raises:
     var plan = Plan()
     var top = plan.scan("sales", ["qty"], 0)
     var bottom = plan.scan("tiers", ["band"], 1)
     var root = plan.setop([top, bottom], SET_EXCEPT, all=True)
-    _ = bind(plan, root, two_schemas())
+    var out = run_two(plan, root)
 
-    with assert_raises(contains="EXCEPT ALL counts the copies of a row"):
-        _ = lower(plan, root, two_frames())
+    # No quantity is written twice, so ALL and the set answer agree here and
+    # the test below is the one that tells them apart.
+    same(read_back(out, "qty"), [5, 12, 8, 25, 1, 30, 15], "qty")
 
 
-def test_an_intersection_written_all_is_refused_by_name() raises:
+def test_a_difference_written_all_keeps_the_copies_over() raises:
+    var plan = Plan()
+    var top = plan.scan("copies", ["band"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_EXCEPT, all=True)
+    var out = run_pair(plan, root, copies(), tiers())
+
+    # Two threes on the left and one on the right leaves one three, and the
+    # set answer leaves none.
+    same(read_back(out, "band"), [3, 77], "band")
+
+
+def test_an_intersection_written_all_keeps_the_thinner_count() raises:
     var plan = Plan()
     var top = plan.scan("sales", ["qty"], 0)
     var bottom = plan.scan("tiers", ["band"], 1)
     var root = plan.setop([top, bottom], SET_INTERSECT, all=True)
-    _ = bind(plan, root, two_schemas())
+    var out = run_two(plan, root)
 
-    with assert_raises(contains="INTERSECT ALL counts the copies of a row"):
-        _ = lower(plan, root, two_frames())
+    same(read_back(out, "qty"), [20, 3, 40], "qty")
+
+
+def test_an_intersection_written_all_over_itself_is_itself() raises:
+    var plan = Plan()
+    var top = plan.scan("copies", ["band"], 0)
+    var bottom = plan.scan("copies", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_INTERSECT, all=True)
+    var out = run_pair(plan, root, copies(), copies())
+
+    # Every count is the same on both sides, so the smaller of the two is the
+    # count itself and the answer is the arm back again.
+    same(read_back(out, "band"), [3, 3, 20, 77], "band")
 
 
 def series(mut plan: Plan, root: Int) raises -> DataFrame:

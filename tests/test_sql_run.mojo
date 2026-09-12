@@ -803,20 +803,63 @@ def test_an_intersect_counts_two_nulls_as_the_same_row() raises:
     )
 
 
-def test_an_except_all_is_refused_by_name() raises:
-    with assert_raises(contains="EXCEPT ALL counts the copies of a row"):
-        _ = run(
-            "SELECT qty FROM sales EXCEPT ALL SELECT band FROM tiers",
-            session(),
-        )
+def test_an_except_all_subtracts_a_copy_for_a_copy() raises:
+    # Two threes on the left and one on the right leaves one three, where the
+    # set answer leaves none, and that is the whole of the difference between
+    # the two spellings.
+    same(
+        answer(
+            "SELECT band FROM dupes EXCEPT ALL SELECT band FROM tiers", "band"
+        ),
+        [3, 77],
+        "one three survives the one the right side had",
+    )
 
 
-def test_an_intersect_all_is_refused_by_name() raises:
-    with assert_raises(contains="INTERSECT ALL counts the copies of a row"):
-        _ = run(
-            "SELECT qty FROM sales INTERSECT ALL SELECT band FROM tiers",
-            session(),
-        )
+def test_an_except_all_over_rows_that_all_differ_is_the_set_answer() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales EXCEPT ALL SELECT band FROM tiers", "qty"
+        ),
+        [5, 12, 8, 25, 1, 30, 15],
+        "no quantity is written twice, so the two spellings agree",
+    )
+
+
+def test_an_except_all_keeps_every_copy_the_right_side_lacks() raises:
+    same(
+        answer(
+            (
+                "SELECT band FROM dupes EXCEPT ALL SELECT band FROM tiers"
+                " WHERE band > 10"
+            ),
+            "band",
+        ),
+        [3, 3, 77],
+        "the right side has no three at all, so both of them come back",
+    )
+
+
+def test_an_intersect_all_keeps_as_many_as_the_thinner_side_has() raises:
+    same(
+        answer(
+            "SELECT band FROM dupes INTERSECT ALL SELECT band FROM tiers",
+            "band",
+        ),
+        [3, 20],
+        "one three on the right is the smaller of the two counts",
+    )
+
+
+def test_an_intersect_all_over_one_arm_twice_is_that_arm() raises:
+    same(
+        answer(
+            "SELECT band FROM dupes INTERSECT ALL SELECT band FROM dupes",
+            "band",
+        ),
+        [3, 3, 20, 77],
+        "the two counts are the same one, so the smaller is the count itself",
+    )
 
 
 def test_a_range_is_a_table_that_reads_no_table() raises:
