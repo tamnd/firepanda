@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the conditions of a WHERE run in the order that costs least
+
+The lowering already made one physical filter per conjunct so that each condition only reads what the one before it kept, and the planner already threw away the halves of a conjunction that belonged somewhere else, but what was left over at a node was put back together in the order it was met, which is the order somebody typed it in. Predicate pushdown now sorts them. An equality against a constant goes first, then an ordered comparison against a constant, then any other single comparison, then everything with more than one operation in it. Two conditions of one class keep the order the query wrote them in, because nothing in the pass can tell them apart and the query is the only thing that can.
+
+It is a rule and not an estimate, and that is the same trade the join ordering work already makes: firepanda has no column statistics, and a rule that is right on average beats a guess that is wrong with confidence. The reasoning for each class is written down on `_rank` in `firepanda/plan/push.mojo`, which is also the one function a selectivity estimate would replace later. It would answer a fraction instead of a class and the sort would stay where it is.
+
+Reordering an `and` is allowed. SQL does not promise an evaluation order for one, and this pass already moves the halves of a conjunction to different nodes, so nothing that reaches this point could have been relying on the written order.
+
+### Changed: a group key every row agrees on is dropped
+
+`GROUP BY 1, g` groups on a column of ones beside the real key, which puts every row in the group it was already in and costs a column hashed and compared for every row to get there. Projection pushdown drops it now, when the key is a constant and nothing above the aggregate reads it. ClickBench q34 writes one.
+
+The last key never goes, even when it is constant. An aggregate with no keys is a whole frame reduction rather than a grouping, and the two differ on empty input: the reduction answers one row and the grouping answers none.
+
+### Changed: two calls that fold the same thing are one slot in the aggregate
+
+`SELECT g, count(*) FROM t GROUP BY g HAVING count(*) > 100` wrote the count twice and meant it once, so the aggregate counted every group twice and answered the same number both times. The SQL lowering now compares the shape of each fold against the ones it has already recorded and hands back the slot that is there. ClickBench q27 and q28 are that query. It applies to a select list that repeats a fold as well, which is where the same thing happens without a HAVING in sight.
+
 ### Added: EXCEPT and INTERSECT
 
 `SELECT qty FROM sales EXCEPT SELECT band FROM tiers` and the same query written `INTERSECT` were both refused with a note saying a difference is not a stack of its inputs. They run now. Lowering stacks the two arms with a column saying which arm each row came from, groups over the query's own columns so that every copy of a row lands in one group whichever arm it came from, and reads the smallest and the largest tag in each group back to say which arms had it. Both arms is a smallest of zero and a largest of one, the left arm alone is zero and zero, and the right arm alone is one and one, so an intersection keeps a group whose two tags differ and a difference keeps a group whose largest tag is zero.

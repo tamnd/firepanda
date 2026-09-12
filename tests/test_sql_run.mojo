@@ -298,6 +298,29 @@ def test_two_conditions_both_have_to_hold() raises:
     )
 
 
+def test_conditions_run_in_a_different_order_than_they_were_written() raises:
+    # The planner runs the equality first and the range over what it kept, and
+    # the point of this test is that the rows do not know that. Written the
+    # other way round it is the same four rows in the same order, because the
+    # order of an `and` decides what each condition reads and nothing else.
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty > 4 AND shop = 1",
+            "qty",
+        ),
+        [5, 12, 25, 30],
+        "qty",
+    )
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE shop = 1 AND qty > 4",
+            "qty",
+        ),
+        [5, 12, 25, 30],
+        "the same rows the other way round",
+    )
+
+
 def test_an_expression_in_the_select_list_is_computed() raises:
     same(
         answer("SELECT qty * price AS total FROM sales", "total"),

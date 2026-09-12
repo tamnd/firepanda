@@ -22,6 +22,22 @@ separated ends up unchanged.
 Splitting only at `and`. An `or` cannot be split, because neither side of it has
 to hold for the row to survive.
 
+## The order the pieces go back in
+
+Putting them back is also the one chance to decide which runs first, and the
+pass takes it. `_lower_filter` makes one physical filter per conjunct, so the
+order of an `and` chain is the order the conditions run in and the second one
+only ever looks at what the first one kept. `_rank` sorts them: an equality
+against a constant, then an ordered comparison against a constant, then any
+other single comparison, then everything with more than one operation in it.
+That is a rule and not an estimate, and `_rank`'s docstring says why each class
+sits where it does and what a selectivity estimate would replace.
+
+Reordering an `and` is allowed. SQL does not promise an evaluation order for
+one, and this pass already moves the halves of a conjunction to different nodes,
+so nothing that survives here could have been relying on the written order in
+the first place.
+
 ## What stops a predicate
 
 A predicate can move below a node when the rows that come out of that node still
@@ -101,10 +117,15 @@ refusal and it is quiet, so it is written down here.
 
 from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
+from firepanda.kernel.binary import BinaryOp
 from firepanda.plan.bind import Bound, bind, bind_all
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NodeKind, Plan, PlanNode
 from firepanda.plan.transit import derive
+
+
+comptime RANKS = 4
+"""How many classes `_rank` sorts a conjunct into."""
 
 
 def push(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
@@ -484,10 +505,92 @@ def _emit(
     return at
 
 
+def _rank(exprs: Expressions, root: Int) raises -> Int:
+    """Which cost class one conjunct belongs to, lowest first.
+
+    A rule rather than an estimate, because firepanda has no column statistics
+    and a rule that is right on average beats a guess that is wrong with
+    confidence. The four classes, in the order they run:
+
+    An equality against a constant. One pass over one column, and the most
+    selective thing a comparison can be: a column of a thousand distinct values
+    keeps a thousandth of the rows on average, and the ones worth writing in a
+    query are usually narrower than that.
+
+    An ordered comparison against a constant. The same one pass over the same
+    one column, and on average it keeps a third of the rows rather than a
+    thousandth, so it is the same cost for less of a reduction.
+
+    Anything else that is one comparison. A `!=` against a constant, which costs
+    an equality and keeps nearly everything, and a comparison between two
+    columns, which reads two columns and says nothing about how many rows
+    survive without statistics that do not exist.
+
+    Everything else. A disjunction, a call, and a comparison with an operation
+    under it, all of which are more than one pass over the rows before the
+    answer is a mask. A pattern match lands here too once it can be lowered,
+    without another rule, because it arrives as a call.
+
+    The door for later: this is the one function a selectivity estimate would
+    replace. It would return a fraction instead of a class and `_apply` would
+    sort on it, and nothing else about the pass would move.
+
+    Args:
+        exprs: The expression arena.
+        root: The conjunct.
+
+    Returns:
+        A class between zero and `RANKS` minus one.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    if exprs.nodes[root].kind != ExprKind.BINARY:
+        return 3
+
+    var left = exprs.nodes[root].children[0]
+    var right = exprs.nodes[root].children[1]
+    var left_kind = exprs.nodes[left].kind
+    var right_kind = exprs.nodes[right].kind
+    var left_plain = (
+        left_kind == ExprKind.COLUMN or left_kind == ExprKind.LITERAL
+    )
+    var right_plain = (
+        right_kind == ExprKind.COLUMN or right_kind == ExprKind.LITERAL
+    )
+    if not left_plain or not right_plain:
+        return 3
+
+    var op = BinaryOp(UInt8(exprs.nodes[root].op))
+    if (left_kind == ExprKind.LITERAL) == (right_kind == ExprKind.LITERAL):
+        # Two columns, or two constants that simplify refused to fold. Neither
+        # is a comparison this can say anything about.
+        return 2
+    if op == BinaryOp.EQ:
+        return 0
+    if (
+        op == BinaryOp.LT
+        or op == BinaryOp.LE
+        or op == BinaryOp.GT
+        or op == BinaryOp.GE
+    ):
+        return 1
+    return 2
+
+
 def _apply(
     mut plan: Plan, input: Int, var preds: List[Int], mut into: List[PlanNode]
 ) raises -> Int:
     """Puts the predicates that stopped here back together as one filter.
+
+    Cheapest and most selective first, because `_lower_filter` makes one
+    physical filter per conjunct and each one narrows what the next one reads.
+    Four conditions where the first keeps a hundredth of the rows is three
+    conditions evaluated on a hundredth of a column, and the same four in the
+    other order is four full passes. The written order of a `WHERE` is the order
+    a person found the conditions in and says nothing about either cost or
+    selectivity, so it is not the order to run them in.
 
     Args:
         plan: The plan, whose expression arena gets the `and` chain.
@@ -503,11 +606,22 @@ def _apply(
     """
     if len(preds) == 0:
         return input
-    var whole = preds[0]
-    for i in range(1, len(preds)):
+    var ranks = List[Int](capacity=len(preds))
+    for i in range(len(preds)):
+        ranks.append(_rank(plan.exprs, preds[i]))
+    var order = List[Int](capacity=len(preds))
+    for r in range(RANKS):
+        for i in range(len(preds)):
+            # Bucketed rather than sorted, so that two conjuncts of one class
+            # come out in the order they were written. Nothing here can tell
+            # them apart and the query is the only thing that can.
+            if ranks[i] == r:
+                order.append(preds[i])
+    var whole = order[0]
+    for i in range(1, len(order)):
         var pair = List[Int]()
         pair.append(whole)
-        pair.append(preds[i])
+        pair.append(order[i])
         whole = plan.exprs.call(String("and"), pair^, rowwise=True)
     var at = len(into)
     into.append(

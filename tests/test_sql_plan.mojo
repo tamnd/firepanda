@@ -293,6 +293,57 @@ def test_an_aggregate_with_no_group_by_still_aggregates() raises:
     )
 
 
+def test_a_limit_with_no_order_by_does_not_sort() raises:
+    # Worth pinning rather than assuming. A limit is the whole reason a sort
+    # would be cheap to add here by accident, and sorting a hundred million
+    # rows to hand back ten is the most expensive way there is to answer a
+    # query that needs one pass and a counter.
+    assert_equal(
+        _plan("SELECT a FROM t LIMIT 10"),
+        "LIMIT 10\n  PROJECT [a]\n    SCAN t []\n",
+    )
+
+
+def test_a_having_repeating_a_fold_reads_the_one_the_select_list_asked_for() raises:
+    # Two calls that compute the same thing are one slot in the aggregate. This
+    # shape is ClickBench q27 and q28, and without the sharing the node counts
+    # every group twice and answers the same number both times.
+    assert_equal(
+        _plan("SELECT g, count(*) AS c FROM t GROUP BY g HAVING count(*) > 1"),
+        (
+            "PROJECT [g, __agg_0 as c]\n"
+            "  FILTER __agg_0 > 1\n"
+            "    AGGREGATE [g] -> [count(1)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_two_folds_of_one_shape_in_a_select_list_are_one_slot() raises:
+    assert_equal(
+        _plan("SELECT g, sum(a) AS x, sum(a) AS y FROM t GROUP BY g"),
+        (
+            "PROJECT [g, __agg_0 as x, __agg_0 as y]\n"
+            "  AGGREGATE [g] -> [sum(a)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_two_folds_that_differ_are_two_slots() raises:
+    # The guard on the sharing. `sum(a)` and `sum(b)` read the same kind over
+    # different columns, and a shape that only looked at the kind would fold
+    # them into one and answer the first one twice.
+    assert_equal(
+        _plan("SELECT g, sum(a), sum(b) FROM t GROUP BY g"),
+        (
+            "PROJECT [g, __agg_0 as __expr_1, __agg_1 as __expr_2]\n"
+            "  AGGREGATE [g] -> [sum(a), sum(b)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
 def test_a_having_filters_the_column_the_aggregate_produced() raises:
     # The fold is computed once, in the AGGREGATE node, and the HAVING reads the
     # column it landed in. A filter holding a sum is refused by the plan itself,
@@ -2082,13 +2133,15 @@ def test_two_windows_over_different_keys_are_a_node_each() raises:
 
 def test_a_window_sits_above_the_aggregate_whose_answer_it_reads() raises:
     # `sum(sum(b))` is a fold of a fold, and the inner one is the GROUP BY's, so
-    # the window has to be the node above it rather than beside it.
+    # the window has to be the node above it rather than beside it. The inner
+    # one is also the `sum(b)` the query already asked for, so both read the one
+    # slot the aggregate computes.
     assert_equal(
         _plan("SELECT g, sum(b), sum(sum(b)) OVER () FROM t GROUP BY g"),
         (
             "PROJECT [g, __agg_0 as __expr_1, __win_0 as __expr_2]\n"
-            "  WINDOW [sum(__agg_1) over () as __win_0]\n"
-            "    AGGREGATE [g] -> [sum(b), sum(b)]\n"
+            "  WINDOW [sum(__agg_0) over () as __win_0]\n"
+            "    AGGREGATE [g] -> [sum(b)]\n"
             "      SCAN t []\n"
         ),
     )
