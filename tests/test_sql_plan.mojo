@@ -279,6 +279,68 @@ def test_a_group_by_puts_the_keys_and_the_folds_in_one_node() raises:
     )
 
 
+def test_a_group_by_all_groups_by_the_items_that_do_not_fold() raises:
+    # The same plan the query with the key written out gives, because that is
+    # what GROUP BY ALL means rather than being a node of its own.
+    assert_equal(
+        _plan("SELECT g, sum(a) FROM t GROUP BY ALL"),
+        _plan("SELECT g, sum(a) FROM t GROUP BY g"),
+    )
+
+
+def test_a_group_by_all_over_a_star_groups_by_every_column() raises:
+    assert_equal(
+        _plan("SELECT * FROM t GROUP BY ALL"),
+        _plan("SELECT * FROM t GROUP BY a, b, g, f"),
+    )
+
+
+def test_a_group_by_all_with_no_key_left_is_one_group() raises:
+    # Every item folds, so there is nothing to group by and the answer is the
+    # one row a bare aggregate gives.
+    assert_equal(
+        _plan("SELECT sum(a) FROM t GROUP BY ALL"),
+        _plan("SELECT sum(a) FROM t"),
+    )
+
+
+def test_a_group_by_all_with_no_fold_is_a_distinct() raises:
+    assert_equal(
+        _plan("SELECT g FROM t GROUP BY ALL"),
+        _plan("SELECT g FROM t GROUP BY g"),
+    )
+
+
+def test_an_order_by_all_sorts_on_every_output_column() raises:
+    assert_equal(
+        _plan("SELECT a, b FROM t ORDER BY ALL"),
+        _plan("SELECT a, b FROM t ORDER BY a, b"),
+    )
+
+
+def test_an_order_by_all_takes_the_direction_written_once() raises:
+    assert_equal(
+        _plan("SELECT a, b FROM t ORDER BY ALL DESC"),
+        _plan("SELECT a, b FROM t ORDER BY a DESC, b DESC"),
+    )
+
+
+def test_an_order_by_all_reads_the_names_the_query_produced() raises:
+    # The rename is what it sorts on, not the column under it, because the
+    # names come off the node below the sort and that node is the projection.
+    assert_equal(
+        _plan("SELECT a AS z FROM t ORDER BY ALL"),
+        "SORT [z asc nulls last]\n  PROJECT [a as z]\n    SCAN t []\n",
+    )
+
+
+def test_an_order_by_all_over_a_union_sorts_the_stack() raises:
+    assert_equal(
+        _plan("SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY ALL"),
+        _plan("SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY a"),
+    )
+
+
 def test_an_aggregate_with_no_group_by_still_aggregates() raises:
     # No GROUP BY and one fold is one group, and the node that computes it is
     # the same node, which is why whether a query aggregates has to be decided

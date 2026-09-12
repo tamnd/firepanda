@@ -419,6 +419,7 @@ from .ast import (
     EXPR_UNARY,
     CALL_DISTINCT,
     CALL_STAR,
+    GROUP_ALL,
     GROUP_EXPRESSION,
     LIMIT_PERCENT,
     LITERAL_BOOLEAN,
@@ -4751,11 +4752,31 @@ def _block(
     if grouped:
         for entry in ast.items(group_clause):
             var group = ast.stmts[Int(entry)]
+            if group.b == GROUP_ALL:
+                # GROUP BY ALL is the select list read twice rather than a mask
+                # on the aggregate, so it is written out here as the keys the
+                # query would have had to write. Every item that is not an
+                # aggregate is a key, in the order the select list has them,
+                # which is the rule and also the reason a query with no
+                # aggregate in it groups by its whole row.
+                _group_by_all(
+                    ast,
+                    items,
+                    from_clause,
+                    schema,
+                    origin,
+                    plan,
+                    walk,
+                    scope,
+                    keys,
+                    key_names,
+                )
+                continue
             if group.b != GROUP_EXPRESSION:
                 raise Error(
-                    "firepanda lowers a GROUP BY of plain expressions so far,"
-                    " and GROUPING SETS, CUBE, ROLLUP and GROUP BY ALL are"
-                    " masks on one aggregate the plan cannot carry yet"
+                    "firepanda lowers a GROUP BY of plain expressions and"
+                    " GROUP BY ALL so far, and GROUPING SETS, CUBE and ROLLUP"
+                    " are masks on one aggregate the plan cannot carry yet"
                 )
             keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
             key_names.append(_name_of(ast, group.a, len(key_names)))
@@ -4905,6 +4926,78 @@ def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
     if node.kind == EXPR_COLUMN and parts != 0:
         return String(ast.text(ast.at(node.children, parts - 1)))
     return String("__expr_", place)
+
+
+def _group_by_all(
+    ast: Ast,
+    items: List[UInt32],
+    from_clause: UInt32,
+    schema: Schema,
+    origin: List[Int],
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    mut keys: List[Int],
+    mut key_names: List[String],
+) raises:
+    """Turns `GROUP BY ALL` into the keys the query would otherwise have written.
+
+    The rule is one line: every item of the select list that is not an aggregate
+    is a key, in the order the select list has them. So `SELECT a, sum(b) FROM t
+    GROUP BY ALL` groups by `a`, and a select list with no aggregate in it at all
+    groups by its whole row, which is the same answer a `SELECT DISTINCT` gives
+    and is what DuckDB does with it.
+
+    A star is expanded here the same way the select list expands it further
+    down, rather than being refused, because `SELECT * FROM t GROUP BY ALL` is
+    one of the two shapes people write this for. Expanding it twice builds the
+    column references twice, which costs two expression nodes per column and
+    nothing else, since the plan is an arena and common subexpressions are found
+    later by key rather than by identity.
+
+    The keys are lowered ungrouped, because they are what the grouping is being
+    built out of and there is nothing yet for them to be checked against.
+
+    Args:
+        ast: The arenas.
+        items: The select list.
+        from_clause: The FROM, for the star's refusal when there is none.
+        schema: What the FROM produces, for a star.
+        origin: Which relation each of those columns came from, for a star.
+        plan: Where the lowered expressions go.
+        walk: The aggregates found so far.
+        scope: What the FROM put in reach.
+        keys: Where the group keys go.
+        key_names: Where their names go.
+
+    Raises:
+        If a star has no FROM to stand for, or whatever lowering an item raises.
+    """
+    for i in range(len(items)):
+        var item = ast.stmts[Int(items[i])]
+        if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+            if from_clause == NO_NODE:
+                raise Error(
+                    "a star in a SELECT with no FROM, and there is nothing for"
+                    " it to stand for"
+                )
+            _expand(
+                ast,
+                item.a,
+                schema,
+                origin,
+                plan,
+                walk,
+                scope,
+                False,
+                keys,
+                key_names,
+            )
+            continue
+        if _has_aggregate(ast, item.a):
+            continue
+        keys.append(_lower_expr(ast, item.a, plan, walk, scope, False))
+        key_names.append(_name_of(ast, item.a, len(key_names)))
 
 
 def _expand(
@@ -5110,22 +5203,31 @@ def _modifiers(
         var nulls_last = List[Bool]()
         for i in range(len(orders)):
             var entry = ast.stmts[Int(orders[i])]
-            if entry.a == NO_NODE:
-                raise Error(
-                    "firepanda does not lower ORDER BY ALL yet, which sorts on"
-                    " every output column in order"
-                )
-            keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
-            descending.append(entry.b == SORT_DESCENDING)
+            var down = entry.b == SORT_DESCENDING
             # DuckDB puts the missing values last when the sort goes up and
             # first when it goes down, so the default follows the direction
             # rather than being one answer for both.
+            var last = not down
             if entry.payload == NULLS_LAST:
-                nulls_last.append(True)
-            elif entry.payload == NO_NODE or entry.payload == 0:
-                nulls_last.append(entry.b != SORT_DESCENDING)
-            else:
-                nulls_last.append(False)
+                last = True
+            elif entry.payload != NO_NODE and entry.payload != 0:
+                last = False
+            if entry.a == NO_NODE:
+                # ORDER BY ALL is every output column in the order the query
+                # produced them, each with the direction written once and
+                # applied to all of them. The names come off the plan rather
+                # than out of the select list, because what is being sorted is
+                # whatever is under here, and after a set operation that is the
+                # stack and not either arm's select list.
+                var produced = _produces(plan, input)
+                for j in range(len(produced)):
+                    keys.append(plan.exprs.column(String(produced[j])))
+                    descending.append(down)
+                    nulls_last.append(last)
+                continue
+            keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
+            descending.append(down)
+            nulls_last.append(last)
         out = plan.sort(out, keys^, descending^, nulls_last^)
 
     if (node.payload & LIMIT_PERCENT) != 0:
