@@ -42,6 +42,7 @@ from firepanda.exec import (
     Node,
     NodeStatus,
     Pipeline,
+    Presence,
     Project,
     Reduce,
     Scan,
@@ -835,6 +836,68 @@ def test_a_match_on_a_pattern_with_no_wildcard_is_refused() raises:
     # the node says which node to build rather than growing a fifth branch.
     with assert_raises(contains="is an equality against a constant"):
         _ = Match(2, Pattern(MatchKind.EQUALS, "ok", ""), "nope")
+
+
+def _presence(missing: Bool) raises -> List[Bool]:
+    """Runs one null test over `gappy_frame` and reads the answer back.
+
+    Args:
+        missing: True to ask which rows are null.
+
+    Returns:
+        One flag per row, in order.
+    """
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Presence(0, missing, "answer")))
+    var out = pipeline^.run()
+    var col = out.column("answer").as_typed[DType.bool]()
+    var flags = List[Bool](capacity=len(col))
+    for i in range(len(col)):
+        flags.append(col[i])
+    return flags^
+
+
+def test_a_null_test_appends_a_column_of_yes_and_no() raises:
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Presence(0, True, "gone")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 2, "the answer was appended")
+    assert_equal(out.schema[1].name, "gone", "the name it was given")
+    assert_true(out.schema[1].dtype == LogicalType.BOOL, "a yes or no")
+    assert_true(
+        not out.schema[1].nullable,
+        "the answer is never a null, whatever the column under it holds",
+    )
+
+
+def test_the_two_null_tests_are_the_opposite_of_each_other() raises:
+    # `gappy_frame` is 4, null, 1, 6, 2, null over two chunks, so the second
+    # null is in the chunk the first one is not, and a node that read the
+    # validity of the first chunk twice would answer the fourth row wrongly.
+    var missing = _presence(True)
+    var there = _presence(False)
+    assert_equal(len(missing), 6, "one answer per row")
+    for i in range(6):
+        assert_equal(missing[i], i == 1 or i == 5, "missing at " + String(i))
+        assert_equal(there[i], not missing[i], "the other way at " + String(i))
+
+
+def test_a_null_test_over_a_column_with_none_answers_for_every_row() raises:
+    # Nothing to find, and the answer is still a column of six falses rather
+    # than an empty one or a refusal.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Presence(0, True, "gone")))
+    var out = pipeline^.run()
+    var col = out.column("gone").as_typed[DType.bool]()
+    assert_equal(len(col), 6, "one answer per row")
+    for i in range(6):
+        assert_true(not col[i], "nothing is missing at " + String(i))
+
+
+def test_a_null_test_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Presence(4, True, "nope")))
 
 
 def test_a_computed_column_keeps_the_chunk_boundaries() raises:

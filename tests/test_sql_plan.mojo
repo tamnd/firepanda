@@ -2473,6 +2473,67 @@ def test_a_similar_to_says_there_is_no_regular_expression_engine() raises:
         _ = _plan("SELECT a FROM t WHERE g SIMILAR TO 'a.*'")
 
 
+def test_an_is_null_is_a_call_and_not_a_comparison() raises:
+    # The shape is the whole point. An equality against a null would print the
+    # same way a query writes it and would answer null for every row.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g IS NULL"),
+        "PROJECT [a]\n  FILTER is_null(g)\n    SCAN t []\n",
+    )
+
+
+def test_an_is_not_null_is_the_other_call() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g IS NOT NULL"),
+        "PROJECT [a]\n  FILTER is_not_null(g)\n    SCAN t []\n",
+    )
+
+
+def test_the_one_word_spellings_build_the_same_two_calls() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g ISNULL"),
+        _plan("SELECT a FROM t WHERE g IS NULL"),
+    )
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g NOTNULL"),
+        _plan("SELECT a FROM t WHERE g IS NOT NULL"),
+    )
+
+
+def test_an_is_true_asks_whether_the_value_is_there_and_holds() raises:
+    # Two questions rather than one, because a null has to come out false here
+    # and a comparison against it does not. The and is Kleene's, so a null on
+    # one side of a false is a false, which is what makes the pair total.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE (b > 1) IS TRUE"),
+        "PROJECT [a]\n  FILTER and(is_not_null(b > 1), b > 1)\n    SCAN t []\n",
+    )
+
+
+def test_an_is_false_puts_a_not_over_the_value_half() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE (b > 1) IS FALSE"),
+        (
+            "PROJECT [a]\n  FILTER and(is_not_null(b > 1), not(b > 1))\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_an_is_not_true_asks_the_pair_the_other_way_round() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE (b > 1) IS NOT TRUE"),
+        "PROJECT [a]\n  FILTER or(is_null(b > 1), not(b > 1))\n    SCAN t []\n",
+    )
+
+
+def test_an_is_not_false_keeps_the_value_half_as_it_was_written() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE (b > 1) IS NOT FALSE"),
+        "PROJECT [a]\n  FILTER or(is_null(b > 1), b > 1)\n    SCAN t []\n",
+    )
+
+
 def test_a_not_in_negates_the_chain_rather_than_inverting_it() raises:
     # The one that matters. `b <> 1 AND b <> 2` answers true for a row that a
     # null in the list should have made null, which is the classic wrong answer

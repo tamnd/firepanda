@@ -123,6 +123,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import LogicOp, logic_any, logic_type
+from firepanda.kernel.nulls import is_not_null_any, is_null_any
 from firepanda.kernel.pattern import (
     MatchKind,
     Pattern,
@@ -1738,6 +1739,105 @@ struct Match(Movable):
             made = text_contains_in_order(
                 text, self.first.as_bytes(), self.second.as_bytes()
             )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Presence(Movable):
+    """Appends a column saying whether each element is there or missing.
+
+    This is `IS NULL` and `IS NOT NULL`, and the one node answers both because
+    the two kernels behind it differ by a flipped byte and nothing else. It is
+    not a `Compute` with an equality on it, for the reason SQL has the words at
+    all: an equality against null is null, so `x = NULL` keeps no row and is not
+    the question anybody meant to ask.
+
+    The answer never holds a null, whatever the column it reads holds. That is
+    the whole point of the test, and it means the appended field is not nullable
+    even when the one under it is, which is worth stating because a `WHERE` over
+    it then has no validity to walk.
+
+    Any type is readable here. A null is a null whether the column holds numbers
+    or text or dates, and `is_null_any` already dispatches on that, so there is
+    no check on the type the way `Match` has one.
+    """
+
+    var at: Int
+    """The position of the column being tested."""
+
+    var missing: Bool
+    """True for `IS NULL`, false for `IS NOT NULL`."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, missing: Bool, name: String):
+        """Constructs a test for a null, or for the absence of one.
+
+        Args:
+            at: The position of the column being tested.
+            missing: True to answer where the column is null.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.missing = missing
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a boolean column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one boolean field on the end.
+
+        Raises:
+            If the position is outside the schema.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "presence: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        # Not nullable, which is the one thing a schema can say about this node
+        # that it cannot say about any of the others that append a column. The
+        # two kernels answer a yes or a no for every row and never a null.
+        out.append(Field(self.name, LogicalType.BOOL, False))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Runs the test and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "presence: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made: Array[DType.bool]
+        if self.missing:
+            made = is_null_any(chunk.columns[self.at])
+        else:
+            made = is_not_null_any(chunk.columns[self.at])
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -4554,6 +4654,7 @@ comptime Node = Variant[
     Connective,
     Apply,
     Match,
+    Presence,
     Choose,
     Constant,
     Cast,
@@ -4605,6 +4706,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Apply].bind(input^)
     if node.isa[Match]():
         return node[Match].bind(input^)
+    if node.isa[Presence]():
+        return node[Presence].bind(input^)
     if node.isa[Choose]():
         return node[Choose].bind(input^)
     if node.isa[Constant]():
@@ -4737,7 +4840,7 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Choose`, `Constant`, `Cast` and `Join`.
+        `Apply`, `Match`, `Presence`, `Choose`, `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -4747,6 +4850,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Connective]()
         or node.isa[Apply]()
         or node.isa[Match]()
+        or node.isa[Presence]()
         or node.isa[Choose]()
         or node.isa[Constant]()
         or node.isa[Cast]()
@@ -4788,6 +4892,10 @@ def node_computes_per_row(node: Node) -> Bool:
     i9-13900K, a line with a compute and a filter in it ran three times faster
     spread over the cores, while a project on its own ran no faster at all and
     paid for the tasks on top.
+
+    `Presence` is on the memory bound side with those three. It reads a bit per
+    row and writes a byte per row and does no arithmetic in between, so there is
+    nothing for a second core to speed up.
 
     Args:
         node: The node.
@@ -4879,6 +4987,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
+    if node.isa[Presence]():
+        return node[Presence].process(chunk^)
     if node.isa[Choose]():
         return node[Choose].process(chunk^)
     if node.isa[Constant]():
@@ -4939,6 +5049,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
+    if node.isa[Presence]():
+        return node[Presence].process(chunk^)
     if node.isa[Choose]():
         return node[Choose].process(chunk^)
     if node.isa[Constant]():

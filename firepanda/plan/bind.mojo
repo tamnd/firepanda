@@ -289,16 +289,21 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the four that exist.
+    """Returns what a named function answers, for the six that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of four entries instead. When the registry arrives this function
+    table of six entries instead. When the registry arrives this function
     becomes a lookup in it and the table goes away.
 
     `like` is here with them because a pattern match is not a binary operation
     either. Its right side is a pattern rather than an operand, and the node
     that runs it reads that pattern once at plan time.
+
+    `is_null` and `is_not_null` are here for the same kind of reason. `x = NULL`
+    is null for every row, so the test that SQL spells with words cannot be the
+    equality it looks like, and holding it as a call is what keeps the two
+    apart all the way down to the operator.
 
     Args:
         name: The function name.
@@ -308,8 +313,19 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the four, or an argument has the wrong type.
+        If the name is not one of the six, or an argument has the wrong type.
     """
+    if name == "is_null" or name == "is_not_null":
+        # No check on the type. Every column can hold a null, and a column that
+        # cannot is still a fair thing to ask about: the answer is then the same
+        # for every row, which is a true answer and not an error.
+        if len(args) != 1:
+            raise Error(
+                String(
+                    "'", name, "' takes 1 argument and was given ", len(args)
+                )
+            )
+        return LogicalType.BOOL
     if name == "like":
         # The pattern is a constant and lowering refuses it as anything else,
         # but that is lowering's rule rather than a typing one, so what is

@@ -1306,6 +1306,118 @@ def test_a_like_against_a_column_is_refused() raises:
         _ = run("SELECT n FROM words WHERE word LIKE word", session())
 
 
+def test_an_is_null_keeps_the_rows_with_nothing_in_them() raises:
+    same(
+        gapped(
+            run("SELECT mark FROM gappy WHERE mark IS NULL", session()), "mark"
+        ),
+        [-1, -1],
+        "mark",
+    )
+
+
+def test_an_is_not_null_keeps_the_others() raises:
+    same(
+        answer("SELECT mark FROM gappy WHERE mark IS NOT NULL", "mark"),
+        [4, 4, 9, 1],
+        "mark",
+    )
+
+
+def test_an_is_null_in_a_select_list_answers_yes_or_no_for_every_row() raises:
+    # Never a null itself, whatever the column under it holds, which is what
+    # tells this apart from `mark = NULL` and is the reason SQL has the words.
+    same(
+        truths(
+            run("SELECT mark IS NULL AS gone FROM gappy", session()), "gone"
+        ),
+        [0, 0, 1, 0, 1, 0],
+        "gone",
+    )
+
+
+def test_the_one_word_spellings_mean_the_same_two_tests() raises:
+    # `ISNULL` and `NOTNULL` are postfix words rather than functions, and the
+    # parser folds each of them into the node the two word form builds.
+    same(
+        answer("SELECT mark FROM gappy WHERE mark NOTNULL", "mark"),
+        [4, 4, 9, 1],
+        "mark",
+    )
+    same(
+        gapped(
+            run("SELECT mark FROM gappy WHERE mark ISNULL", session()), "mark"
+        ),
+        [-1, -1],
+        "mark",
+    )
+
+
+def test_an_is_null_reads_a_column_of_text_too() raises:
+    same(answer("SELECT n FROM words WHERE word IS NULL", "n"), [6], "n")
+
+
+def test_an_is_true_keeps_the_rows_the_comparison_held_for() raises:
+    # `mark > 3` is true, true, null, true, null, false down the six rows, so
+    # each of the four tests below keeps a different set and no two of them
+    # would agree if the null were being read as a false.
+    same(
+        answer("SELECT mark FROM gappy WHERE (mark > 3) IS TRUE", "mark"),
+        [4, 4, 9],
+        "mark",
+    )
+
+
+def test_an_is_false_keeps_the_row_it_did_not_hold_for() raises:
+    same(
+        answer("SELECT mark FROM gappy WHERE (mark > 3) IS FALSE", "mark"),
+        [1],
+        "mark",
+    )
+
+
+def test_an_is_not_true_keeps_the_nulls_with_the_false() raises:
+    same(
+        gapped(
+            run(
+                "SELECT mark FROM gappy WHERE (mark > 3) IS NOT TRUE", session()
+            ),
+            "mark",
+        ),
+        [-1, -1, 1],
+        "mark",
+    )
+
+
+def test_an_is_not_false_keeps_the_nulls_with_the_true() raises:
+    same(
+        gapped(
+            run(
+                "SELECT mark FROM gappy WHERE (mark > 3) IS NOT FALSE",
+                session(),
+            ),
+            "mark",
+        ),
+        [4, 4, -1, 9, -1],
+        "mark",
+    )
+
+
+def test_a_yes_written_out_keeps_every_row_and_a_no_keeps_none() raises:
+    # The word is written in capitals by the parser whatever the query spelled
+    # it with, and reading it as lower case made every one of them a no.
+    same(
+        gapped(run("SELECT mark FROM gappy WHERE true", session()), "mark"),
+        [4, 4, -1, 9, -1, 1],
+        "mark",
+    )
+    assert_equal(
+        len(run("SELECT mark FROM gappy WHERE FALSE", session())),
+        0,
+        "a no keeps nothing",
+    )
+
+
 def test_a_chain_of_ors_folds_left_to_right_and_keeps_every_arm() raises:
     same(
         answer(

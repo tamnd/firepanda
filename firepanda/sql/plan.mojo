@@ -636,6 +636,70 @@ def _binary_op(text: String) raises -> BinaryOp:
     )
 
 
+def _lower_is(
+    mut plan: Plan, negated: Bool, left: Int, right: Int
+) raises -> Int:
+    """Builds what an `IS` test against a literal means.
+
+    The grammar lets four words follow `IS`, and `UNKNOWN` is refused before
+    anything gets this far, so the right side here is a null or one of the two
+    booleans. A null is the test the engine has an operator for. The other two
+    are written out of pieces that already exist, because what `x IS TRUE` says
+    is that `x` is there and holds true, and an and over Kleene's logic says
+    exactly that: a null on the left of it is false rather than null, so the
+    answer is a yes or a no for every row, which is what the test promises.
+
+    Written out, the four are:
+
+        x IS TRUE      ->  x is not null and x
+        x IS FALSE     ->  x is not null and not x
+        x IS NOT TRUE  ->  x is null or not x
+        x IS NOT FALSE ->  x is null or x
+
+    Args:
+        plan: The plan, whose arena the pieces go in.
+        negated: True if the test was written `IS NOT`.
+        left: The operand, already lowered.
+        right: The literal on the right, already lowered.
+
+    Returns:
+        The expression that answers the test.
+
+    Raises:
+        Error: If the right side is not a literal, which is a plan built by
+            something other than the parser.
+    """
+    if plan.exprs.nodes[right].kind != ExprKind.LITERAL:
+        raise Error(
+            "the right side of an IS has to be NULL, TRUE or FALSE, and this"
+            " one is an expression"
+        )
+
+    if plan.exprs.nodes[right].value.is_null():
+        return plan.exprs.call(
+            "is_not_null" if negated else "is_null", [left], True
+        )
+
+    # A boolean literal, the only other thing the grammar allows. Both the
+    # column and the constant are read twice, once by the presence test and once
+    # by the value test, and lowering computes a repeated expression once, so
+    # the second read costs nothing.
+    var wanted = plan.exprs.nodes[right].value.bits != 0
+    # The value test is the operand itself when the two negations cancel, which
+    # they do for `IS TRUE` and for `IS NOT FALSE`, and a `not` over it when
+    # only one of them is there.
+    var held = left if wanted != negated else plan.exprs.call(
+        "not", [left], True
+    )
+    if negated:
+        return plan.exprs.call(
+            "or", [plan.exprs.call("is_null", [left], True), held], True
+        )
+    return plan.exprs.call(
+        "and", [plan.exprs.call("is_not_null", [left], True), held], True
+    )
+
+
 def _agg_kind(name: String, distinct: Bool = False) raises -> AggKind:
     """The fold a function name is, or nothing if the name is not an aggregate.
 
@@ -1397,7 +1461,10 @@ def _lower_expr(
             return plan.exprs.literal(Value(null=LogicalType.NULL))
         var text = ast.text(node.payload)
         if tag == LITERAL_BOOLEAN:
-            return plan.exprs.literal(Value(text == "true"))
+            # The transform writes the word out in capitals whatever the query
+            # spelled it with, so this reads capitals and not the lower case the
+            # rest of the file uses for names.
+            return plan.exprs.literal(Value(text == "TRUE"))
         if tag == LITERAL_NUMBER:
             return plan.exprs.literal(_number(text))
         if tag == LITERAL_STRING:
@@ -1479,6 +1546,13 @@ def _lower_expr(
             return plan.exprs.call("and", [left, right], True)
         if op == "OR":
             return plan.exprs.call("or", [left, right], True)
+        # `IS NULL`, `ISNULL`, `NOTNULL` and the two tests against a boolean all
+        # reach here as `IS` or `IS NOT` over a literal, the grammar allowing
+        # nothing else on the right of the word. None of them is the equality it
+        # looks like: `x = NULL` is null for every row and keeps nothing, which
+        # is the reason SQL has the words at all.
+        if op == "IS" or op == "IS NOT":
+            return _lower_is(plan, op == "IS NOT", left, right)
         # The LIKE family reaches here as the text it was written with, the
         # grammar having folded the word and the operator spelling of each one
         # into the same shape. Only the case sensitive match has kernels behind
