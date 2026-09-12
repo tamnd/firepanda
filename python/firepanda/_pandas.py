@@ -3805,7 +3805,7 @@ class DataFrameMixin:
         made = _labelled(self._inner.names(), self._inner.dtypes())
         return Series._wrap(made._inner.relabel(None).renamed_axis(None))
 
-    def memory_usage(self, index: bool = True, deep: bool = False) -> Series:
+    def memory_usage(self, index: Any = True, deep: Any = False) -> Series:
         """How many bytes each column weighs, labelled by column name.
 
         The index comes first and is called `Index`, which is pandas' name for
@@ -3826,6 +3826,15 @@ class DataFrameMixin:
         caller who passed it think something was unavailable, when what is
         unavailable is the shallow answer.
 
+        Neither flag is checked for being a boolean, which is deliberate and is
+        not what the rest of the library does. Almost every flag here goes
+        through `_flag`, because pandas validates almost every flag and refuses
+        a `1` with a sentence naming the type that arrived. These two it does
+        not. `df.memory_usage(index=1)` counts the index in pandas and
+        `deep="yes"` is simply truthy, so both are read for their truth here as
+        well, since a library that refuses what pandas accepts stops a working
+        program for no gain.
+
         The numbers are Arrow buffers and pandas' are numpy arrays, which is
         `nbytes` divergence and is registered as one. It shows up here more than
         it does on a column, because a frame is where somebody adds the numbers
@@ -3841,8 +3850,6 @@ class DataFrameMixin:
         """
         from ._frame import Series
 
-        _flag("index", index)
-        _flag("deep", deep)
         labels: list[Any] = list(self._inner.names())
         counts: list[Any] = list(self._inner.column_nbytes())
         if index:
@@ -5810,7 +5817,7 @@ class SeriesMixin:
         """
         return self._inner.dtype()
 
-    def memory_usage(self, index: bool = True, deep: bool = False) -> int:
+    def memory_usage(self, index: Any = True, deep: Any = False) -> int:
         """How many bytes the column weighs, one number rather than a column.
 
         The frame's version answers a column because a frame has several things
@@ -5824,7 +5831,8 @@ class SeriesMixin:
         That is why both exist.
 
         `deep` is accepted and changes nothing, for the reason the frame's
-        version gives.
+        version gives, and neither flag is checked for being a boolean, for the
+        other reason the frame's version gives.
 
         Args:
             index: Whether to add the bytes the row labels occupy.
@@ -5833,8 +5841,6 @@ class SeriesMixin:
         Returns:
             The size in bytes.
         """
-        _flag("index", index)
-        _flag("deep", deep)
         out: int = self._inner.nbytes()
         if index:
             out += self.index.nbytes
