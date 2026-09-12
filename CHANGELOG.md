@@ -12,6 +12,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 `EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
 
+An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
 An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold shipped in 0.6.74 and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
 
 There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
@@ -21,6 +22,20 @@ Which of the two forms an `EXISTS` takes has to be settled before the `FROM` und
 A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison is still refused: `ANY` and `ALL` answer the same boolean per row, but each carries a comparison that neither the mark join nor this counting is given.
 
 Part of #309.
+
+### Added: a grouped reduction whose state is the values holds the column too
+
+The other half of what 0.6.74 did without a key. `SELECT shop, count(DISTINCT qty) FROM sales GROUP BY shop` and `SELECT shop, median(qty) FROM sales GROUP BY shop` answered "nunique cannot be computed a chunk at a time" and now answer per group.
+
+`Group` holds the same way `Reduce` does, with one addition: the key columns are held beside the values, because a reduction over a group needs to know which rows are in it. At `finish` the held keys are grouped once, each held column is reduced with those ordinals, and the answers go into the output beside the folded ones.
+
+The keys are grouped a second time rather than reused, and that is the one decision worth reading. There are two folding routes with two different ideas of an ordinal, `_push` keeps a map that lasts the whole query and `_absorb` makes a new table per chunk, and `_demote` can swap one for the other in the middle of a query when a null key turns up. What both of them agree on is the group order the output promises, which is the order the groups were first seen, and that is exactly what a group by over the held keys gives back. So one pass over the kept rows is correct whichever route the folds took, and `_settle` checks the two group counts against each other rather than assuming.
+
+Memory is the same trade as before and it is said in the docstring. The key columns and the columns a non folding reduction reads are resident for the length of the run, and nothing else is, so `sum(x), median(y) GROUP BY k` holds `k` and `y` and still folds `x` into one row per group a chunk at a time.
+
+A grouped `corr` or `cov` is still refused, now saying it reads two columns where a reduction here names one, which is the same sentence `Reduce` gives.
+
+This closes the operator half of #617. What is left in it is #610, a set shaped table so a distinct count holds a set rather than the values.
 
 ### Added: `= ANY` and `<> ALL` over a subquery, which are the two that are an IN
 

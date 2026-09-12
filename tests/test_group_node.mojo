@@ -32,6 +32,7 @@ and the ordinals already handed out have to survive both the table growing and
 the array being given up.
 """
 
+from std.math import isnan
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 
 from firepanda.array.any import AnyArray
@@ -608,19 +609,117 @@ def test_a_filter_after_a_group_by_runs_in_the_second_stage() raises:
     assert_equal(totals[1], Int64(8), "green")
 
 
-def test_a_reduction_that_does_not_fold_is_refused_at_plan_time() raises:
+def repeated_frame() raises -> DataFrame:
+    """Nine rows in three chunks, three groups, with a value in two chunks.
+
+    `keyed_frame` gives every row of a group a different value, so a distinct
+    count over it is the row count and a test that read one would prove
+    nothing. Here key 1 sees 10, 10 and 7, so its count is three and its
+    distinct count is two, and the two 10s are in different chunks, which is
+    where an implementation that added partial answers would say three.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([1, 2, 3]))
+    one.append(numbers([10, 20, 30]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([1, 2, 3]))
+    two.append(numbers([10, 20, 31]))
+    pieces.append(two^)
+    var three = List[AnyArray]()
+    three.append(numbers([3, 2, 1]))
+    three.append(numbers([32, 26, 7]))
+    pieces.append(three^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    return cut(pieces^, fields^)
+
+
+def test_a_grouped_median_is_the_median_of_each_whole_group() raises:
+    """A median does not fold, so the node holds the column and the keys beside
+    it and groups them once at the end. Key 1 sees 10, 10 and 7, key 2 sees 20,
+    20 and 26, key 3 sees 30, 31 and 32."""
     var aggs = List[GroupAgg]()
     aggs.append(GroupAgg(1, AggKind.MEDIAN, "middle"))
-    var pipeline = Pipeline(keyed_frame())
-    with assert_raises(contains="cannot be computed a chunk at a time"):
-        pipeline.add(Node(Group([0], aggs^)))
+    var out = run_group(repeated_frame(), [0], aggs^)
+    assert_equal(len(out), 3, "three groups")
+    assert_equal(read_ints(out, "k")[0], Int64(1), "first seen order")
+    var mid = out.column("middle").as_typed[DType.float64]()
+    assert_equal(mid[0], Float64(10.0), "the middle of 7, 10, 10")
+    assert_equal(mid[1], Float64(20.0), "the middle of 20, 20, 26")
+    assert_equal(mid[2], Float64(31.0), "the middle of 30, 31, 32")
 
 
-def test_a_distinct_count_does_not_fold_either() raises:
+def test_a_grouped_distinct_count_counts_a_value_in_two_chunks_once() raises:
+    """The two 10s of key 1 are in different chunks, so an implementation that
+    counted each chunk and added would answer three where the answer is two."""
     var aggs = List[GroupAgg]()
     aggs.append(GroupAgg(1, AggKind.NUNIQUE, "distinct"))
+    aggs.append(GroupAgg(1, AggKind.COUNT, "seen"))
+    var out = run_group(repeated_frame(), [0], aggs^)
+    assert_equal(len(out), 3, "three groups")
+    var distinct = read_ints(out, "distinct")
+    var seen = read_ints(out, "seen")
+    assert_equal(distinct[0], Int64(2), "key 1 saw 10 twice")
+    assert_equal(seen[0], Int64(3), "and three rows")
+    assert_equal(distinct[1], Int64(2), "key 2 saw 20 twice")
+    assert_equal(distinct[2], Int64(3), "key 3 saw three values")
+
+
+def test_a_fold_and_a_hold_in_one_group_by_both_answer() raises:
+    """The point of holding per aggregate rather than per query. The sum folds
+    into one row per group a chunk at a time and the median holds the column,
+    and the two answers come out of the same node."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(1, AggKind.MEDIAN, "middle"))
+    var out = run_group(repeated_frame(), [0], aggs^)
+    assert_equal(len(out), 3, "three groups")
+    var totals = read_ints(out, "total")
+    assert_equal(totals[0], Int64(27), "10 and 10 and 7")
+    assert_equal(totals[1], Int64(66), "20 and 20 and 26")
+    assert_equal(totals[2], Int64(93), "30 and 31 and 32")
+    var mid = out.column("middle").as_typed[DType.float64]()
+    assert_equal(mid[0], Float64(10.0), "and the middle of the same rows")
+
+
+def test_a_held_column_lines_up_with_a_null_key() raises:
+    """A null key sends the folds from the lasting map to the stacking merge
+    partway through, and the held rows know nothing about that. What both
+    routes agree on is the group order, which is why the keys are grouped a
+    second time rather than borrowed from whichever route ran."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(1, AggKind.MEDIAN, "middle"))
+    var out = run_group(holey_frame(), [0], aggs^)
+    var direct = flat(holey_frame())
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM, "total"))
+    specs.append(AggSpec("v", AggKind.MEDIAN, "middle"))
+    var want = direct.group_by(["k"], specs^, dropna=False, sort=False)
+    assert_equal(len(out), len(want), "the same groups")
+    var mine = out.column("middle").as_typed[DType.float64]()
+    var theirs = want.column("middle").as_typed[DType.float64]()
+    for i in range(len(want)):
+        assert_equal(
+            mine.is_valid(i), theirs.is_valid(i), "the same rows are null"
+        )
+        if not mine.is_valid(i):
+            continue
+        # Key 9 has nothing but nulls under it, and a median of nothing is a
+        # NaN that is still valid, which does not equal itself.
+        assert_equal(isnan(mine[i]), isnan(theirs[i]), "the same NaNs")
+        if not isnan(mine[i]):
+            assert_equal(mine[i], theirs[i], "and the same middles")
+
+
+def test_a_grouped_reduction_that_reads_two_columns_is_refused() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.CORR, "together"))
     var pipeline = Pipeline(keyed_frame())
-    with assert_raises(contains="cannot be computed a chunk at a time"):
+    with assert_raises(contains="reads two columns"):
         pipeline.add(Node(Group([0], aggs^)))
 
 

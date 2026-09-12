@@ -2271,8 +2271,9 @@ def _folds(kind: AggKind) -> Bool:
 
     A kind that does not fold is not a kind nothing can run. It means the state
     is the values, so the operator holds the column and calls the whole frame
-    kernel once at the end. `Reduce` does that. `Group` still refuses, because
-    holding a column beside a key map is a change of its own.
+    kernel once at the end. `Reduce` does that and `Group` does it keyed, with
+    the key columns held alongside. What this answers is which of the two a
+    reduction gets, not whether it runs.
 
     Args:
         kind: The reduction.
@@ -2420,10 +2421,33 @@ struct Group(Movable):
     and twenty eight thousand, which is where `group/pipeline_stream` sits and
     where the operator is 2.4x faster than it was.
 
-    Not every reduction survives that. `_folds` is the list that does, and the
-    rest keep the `Materialize` fallback, which is the right answer rather than a
-    gap: a median needs the values and there is no state short of the values that
-    would give it one. Asking for one here is an error at plan time.
+    ## The ones that do not fold
+
+    Not every reduction survives that. `_folds` is the list that does, and a
+    median is not on it, because a median needs the values and there is no state
+    short of the values that would give it one.
+
+    So the values are what this holds for them. A reduction that does not fold
+    names its source column, that column's chunks go by and are kept, the key
+    columns are kept beside them, and at `finish` the whole thing is grouped once
+    and the whole frame kernel is called. That is the same thing `Window` does
+    with its partition and the same thing `Reduce` does without a key.
+
+    The keys are grouped a second time here rather than reusing the ordinals the
+    folding route already has, and that is deliberate. There are two folding
+    routes with two different ideas of an ordinal, `_push` keeps one that lasts
+    and `_absorb` makes a new one per chunk, and `_demote` can switch between
+    them in the middle of a query. What both of them agree on is the group order
+    the output promises, which is the order the groups were first seen, and that
+    is exactly what a group by over the held keys gives. So the second grouping
+    is one pass over the kept rows and it is correct whichever route the folds
+    took. `_settle` checks the two group counts against each other.
+
+    The cost is the whole of every held column resident, which is the thing this
+    node exists to avoid, and it is paid only for the key columns and the columns
+    a non folding reduction reads. `sum(x), median(y) GROUP BY k` holds `k` and
+    `y` and still folds `x` into one row per group. The alternative to paying it
+    is refusing the query, which is what this node used to do.
 
     Two things this node deliberately does not do. It does not sort, so the
     groups come out in the order they were first seen, which is what pandas
@@ -2466,7 +2490,24 @@ struct Group(Movable):
     """Per state slot, the reduction that combines two partial answers."""
 
     var _at: List[Int]
-    """Per aggregate, the state slot it starts at. A mean owns two."""
+    """Per aggregate, the slot it starts at. A state slot when it folds and a
+    held slot when it does not. A mean folds and owns two state slots."""
+
+    var _holds: List[Bool]
+    """Per aggregate, whether `_at` points into `held` rather than `state`."""
+
+    var held: List[ChunkedArray]
+    """Per held slot, every chunk of the column that slot reduces."""
+
+    var _kept: List[Int]
+    """Per held slot, the input column it holds."""
+
+    var _late: List[AggKind]
+    """Per held slot, the reduction to run over each group at the end."""
+
+    var _key_held: List[ChunkedArray]
+    """Per key column, every chunk of it, kept beside `held` so the held rows
+    can be grouped at the end. Empty when nothing is held."""
 
     var started: Bool
     """Whether a chunk with rows in it has arrived."""
@@ -2512,6 +2553,11 @@ struct Group(Movable):
         self._produce = List[AggKind]()
         self._merge = List[AggKind]()
         self._at = List[Int]()
+        self._holds = List[Bool]()
+        self.held = List[ChunkedArray]()
+        self._kept = List[Int]()
+        self._late = List[AggKind]()
+        self._key_held = List[ChunkedArray]()
         self.started = False
         self.ran = False
         self.emit = List[AnyArray]()
@@ -2526,9 +2572,14 @@ struct Group(Movable):
 
         Everything that can be wrong with a group by that does not depend on the
         data is wrong here: a key that is not a column, a key given twice, a
-        reduction that does not fold, a sum of a column of names, two output
-        columns with the same name. None of those needs a row to detect and all
-        of them are cheaper to report before the first one moves.
+        reduction that reads a column this node has no second name for, a sum of
+        a column of names, two output columns with the same name. None of those
+        needs a row to detect and all of them are cheaper to report before the
+        first one moves.
+
+        Whether a reduction folds is settled here too, and it is not an error
+        either way. A reduction that does not gets a held slot instead of a state
+        slot, and `_at` points into whichever of the two `_holds` says.
 
         Args:
             input: The schema of the chunks that will arrive. Consumed.
@@ -2539,7 +2590,7 @@ struct Group(Movable):
 
         Raises:
             If a position is outside the schema, if a key is repeated, if a
-            reduction does not fold, if a reduction has no meaning on its
+            reduction reads two columns, if a reduction has no meaning on its
             column's type, or if two output columns would have the same name.
         """
         self.input = input^
@@ -2575,11 +2626,11 @@ struct Group(Movable):
                     + String(len(self.input))
                     + " columns"
                 )
-            if not _folds(kind):
+            if kind.reads_two_columns():
                 raise Error(
                     "group: "
                     + String(kind)
-                    + " cannot be computed a chunk at a time"
+                    + " reads two columns and a reduction here names one"
                 )
             var source = self.input[at].dtype
             if source.is_variable_width() and (
@@ -2596,6 +2647,17 @@ struct Group(Movable):
                     )
             fields.append(Field(name, agg_type(kind, source)))
 
+            if not _folds(kind):
+                # The values themselves are the state, so the column goes by and
+                # the kernel runs once over each group's share of it at the end.
+                self._holds.append(True)
+                self._at.append(len(self._kept))
+                self._kept.append(at)
+                self._late.append(kind)
+                self.held.append(ChunkedArray(source))
+                continue
+
+            self._holds.append(False)
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
                 # A mean is a sum and a count until the last moment. Keeping the
@@ -2625,6 +2687,15 @@ struct Group(Movable):
         for s in range(len(self._source)):
             if self.input[self._source[s]].dtype.is_variable_width():
                 self._fast = False
+
+        # The keys are only kept when something is held, because they are only
+        # kept so that the held rows can be grouped, and a query with nothing
+        # held should carry nothing extra.
+        if len(self._kept) > 0:
+            for k in range(len(self.keys)):
+                self._key_held.append(
+                    ChunkedArray(self.input[self.keys[k]].dtype)
+                )
 
         self.output = Schema(fields^)
         return Schema(copy=self.output)
@@ -2667,6 +2738,15 @@ struct Group(Movable):
         if rows == 0:
             return None
         var columns = chunk^.into_columns()
+
+        if len(self._kept) > 0:
+            # Before either folding route, and the same on both, because a
+            # reduction whose state is the values has no opinion about which one
+            # the folds took and `_demote` can change it halfway through.
+            for k in range(len(self.keys)):
+                self._key_held[k].append(AnyArray(copy=columns[self.keys[k]]))
+            for h in range(len(self._kept)):
+                self.held[h].append(AnyArray(copy=columns[self._kept[h]]))
 
         if self._fast:
             if columns[self.keys[0]].null_count() == 0:
@@ -2872,11 +2952,65 @@ struct Group(Movable):
             row.append(self.emit.pop())
         return Chunk(row^)
 
+    def _reduce_held(mut self, groups: Int) raises -> List[AnyArray]:
+        """Groups the held rows once and reduces each group's share of them.
+
+        The keys are grouped again rather than reused, for the reason in the
+        struct's docstring: the two folding routes keep two different kinds of
+        ordinal and `_demote` can swap one for the other mid query, while the
+        group order the output promises is the same on both and is what a group
+        by over the held keys gives back.
+
+        Args:
+            groups: How many groups the running table ended up with, which is
+                what this has to agree with.
+
+        Returns:
+            One column per held slot, one row per group, in the running table's
+            group order.
+
+        Raises:
+            If the held chunks cannot be stacked, if grouping them raises, or if
+            the two group counts disagree.
+        """
+        var keys = List[AnyArray](capacity=len(self.keys))
+        for k in range(len(self.keys)):
+            keys.append(ChunkedArray(copy=self._key_held[k]).combine())
+        var rows = len(keys[0])
+        var refs = borrow_columns(keys)
+        var at = List[Int](capacity=len(self.keys))
+        for k in range(len(self.keys)):
+            at.append(k)
+        var found = group_ordinals(refs, at, rows)
+        if found.groups != groups:
+            raise Error(
+                "group: the held rows fall into "
+                + String(found.groups)
+                + " groups and the running table has "
+                + String(groups)
+            )
+
+        var out = List[AnyArray](capacity=len(self._kept))
+        for h in range(len(self._kept)):
+            out.append(
+                aggregate_group_any(
+                    ChunkedArray(copy=self.held[h]).combine(),
+                    self._late[h],
+                    found.codes,
+                    found.groups,
+                    trusted=True,
+                )
+            )
+        self.held = List[ChunkedArray]()
+        self._key_held = List[ChunkedArray]()
+        return out^
+
     def _settle(mut self) raises:
         """Turns the running state into output columns and cuts them into chunks.
 
         Raises:
-            If a mean cannot be computed from its sum and its count.
+            If a mean cannot be computed from its sum and its count, or if the
+            held columns cannot be grouped and reduced.
         """
         self.width = len(self.keys) + len(self.aggs)
         if self._fast:
@@ -2888,13 +3022,20 @@ struct Group(Movable):
         var out = List[AnyArray](capacity=self.width)
         for k in range(len(self.keys)):
             out.append(AnyArray(copy=self.state[k]))
+        var late = List[AnyArray]()
+        if len(self._kept) > 0:
+            late = self._reduce_held(len(self.state[0]))
         var base = len(self.keys)
         for a in range(len(self.aggs)):
-            var at = base + self._at[a]
-            if self.aggs[a].kind == AggKind.MEAN:
-                out.append(_mean_of(self.state[at], self.state[at + 1]))
+            var at = self._at[a]
+            if self._holds[a]:
+                out.append(AnyArray(copy=late[at]))
+            elif self.aggs[a].kind == AggKind.MEAN:
+                out.append(
+                    _mean_of(self.state[base + at], self.state[base + at + 1])
+                )
             else:
-                out.append(AnyArray(copy=self.state[at]))
+                out.append(AnyArray(copy=self.state[base + at]))
         self.state = List[AnyArray]()
 
         # Same reversed, chunk major layout `_stripe` produces, for the same

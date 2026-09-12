@@ -1797,12 +1797,52 @@ def test_a_spread_comes_back_through_sql() raises:
     assert_true(abs(s * s - v) < 1e-9, "the deviation squared is the variance")
 
 
-def test_a_grouped_count_distinct_says_the_same_thing() raises:
-    with assert_raises(contains="nunique cannot be computed a chunk at a time"):
-        _ = run(
-            "SELECT shop, count(DISTINCT qty) AS n FROM sales GROUP BY shop",
-            session(),
-        )
+def test_a_grouped_count_distinct_counts_each_group_on_its_own() raises:
+    # Every qty is different, so this checks the wiring rather than the
+    # counting, which the group node's own tests do over repeated values. Shop
+    # 1 sold five of the ten and shop 2 sold the other five.
+    var out = run(
+        (
+            "SELECT shop, count(DISTINCT qty) AS n FROM sales GROUP BY shop"
+            " ORDER BY shop"
+        ),
+        session(),
+    )
+    assert_equal(len(out), 2, "two shops")
+    same(read_back(out, "n"), [5, 5], "five each")
+
+
+def test_a_grouped_median_comes_back_through_sql() raises:
+    # Shop 1 sold 5, 3, 12, 25 and 30, whose middle is 12. Shop 2 sold 20, 40,
+    # 8, 1 and 15, whose middle is 15.
+    var out = run(
+        (
+            "SELECT shop, median(qty) AS mid FROM sales GROUP BY shop"
+            " ORDER BY shop"
+        ),
+        session(),
+    )
+    assert_equal(len(out), 2, "two shops")
+    var mid = out.column("mid").as_typed[DType.float64]()
+    assert_equal(mid[0], Float64(12.0), "shop 1")
+    assert_equal(mid[1], Float64(15.0), "shop 2")
+
+
+def test_a_grouped_spread_comes_back_through_sql() raises:
+    # Shop 1 sold 5, 3, 12, 25 and 30, whose mean is 15 and whose squared
+    # distances from it add up to 578 over four degrees of freedom.
+    var out = run(
+        (
+            "SELECT shop, var_samp(qty) AS v, stddev(qty) AS s FROM sales"
+            " GROUP BY shop ORDER BY shop"
+        ),
+        session(),
+    )
+    assert_equal(len(out), 2, "two shops")
+    var v = out.column("v").as_typed[DType.float64]()
+    var s = out.column("s").as_typed[DType.float64]()
+    assert_true(abs(v[0] - Float64(578.0) / 4.0) < 1e-9, "shop 1's variance")
+    assert_true(abs(s[0] * s[0] - v[0]) < 1e-9, "and its deviation squared")
 
 
 def test_distinct_inside_another_aggregate_is_refused_rather_than_ignored() raises:
