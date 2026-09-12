@@ -27,6 +27,19 @@ It reads the two numbers as characters and not as bytes. That is what the standa
 The clipping rule is DuckDB's and it falls out rather than being arranged. The window is a range with both ends counted from one and both ends clipped into the string, so a start of zero spends its first position outside the string and comes back one character short, a negative start counts back from the end, and a negative length runs the window backwards from the start instead of being an error. `substring('hello', 0, 2)` is `h` and `substring('hello', 2, -1)` is `h` for the same reason, which is that the clipping happens to the ends and not to the answer.
 
 The positions have to be written out. A column in either of them would mean a different window for every row, and the kernel takes one window for the whole column, so a query that asks for that is refused at the point the plan is built with a message saying that is what it asked for. `substr` is renamed to `substring` while the query is lowered, the same way `ifnull` is, since nothing after that point could tell the two apart.
+### Added: any, all, prod and product on both classes
+
+`s.prod()` and `df.any()` were the four reduction names still missing from the Python layer, and two of them could not be written by copying the one beside them. A null is a zero in the values buffer here, which is what lets the sum add straight down a column without reading the validity bitmap, and zero is the identity for addition rather than for multiplication, so a product written that way would report nothing for any column with a gap in it. The product reads the bitmap and takes the three paths per word that the extremes take. It needs no found flag though, because a product over nothing is one and one is also the answer.
+
+`any` and `all` are one kernel body with the difference a compile time parameter, so the branch is gone before anything is compiled and the return of the empty case doubles as the fallthrough. The rule that is not obvious is about NaN: a NaN is not equal to zero, so a truth loop asking only about zero would say a column of nothing but NaNs has something true in it, where pandas says False. A NaN is missing here, on both the vector path and the scalar one. Text has a truth value too, an empty string being the false one, and a product over text is refused with the reason pandas refuses it. A length of time answers both truth questions and a point in time refuses them, because a duration has a zero to be measured against and an instant does not.
+
+`product` is the same method as `prod` under a second spelling and the Python layer sends `prod` for both, so the kernel has three new codes rather than four. The grouped forms are not here and the grouped dispatch refuses the three by name, with a test asserting the refusal so that adding them later means deleting it. docs/specs/52-multiplying-and-asking-whether-a-column-is-true.md.
+
+### Fixed: axis=None on a frame answered a column instead of one number
+
+`df.sum(axis=None)` folds the whole frame to a single scalar in pandas. Here the axis translation mapped None onto the default axis without comment, so every reduction on a frame had been quietly answering a column of per column answers, for every name, since the first reduction slice.
+
+Six of them answer properly now. `sum`, `prod`, `min`, `max`, `any` and `all` are each the same question asked again of their own answers, so the fold runs the reduction a second time over the column it produced, and for a frame mixing an integer column with a float one that lands on the `-0.0` pandas gives rather than on `0.0`. `mean`, `median`, `std`, `var`, `sem` and `skew` cannot be built that way and refuse with a sentence saying so, since a mean of means is not a mean. `count`, `quantile` and `nunique` have no whole frame form in pandas either and are refused here with the message pandas uses.
 
 ### Added: COALESCE, IFNULL and NULLIF
 

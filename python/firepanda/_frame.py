@@ -2068,19 +2068,19 @@ class DataFrame(DataFrameMixin):
 
     def min(
         self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
-    ) -> Series:
+    ) -> Any:
         """The smallest value. Over the columns. One value per column."""
         try:
-            return self._reduce("min", 0.0, axis, skipna, numeric_only, 0)
+            return self._fold("min", 0.0, axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
     def max(
         self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
-    ) -> Series:
+    ) -> Any:
         """The largest value. Over the columns. One value per column."""
         try:
-            return self._reduce("max", 0.0, axis, skipna, numeric_only, 0)
+            return self._fold("max", 0.0, axis, skipna, numeric_only, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -2110,10 +2110,60 @@ class DataFrame(DataFrameMixin):
         numeric_only: bool = False,
         min_count: int = 0,
         **kwargs: Any,
-    ) -> Series:
+    ) -> Any:
         """The sum of the values. Over the columns. One value per column."""
         try:
-            return self._reduce("sum", 0.0, axis, skipna, numeric_only, min_count)
+            return self._fold("sum", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def prod(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """The product of the values. Over the columns. One value per column."""
+        try:
+            return self._fold("prod", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def product(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """The product of the values. The same as prod. Over the columns. One value per
+        column.
+        """
+        try:
+            return self._fold("prod", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def any(
+        self, *, axis: Any = 0, bool_only: bool = False, skipna: bool = True, **kwargs: Any
+    ) -> Any:
+        """Whether any value is true. Over the columns. One value per column."""
+        try:
+            return self._truth("any", axis, bool_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def all(
+        self, *, axis: Any = 0, bool_only: bool = False, skipna: bool = True, **kwargs: Any
+    ) -> Any:
+        """Whether every value is true. Over the columns. One value per column."""
+        try:
+            return self._truth("all", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
@@ -2944,6 +2994,54 @@ class Series(SeriesMixin):
         """The sum of the values. Over the rows."""
         try:
             return self._reduce("sum", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def prod(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """The product of the values. Over the rows."""
+        try:
+            return self._reduce("prod", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def product(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """The product of the values. The same as prod. Over the rows."""
+        try:
+            return self._reduce("prod", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def any(
+        self, *, axis: Any = 0, bool_only: bool = False, skipna: bool = True, **kwargs: Any
+    ) -> Any:
+        """Whether any value is true. Over the rows."""
+        try:
+            return self._truth("any", axis, bool_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def all(
+        self, *, axis: Any = 0, bool_only: bool = False, skipna: bool = True, **kwargs: Any
+    ) -> Any:
+        """Whether every value is true. Over the rows."""
+        try:
+            return self._truth("all", axis, bool_only, skipna)
         except Exception as error:
             raise translate(error) from None
 

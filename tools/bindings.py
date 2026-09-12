@@ -489,6 +489,44 @@ PLAIN: tuple[tuple[str, str], ...] = (
 )
 """The reductions whose only arguments are the four every reduction has."""
 
+TOTALS: tuple[tuple[str, str], ...] = (
+    ("sum", "The sum of the values."),
+    ("prod", "The product of the values."),
+    ("product", "The product of the values. The same as prod."),
+)
+"""The three that also take a floor on how many values they need.
+
+`product` is pandas' alias for `prod` and is written out rather than assigned,
+because the signature parity test asks the class for both names and a method
+that is the same object under two names is still two entries in the table. The
+word that crosses the boundary is `prod` for both of them, so the kernel side
+has one branch and not two."""
+
+TRUTHS: tuple[tuple[str, str], ...] = (
+    ("any", "Whether any value is true."),
+    ("all", "Whether every value is true."),
+)
+"""The two that fold with or and with and.
+
+They take `bool_only` where every other reduction takes `numeric_only`, and
+neither takes a `min_count`, which is why they are a list of their own rather
+than a flag on one of the lists above."""
+
+FOLDS = frozenset({"sum", "prod", "product", "min", "max"})
+"""The reductions on a frame that also have a whole frame form.
+
+`df.sum(axis=None)` in pandas is one number for every cell and not one per
+column, and these five spellings get it by being run a second time over their
+own per column answers, which is what `_fold` in `_pandas.py` does. `any` and
+`all` have the same form and are not listed here only because they go through
+`_truth` already. Everything not named in either place refuses `axis=None`, and
+the line between the two is whether the reduction is the same question asked of
+its own answers: a mean of means is not a mean.
+
+The return type follows the same split. A member that can answer either a series
+or a number is written as returning `Any`, and the ones that can only answer a
+series keep saying so."""
+
 SPREAD: tuple[tuple[str, str], ...] = (
     ("std", "The sample standard deviation, normalised by N-1 by default."),
     ("var", "The unbiased variance, normalised by N-1 by default."),
@@ -498,7 +536,7 @@ SPREAD: tuple[tuple[str, str], ...] = (
 
 
 def _reductions(py: str) -> tuple[Member, ...]:
-    """Writes the twelve reduction members for one class.
+    """Writes the sixteen reduction members for one class, fifteen on a series.
 
     A loop for the same reason `_operators` is one, and under the same
     restriction: what varies between these rows is a word and a parameter list,
@@ -509,10 +547,13 @@ def _reductions(py: str) -> tuple[Member, ...]:
     The signatures are pandas' own, measured rather than copied from the
     documentation, and the two classes differ in ways that are not cosmetic. A
     series returns a value and a frame returns a series of them. `quantile` and
-    `nunique` and `count` take positional arguments while the other nine are
-    keyword only. A frame's `quantile` takes two parameters a series' does not.
-    The signature parity test compares the whole list in order, so each of those
-    is written out rather than shared.
+    `nunique` and `count` take positional arguments while the rest are keyword
+    only. A frame's `quantile` takes two parameters a series' does not. The two
+    truth values take a `bool_only` where the others take a `numeric_only`, and
+    a series defaults their `axis` to zero while defaulting a sum's to None,
+    which is pandas' own inconsistency rather than one introduced here. The
+    signature parity test compares the whole list in order, so each of those is
+    written out rather than shared.
 
     Args:
         py: The class name, `DataFrame` or `Series`.
@@ -527,25 +568,43 @@ def _reductions(py: str) -> tuple[Member, ...]:
     tail = ", **kwargs: Any"
     out: list[Member] = []
 
-    for name, what in PLAIN + (("sum", "The sum of the values."),):
-        start = "0" if frame or name != "sum" else "None"
+    totals = {name for name, _ in TOTALS}
+    for name, what in PLAIN + TOTALS:
+        start = "0" if frame or name not in totals else "None"
         parts = [
             "*",
             f"axis: Any = {start}",
             "skipna: bool = True",
             "numeric_only: bool = False",
         ]
-        if name == "sum":
+        if name in totals:
             parts.append("min_count: int = 0")
-        count = "min_count" if name == "sum" else "0"
+        count = "min_count" if name in totals else "0"
+        word = "prod" if name == "product" else name
+        folds = frame and name in FOLDS
+        door = "_fold" if folds else "_reduce"
         out.append(
             Member(
                 name=name,
                 kind="method",
                 signature=", ".join(parts) + tail,
-                body=f'self._reduce("{name}", 0.0, axis, skipna, numeric_only, {count})',
+                body=f'self.{door}("{word}", 0.0, axis, skipna, numeric_only, {count})',
                 doc=f"{what} Over the {over}s. {plural}".strip(),
-                returns=gives,
+                returns="Any" if folds else gives,
+            )
+        )
+
+    for name, what in TRUTHS:
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=(
+                    "*, axis: Any = 0, bool_only: bool = False, skipna: bool = True" + tail
+                ),
+                body=f'self._truth("{name}", axis, bool_only, skipna)',
+                doc=f"{what} Over the {over}s. {plural}".strip(),
+                returns="Any",
             )
         )
 

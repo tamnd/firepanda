@@ -792,6 +792,55 @@ def _reducing_axis(axis: Any, owner: str) -> None:
         )
 
 
+_NO_FOLD_IN_PANDAS = frozenset({"count", "quantile", "nunique"})
+"""The three frame reductions pandas has no whole frame form of.
+
+`df.sum(axis=None)` in pandas is the total of every cell rather than a total per
+column, and most of the reductions have such a form. These three do not, and
+pandas answers them with the message it gives for any axis a frame does not
+have, so that is the message given back here rather than a refusal of this
+library's own."""
+
+
+def _refuses_a_fold(axis: Any, kind: str) -> None:
+    """Refuses `axis=None` for the frame reductions that cannot answer it.
+
+    `None` is a legal spelling of an axis argument and means the whole frame
+    rather than the default, so it has to be answered before `_reducing_axis`
+    reads it and turns it into a number, after which the question cannot be
+    asked any more. Getting that order wrong is what made every reduction on a
+    frame quietly answer a column where pandas answers one number.
+
+    What can be folded and what cannot is decided in `tools/bindings.py`, which
+    sends a name through `_fold` or through here, and the rule it uses is
+    whether the reduction is the same question asked of its own answers. A total
+    of totals is a total and the largest of the largest is the largest, so those
+    fold by being run twice. A mean of means is not a mean, and it would only
+    agree with pandas when the columns happen to be the same length, so the mean
+    and the median and the two dispersions and the standard error and the skew
+    refuse instead of answering a number that is right often enough to be
+    trusted.
+
+    Args:
+        axis: What was passed.
+        kind: The reduction, as the boundary spells it.
+
+    Raises:
+        InvalidArgumentError: For the three pandas refuses as well.
+        NotImplementedError: For the reductions that cannot be built out of
+            their own per column answers.
+    """
+    if axis is not None:
+        return
+    if kind in _NO_FOLD_IN_PANDAS:
+        raise InvalidArgumentError("No axis named None for object type DataFrame")
+    raise NotImplementedError(
+        f"axis=None is not supported yet for {kind}, because folding a frame to one"
+        " number means reading every cell at once and this reduction cannot be built"
+        " out of the answers it gave per column"
+    )
+
+
 def _quantile_wanted(q: Any, interpolation: str) -> float:
     """Reads the one quantile a reduction can answer.
 
@@ -4173,15 +4222,19 @@ class DataFrameMixin:
         numeric_only: bool,
         min_count: int,
     ) -> Series:
-        """Runs one of the twelve reductions down every column.
+        """Runs one of the reductions down every column.
 
         The answer is a series labelled by the column names, which is a
         different shape from the one row frame the core produces, and the turn
         between them is in `PyDataFrame.reduce` where the type the answers have
         to share is picked.
-        """
-        from ._frame import Series
 
+        A reduction that has a whole frame form arrives here through `_fold`
+        with its axis already resolved, so `axis=None` reaching this method is a
+        reduction that has no such form and `_refuses_a_fold` says which of the
+        two refusals it gets.
+        """
+        _refuses_a_fold(axis, kind)
         _reducing_axis(axis, "DataFrame")
         _held_at(
             "skipna",
@@ -4204,6 +4257,76 @@ class DataFrameMixin:
             "a floor on how many values a sum needs before it answers at all is"
             " a rule about the result rather than about the sum",
         )
+        return self._per_column(kind, param)
+
+    def _fold(
+        self,
+        kind: str,
+        param: float,
+        axis: Any,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: int,
+    ) -> Any:
+        """Runs a reduction that can also answer one number for the whole frame.
+
+        `axis=None` in pandas means every cell rather than the default axis, and
+        for these it is the per column pass run a second time over the series it
+        produced. That works because each of them is the same question asked of
+        its own answers: a total of totals is a total, the largest of the
+        largest is the largest. There is no kernel for it and there does not
+        need to be one.
+
+        The answer is a series for every other spelling of the axis, which is
+        why this returns whatever it returns rather than a series.
+        """
+        columns = self._reduce(
+            kind, param, 0 if axis is None else axis, skipna, numeric_only, min_count
+        )
+        if axis is not None:
+            return columns
+        return columns._reduce(kind, param, 0, True, False, 0)
+
+    def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
+        """Runs `any` or `all` down every column, or over the whole frame.
+
+        A separate door from `_reduce` because the two arguments are different
+        ones. There is no `numeric_only` here and no `min_count`, and there is a
+        `bool_only` that no other reduction has, so sharing a signature would
+        mean four parameters that three quarters of the callers pass a default
+        for.
+
+        Both of these have a whole frame form, and it is the second pass `_fold`
+        describes, asked here rather than there because the second pass has to
+        go through the same door as the first.
+        """
+        folding = axis is None
+        _reducing_axis(axis, "DataFrame")
+        _held_at(
+            "bool_only",
+            bool_only,
+            False,
+            "keeping only the columns that already hold booleans is a choice"
+            " about which columns are in the answer rather than about the"
+            " question being asked of each one",
+        )
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing value is skipped here as it is by every other reduction,"
+            " and pandas' other reading of it, where a gap counts as true,"
+            " is a second pass rather than a flag on this one",
+        )
+        made = self._per_column(kind, 0.0)
+        if not folding:
+            return made
+        return made._truth(kind, 0, False, True)
+
+    def _per_column(self, kind: str, param: float) -> Series:
+        """Sends one reduction across the boundary and labels what comes back."""
+        from ._frame import Series
+
         try:
             return Series._wrap(self._inner.reduce(kind, param))
         except Exception as error:
@@ -5894,7 +6017,7 @@ class SeriesMixin:
         numeric_only: bool,
         min_count: int,
     ) -> Any:
-        """Runs one of the twelve reductions over the whole column.
+        """Runs one of the reductions over the whole column.
 
         The answer is an ordinary Python number rather than a one row series,
         because that is what pandas hands back and because a caller who wrote
@@ -5932,6 +6055,32 @@ class SeriesMixin:
         except Exception as error:
             raise translate(error) from None
         return float("nan") if answer is None else answer
+
+    def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
+        """Runs `any` or `all` over the whole column.
+
+        A column has one axis, so there is no folding to do and no `axis=None`
+        question to answer: pandas takes the None as the default here, which is
+        the axis there is, and `_reducing_axis` already reads it that way.
+
+        `bool_only` is accepted and ignored, which is measured rather than
+        chosen. It names which columns to keep and a column is the only column
+        there is, so pandas takes it, does nothing with it and answers, and a
+        layer that refused it would be stricter than the thing it copies.
+        """
+        _reducing_axis(axis, "Series")
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing value is skipped here as it is by every other reduction,"
+            " and pandas' other reading of it, where a gap counts as true,"
+            " is a second pass rather than a flag on this one",
+        )
+        try:
+            return self._inner.reduce(kind, 0.0)
+        except Exception as error:
+            raise translate(error) from None
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
         """Runs the quantile over the whole column."""

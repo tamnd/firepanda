@@ -66,10 +66,12 @@ from firepanda.kernel import (
     not_equal,
     power,
     power_const,
+    prod_of,
     subtract,
     sum_of,
     take_range,
     take_rows,
+    truth_over,
 )
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.temporal import TimeUnit
@@ -114,12 +116,14 @@ from firepanda.kernel.scalar import (
     negate_scalar,
     power_const_scalar,
     power_scalar,
+    prod_scalar,
     round_to_period_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
     temporal_field_scalar,
     total_seconds_scalar,
+    truth_scalar,
 )
 from firepanda.kernel.temporal import (
     FIELD_CODES,
@@ -382,7 +386,51 @@ def nan_reductions[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
             String(avg.value, " but twin has ", avg_twin[0]),
         )
 
+    truths(a, step, seed)
+
     nan_fills(a, step, seed)
+
+
+def truths[dt: DType](a: Array[dt], step: Int, seed: UInt64) raises:
+    """Checks both truth values against their twin.
+
+    Both spellings are asked on every column rather than one of them per case,
+    because the two take different exits out of the same body and a column that
+    catches one of them is usually the column that would catch the other. The
+    answer is a single bit either way, so there is no arithmetic to be off by
+    and the comparison is exact on every dtype.
+
+    Args:
+        a: The column.
+        step: The case number.
+        seed: The seed.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Raises:
+        If either answer disagrees with the twin.
+    """
+    var ptr = a.unsafe_ptr()
+    var n = len(a)
+
+    var some = truth_over[want_all=False](ptr, a.data.validity, n)
+    if some != truth_scalar(a, False):
+        fail(
+            step,
+            seed,
+            "truth_over for any",
+            String(some, " but twin has ", truth_scalar(a, False)),
+        )
+
+    var every = truth_over[want_all=True](ptr, a.data.validity, n)
+    if every != truth_scalar(a, True):
+        fail(
+            step,
+            seed,
+            "truth_over for all",
+            String(every, " but twin has ", truth_scalar(a, True)),
+        )
 
 
 def nan_fills[dt: DType](a: Array[dt], step: Int, seed: UInt64) raises:
@@ -811,6 +859,23 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
             "mean_of",
             String(avg.value, " but twin has ", avg_twin[0]),
         )
+
+    truths(a, step, seed)
+
+    # The product is only checked on an integer dtype. Integer multiplication
+    # wraps, and wrapping multiplication is associative, so the kernel folding
+    # per lane and per morsel lands on the same bits as the twin folding left to
+    # right. Floating point multiplication is not associative, so the two would
+    # be free to disagree in the last place for reasons that are nobody's bug.
+    comptime if dt.is_integral():
+        var product = prod_of(a)
+        if product != prod_scalar(a):
+            fail(
+                step,
+                seed,
+                "prod_of",
+                String(product, " but twin has ", prod_scalar(a)),
+            )
 
     comptime if dt.is_floating_point():
         nan_reductions[dt](rng, step, seed)

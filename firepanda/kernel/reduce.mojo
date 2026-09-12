@@ -48,9 +48,12 @@ from .accum import accumulator
 from .agg import (
     extreme_over,
     mean_over,
+    prod_over,
     sum_over,
     text_edge_row,
     text_extreme_row,
+    text_truth,
+    truth_over,
 )
 from .group import (
     AggKind,
@@ -68,10 +71,13 @@ def _takes_fast_route(kind: AggKind) -> Bool:
         kind: Which reduction.
 
     Returns:
-        True for the five that `agg.mojo` covers plus the two that are counts.
+        True for the eight that `agg.mojo` covers plus the two that are counts.
     """
     return (
         kind == AggKind.SUM
+        or kind == AggKind.PROD
+        or kind == AggKind.ANY
+        or kind == AggKind.ALL
         or kind == AggKind.MEAN
         or kind == AggKind.MIN
         or kind == AggKind.MAX
@@ -186,6 +192,21 @@ def reduce_any(
 
     if col.is_string() and _reports_a_row(kind):
         return _reduce_text(col.strings(), kind)
+
+    if col.is_string() and (kind == AggKind.ANY or kind == AggKind.ALL):
+        var settled = Array[DType.bool](1)
+        settled[0] = text_truth(col.strings(), kind == AggKind.ALL)
+        return AnyArray(settled^)
+
+    if col.is_string() and kind == AggKind.PROD:
+        # pandas refuses this one and the refusal is the whole answer, so it is
+        # written here rather than left to the fall through below, which would
+        # report that the grouped chain has no branch for a product and say
+        # nothing about the column being text.
+        raise Error(
+            "reduce: a product over text has no answer, because multiplying two"
+            " strings together is not defined in pandas either"
+        )
 
     # As in `aggregate_group_any`: uint8 is in ALL, so a string column would
     # match it and a sum over a column of names would return a number taken from
@@ -477,6 +498,24 @@ def _reduce_core[
         var high = extreme_over[want_min=False](source, validity, n)
         _place(largest, high.value, high.valid)
         return AnyArray(largest^)
+
+    if kind == AggKind.PROD:
+        comptime prod_acc = accumulator(dt)
+        var multiplied = Array[prod_acc](1)
+        # Always valid, and for the same kind of reason a sum always is. An
+        # empty product is one rather than nothing, so there is no case here
+        # where the identity is standing in for an answer that was not found and
+        # no call to `_place`.
+        multiplied[0] = prod_over(source, validity, n)
+        return AnyArray(multiplied^)
+
+    if kind == AggKind.ANY or kind == AggKind.ALL:
+        var settled = Array[DType.bool](1)
+        if kind == AggKind.ALL:
+            settled[0] = truth_over[want_all=True](source, validity, n)
+        else:
+            settled[0] = truth_over[want_all=False](source, validity, n)
+        return AnyArray(settled^)
 
     raise Error("reduce: unsupported aggregation")
 

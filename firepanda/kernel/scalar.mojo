@@ -75,6 +75,61 @@ def sum_scalar[dt: DType](col: Array[dt]) -> Scalar[accumulator(dt)]:
     return total
 
 
+def prod_scalar[dt: DType](col: Array[dt]) -> Scalar[accumulator(dt)]:
+    """Multiplies the values that are there together, one at a time.
+
+    The identity is one and not zero, which is the whole difference between this
+    and the twin above and is the mistake the kernel is being checked for. A
+    null holds a zero in this package, so a product written the way the sum is
+    written would answer nothing for any column with a gap in it.
+
+    Args:
+        col: The column.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The product, which is one over a column with no values in it.
+    """
+    comptime acc = accumulator(dt)
+    var total = Scalar[acc](1)
+    for i in range(len(col)):
+        if _is_there(col, i):
+            total *= Scalar[acc](col[i])
+    return total
+
+
+def truth_scalar[dt: DType](col: Array[dt], want_all: Bool) -> Bool:
+    """Reports whether any or every value that is there is true, one at a time.
+
+    True means not zero, which is numpy's rule and therefore pandas'. A row that
+    is not there is neither true nor false and is stepped over, so a column with
+    nothing in it answers the identity of whichever operator was asked for:
+    False for any and True for every.
+
+    Args:
+        col: The column.
+        want_all: True to ask about every value, False to ask about any.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The answer.
+    """
+    for i in range(len(col)):
+        if not _is_there(col, i):
+            continue
+        var here = Bool(col[i] != Scalar[dt](0))
+        if want_all:
+            if not here:
+                return False
+        elif here:
+            return True
+    return want_all
+
+
 def count_scalar[dt: DType](col: Array[dt]) -> Int:
     """Counts the set validity bits, one at a time.
 

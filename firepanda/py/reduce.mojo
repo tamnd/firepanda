@@ -21,11 +21,17 @@ number in a formula rather than a length, and `AggKind` stores it as a float for
 that reason. Reading it as an `Int` here and widening it there would be two
 conversions to say the same thing.
 
-### The twelve that are here and the five that are not
+### The fifteen that are here and the five that are not
 
-`AggKind` has seventeen reductions and twelve of them cross through `reduction`.
+`AggKind` has twenty reductions and fifteen of them cross through `reduction`.
 `corr` and `cov` read a second column, which is a second entry point and a
 question about aligning two indexes that this does not answer yet.
+
+`product` is not a sixteenth name. pandas has it as an alias of `prod` rather
+than as a reduction of its own, so the Python layer sends the word `prod` for
+both spellings and there is one branch here for them. A word that arrives at
+this door is the name of a kernel and not the name a user typed, which is the
+point of the last paragraph below.
 
 The other three, `size`, `first` and `last`, are grouped shapes and are the
 reason for the second entry point below. `first` and `last` on a whole column
@@ -58,7 +64,7 @@ def reduction(name: String, param: Float64) raises -> AggKind:
         The kind, carrying the parameter for the four that use one.
 
     Raises:
-        Error: Tagged `value`, if the name is not one of the twelve.
+        Error: Tagged `value`, if the name is not one of the fifteen.
     """
     if name == "sum":
         return AggKind.SUM
@@ -76,6 +82,12 @@ def reduction(name: String, param: Float64) raises -> AggKind:
         return AggKind.NUNIQUE
     if name == "skew":
         return AggKind.SKEW
+    if name == "prod":
+        return AggKind.PROD
+    if name == "any":
+        return AggKind.ANY
+    if name == "all":
+        return AggKind.ALL
     if name == "var":
         return AggKind(AggKind.VAR.code, param)
     if name == "std":
@@ -90,7 +102,7 @@ def reduction(name: String, param: Float64) raises -> AggKind:
 def grouped_reduction(name: String, param: Float64) raises -> AggKind:
     """Reads the name of a reduction that is being applied to a group.
 
-    Three more names than `reduction` takes, and the same twelve otherwise.
+    Three more names than `reduction` takes, and the same fifteen otherwise.
     `first` and `last` are the first and last row of the group in the frame's own
     order, which is a reduction only because a group has an order, and `size` is
     the number of rows in it. None of the three is a whole column reduction, and
@@ -109,7 +121,7 @@ def grouped_reduction(name: String, param: Float64) raises -> AggKind:
         The kind, carrying the parameter for the four that use one.
 
     Raises:
-        Error: Tagged `value`, if the name is not one of the fifteen.
+        Error: Tagged `value`, if the name is not one of the eighteen.
     """
     if name == "size":
         return AggKind.SIZE

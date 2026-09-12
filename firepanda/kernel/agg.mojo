@@ -1,4 +1,4 @@
-"""Reductions over a column: sum, min, max, count and mean.
+"""Reductions over a column: sum, product, truth, min, max, count and mean.
 
 Two shapes of loop appear here and the difference between them is the whole
 reason this file is longer than it looks like it should be.
@@ -16,6 +16,24 @@ whole block; mixed, fall back to a bit test per value. Real columns are mostly
 one of the first two, and the third is only ever paid for on the boundary.
 
 `count_of` is a popcount and does not look at the values at all.
+
+`prod_over` looks like a sum with a different operator and is not one. The sum
+gets to ignore the validity bitmap because a null holds a zero and zero is the
+identity for addition, which is the single sentence the whole package is built
+on, and that sentence is what makes a product wrong: the identity for
+multiplication is one, so a column of prices with one gap in it would report a
+total of nothing. So the product walks the bitmap a word at a time the way the
+extremes do, and it is in the extremes' half of this file in everything except
+where it happens to be written. Unlike a minimum it has no second slot saying
+whether it found anything, because an empty product is one and that is an answer
+rather than an absence, which is also what pandas hands back.
+
+`truth_over` is `any` and `all` in one body, parameterized on which. It reads
+the same bitmap for the same reason, since a null is not false and a column of
+nulls is not all false. A present value counts as true when it is not zero, and
+on a float dtype a NaN is missing rather than true, which matters because a NaN
+is not equal to zero and a loop that forgot to ask would report that a column of
+nothing but gaps has something true in it.
 
 On a float dtype all of them step over a NaN as well as over a null, because
 that is what pandas does and a NaN is one of pandas' two spellings of missing.
@@ -336,6 +354,170 @@ def _sum_range[
     return SumResult[acc](total, skipped)
 
 
+def prod_of[dt: DType](col: Array[dt]) raises -> Scalar[accumulator(dt)]:
+    """Multiplies the non-null values of a column together.
+
+    Args:
+        col: The column.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The product, which is one for a column with no values in it.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return prod_over(col.unsafe_ptr(), col.data.validity, len(col))
+
+
+def prod_over[
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int
+) raises -> Scalar[acc]:
+    """Multiplies `n` values together, skipping the ones that are not there.
+
+    The validity is read, which is the difference between this and `sum_over`
+    and is not an optimization that was left out. A null holds a zero, so a
+    product that ignored the bitmap would answer zero for any column with a gap
+    in it, and the gap would be the answer rather than the values.
+
+    There is no second slot per morsel saying whether anything was found, which
+    is the other thing this does not borrow from the extremes. An empty product
+    is one, a product over a column that is entirely null is one, and both of
+    those are the answer pandas gives rather than a missing value, so the
+    identity is never standing in for something that was not there.
+
+    Nothing here is guarded against overflow. A product over int64 wraps, which
+    is what pandas does because numpy does, and it wraps to zero remarkably
+    quickly: two values of two to the fortieth multiply to nothing at all.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        n: How many of them.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        acc: What to accumulate in. Defaults to int64, uint64 or float64.
+
+    Returns:
+        The product, in the accumulator type.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if n <= MORSEL_ROWS:
+        return _prod_range[acc=acc](source, validity, 0, n)
+
+    var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var partials = Array[acc](count)
+
+    def multiply_up(start: Int, stop: Int) {mut partials, imm}:
+        var found = _prod_range[acc=acc](source, validity, start, stop)
+        partials.unsafe_mut_ptr().unsafe_offset(
+            start // MORSEL_ROWS
+        ).unsafe_write(found)
+
+    parallel_morsels(multiply_up, n)
+
+    var slots = partials.unsafe_ptr()
+
+    # Multiplied back together in morsel order rather than in whichever order the
+    # workers finished, so the answer does not depend on the scheduling. The note
+    # in the module docstring about floating point applies here as well.
+    var total = Scalar[acc](1)
+    for i in range(count):
+        total *= slots.unsafe_offset(i).unsafe_load()
+    return total
+
+
+def _prod_range[
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, start: Int, stop: Int
+) -> Scalar[acc]:
+    """Multiplies one range of values together, on one thread.
+
+    The three paths per validity word are the ones `_extreme_range` takes and
+    for the same reasons: a word of nothing but nulls contributes the identity
+    and is skipped whole, a word of nothing but values goes through the vector
+    unit without a bit test, and a mixed word falls back to a test per value.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        start: The first row to read. Must be a multiple of 64, which every
+            morsel boundary is.
+        stop: One past the last row to read.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        acc: What to accumulate in.
+
+    Returns:
+        The product over the range, which is one if the range holds no values.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var ptr = source
+    var total = Scalar[acc](1)
+
+    var first = start // BLOCK
+    var limit = min((stop + BLOCK - 1) // BLOCK, validity.word_count())
+    for w in range(first, limit):
+        var word = validity.unsafe_word(w)
+        if word == 0:
+            continue
+
+        var base = w * BLOCK
+        var last = base + BLOCK
+        if last > stop:
+            last = stop
+
+        if word == UInt64.MAX and last == base + BLOCK:
+            var i = base
+            var lanes = SIMD[acc, width](1)
+            while i + width <= last:
+                var chunk = ptr.unsafe_offset(i).unsafe_load[
+                    width=width
+                ]().cast[acc]()
+                comptime if dt.is_floating_point():
+                    # A NaN becomes the identity, which changes no product it is
+                    # in. There is nothing to remember on the side the way the
+                    # extremes have to, because the identity is the right answer
+                    # for a block that held nothing else.
+                    chunk = isnan(chunk).select(SIMD[acc, width](1), chunk)
+                lanes *= chunk
+                i += width
+            total *= lanes.reduce_mul()
+
+            while i < last:
+                var value = Scalar[acc](ptr.unsafe_offset(i).unsafe_load())
+                comptime if dt.is_floating_point():
+                    if isnan(value):
+                        i += 1
+                        continue
+                total *= value
+                i += 1
+            continue
+
+        for i in range(base, last):
+            if (word >> UInt64(i - base)) & 1 == 0:
+                continue
+            var value = Scalar[acc](ptr.unsafe_offset(i).unsafe_load())
+            comptime if dt.is_floating_point():
+                if isnan(value):
+                    continue
+            total *= value
+
+    return total
+
+
 def min_of[dt: DType](col: Array[dt]) raises -> AggResult[dt]:
     """Returns the smallest non-null value in a column.
 
@@ -590,6 +772,199 @@ def _better[
     return a if a > b else b
 
 
+def _truthy[dt: DType](value: Scalar[dt]) -> Bool:
+    """Says whether one value counts as true.
+
+    The rule is numpy's and therefore pandas': anything that is not zero is
+    true. Booleans are the same rule said in one fewer step, and they are
+    written out rather than compared against a zero because a bool has no zero
+    to be compared against without going through an integer first.
+
+    Args:
+        value: The value.
+
+    Parameters:
+        dt: Its dtype.
+
+    Returns:
+        True if it is not zero.
+    """
+    comptime if dt == DType.bool:
+        return Bool(value)
+    return Bool(value != Scalar[dt](0))
+
+
+def truth_over[
+    dt: DType, //, origin: ImmOrigin, want_all: Bool
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int
+) raises -> Bool:
+    """Reports whether any or every present value of `n` is true.
+
+    `any` and `all` differ by which way the fold goes and by which answer ends
+    it early, so they share a body parameterized on which one it is, the way the
+    two extremes do. Neither reads a value that is not there, and both take the
+    identity of their own operator for a range with nothing in it: an `any` over
+    no values is False and an `all` over no values is True, which is what pandas
+    answers and what anybody writing a loop by hand would get.
+
+    On a float dtype a NaN is missing rather than true. That is not a detail. A
+    NaN is not equal to zero, so a version of this that only asked about zero
+    would report that a column of nothing but gaps holds something true, and
+    pandas says it does not.
+
+    Past one morsel this runs on every core, in the shape the rest of the file
+    uses. A morsel that settled the question early still writes its own answer
+    and the serial fold over the slots is the same operator again.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        n: How many of them.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        want_all: True to ask whether every value is true, False to ask whether
+            any of them is.
+
+    Returns:
+        The answer.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if n <= MORSEL_ROWS:
+        return _truth_range[want_all=want_all](source, validity, 0, n)
+
+    var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var flags = Array[DType.uint8](count)
+
+    def reduce_one(start: Int, stop: Int) {mut flags, imm}:
+        var found = _truth_range[want_all=want_all](
+            source, validity, start, stop
+        )
+        flags.unsafe_mut_ptr().unsafe_offset(
+            start // MORSEL_ROWS
+        ).unsafe_write(UInt8(1) if found else UInt8(0))
+
+    parallel_morsels(reduce_one, n)
+
+    var slots = flags.unsafe_ptr()
+    for i in range(count):
+        var here = slots.unsafe_offset(i).unsafe_load() != 0
+        comptime if want_all:
+            if not here:
+                return False
+        else:
+            if here:
+                return True
+    return want_all
+
+
+def _truth_range[
+    dt: DType, //, origin: ImmOrigin, want_all: Bool
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, start: Int, stop: Int
+) -> Bool:
+    """Answers `any` or `all` over one range of values, on one thread.
+
+    The three paths per validity word are `_extreme_range`'s again, with one
+    difference: a word of nothing but nulls is skipped whole here because a null
+    is neither true nor false and contributes nothing either way.
+
+    The loop stops as soon as the answer cannot change, which the extremes
+    cannot do and which is most of the point of asking this question rather than
+    a stronger one. A column whose first row is true settles an `any` in one
+    read.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        start: The first row to read. Must be a multiple of 64, which every
+            morsel boundary is.
+        stop: One past the last row to read.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        want_all: True for every, False for any.
+
+    Returns:
+        The answer over the range, which is `want_all` if the range holds no
+        values at all.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var ptr = source
+    var first = start // BLOCK
+    var limit = min((stop + BLOCK - 1) // BLOCK, validity.word_count())
+    for w in range(first, limit):
+        var word = validity.unsafe_word(w)
+        if word == 0:
+            continue
+
+        var base = w * BLOCK
+        var last = base + BLOCK
+        if last > stop:
+            last = stop
+
+        if word == UInt64.MAX and last == base + BLOCK:
+            var i = base
+
+            # Booleans skip the vector unit and fall through to the loop below,
+            # as they do in `_extreme_range`. A bool column is already the
+            # answer one row at a time and there is no comparison to vectorize.
+            comptime if dt != DType.bool:
+                var zeros = SIMD[dt, width](0)
+                while i + width <= last:
+                    var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]()
+                    var real = SIMD[DType.bool, width](fill=True)
+                    comptime if dt.is_floating_point():
+                        real = ~isnan(chunk)
+                    var hits = chunk.ne(zeros) & real
+                    comptime if want_all:
+                        if (real & ~hits).reduce_or():
+                            return False
+                    else:
+                        if hits.reduce_or():
+                            return True
+                    i += width
+
+            while i < last:
+                var value = ptr.unsafe_offset(i).unsafe_load()
+                comptime if dt.is_floating_point():
+                    if isnan(value):
+                        i += 1
+                        continue
+                var here = _truthy(value)
+                comptime if want_all:
+                    if not here:
+                        return False
+                else:
+                    if here:
+                        return True
+                i += 1
+            continue
+
+        for i in range(base, last):
+            if (word >> UInt64(i - base)) & 1 == 0:
+                continue
+            var value = ptr.unsafe_offset(i).unsafe_load()
+            comptime if dt.is_floating_point():
+                if isnan(value):
+                    continue
+            var here = _truthy(value)
+            comptime if want_all:
+                if not here:
+                    return False
+            else:
+                if here:
+                    return True
+
+    return want_all
+
+
 def text_extreme_row[want_min: Bool](col: StringArray) raises -> Int:
     """Finds the row holding the smallest or largest element of a text column.
 
@@ -712,6 +1087,44 @@ def text_edge_row(col: StringArray, first: Bool) -> Int:
         if col.is_valid(i):
             return i
     return -1
+
+
+def text_truth(col: StringArray, want_all: Bool) -> Bool:
+    """Answers `any` or `all` over a text column.
+
+    A string is true when it is not empty, which is Python's rule and the one
+    pandas keeps for a column of them. A null is not a value and is stepped over
+    the same way it is in every other reduction here, so a column of nothing but
+    nulls answers False to `any` and True to `all`, exactly as a column of
+    nothing but nulls does when it holds numbers.
+
+    The empty string is the whole reason this is worth a function. A dataset
+    that spells its missing text as an empty string, which the ClickBench hits
+    table does, gets a different answer from one that spells it as a null, and
+    both answers are right.
+
+    Serial, and it stays serial because it stops as soon as the answer cannot
+    change, which is the argument `text_edge_row` makes for itself. Nothing here
+    reads a byte beyond the length of each element.
+
+    Args:
+        col: The column.
+        want_all: True to ask whether every value is non-empty, False to ask
+            whether any of them is.
+
+    Returns:
+        The answer, which is `want_all` for a column with no values in it.
+    """
+    for i in range(len(col)):
+        if not col.is_valid(i):
+            continue
+        var here = col.byte_length(i) > 0
+        if want_all:
+            if not here:
+                return False
+        elif here:
+            return True
+    return want_all
 
 
 def mean_of[dt: DType](col: Array[dt]) raises -> AggResult[DType.float64]:

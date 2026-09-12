@@ -19,6 +19,13 @@ that forgot to look at the validity would still return a plausible number, and
 the oracle would not catch it if both routes were wrong in the same way. Here
 `sum` and `count` give zero, `mean`, `min` and `max` give null, and `size` gives
 the row count, which is pandas' answer.
+
+Three reductions get none of that. The product and the two truth values have a
+whole column implementation and no grouped one, so there is no oracle to compare
+them against and every assertion about them is written out by hand against what
+a running pandas answers. The last test in that group asserts the missing
+grouped branch on purpose, so that adding it later is a test to delete rather
+than a silent change of behaviour.
 """
 
 from std.math import isnan
@@ -35,6 +42,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.lists import ALL
+from firepanda.exec import MORSEL_ROWS
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
@@ -393,6 +401,219 @@ def test_a_string_column_refuses_a_sum() raises:
     var col = strings_of(["a", "b"])
     with assert_raises():
         _ = reduce_any(AnyArray(col^), AggKind.SUM)
+
+
+def test_a_product_multiplies_only_the_values_that_are_there() raises:
+    # The one assertion in this file that would still pass if the kernel were
+    # wrong in the most likely way, so it is worth saying what the likely way is.
+    # A sum is allowed to ignore the validity bitmap because a null holds a zero,
+    # and a product that copied that loop would multiply those zeros in and
+    # answer nothing at all. The sample column has two nulls in it and 1296 is
+    # the product of the six values that are left.
+    var out = reduce_any(AnyArray(sample()), AggKind.PROD)
+    assert_true(out.is_valid(0))
+    assert_equal(out.as_typed[DType.int64]()[0], 1296)
+
+
+def test_a_product_of_no_values_is_one() raises:
+    var empty = Array[DType.int64](0)
+    var over_nothing = reduce_any(AnyArray(empty^), AggKind.PROD)
+    assert_true(over_nothing.is_valid(0))
+    assert_equal(over_nothing.as_typed[DType.int64]()[0], 1)
+
+    var blank = ints([4, 5, 6])
+    blank.set_null(0)
+    blank.set_null(1)
+    blank.set_null(2)
+    # One and not a null, which is the identity rather than a missing answer and
+    # is what pandas hands back. A minimum over the same column has no answer,
+    # and the difference is that an empty product is defined and an empty
+    # minimum is not.
+    var over_nulls = reduce_any(AnyArray(blank^), AggKind.PROD)
+    assert_true(over_nulls.is_valid(0))
+    assert_equal(over_nulls.as_typed[DType.int64]()[0], 1)
+
+
+def test_a_product_steps_over_a_nan_the_way_the_extremes_do() raises:
+    var col = floats([1.5, 0.0, -2.0, 4.0])
+    col[1] = Float64("nan")
+    var out = reduce_any(AnyArray(col^), AggKind.PROD)
+    assert_almost_equal(out.as_typed[DType.float64]()[0], -12.0)
+
+
+def test_a_product_wraps_rather_than_refusing_to_answer() raises:
+    # pandas wraps here because numpy wraps, and two values of two to the
+    # fortieth multiply to exactly nothing in int64. Copying that is the choice,
+    # since an answer that disagrees with pandas is worse than one that is
+    # obviously the wrong size.
+    var col = ints([1 << 40, 1 << 40])
+    var out = reduce_any(AnyArray(col^), AggKind.PROD)
+    assert_equal(out.as_typed[DType.int64]()[0], 0)
+
+
+def test_a_product_over_a_long_column_agrees_with_a_short_one() raises:
+    # Past one morsel the product runs on every core and the slots are folded
+    # afterwards. Every value is one except four of them, so the answer is small
+    # enough to write down and the parallel fold is still the thing being tested.
+    var rows = 300_000
+    var col = Array[DType.float64](rows)
+    for i in range(rows):
+        col[i] = 1.0
+    col[7] = 2.0
+    col[MORSEL_ROWS + 3] = 3.0
+    col[2 * MORSEL_ROWS + 11] = 5.0
+    col[rows - 1] = 7.0
+    col.set_null(9)
+    var out = reduce_any(AnyArray(col^), AggKind.PROD)
+    assert_almost_equal(out.as_typed[DType.float64]()[0], 210.0)
+
+
+def test_any_and_all_read_a_value_as_true_when_it_is_not_zero() raises:
+    var mixed = ints([0, 1, 0])
+    assert_true(
+        reduce_any(AnyArray(mixed.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_false(
+        reduce_any(AnyArray(mixed^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+    var zeros = ints([0, 0, 0])
+    assert_false(
+        reduce_any(AnyArray(zeros.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_false(
+        reduce_any(AnyArray(zeros^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_column_with_no_values_answers_the_identity_of_the_operator() raises:
+    var empty = Array[DType.int64](0)
+    assert_false(
+        reduce_any(AnyArray(empty.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    # True, and not because anything in the column was true. An `all` over
+    # nothing is the identity of and, the same way an `any` over nothing is the
+    # identity of or, and pandas answers both that way.
+    assert_true(
+        reduce_any(AnyArray(empty^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+    var blank = ints([1, 1])
+    blank.set_null(0)
+    blank.set_null(1)
+    assert_false(
+        reduce_any(AnyArray(blank.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_true(
+        reduce_any(AnyArray(blank^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_nan_is_missing_rather_than_true() raises:
+    # The one that a loop asking only about zero would get wrong, because a NaN
+    # is not equal to zero and would sail through as a value that is true.
+    var col = Array[DType.float64](2)
+    col[0] = Float64("nan")
+    col[1] = Float64("nan")
+    assert_false(
+        reduce_any(AnyArray(col.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_true(
+        reduce_any(AnyArray(col^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_boolean_column_answers_both_truth_values() raises:
+    # Two hundred rows so the whole block path runs, which for booleans is the
+    # scalar loop under it rather than the vector unit.
+    var flags = Array[DType.bool](200)
+    for i in range(200):
+        flags[i] = i % 7 == 3
+    assert_true(
+        reduce_any(AnyArray(flags.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_false(
+        reduce_any(AnyArray(flags^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_the_truth_values_fold_across_morsels() raises:
+    var rows = 300_000
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col[i] = 1
+    assert_true(
+        reduce_any(AnyArray(col.copy()), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+    # The one zero is in the last morsel, which is where a fold that stopped at
+    # the first slot rather than reading all of them would miss it.
+    col[rows - 1] = 0
+    assert_false(
+        reduce_any(AnyArray(col.copy()), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+    assert_true(
+        reduce_any(AnyArray(col^), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_text_column_reads_an_empty_string_as_false() raises:
+    var words = strings_of(["a", "b"])
+    assert_true(
+        reduce_any(AnyArray(words^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+    var one_blank = strings_of(["", "b"])
+    assert_true(
+        reduce_any(AnyArray(one_blank.copy()), AggKind.ANY).as_typed[
+            DType.bool
+        ]()[0]
+    )
+    assert_false(
+        reduce_any(AnyArray(one_blank^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+    var blanks = strings_of(["", ""])
+    assert_false(
+        reduce_any(AnyArray(blanks.copy()), AggKind.ANY).as_typed[DType.bool]()[
+            0
+        ]
+    )
+    assert_false(
+        reduce_any(AnyArray(blanks^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_text_column_of_nulls_answers_the_identity_too() raises:
+    var out = StringBuilder(capacity=2)
+    out.append_null()
+    out.append_null()
+    var col = out^.finish()
+    assert_false(
+        reduce_any(AnyArray(col.copy()), AggKind.ANY).as_typed[DType.bool]()[0]
+    )
+    assert_true(
+        reduce_any(AnyArray(col^), AggKind.ALL).as_typed[DType.bool]()[0]
+    )
+
+
+def test_a_string_column_refuses_a_product() raises:
+    var col = strings_of(["a", "b"])
+    with assert_raises(contains="multiplying two"):
+        _ = reduce_any(AnyArray(col^), AggKind.PROD)
+
+
+def test_the_three_new_reductions_have_no_grouped_form_yet() raises:
+    # Every other reduction in this file is checked against the group by on a
+    # constant key, and these three cannot be, because the grouped chain has no
+    # branch for them. That is the whole reason they are asserted by hand above,
+    # and this says out loud that the missing branch is known rather than
+    # forgotten, so that whoever adds it has a test to delete.
+    var frame = sample_frame()
+    for kind in [AggKind.PROD, AggKind.ANY, AggKind.ALL]:
+        var specs = List[AggSpec]()
+        specs.append(AggSpec("v", kind, "answer"))
+        with assert_raises(contains="no grouped one yet"):
+            _ = frame.group_by(["k"], specs^, True, False)
 
 
 def test_agg_returns_one_row_named_by_the_specs() raises:
