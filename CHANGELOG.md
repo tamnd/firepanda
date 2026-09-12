@@ -32,6 +32,8 @@ The parallel route works unchanged. `partial` runs on a worker and cannot write 
 
 A reduction that reads two columns is still refused, and by a better sentence. `corr` and `cov` want a pair and the plan node here names one column, so they say so instead of saying they cannot fold.
 
+Over an input that kept no rows a held reduction flattens a column of no rows and the kernel answers over that, so nothing about the empty case is written down in the operator. That answer is a NaN that is still valid rather than a null, which is `_quantile_core`'s rule and pandas' as well. It disagrees with the null a minimum of nothing gets and that disagreement is #170's.
+
 `Group` still refuses. Holding a column beside a key map is a change of its own and is not in here.
 
 ### Fixed: a join whose build side has no rows joins against nothing

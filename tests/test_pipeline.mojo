@@ -13,6 +13,7 @@ easy case and it hides every off by one in the prefix sums, in the reverse pop
 order the scan uses, and in the way a breaker hands its result back.
 """
 
+from std.math import isnan
 from std.testing import TestSuite, assert_equal, assert_false, assert_raises
 from std.testing import assert_true
 
@@ -1052,6 +1053,29 @@ def test_a_mean_over_an_input_that_kept_nothing_is_null() raises:
     assert_equal(len(out), 1, "one row")
     var got = out.column("average").as_typed[DType.float64]()
     assert_false(got.is_valid(0), "the mean of nothing")
+
+
+def test_a_held_column_over_an_input_that_kept_nothing_answers_anyway() raises:
+    """A reduction whose state is the values held no chunks at all here, so what
+    it flattens is a column of no rows and the kernel answers over that. Nothing
+    about the empty case is written down in the operator, which is the point of
+    the test: the answer is the kernel's and the two folds above get theirs the
+    same way.
+
+    A median of nothing is a NaN that is still valid rather than a null, which
+    is `_quantile_core`'s own rule and pandas' as well, where a float column
+    carries a missing value as a NaN. It disagrees with the null a minimum of
+    nothing gets and that disagreement is #170's, not this node's."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEDIAN, "middle"))
+    var pipeline = Pipeline(kept_nothing())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("middle").as_typed[DType.float64]()
+    assert_true(got.is_valid(0), "valid, the way pandas would have it")
+    assert_true(isnan(got[0]), "and not a number")
 
 
 def test_a_reduction_reduces_what_reached_it() raises:
