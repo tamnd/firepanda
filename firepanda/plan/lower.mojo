@@ -1769,6 +1769,13 @@ def _lower_join(
     that holds it. The work is the same work in either place and it is work
     that has to finish before the first chunk of the left side is read.
 
+    A join on more than one key pair builds the table from the first pair and
+    asks the rest afterwards, as a comparison and a filter per pair over the
+    paired chunk. That is a real plan rather than a stopgap, it is what an
+    engine does with any join condition its table cannot answer, and the cost of
+    it is the pairs it makes and drops. It is inner joins only, for the reason
+    written where it happens.
+
     Args:
         plan: The plan.
         at: The join node.
@@ -1777,9 +1784,9 @@ def _lower_join(
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If the join is one the probe operator does not do, if it has
-            anything other than one key pair of plain columns, or whatever the
-            build side itself refuses.
+        Error: If the join is one the probe operator does not do, if a key is
+            anything but a plain column, if a join on more than one key pair is
+            anything but inner, or whatever the build side itself refuses.
     """
     var kind = JoinKind(UInt8(plan.nodes[at].op))
     if kind == JoinKind.RIGHT or kind == JoinKind.OUTER:
@@ -1800,29 +1807,43 @@ def _lower_join(
         return
 
     var parts = plan.nodes[at].parts
-    if parts != 1:
+    if parts < 1:
         raise Error(
             String(
-                "lower: this operator joins on one column and this join has ",
+                "lower: a ",
+                kind,
+                " join pairs rows a key agrees on and this one has no key",
+            )
+        )
+    if parts > 1 and kind != JoinKind.INNER:
+        raise Error(
+            String(
+                "lower: this operator builds its table from one column, so a ",
+                kind,
+                " join on ",
                 parts,
                 (
-                    " key pairs, which needs the ordinal space that"
-                    " concatenating both key columns builds, and concatenating"
-                    " both sides is having them both"
+                    " key pairs would need the ordinal space that concatenating"
+                    " both key columns builds, and concatenating both sides is"
+                    " having them both. An inner join is the one kind that does"
+                    " not need it, because it keeps both sides' columns and so"
+                    " the rest of the key can be asked after the pairing"
                 ),
             )
         )
+    for i in range(parts):
+        if (
+            plan.exprs.nodes[plan.nodes[at].exprs[i]].kind != ExprKind.COLUMN
+            or plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].kind
+            != ExprKind.COLUMN
+        ):
+            raise Error(
+                "lower: this operator joins on a column on each side, and a"
+                " computed key would have to be computed on the build side too,"
+                " which is a projection over a frame rather than over a chunk"
+            )
     var left_key = plan.nodes[at].exprs[0]
-    var right_key = plan.nodes[at].exprs[1]
-    if (
-        plan.exprs.nodes[left_key].kind != ExprKind.COLUMN
-        or plan.exprs.nodes[right_key].kind != ExprKind.COLUMN
-    ):
-        raise Error(
-            "lower: this operator joins on a column on each side, and a"
-            " computed key would have to be computed on the build side too,"
-            " which is a projection over a frame rather than over a chunk"
-        )
+    var right_key = plan.nodes[at].exprs[parts]
     var left_on = plan.exprs.nodes[left_key].name.copy()
     var right_on = plan.exprs.nodes[right_key].name.copy()
 
@@ -1864,6 +1885,30 @@ def _lower_join(
             )
         )
     )
+    if parts == 1:
+        return
+    # The first key pair built the table and the rest are asked afterwards, one
+    # comparison and one filter each, over the paired chunk. Asking afterwards
+    # is not the same plan as pairing on the whole key, it pairs on less and
+    # throws the extra pairs away, but it is the same answer: a row survives
+    # only if every pair agreed, and a pair a key is null on answers null and is
+    # dropped, which is what a key that is null does anyway. Which of the pairs
+    # builds the table is what it costs, and until something here counts rows
+    # per value the first one is as good a guess as any other.
+    #
+    # An inner join is the only kind this works for. A left join has to emit the
+    # rows that matched nothing and a filter after the pairing cannot tell those
+    # from the rows it is dropping, and semi, anti and mark keep no right column
+    # to compare against in the first place.
+    var joined = len(pipe.schema)
+    for i in range(1, parts):
+        var here = plan.exprs.nodes[plan.nodes[at].exprs[i]].at
+        var there = width + plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].at
+        pipe.add(Node(Compute(here, there, BinaryOp.EQ, "mask")))
+        var keep = List[Int](capacity=joined)
+        for c in range(joined):
+            keep.append(c)
+        pipe.add(Node(Filter(joined, keep^)))
 
 
 def lower(
