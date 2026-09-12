@@ -330,8 +330,36 @@ def glyphs() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def padded() raises -> DataFrame:
+    """Six rows of text with something on the ends of most of them.
+
+    Row two carries tabs rather than spaces, which is the row that says a `TRIM`
+    asks the Zs characters and not the ones `str.strip` removes. Row four is
+    empty, row five is nothing but spaces, and row six has nothing in it at all,
+    which are the three rows an off by one in the scan over the ends gets wrong.
+    """
+    var text = StringBuilder(capacity=6)
+    text.append(String("  hi  ").as_bytes())
+    text.append(String("\tgo\t").as_bytes())
+    text.append(String("xxaxx").as_bytes())
+    text.append(String("").as_bytes())
+    text.append(String("   ").as_bytes())
+    text.append_null()
+    var word = ChunkedArray(LogicalType.STRING)
+    word.append(AnyArray(text^.finish()))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4, 5, 6]))
+    var columns = List[ChunkedArray]()
+    columns.append(word^)
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("word", LogicalType.STRING, True))
+    fields.append(Field("n", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the eleven frames the queries write by name."""
+    """A catalog holding the twelve frames the queries write by name."""
     var catalog = Catalog()
     catalog.register("words", words())
     catalog.register("glyphs", glyphs())
@@ -344,6 +372,7 @@ def session() raises -> Catalog:
     catalog.register("gaps", gaps())
     catalog.register("hits", hits())
     catalog.register("visits", visits())
+    catalog.register("padded", padded())
     return catalog^
 
 
@@ -1629,6 +1658,73 @@ def cuts(sql: StringSlice) raises -> List[String]:
     for i in range(len(col)):
         out.append("null" if not col.is_valid(i) else String(col[i]))
     return out^
+
+
+def test_a_trim_takes_the_spaces_off_both_ends() raises:
+    var got = cuts("SELECT trim(word) AS piece FROM padded")
+    assert_equal(len(got), 6, "one answer per row")
+    assert_equal(got[0], "hi", "both ends came off")
+    assert_equal(got[2], "xxaxx", "a row with nothing on its ends is as it was")
+    assert_equal(got[3], "", "an empty row stays empty")
+    assert_equal(got[4], "", "and a row that is nothing but spaces becomes one")
+    assert_equal(got[5], "null", "and a null stays a null")
+
+
+def test_a_trim_leaves_a_tab_where_duckdb_leaves_it() raises:
+    # A tab is whitespace to Python and is not one of the Zs characters, so
+    # `TRIM` hands this row back exactly as it arrived. `.str.strip()` on the
+    # same column would not, and that difference is deliberate.
+    var got = cuts("SELECT trim(word) AS piece FROM padded")
+    assert_equal(got[1], "\tgo\t", "the tabs stayed on")
+
+
+def test_the_one_sided_trims_work_on_the_end_they_name() raises:
+    var left = cuts("SELECT ltrim(word) AS piece FROM padded WHERE n = 1")
+    var right = cuts("SELECT rtrim(word) AS piece FROM padded WHERE n = 1")
+    assert_equal(left[0], "hi  ", "the far end was left alone")
+    assert_equal(right[0], "  hi", "and the near end was")
+
+
+def test_a_trim_of_a_set_takes_any_of_those_characters_off() raises:
+    var got = cuts("SELECT trim(word, 'x') AS piece FROM padded WHERE n = 3")
+    assert_equal(got[0], "a", "the characters in the set came off")
+
+
+def test_a_trim_set_is_a_set_and_not_a_prefix() raises:
+    # `trim('abcxcba', 'abc')` is `x` in DuckDB, which is the reading this
+    # matches. `apricot` loses the a and the p and stops at the r.
+    var got = cuts("SELECT trim(word, 'ap') AS piece FROM words WHERE n = 2")
+    assert_equal(got[0], "ricot", "every leading character in the set came off")
+
+
+def test_a_trim_of_a_set_leaves_the_whitespace_alone() raises:
+    var got = cuts("SELECT trim(word, 'x') AS piece FROM padded WHERE n = 1")
+    assert_equal(got[0], "  hi  ", "a set does not mean whitespace as well")
+
+
+def test_the_keyword_spelling_of_a_trim_answers_the_same() raises:
+    var written = cuts(
+        "SELECT TRIM(BOTH ' ' FROM word) AS piece FROM padded WHERE n = 1"
+    )
+    var called = cuts("SELECT trim(word, ' ') AS piece FROM padded WHERE n = 1")
+    assert_equal(written[0], "hi", "the keyword spelling ran")
+    assert_equal(called[0], "hi", "and the call spelling agrees")
+
+
+def test_a_trim_whose_set_is_a_column_is_refused_while_it_lowers() raises:
+    # There is no kernel that reads a new set for every row, so this is refused
+    # rather than answered with the first row's set for all of them.
+    with assert_raises(contains="have to be written out"):
+        _ = run("SELECT trim(word, word) AS piece FROM padded", session())
+
+
+def test_a_trim_folds_the_way_a_character_count_folds() raises:
+    # The shape that matters: a trim worked out per row and read back by the
+    # length of what came off it.
+    var got = answer(
+        "SELECT strlen(trim(word)) AS c FROM padded WHERE n < 3", "c"
+    )
+    same(got, [2, 4], "c")
 
 
 def test_a_substring_takes_the_characters_the_query_named() raises:

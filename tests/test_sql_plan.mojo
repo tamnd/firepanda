@@ -2881,6 +2881,83 @@ def test_a_character_count_of_two_things_is_refused_while_it_binds() raises:
         _ = _plan("SELECT strlen(g, g) FROM t")
 
 
+def test_a_trim_is_the_call_it_was_written_as() raises:
+    assert_equal(
+        _plan("SELECT trim(g) FROM t"),
+        "PROJECT [trim(g) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_one_sided_trims_are_calls_of_their_own() raises:
+    assert_equal(
+        _plan("SELECT ltrim(g) FROM t"),
+        "PROJECT [ltrim(g) as __expr_0]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT rtrim(g) FROM t"),
+        "PROJECT [rtrim(g) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_a_trim_carries_the_characters_it_was_asked_to_take_off() raises:
+    assert_equal(
+        _plan("SELECT trim(g, 'ab') FROM t"),
+        "PROJECT [trim(g, ab) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_keyword_spelling_of_a_trim_is_the_same_plan() raises:
+    var want = _plan("SELECT trim(g, 'x') FROM t")
+    assert_equal(_plan("SELECT TRIM(BOTH 'x' FROM g) FROM t"), want)
+    assert_equal(_plan("SELECT TRIM('x' FROM g) FROM t"), want)
+
+
+def test_a_direction_on_a_keyword_trim_picks_the_one_sided_call() raises:
+    assert_equal(
+        _plan("SELECT TRIM(LEADING FROM g) FROM t"),
+        _plan("SELECT ltrim(g) FROM t"),
+    )
+    assert_equal(
+        _plan("SELECT TRIM(TRAILING 'x' FROM g) FROM t"),
+        _plan("SELECT rtrim(g, 'x') FROM t"),
+    )
+
+
+def test_a_keyword_trim_with_nothing_before_the_from_is_a_plain_one() raises:
+    assert_equal(
+        _plan("SELECT TRIM(BOTH FROM g) FROM t"), _plan("SELECT trim(g) FROM t")
+    )
+
+
+def test_a_trim_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'trim' reads text and argument 0 is"):
+        _ = _plan("SELECT trim(a) FROM t")
+
+
+def test_a_trim_of_a_set_that_is_not_text_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'trim' reads text and argument 1 is"):
+        _ = _plan("SELECT trim(g, a) FROM t")
+
+
+def test_a_trim_of_three_things_is_refused_where_it_is_read() raises:
+    # `TRIM` has a grammar rule of its own, so a count it does not take is
+    # caught while the call is built rather than while it binds.
+    with assert_raises(contains="this one was written with 3"):
+        _ = _plan("SELECT trim(g, 'a', 'b') FROM t")
+
+
+def test_an_ltrim_of_three_things_is_refused_while_it_binds() raises:
+    # `LTRIM` is an ordinary call and reaches the binder, which is the other
+    # side of the same check.
+    with assert_raises(contains="'ltrim' takes one or two arguments"):
+        _ = _plan("SELECT ltrim(g, 'a', 'b') FROM t")
+
+
+def test_a_keyword_trim_that_says_the_set_twice_is_refused() raises:
+    with assert_raises(contains="cannot say it again after it"):
+        _ = _plan("SELECT TRIM(BOTH 'x' FROM g, 'y') FROM t")
+
+
 def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
     assert_equal(
         _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),

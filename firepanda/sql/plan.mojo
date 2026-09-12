@@ -1037,6 +1037,8 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "strlen" or name == "length" or name == "len":
         return True
+    if name == "trim" or name == "ltrim" or name == "rtrim":
+        return True
     if name == "is_null" or name == "is_not_null" or name == "like":
         return True
     return name == "and" or name == "or" or name == "not"

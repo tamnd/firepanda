@@ -276,6 +276,7 @@ from firepanda.exec.node import (
     Project,
     Reduce,
     Sort,
+    Trim,
     Truncate,
     Unique,
     Window,
@@ -554,6 +555,12 @@ def _lower_expr(
         return _lower_truncate(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and exprs.nodes[root].name == "length":
         return _lower_length(exprs, root, pipe, base, name, memo)
+    if kind == ExprKind.CALL and (
+        exprs.nodes[root].name == "trim"
+        or exprs.nodes[root].name == "ltrim"
+        or exprs.nodes[root].name == "rtrim"
+    ):
+        return _lower_trim(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "is_null"
@@ -1039,6 +1046,98 @@ def _lower_length(
         )
     var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
     pipe.add(Node(Length(at, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_trim(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `TRIM`, an `LTRIM` or an `RTRIM`.
+
+    Which of the three it is comes off the name and becomes the two end flags on
+    the node, so the three spellings are one node with different flags rather
+    than three nodes.
+
+    The set of characters is read here rather than per row, for the reason the
+    positions of a `SUBSTRING` are: it does not change from row to row, and
+    resolving it once means the node carries a string instead of an expression.
+    A trim whose set is itself a column is a different kernel and is refused
+    here rather than lowered into something that would answer the first row's
+    set for all of them.
+
+    A null set is refused for the same reason a null pattern is. The answer
+    would be a column of nulls and there is no operator that makes one of those
+    out of nothing yet.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, or the set is not
+            a string written in the query.
+    """
+    var called = String(exprs.nodes[root].name)
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 1 and len(args) != 2:
+        raise Error(
+            String(
+                "lower: ",
+                called,
+                (
+                    " reads a column and the characters to take off it, so one"
+                    " or two arguments, and was given "
+                ),
+                len(args),
+            )
+        )
+
+    var set = String("")
+    var by_set = False
+    if len(args) == 2:
+        if exprs.nodes[args[1]].kind != ExprKind.LITERAL:
+            raise Error(
+                String(
+                    "lower: the characters a ",
+                    called,
+                    (
+                        " takes off have to be written out, and argument 1 is"
+                        " an expression, which would mean a new set for every"
+                        " row and there is no kernel that does that"
+                    ),
+                )
+            )
+        if exprs.nodes[args[1]].value.is_null():
+            raise Error(
+                String(
+                    "lower: a ",
+                    called,
+                    (
+                        " with a null set is null for every row, and there is"
+                        " no operator that answers a column of nulls yet"
+                    ),
+                )
+            )
+        set = exprs.nodes[args[1]].value.as_string()
+        by_set = True
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(
+        Node(Trim(at, set, by_set, called != "rtrim", called != "ltrim", name))
+    )
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

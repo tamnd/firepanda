@@ -18,9 +18,11 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.kernel.edges import (
     is_python_space,
+    is_sql_space,
     text_pad,
     text_repeat,
     text_strip,
+    text_trim,
     text_zfill,
 )
 
@@ -114,6 +116,77 @@ def test_a_strip_set_counts_characters_and_not_bytes() raises:
     var answer = rows(text_strip(column, "é".as_bytes(), True, True, True))
     assert_equal(answer[0], "x")
     assert_equal(answer[1], "xab")
+
+
+def test_a_trim_removes_the_spaces_sql_calls_spaces() raises:
+    var column = made(["  hi  ", "　hi", "null"])
+    var answer = rows(text_trim(column, "".as_bytes(), False, True, True))
+    assert_equal(answer[0], "hi")
+    assert_equal(answer[1], "hi")
+    assert_equal(answer[2], "null")
+
+
+def test_a_trim_leaves_the_whitespace_sql_does_not_call_a_space() raises:
+    # Three of the four C0 characters `str.strip` removes and `TRIM` does not,
+    # checked against DuckDB rather than against a reading of the standard. The
+    # form feed is the fourth and is left out of here rather than written into
+    # the source of a test.
+    var column = made(["\tab\t", "\nab\n", "\rab\r"])
+    var answer = rows(text_trim(column, "".as_bytes(), False, True, True))
+    assert_equal(answer[0], "\tab\t")
+    assert_equal(answer[1], "\nab\n")
+    assert_equal(answer[2], "\rab\r")
+
+
+def test_a_strip_removes_what_a_trim_leaves() raises:
+    # The same rows through the other entry point, which is the pair of tests
+    # that says the two tables are not the same table.
+    var column = made(["\tab\t"])
+    assert_equal(
+        rows(text_strip(column, "".as_bytes(), False, True, True))[0], "ab"
+    )
+
+
+def test_a_trim_set_is_a_set_and_not_a_prefix_either() raises:
+    # `trim('abcxcba', 'abc')` is `x` in DuckDB, so SQL reads the second
+    # argument the way pandas reads it and not as a prefix to remove once.
+    var column = made(["abcxcba"])
+    assert_equal(
+        rows(text_trim(column, "abc".as_bytes(), True, True, True))[0], "x"
+    )
+
+
+def test_a_trim_of_one_end_leaves_the_other_alone() raises:
+    var column = made(["  hi  "])
+    assert_equal(
+        rows(text_trim(column, "".as_bytes(), False, True, False))[0], "hi  "
+    )
+    assert_equal(
+        rows(text_trim(column, "".as_bytes(), False, False, True))[0], "  hi"
+    )
+
+
+def test_every_sql_space_is_a_python_space_and_not_the_other_way() raises:
+    var zs = [
+        0x20,
+        0xA0,
+        0x1680,
+        0x2000,
+        0x2005,
+        0x200A,
+        0x202F,
+        0x205F,
+        0x3000,
+    ]
+    for code in zs:
+        assert_true(is_sql_space(code), "a Zs is a space to SQL")
+        assert_true(is_python_space(code), "and to Python as well")
+    var others = [0x09, 0x0A, 0x0C, 0x0D, 0x85, 0x2028, 0x2029]
+    for code in others:
+        assert_false(is_sql_space(code), "and these are not spaces to SQL")
+        assert_true(is_python_space(code), "though they are to Python")
+    assert_false(is_sql_space(0x200B), "a zero width space is not one")
+    assert_false(is_sql_space(0x180E), "and neither is a Mongolian separator")
 
 
 def test_padding_counts_characters_and_not_bytes() raises:

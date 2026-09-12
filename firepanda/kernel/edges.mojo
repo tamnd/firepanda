@@ -28,6 +28,20 @@ set `str.isspace` answers for. The table is written out below rather than being
 derived, because it is twenty nine entries that have not changed since Unicode
 4.1 and a derivation would need a property table this library does not carry.
 
+### SQL means something narrower by whitespace
+
+`TRIM` with nothing to trim removes whitespace too, and DuckDB's idea of it is
+not Python's. It is the Unicode Zs category and nothing else, seventeen code
+points, and it leaves the tab, the newline, the carriage return and the form feed
+where they are. `trim(e'\tx\t')` in DuckDB comes back with both tabs on it. That
+is not an oversight on their side, it is what the standard's `<trim character>`
+defaults to, and a column of text that arrived from a file with a trailing tab
+keeps it.
+
+So the two callers want two different tables and the difference is not one that
+can be papered over. `is_python_space` stays what pandas reaches for and
+`is_sql_space` is what `TRIM` reaches for, and `_strip` takes which one to ask.
+
 ### Why the odd character goes where it goes
 
 Padding both sides of an odd gap leaves one character over, and which side gets
@@ -109,12 +123,40 @@ def is_python_space(code: Int) -> Bool:
     )
 
 
+def is_sql_space(code: Int) -> Bool:
+    """Whether a code point is whitespace the way SQL means it.
+
+    The Unicode Zs category, which is the space, the no break space, the Ogham
+    space mark, the eleven general punctuation spaces, the narrow no break
+    space, the medium mathematical space and the ideographic space. Seventeen
+    in all, and a strict subset of the twenty nine `is_python_space` answers for.
+
+    What is not in it is the part worth knowing. The tab, the newline, the
+    carriage return and the form feed are all whitespace to Python and none of
+    them is a Zs, so `TRIM` leaves them where they are, which is what DuckDB
+    does and what the standard asks for. So does the zero width space, which is
+    not a space by any reading but the name.
+
+    Args:
+        code: The code point.
+
+    Returns:
+        True for the seventeen code points in Zs.
+    """
+    if code < 0x1680:
+        return code == 0x20 or code == 0xA0
+    if code <= 0x200A:
+        return code == 0x1680 or code >= 0x2000
+    return code == 0x202F or code == 0x205F or code == 0x3000
+
+
 def _wanted(
     bytes: Span[UInt8, _],
     at: Int,
     until: Int,
     set: Span[UInt8, _],
     by_set: Bool,
+    sql: Bool,
 ) -> Bool:
     """Whether the character at a byte offset is one the caller asked to remove.
 
@@ -124,12 +166,16 @@ def _wanted(
         until: One past the character's last byte.
         set: The characters to remove, when there are any.
         by_set: Whether to use the set rather than the whitespace table.
+        sql: Which whitespace table to use when there is no set.
 
     Returns:
         True if it should come off.
     """
     if not by_set:
-        return is_python_space(_code_point(bytes, at))
+        var code = _code_point(bytes, at)
+        if sql:
+            return is_sql_space(code)
+        return is_python_space(code)
     var width = until - at
     var k = 0
     while k < len(set):
@@ -148,24 +194,23 @@ def _wanted(
     return False
 
 
-def text_strip(
+def _strip(
     a: StringArray,
     set: Span[UInt8, _],
     by_set: Bool,
     from_left: Bool,
     from_right: Bool,
+    sql: Bool,
 ) raises -> StringArray:
     """Takes characters off one end of every element, or off both.
 
     Args:
         a: The column.
-        set: The characters to remove, as a run of bytes holding each of them
-            once or more. Read as a set of characters and not as a prefix, which
-            is the thing everybody has been bitten by at least once.
-        by_set: Whether to use the set. False means whitespace, which is what
-            pandas does when no characters are named.
+        set: The characters to remove, when there are any.
+        by_set: Whether to use the set rather than a whitespace table.
         from_left: Whether to work on the near end.
         from_right: Whether to work on the far end.
+        sql: Which whitespace table to use when there is no set.
 
     Returns:
         A text column of the same height, null wherever the input is null.
@@ -187,20 +232,81 @@ def text_strip(
             while first < last:
                 var at = character_at(bytes, first)
                 var until = character_at(bytes, first + 1)
-                if not _wanted(bytes, at, until, set, by_set):
+                if not _wanted(bytes, at, until, set, by_set, sql):
                     break
                 first += 1
         if from_right:
             while last > first:
                 var at = character_at(bytes, last - 1)
                 var until = character_at(bytes, last)
-                if not _wanted(bytes, at, until, set, by_set):
+                if not _wanted(bytes, at, until, set, by_set, sql):
                     break
                 last -= 1
         built.append(
             bytes[character_at(bytes, first) : character_at(bytes, last)]
         )
     return built^.finish()
+
+
+def text_strip(
+    a: StringArray,
+    set: Span[UInt8, _],
+    by_set: Bool,
+    from_left: Bool,
+    from_right: Bool,
+) raises -> StringArray:
+    """Takes characters off one end of every element, or off both, for pandas.
+
+    Args:
+        a: The column.
+        set: The characters to remove, as a run of bytes holding each of them
+            once or more. Read as a set of characters and not as a prefix, which
+            is the thing everybody has been bitten by at least once.
+        by_set: Whether to use the set. False means whitespace, which is what
+            pandas does when no characters are named.
+        from_left: Whether to work on the near end.
+        from_right: Whether to work on the far end.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    return _strip(a, set, by_set, from_left, from_right, sql=False)
+
+
+def text_trim(
+    a: StringArray,
+    set: Span[UInt8, _],
+    by_set: Bool,
+    from_left: Bool,
+    from_right: Bool,
+) raises -> StringArray:
+    """Takes characters off one end of every element, or off both, for SQL.
+
+    The same work `text_strip` does and the same reading of the set, which is a
+    set of characters in SQL as well: `trim('abcxcba', 'abc')` is `x` in DuckDB
+    and not `xcba`. The one difference is which characters come off when no set
+    is named, and that difference is the whole reason this is a second entry
+    point rather than a flag on the first one.
+
+    Args:
+        a: The column.
+        set: The characters to remove, as a run of bytes holding each of them
+            once or more.
+        by_set: Whether to use the set. False means the Zs characters, which is
+            what SQL removes when none are named.
+        from_left: Whether to work on the near end.
+        from_right: Whether to work on the far end.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    return _strip(a, set, by_set, from_left, from_right, sql=True)
 
 
 def text_pad(
