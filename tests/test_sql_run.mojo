@@ -1432,12 +1432,19 @@ def test_the_rest_of_the_where_still_holds_beside_an_exists() raises:
     )
 
 
-def test_an_uncorrelated_exists_says_why_it_is_refused() raises:
-    with assert_raises(contains="mark join"):
-        _ = run(
-            "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM tiers)",
-            session(),
-        )
+def test_an_uncorrelated_exists_keeps_every_row_or_none() raises:
+    # It asks whether the table has any row at all, which every outer row gets
+    # the same answer to, so it is counted under a cross join rather than joined
+    # on. The table has rows, so every row is kept.
+    assert_equal(
+        len(
+            run(
+                "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM tiers)",
+                session(),
+            )
+        ),
+        10,
+    )
 
 
 def test_a_subquery_that_answers_one_value_runs() raises:
@@ -1524,6 +1531,103 @@ def test_a_subquery_over_no_rows_keeps_no_rows() raises:
         session(),
     )
     assert_equal(len(got), 0)
+
+
+def test_an_exists_under_an_or_keeps_what_either_side_keeps() raises:
+    # The subquery has no row in it, so the `EXISTS` is false on every row and
+    # what is left is the other side of the `OR`.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > 25 OR EXISTS"
+                " (SELECT band FROM tiers WHERE band > 1000) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [30, 40],
+        "qty",
+    )
+
+
+def test_an_exists_beside_a_condition_with_nothing_to_pair_is_counted() raises:
+    # Written where the `WHERE` is the `AND` of it and other things, which is
+    # where a correlated one is a semi join. This one has no equality to pair
+    # on, so it is a value there too and it is true, because the table has rows.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS (SELECT band FROM tiers)"
+                " AND qty > 25 ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [30, 40],
+        "qty",
+    )
+
+
+def test_a_not_exists_over_an_empty_subquery_keeps_them_all() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE NOT EXISTS"
+                " (SELECT band FROM tiers WHERE band > 1000) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_an_exists_written_in_the_select_list_answers_on_every_row() raises:
+    same(
+        truths(
+            run(
+                (
+                    "SELECT qty, EXISTS (SELECT band FROM tiers WHERE"
+                    " band > 30) AS any_big FROM sales"
+                ),
+                session(),
+            ),
+            "any_big",
+        ),
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "any_big",
+    )
+
+
+def test_an_exists_over_a_fold_that_read_nothing_is_true() raises:
+    # The fold has no GROUP BY and so hands out one row whatever it read, and
+    # SQL says an EXISTS over one row is true even when the row is a null. This
+    # is the shape the semi join refuses by name and the counting gets right.
+    assert_equal(
+        len(
+            run(
+                (
+                    "SELECT qty FROM sales WHERE EXISTS"
+                    " (SELECT max(band) FROM tiers WHERE band > 1000)"
+                ),
+                session(),
+            )
+        ),
+        10,
+    )
+
+
+def test_an_exists_over_a_limit_of_none_is_false() raises:
+    assert_equal(
+        len(
+            run(
+                (
+                    "SELECT qty FROM sales WHERE EXISTS"
+                    " (SELECT band FROM tiers LIMIT 0)"
+                ),
+                session(),
+            )
+        ),
+        0,
+    )
 
 
 def test_a_cross_join_onto_one_row_runs() raises:

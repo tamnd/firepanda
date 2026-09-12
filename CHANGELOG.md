@@ -28,6 +28,20 @@ The join settles its build side once in `bind`, one array per right column, lend
 
 The multi chunk end of the same accessor is #583 and is still open. This was #611.
 
+### Added: an uncorrelated EXISTS, wherever it is written
+
+`EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
+
+An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
+
+There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
+
+Which of the two forms an `EXISTS` takes has to be settled before the `FROM` under it is lowered, so it is settled off what is written. A subquery with no equality at the top level of its `WHERE` has no key pair to give the semi join whatever its names turn out to mean, so it is a value. The same goes for the shapes the semi join refused by name, an aggregate, a `LIMIT`, a `WITH`, a set operation and a `VALUES`, each of which the value form lowers correctly: `WHERE EXISTS (SELECT max(band) FROM tiers WHERE band > 1000)` is true, because the fold hands out one row and the row being null is not the question.
+
+A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison is still refused: `ANY` and `ALL` answer the same boolean per row, but each carries a comparison that neither the mark join nor this counting is given.
+
+Part of #309.
+
 ### Fixed: a fold with no GROUP BY over no rows hands out one row
 
 `SELECT max(band) AS top FROM tiers WHERE band > 1000` answered a frame of no rows. SQL says one row with a null in it and DuckDB answers that. A group by with keys finds no groups in nothing and rightly has no rows to hand out, but a fold with no keys is one group whether or not anything was read, and the operator was treating the two the same way.
