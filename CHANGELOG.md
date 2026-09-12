@@ -8,23 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Added: CASE runs, in every shape SQL writes it
-
-`SELECT CASE WHEN qty > 10 THEN qty ELSE price END FROM sales` parsed, planned and printed, and then stopped at the physical lowering with "there is no operator that computes a conditional expression yet". There is one now, and three refusals in the SQL planner went with it, so every `CASE` firepanda can parse it can also run.
-
-The operator is `Choose` and it is three column positions and a name. The kernel it calls has been there since the beginning, because `pick` was written for the three TPC-H queries that ask for this shape and nothing had wired it to a plan. What is new is the node, the lowering and the rule for a null: a null condition takes the `ELSE` side rather than making the answer null. That is what the standard says, and it is the reason this is a node of its own rather than a thirteenth binary operation, where a null operand is a null answer.
-
-The three refusals were a `CASE` with more than one `WHEN`, a `CASE` with no `ELSE`, and the simple `CASE x WHEN v` form. All three are gone and none needed anything new. A chain of `WHEN`s lowers right to left, each arm's else side being the arm below it, so the first arm that holds is the one that answers and nothing counts arms. A missing `ELSE` is an `ELSE` of null. The simple form is the searched form with the comparison written out, with `x` lowered once and shared, which gives the null rule in both directions: a null subject falls through to the `ELSE`, and `WHEN NULL` is an arm nothing ever reaches. Both were read off DuckDB 1.5.1 first.
-
-Two sides of different types are promoted at binding and the side that moves gets a cast into a column of its own, not a conversion where it lies, since it may be an input column something else still reads at its own type. A null on one side is written down at the type the other side decided rather than being built as a column of nulls and converted.
-
-`sum(CASE WHEN shop = 1 THEN qty ELSE 0 END)` is the shape TPC-H q8, q12 and q14 are all written in, and it runs.
-
-## [0.6.75] - 2026-09-12
+## [0.6.76] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
 
-Subqueries that do not read the row asking about them. An uncorrelated `EXISTS` runs wherever it is written rather than only in the `AND` of a `WHERE`, and so does every quantified comparison, the six shapes of `ANY` and `ALL` that were refused by the planner. Two of those are exactly an `IN` and go to the joins one already used; the other four fold the subquery down to its smallest and largest row. What is left of subqueries is correlation, which is the dependent join. Alongside them, a grouped reduction whose state is the values now holds its key columns too, which finishes the operator half of the reductions 0.6.74 started.
+Two things the ClickBench suite asks for. `CASE` runs in every shape SQL writes it, which was three refusals in the planner and no operator at all behind them, and it is the shape ninety of the suite's sums are written in. And a distinct count now holds a set rather than going through a factorize and reading one integer off it, so `count(DISTINCT x)` allocates nothing per row and peaks at a quarter to a third of what it used to.
+
 ### Changed: a distinct count holds a set rather than four bytes a row it never reads
 
 `nunique` and `count(DISTINCT x)` went through `factorize`, which hands out an ordinal per distinct value and writes one back for every row. The count wants the number of ordinals handed out and nothing else, so on ten million rows that was forty megabytes written once and read never. `distinct_hashed` and `distinct_strings` are the same probe with that side removed, and `distinct_count` and `distinct_count_any` take them.
@@ -49,6 +38,24 @@ The one case that gets slower is the column whose keys are nearly all distinct, 
 `benchmarks/main.mojo` gains `reduce/nunique_wide` and `reduce/nunique_factorized`, which run the two routes over the same column so the trade above is a number in the harness rather than a claim here.
 
 Closes #610, and with it the last of #617.
+
+### Added: CASE runs, in every shape SQL writes it
+
+`SELECT CASE WHEN qty > 10 THEN qty ELSE price END FROM sales` parsed, planned and printed, and then stopped at the physical lowering with "there is no operator that computes a conditional expression yet". There is one now, and three refusals in the SQL planner went with it, so every `CASE` firepanda can parse it can also run.
+
+The operator is `Choose` and it is three column positions and a name. The kernel it calls has been there since the beginning, because `pick` was written for the three TPC-H queries that ask for this shape and nothing had wired it to a plan. What is new is the node, the lowering and the rule for a null: a null condition takes the `ELSE` side rather than making the answer null. That is what the standard says, and it is the reason this is a node of its own rather than a thirteenth binary operation, where a null operand is a null answer.
+
+The three refusals were a `CASE` with more than one `WHEN`, a `CASE` with no `ELSE`, and the simple `CASE x WHEN v` form. All three are gone and none needed anything new. A chain of `WHEN`s lowers right to left, each arm's else side being the arm below it, so the first arm that holds is the one that answers and nothing counts arms. A missing `ELSE` is an `ELSE` of null. The simple form is the searched form with the comparison written out, with `x` lowered once and shared, which gives the null rule in both directions: a null subject falls through to the `ELSE`, and `WHEN NULL` is an arm nothing ever reaches. Both were read off DuckDB 1.5.1 first.
+
+Two sides of different types are promoted at binding and the side that moves gets a cast into a column of its own, not a conversion where it lies, since it may be an input column something else still reads at its own type. A null on one side is written down at the type the other side decided rather than being built as a column of nulls and converted.
+
+`sum(CASE WHEN shop = 1 THEN qty ELSE 0 END)` is the shape TPC-H q8, q12 and q14 are all written in, and it runs.
+
+## [0.6.75] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Subqueries that do not read the row asking about them. An uncorrelated `EXISTS` runs wherever it is written rather than only in the `AND` of a `WHERE`, and so does every quantified comparison, the six shapes of `ANY` and `ALL` that were refused by the planner. Two of those are exactly an `IN` and go to the joins one already used; the other four fold the subquery down to its smallest and largest row. What is left of subqueries is correlation, which is the dependent join. Alongside them, a grouped reduction whose state is the values now holds its key columns too, which finishes the operator half of the reductions 0.6.74 started.
 
 ### Added: an uncorrelated EXISTS, wherever it is written
 
@@ -6103,7 +6110,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.75...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.76...HEAD
+[0.6.76]: https://github.com/tamnd/firepanda/releases/tag/v0.6.76
 [0.6.75]: https://github.com/tamnd/firepanda/releases/tag/v0.6.75
 [0.6.74]: https://github.com/tamnd/firepanda/releases/tag/v0.6.74
 [0.6.73]: https://github.com/tamnd/firepanda/releases/tag/v0.6.73
