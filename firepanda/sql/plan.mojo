@@ -829,6 +829,16 @@ struct _Scope(Movable):
     checked against the columns it actually has. Empty for a scan, which is
     answered by its relation instead."""
 
+    var spellings: List[List[String]]
+    """What each one's columns are called, in the schema's own spelling.
+
+    The tokenizer folds a bare name down and a schema keeps whatever the file
+    it was read from wrote, so the two only meet if something puts the spelling
+    back. This is what it is put back from, and it is filled for a scan, where
+    the spelling can be anything, and left empty for a derived table, whose
+    column names this file wrote itself and already folded.
+    """
+
     var merged: List[String]
     """The column names a `USING` or a `NATURAL` join merged."""
 
@@ -843,6 +853,7 @@ struct _Scope(Movable):
         self.names = List[String]()
         self.tables = List[Int]()
         self.columns = List[List[String]]()
+        self.spellings = List[List[String]]()
         self.merged = List[String]()
         self.pinned = List[Int]()
 
@@ -872,6 +883,79 @@ struct _Scope(Movable):
         self.names.append(name^)
         self.tables.append(table)
         self.columns.append(List[String]())
+        self.spellings.append(List[String]())
+
+    def spells(mut self, var columns: List[String]):
+        """Records how the relation just added spells its columns.
+
+        Args:
+            columns: The schema's names, in its own order.
+        """
+        self.spellings[len(self.spellings) - 1] = columns^
+
+    def spelled(self, name: StringSlice) -> String:
+        """Returns the name the schema writes for a name the query wrote.
+
+        A bare name arrives folded, and everything in reach is searched for a
+        column that folds onto it. One spelling matching is the answer. Two
+        different ones matching is a name that means two columns, and the way
+        to say so is to leave the name as it was written and let binding refuse
+        it, which is the same refusal it would give for two columns of exactly
+        that name.
+
+        Args:
+            name: The column name as the query wrote it, folded.
+
+        Returns:
+            The schema's spelling, or the name unchanged when nothing in reach
+            has one or more than one thing does.
+        """
+        var key = fold(name)
+        var found = String()
+        var hits = 0
+        for i in range(len(self.spellings)):
+            for j in range(len(self.spellings[i])):
+                ref candidate = self.spellings[i][j]
+                if fold(candidate) != key:
+                    continue
+                if hits == 0:
+                    found = candidate.copy()
+                    hits = 1
+                elif candidate != found:
+                    return String(name)
+        if hits == 0:
+            return String(name)
+        return found^
+
+    def spelled_at(self, table: Int, name: StringSlice) -> String:
+        """The same, over one relation rather than everything in reach.
+
+        Args:
+            table: The relation the name was written in front of, or that a
+                join merged the name out of.
+            name: The column name as the query wrote it, folded.
+
+        Returns:
+            The schema's spelling, or the name unchanged.
+        """
+        var key = fold(name)
+        var found = String()
+        var hits = 0
+        for i in range(len(self.tables)):
+            if self.tables[i] != table:
+                continue
+            for j in range(len(self.spellings[i])):
+                ref candidate = self.spellings[i][j]
+                if fold(candidate) != key:
+                    continue
+                if hits == 0:
+                    found = candidate.copy()
+                    hits = 1
+                elif candidate != found:
+                    return String(name)
+        if hits == 0:
+            return String(name)
+        return found^
 
     def derive(mut self, var name: String, var columns: List[String]) raises:
         """Puts the alias of a subquery in reach, with what it produces.
@@ -921,6 +1005,7 @@ struct _Scope(Movable):
             _ = self.names.pop()
             _ = self.tables.pop()
             _ = self.columns.pop()
+            _ = self.spellings.pop()
         while len(self.merged) > merged:
             _ = self.merged.pop()
             _ = self.pinned.pop()
@@ -1331,8 +1416,10 @@ def _lower_expr(
             # that decision is written into the expression.
             var whose = scope.merged_at(bare)
             if whose != NOT_IN_REACH:
-                return plan.exprs.column_of(whose, bare^)
-            return plan.exprs.column(bare^)
+                return plan.exprs.column_of(
+                    whose, scope.spelled_at(whose, bare)
+                )
+            return plan.exprs.column(scope.spelled(bare))
         if parts == 2:
             var qualifier = ast.text(ast.at(node.children, 0))
             var found = scope.find(qualifier)
@@ -1364,7 +1451,7 @@ def _lower_expr(
                 # then comes back from binding as an ambiguity rather than as
                 # the wrong column.
                 return plan.exprs.column(column^)
-            return plan.exprs.column_of(found, column^)
+            return plan.exprs.column_of(found, scope.spelled_at(found, column))
         raise Error(
             "firepanda reads a column as a name or as a table and a name so"
             " far, and a third part is either a schema or a struct field and"
@@ -2539,6 +2626,13 @@ def _table(
     var table = len(sources)
     sources.append(Schema(copy=schema))
     scope.add(called^, table)
+    # A registered frame spells its columns however the file it was read from
+    # spelled them, and the query's names arrive folded, so the scope keeps the
+    # spelling and lowering puts it back.
+    var spelling = List[String](capacity=len(schema))
+    for i in range(len(schema)):
+        spelling.append(String(schema[i].name))
+    scope.spells(spelling^)
     var origin = List[Int](length=len(schema), fill=table)
     return _From(plan.scan(name, List[String](), table), schema^, origin^)
 
@@ -5270,7 +5364,7 @@ def _block(
                     " are masks on one aggregate the plan cannot carry yet"
                 )
             keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
-            key_names.append(_name_of(ast, group.a, len(key_names)))
+            key_names.append(_name_of(ast, group.a, len(key_names), scope))
 
     # The select list is lowered before the aggregate is built, because
     # lowering it is what finds the aggregates the node has to compute.
@@ -5301,7 +5395,7 @@ def _block(
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
-            names.append(_name_of(ast, item.a, i))
+            names.append(_name_of(ast, item.a, i, scope))
 
     # A star whose EXCLUDE names every column it stood for leaves nothing, and
     # a select list of nothing is not a query. DuckDB's wording, since this is
@@ -5394,7 +5488,7 @@ def _windows(mut plan: Plan, at: Int, walk: _Walk) raises -> Int:
     return out
 
 
-def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
+def _name_of(ast: Ast, at: UInt32, place: Int, scope: _Scope) raises -> String:
     """What an output column is called when the query did not say.
 
     A bare column keeps its own name, which is what makes `SELECT a FROM t` come
@@ -5405,10 +5499,18 @@ def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
     written as and reproducing that needs the printer over the original tokens,
     which is a thing to do once rather than here.
 
+    The name a column keeps is the schema's and not the query's. `SELECT
+    advengineid FROM hits` comes back with a column called `AdvEngineID`,
+    because the query only ever wrote a folded name and the folded name is not
+    what the table calls the column. DuckDB answers this way, and the
+    alternative would be an answer whose column names change with how the
+    question was typed.
+
     Args:
         ast: The arenas.
         at: The expression.
         place: Where it sits in the list, counting from zero.
+        scope: What the FROM put in reach, for the spelling.
 
     Returns:
         The name.
@@ -5421,7 +5523,12 @@ def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
     var node = ast.exprs[Int(at)]
     var parts = ast.length(node.children)
     if node.kind == EXPR_COLUMN and parts != 0:
-        return String(ast.text(ast.at(node.children, parts - 1)))
+        var written = ast.text(ast.at(node.children, parts - 1))
+        if parts == 2:
+            var found = scope.find(ast.text(ast.at(node.children, 0)))
+            if found != NOT_IN_REACH and found != DERIVED:
+                return scope.spelled_at(found, written)
+        return scope.spelled(written)
     return String("__expr_", place)
 
 
@@ -5494,7 +5601,7 @@ def _group_by_all(
         if _has_aggregate(ast, item.a):
             continue
         keys.append(_lower_expr(ast, item.a, plan, walk, scope, False))
-        key_names.append(_name_of(ast, item.a, len(key_names)))
+        key_names.append(_name_of(ast, item.a, len(key_names), scope))
 
 
 def _expand(

@@ -202,8 +202,29 @@ def gaps() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def hits() raises -> DataFrame:
+    """Four rows under ClickBench's spelling, which is not the query's.
+
+    A parquet file writes its column names however it likes and `AdvEngineID`
+    is how that suite writes one. The tokenizer folds a bare name down, so
+    nothing a query writes bare arrives spelled this way and the resolver is
+    what has to bridge it.
+    """
+    var engine = ChunkedArray(LogicalType.INT64)
+    engine.append(numbers([0, 2, 2, 3]))
+    var region = ChunkedArray(LogicalType.INT64)
+    region.append(numbers([7, 7, 9, 9]))
+    var columns = List[ChunkedArray]()
+    columns.append(engine^)
+    columns.append(region^)
+    var fields = List[Field]()
+    fields.append(Field("AdvEngineID", LogicalType.INT64))
+    fields.append(Field("RegionID", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the seven frames under the names the queries write."""
+    """A catalog holding the eight frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
@@ -212,6 +233,7 @@ def session() raises -> Catalog:
     catalog.register("dupes", dupes())
     catalog.register("gappy", gappy())
     catalog.register("gaps", gaps())
+    catalog.register("hits", hits())
     return catalog^
 
 
@@ -2690,6 +2712,70 @@ def test_a_rename_changes_the_name_and_nothing_else() raises:
         [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
         "the quantities under the new name",
     )
+
+
+def test_a_column_is_found_however_the_query_spells_it() raises:
+    same(
+        answer("SELECT AdvEngineID FROM hits", "AdvEngineID"),
+        [0, 2, 2, 3],
+        "written the way the schema writes it",
+    )
+    same(
+        answer("SELECT advengineid FROM hits", "AdvEngineID"),
+        [0, 2, 2, 3],
+        "written flat",
+    )
+    same(
+        answer("SELECT ADVENGINEID FROM hits", "AdvEngineID"),
+        [0, 2, 2, 3],
+        "written shouting",
+    )
+
+
+def test_a_quoted_name_folds_too_because_duckdb_folds_it() raises:
+    same(
+        answer('SELECT "advengineid" FROM hits', "AdvEngineID"),
+        [0, 2, 2, 3],
+        "quoting changes what a name is and not how it compares",
+    )
+
+
+def test_the_answer_keeps_the_schema_spelling() raises:
+    var out = run("SELECT advengineid FROM hits", session())
+    assert_equal(
+        String(out.schema[0].name),
+        "AdvEngineID",
+        "the column comes back called what it is called",
+    )
+
+
+def test_a_folded_name_works_everywhere_a_name_works() raises:
+    var out = run(
+        (
+            "SELECT regionid, SUM(advengineid) AS s FROM hits"
+            " WHERE advengineid <> 0 GROUP BY regionid ORDER BY s DESC"
+        ),
+        session(),
+    )
+    same(read_back(out, "s"), [5, 2], "the filter, the grouping and the sum")
+    same(
+        read_back(out, "RegionID"),
+        [9, 7],
+        "the key, spelled as the schema does",
+    )
+
+
+def test_a_qualified_name_folds_as_well() raises:
+    same(
+        answer("SELECT h.advengineid FROM hits AS h", "AdvEngineID"),
+        [0, 2, 2, 3],
+        "written in front of an alias",
+    )
+
+
+def test_a_name_nothing_has_still_says_so() raises:
+    with assert_raises(contains="there is no column named"):
+        _ = run("SELECT advengineidx FROM hits", session())
 
 
 def main() raises:
