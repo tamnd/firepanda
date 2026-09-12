@@ -1979,6 +1979,81 @@ def test_a_subquery_in_a_select_list_runs() raises:
     )
 
 
+def test_a_correlated_subquery_folds_per_outer_row() raises:
+    # Shop one sold 75 and shop two sold 84, so both floors are under their
+    # own shop's total. Shop three sold nothing, its total is a null, and a
+    # comparison against a null keeps no row.
+    same(
+        answer(
+            (
+                "SELECT shop FROM shops WHERE floor < (SELECT sum(qty) FROM"
+                " sales WHERE sales.shop = shops.shop)"
+            ),
+            "shop",
+        ),
+        [1, 2],
+        "shop",
+    )
+
+
+def test_a_correlated_subquery_in_a_select_list_runs() raises:
+    var got = run(
+        (
+            "SELECT shop, (SELECT sum(qty) FROM sales WHERE sales.shop ="
+            " shops.shop) AS total FROM shops"
+        ),
+        session(),
+    )
+    same(read_back(got, "shop"), [1, 2, 3], "shop")
+    same(gapped(got, "total"), [75, 84, -1], "total")
+
+
+def test_a_correlated_subquery_keeps_its_own_condition_under_the_fold() raises:
+    # `qty > 10` reads the subquery's table alone, so it runs once under the
+    # aggregate rather than once per outer row, and the answer is the same.
+    var got = run(
+        (
+            "SELECT shop, (SELECT sum(qty) FROM sales WHERE sales.shop ="
+            " shops.shop AND qty > 10) AS big FROM shops"
+        ),
+        session(),
+    )
+    same(gapped(got, "big"), [67, 75, -1], "big")
+
+
+def test_a_correlated_subquery_may_compute_over_its_fold() raises:
+    var got = run(
+        (
+            "SELECT shop, (SELECT max(qty) + 1 FROM sales WHERE sales.shop ="
+            " shops.shop) AS top FROM shops"
+        ),
+        session(),
+    )
+    same(gapped(got, "top"), [31, 41, -1], "top")
+
+
+def test_a_correlated_subquery_that_counts_is_refused_by_name() raises:
+    with assert_raises(contains="a count of nothing is zero"):
+        _ = run(
+            (
+                "SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop ="
+                " shops.shop) AS n FROM shops"
+            ),
+            session(),
+        )
+
+
+def test_a_correlated_subquery_read_another_way_is_refused_by_name() raises:
+    with assert_raises(contains="which is the dependent join"):
+        _ = run(
+            (
+                "SELECT shop FROM shops WHERE floor < (SELECT sum(qty) FROM"
+                " sales WHERE sales.shop > shops.shop)"
+            ),
+            session(),
+        )
+
+
 def test_a_subquery_over_no_table_runs() raises:
     same(
         answer(

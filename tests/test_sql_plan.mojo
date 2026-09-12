@@ -1932,10 +1932,95 @@ def test_a_subquery_that_hands_out_two_columns_is_refused() raises:
         _ = _plan("SELECT a FROM t WHERE a > (SELECT max(b), min(k) FROM u)")
 
 
-def test_a_correlated_one_is_refused_by_the_scope_it_lowers_against() raises:
-    with assert_raises(contains="nothing in this query is called 't'"):
-        _ = _plan(
+def test_a_correlated_one_is_a_group_under_a_left_join() raises:
+    # The subquery is asked once rather than once per outer row. The equality
+    # that made it correlated is the group key and the join key, and the fold
+    # comes out of the aggregate under a name the outer query cannot collide
+    # with.
+    assert_equal(
+        _plan(
             "SELECT a FROM t WHERE a > (SELECT max(k) FROM u WHERE u.b = t.b)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a > __sub_0\n"
+            "    JOIN left [b = __by_0]\n"
+            "      SCAN t []\n"
+            "      PROJECT [b as __by_0, __agg_0 as __sub_0]\n"
+            "        AGGREGATE [b] -> [max(k)]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_a_correlated_one_in_a_select_list_is_the_same_join() raises:
+    assert_equal(
+        _plan("SELECT a, (SELECT max(k) FROM u WHERE u.b = t.b) AS m FROM t"),
+        (
+            "PROJECT [a, __sub_0 as m]\n"
+            "  JOIN left [b = __by_0]\n"
+            "    SCAN t []\n"
+            "    PROJECT [b as __by_0, __agg_0 as __sub_0]\n"
+            "      AGGREGATE [b] -> [max(k)]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_a_correlated_one_puts_its_own_condition_under_the_fold() raises:
+    # `k > 2` reads the subquery's table and nothing else, so it runs once
+    # over that table rather than once per pairing.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE a > (SELECT avg(k) + 1 FROM u WHERE u.b ="
+            " t.b AND k > 2)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a > __sub_0\n"
+            "    JOIN left [b = __by_0]\n"
+            "      SCAN t []\n"
+            "      PROJECT [b as __by_0, __agg_0 + 1 as __sub_0]\n"
+            "        AGGREGATE [b] -> [mean(k)]\n"
+            "          FILTER k > 2\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_a_correlated_one_that_counts_is_refused_by_name() raises:
+    # The count bug. A left join answers null for an outer row whose group has
+    # no rows in it, and a count over nothing is zero rather than null.
+    with assert_raises(contains="a count of nothing is zero"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT count(k) FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_a_correlated_one_read_another_way_is_refused_by_name() raises:
+    with assert_raises(contains="which is the dependent join"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT max(k) FROM u WHERE u.k > t.b)"
+        )
+
+
+def test_a_correlated_one_that_does_not_fold_is_refused_by_name() raises:
+    with assert_raises(contains="a fold answers one value per group"):
+        _ = _plan("SELECT a FROM t WHERE a > (SELECT k FROM u WHERE u.b = t.b)")
+
+
+def test_a_correlated_one_with_its_own_group_by_is_refused_by_name() raises:
+    with assert_raises(contains="the group this builds is the correlation"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT max(k) FROM u WHERE u.b = t.b"
+            " GROUP BY z)"
+        )
+
+
+def test_an_outer_name_nothing_is_called_is_still_refused() raises:
+    with assert_raises(contains="nothing in this query is called 'v'"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT max(k) FROM u WHERE u.b = v.b)"
         )
 
 
