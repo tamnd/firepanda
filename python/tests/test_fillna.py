@@ -132,6 +132,23 @@ def test_a_number_does_not_go_into_a_column_of_text(firepanda):
         frame(firepanda).fillna({"s": 0})
 
 
+def test_a_nan_is_missing_and_is_filled(firepanda):
+    """pandas has no other way to spell missing in a float, so nor has this."""
+    made = firepanda.Series([1.0, float("nan"), None])
+    assert made.fillna(0.0).tolist() == [1.0, 0.0, 0.0]
+
+
+def test_a_nan_in_a_frame_is_filled_too(firepanda):
+    made = firepanda.DataFrame({"v": [1.0, float("nan"), None]})
+    assert made.fillna(0.0)["v"].tolist() == [1.0, 0.0, 0.0]
+
+
+def test_a_column_whose_only_gap_is_a_nan_is_not_a_clean_column(firepanda):
+    """The count of what is missing is the count `isna` would agree with."""
+    made = firepanda.Series([1.0, float("nan")])
+    assert made.fillna(0.0).tolist() == [1.0, 0.0]
+
+
 def test_a_category_column_takes_one_of_its_own_categories(firepanda):
     made = firepanda.Series(["b", "a", None, "c"]).astype("category")
     answered = made.fillna("a")
@@ -229,6 +246,7 @@ def test_both_libraries_answer_the_same_things(firepanda):
         lambda d: d["f"].fillna(0.0).tolist(),
         lambda d: d["s"].fillna("z").tolist(),
         lambda d: d["s"].astype("category").fillna("a").tolist(),
+        lambda d: d["f"].fillna(float("nan")).isna().tolist(),
         lambda d: list(d["s"].astype("category").fillna("a").cat.categories),
     ]
     for ask in questions:

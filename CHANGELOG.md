@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a NaN is missing to a fill, the way it is to isna and dropna
+
+`Series.null_count` counts the cleared validity bits plus the NaNs, and says in its own docstring that this is the line between the two halves of the library, where an `Array` is Arrow and answers what is in the buffers and a `Series` is pandas and answers what pandas would say. `isna` followed that rule and so did `dropna`, and `fill_null` did not, so a float column that reported two missing rows came back from a fill with one of them still missing and the two calls disagreed about the same column.
+
+The kernel is unchanged and is not wrong. A coalesce reads a validity bit and nothing else, which is Arrow's question and also SQL's, where `COALESCE` over a NaN answers the NaN. The fix is in `Series.fill_null`, which clears the validity of the NaN rows before calling it, using `present_bitmap`, the one function here that knows what missing means for a float. It costs one pass and no copy of the values, since a buffer is shared until something writes through it and only the bitmap beside them is new. `Frame.fill_null` now goes through the series call rather than to the kernel, so there is one place this happens rather than two.
+
 ## [0.6.80] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

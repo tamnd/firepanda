@@ -78,6 +78,7 @@ from firepanda.kernel.nulls import (
     is_null_any,
     missing_count_any,
     nan_over_nulls,
+    present_bitmap_any,
     widen_for_missing,
 )
 from firepanda.kernel.parse_time import (
@@ -1382,6 +1383,16 @@ struct Series(Copyable, Movable, Sized, Writable):
         is how filling with a scalar is spelled, and it is the same operation as
         filling from a column rather than a second one.
 
+        A NaN in a float column is filled, the way `null_count` counts it and
+        `is_null` reports it, because this is the `Series` layer and a `Series`
+        says what pandas would say. The kernel underneath reads a validity bit
+        and nothing else, which is right for it, since that is Arrow's question
+        and SQL's `COALESCE` asks it. The two are joined here by handing the
+        kernel a bitmap that has the NaN rows cleared, which `present_bitmap`
+        builds and which is the one place that rule is written down. The values
+        are not copied to do it: a buffer is shared until something writes
+        through it and only the bitmap beside them is new. See #170.
+
         Args:
             other: The fallback, of the same dtype and either as tall as the
                 series or one row. Its name is ignored; the result keeps this
@@ -1394,9 +1405,13 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the dtypes differ, if the fallback is neither one row nor as tall
             as the series, or if the dtype has no physical layout.
         """
-        return self._relabelled(
-            self.name, coalesce_any(self.values, other.values)
-        )
+        if not self.values.type.is_float():
+            return self._relabelled(
+                self.name, coalesce_any(self.values, other.values)
+            )
+        var mine = AnyArray(copy=self.values)
+        mine.data.validity = present_bitmap_any(self.values)
+        return self._relabelled(self.name, coalesce_any(mine, other.values))
 
     def fill_forward(self, limit: Int = 0) raises -> Self:
         """Returns the series with each null taking the last present value before it.
