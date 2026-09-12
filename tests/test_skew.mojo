@@ -121,7 +121,7 @@ def test_the_head_is_ordered_by_frequency() raises:
 
 
 def test_a_column_with_no_head_is_all_distinct() raises:
-    """The nearly unique case, which is what q31 actually groups on.
+    """The nearly unique case, which is what q32 actually groups on.
 
     The tail is a counter, so below the host space every row is its own group.
     """

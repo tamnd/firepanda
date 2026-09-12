@@ -1,10 +1,10 @@
 """What a skewed key does to the table, and where the time goes when it does.
 
-ClickBench q31 groups a hundred million rows by `ClientIP`. Every number the hash
-table has ever been tuned against came from a uniform column, and an address
-column is not one: a few addresses account for a large share of the rows, most
-are seen once, and all of them sit inside a handful of networks so the top of
-every key is drawn from a set of eight. tamnd/firepanda#484 asks what that costs
+ClickBench q31 and q32 group a hundred million rows by `WatchID` and `ClientIP`.
+Every number the hash table has ever been tuned against came from a uniform
+column, and an address column is not one: a few addresses account for a large
+share of the rows, most are seen once, and all of them sit inside a handful of
+networks so the top of every key is drawn from a set of eight. tamnd/firepanda#484 asks what that costs
 before anything is changed to make it cheaper, which is the right order, because
 the answer might be that the table is fine.
 
@@ -29,7 +29,7 @@ Four columns, all the same height, so the rows are comparable down the page:
     uniform      every row its own group, keys spread with a stride
     head         a thousand hosts per network taking half the rows
     heavy        a thousand hosts per network taking nine tenths of them
-    tail         no head at all, which is the nearly unique case q31 is
+    tail         no head at all, which is the nearly unique case q32 is
 
 The two subtractions are subtractions of separate measurements, so on a loaded
 machine at a small row count either of them can come out negative. That is the
