@@ -386,6 +386,45 @@ def test_a_group_by_folds_the_rows_into_groups() raises:
     same(read_back(out, "total"), [75, 84], "total")
 
 
+def test_a_group_by_all_folds_the_same_groups() raises:
+    var out = run(
+        "SELECT shop, SUM(qty) AS total FROM sales GROUP BY ALL ORDER BY shop",
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2], "shop")
+    same(read_back(out, "total"), [75, 84], "total")
+
+
+def test_a_group_by_all_with_nothing_to_fold_keeps_one_of_each() raises:
+    same(
+        answer("SELECT shop FROM sales GROUP BY ALL ORDER BY shop", "shop"),
+        [1, 2],
+        "the two shops, once each",
+    )
+
+
+def test_a_group_by_all_over_a_star_groups_by_the_whole_row() raises:
+    # Every column of the row is a key, so nothing folds and every row of a
+    # table with no repeat in it comes back.
+    var out = run("SELECT * FROM shops GROUP BY ALL ORDER BY shop", session())
+    same(read_back(out, "shop"), [1, 2, 3], "shop")
+    same(read_back(out, "floor"), [11, 22, 33], "floor")
+
+
+def test_an_order_by_all_sorts_on_every_column_it_produced() raises:
+    var out = run("SELECT qty, shop FROM sales ORDER BY ALL", session())
+    same(read_back(out, "qty"), [1, 3, 5, 8, 12, 15, 20, 25, 30, 40], "qty")
+    same(read_back(out, "shop"), [2, 1, 1, 2, 1, 2, 2, 1, 1, 2], "shop")
+
+
+def test_an_order_by_all_descending_reverses_all_of_them() raises:
+    same(
+        answer("SELECT band FROM tiers ORDER BY ALL DESC", "band"),
+        [99, 40, 20, 3],
+        "band",
+    )
+
+
 def test_a_having_drops_a_whole_group() raises:
     var out = run(
         (

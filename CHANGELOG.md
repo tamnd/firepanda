@@ -32,6 +32,14 @@ The last key never goes, even when it is constant. An aggregate with no keys is 
 
 `SELECT g, count(*) FROM t GROUP BY g HAVING count(*) > 100` wrote the count twice and meant it once, so the aggregate counted every group twice and answered the same number both times. The SQL lowering now compares the shape of each fold against the ones it has already recorded and hands back the slot that is there. ClickBench q27 and q28 are that query. It applies to a select list that repeats a fold as well, which is where the same thing happens without a HAVING in sight.
 
+### Added: GROUP BY ALL and ORDER BY ALL
+
+Both were parsed and printed already and refused by the planner. They lower now, and neither is a new node.
+
+`GROUP BY ALL` is the select list read twice. Every item that is not an aggregate becomes a group key, in the order the select list has them, so `SELECT shop, sum(qty) FROM sales GROUP BY ALL` builds the same plan as the same query with `GROUP BY shop` written out. A select list with no aggregate in it groups by its whole row, which is the answer a distinct gives, and a select list that is all aggregates has no key left and is the one row a bare aggregate produces. A star is expanded the same way the select list expands it, so `SELECT * FROM t GROUP BY ALL` groups by every column rather than being refused. The refusal that is left names `GROUPING SETS`, `CUBE` and `ROLLUP`, which really are masks on one aggregate that the plan cannot carry yet.
+
+`ORDER BY ALL` sorts on every output column, left to right, with the direction and the nulls placement written once and applied to all of them. The names come off the plan rather than out of the select list, so a renamed column sorts under its new name and an `ORDER BY ALL` after a set operation sorts the stack rather than either arm.
+
 ### Added: EXCEPT and INTERSECT
 
 `SELECT qty FROM sales EXCEPT SELECT band FROM tiers` and the same query written `INTERSECT` were both refused with a note saying a difference is not a stack of its inputs. They run now. Lowering stacks the two arms with a column saying which arm each row came from, groups over the query's own columns so that every copy of a row lands in one group whichever arm it came from, and reads the smallest and the largest tag in each group back to say which arms had it. Both arms is a smallest of zero and a largest of one, the left arm alone is zero and zero, and the right arm alone is one and one, so an intersection keeps a group whose two tags differ and a difference keeps a group whose largest tag is zero.
