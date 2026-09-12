@@ -225,6 +225,9 @@ comptime _NULLIF: UInt8 = 18
 comptime _SUBSTRING: UInt8 = 75
 """`SubstringExpression`, which is a call with two ways of spelling it."""
 
+comptime _EXTRACT: UInt8 = 76
+"""`ExtractExpression`, which is `date_part` written with a keyword."""
+
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
 comptime _NULL: UInt8 = 21
@@ -677,6 +680,7 @@ struct Transform(Movable):
         self._set(names, "CoalesceExpression", _COALESCE)
         self._set(names, "NullIfExpression", _NULLIF)
         self._set(names, "SubstringExpression", _SUBSTRING)
+        self._set(names, "ExtractExpression", _EXTRACT)
         self._set(names, "StringLiteral", _STRING)
         self._set(names, "NumberLiteral", _NUMBER)
         self._set(names, "NullLiteral", _NULL)
@@ -841,7 +845,6 @@ struct Transform(Movable):
         # The functions SQL spells with keywords inside the parentheses. The
         # message fills in whichever one it was, so they share an entry.
         var special: List[StaticString] = [
-            "ExtractExpression",
             "TrimExpression",
             "PositionExpression",
             "OverlayExpression",
@@ -1664,6 +1667,9 @@ struct Transform(Movable):
 
         if action == _SUBSTRING:
             return self._substring(tree, sql, node, ast, work, at)
+
+        if action == _EXTRACT:
+            return self._extract(tree, sql, node, ast, work, at)
 
         if action == _NULLIF:
             # `NULLIF Parens(NullIfArguments)`, and the arguments rule holds
@@ -2567,6 +2573,57 @@ struct Transform(Movable):
         for i in range(1, len(items)):
             arguments.append(work.value(items[i]))
         return ast.call("substring", arguments, 0, at)
+
+    def _extract(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        at: UInt32,
+    ) raises -> UInt32:
+        """Builds an `EXTRACT` as the `date_part` call DuckDB says it is.
+
+        `EXTRACT(year FROM d)` and `date_part('year', d)` are the same function
+        and the second is the one DuckDB shows in a plan, so the first becomes
+        the second here and nothing after this point has two shapes to handle.
+
+        The field is a word in the query and a string in the call. The grammar
+        takes it three ways, as one of thirteen keywords, as any identifier, or
+        as a string already, and all three arrive as the same lower case text.
+        Folding the case is this side's job because the rest of SQL folds a bare
+        name down and the field name is written like one.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ExtractExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the value of the column.
+            at: The token the call starts at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the column is something this has no case for.
+        """
+        # Past `EXTRACT` and past the parentheses, to `ExtractArgument 'FROM'
+        # Expression`. The keyword is not a child, so there are two.
+        var kids = tree.children(self._only(tree, self._only(tree, node)))
+        var token = tree.tokens[Int(tree.nodes[Int(kids[0])].token_start)]
+        var field: String
+        if token.kind == TOKEN_STRING:
+            field = _string_value(sql, token)
+        else:
+            field = String(token_text(sql, token))
+
+        var column = work.value(kids[1])
+        var arguments = List[UInt32]()
+        arguments.append(ast.literal(LITERAL_STRING, field.lower(), at))
+        arguments.append(column)
+        return ast.call("date_part", arguments, 0, at)
 
     def _named_call(
         self,

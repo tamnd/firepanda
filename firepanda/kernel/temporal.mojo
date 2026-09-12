@@ -1012,6 +1012,67 @@ def field_named(name: StringSlice) raises -> TemporalField:
     )
 
 
+def sql_field_named(name: StringSlice) raises -> TemporalField:
+    """Looks a field up by the name SQL gives it.
+
+    A second table rather than a second spelling in the first one, because the
+    two naming systems disagree about more than spelling. `dayofweek` means
+    Monday is zero in pandas and Sunday is zero in DuckDB, and `microsecond`
+    means the fraction in pandas and the whole of the seconds and the fraction
+    in DuckDB. A single table with both spellings in it would answer those with
+    the wrong number and look right doing it, so the names that mean different
+    things in the two systems are not in here at all and the caller deals with
+    them.
+
+    What is in here is the subset where the two agree exactly. `week` is the ISO
+    week in DuckDB, which is what `isoweek` is here, and `doy` and `dayofyear`
+    are the same count in both. The rest of DuckDB's specifiers, which is
+    `epoch`, `decade`, `century`, `millennium`, `era`, `timezone` and the two
+    cumulative fraction fields, have no field code here and are refused by name
+    where the query is lowered rather than silently answered with something
+    close.
+
+    Args:
+        name: The specifier, already folded to lower case.
+
+    Returns:
+        The field.
+
+    Raises:
+        Error: If nothing here is called that.
+    """
+    if name == "year" or name == "years":
+        return TemporalField(FIELD_YEAR)
+    if name == "month" or name == "months" or name == "mon":
+        return TemporalField(FIELD_MONTH)
+    if name == "day" or name == "days":
+        return TemporalField(FIELD_DAY)
+    if name == "hour" or name == "hours":
+        return TemporalField(FIELD_HOUR)
+    if name == "minute" or name == "minutes" or name == "min":
+        return TemporalField(FIELD_MINUTE)
+    if name == "second" or name == "seconds" or name == "sec":
+        return TemporalField(FIELD_SECOND)
+    if name == "quarter" or name == "quarters":
+        return TemporalField(FIELD_QUARTER)
+    if name == "dayofyear" or name == "doy":
+        return TemporalField(FIELD_DAY_OF_YEAR)
+    if (
+        name == "week"
+        or name == "weeks"
+        or name == "weekofyear"
+        or name == "isoweek"
+    ):
+        return TemporalField(FIELD_ISO_WEEK)
+    if name == "isoyear":
+        return TemporalField(FIELD_ISO_YEAR)
+    if name == "isodow":
+        return TemporalField(FIELD_ISO_DAY)
+    raise Error(
+        "temporal: there is no field SQL calls " + String(name) + " yet"
+    )
+
+
 def temporal_field(a: AnyArray, field: TemporalField) raises -> AnyArray:
     """Reads one calendar or clock field out of a temporal column.
 

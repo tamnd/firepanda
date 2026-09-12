@@ -734,8 +734,6 @@ def test_a_call_spelled_with_keywords_refuses_under_its_own_name() raises:
     # it was, which is what the `{}` slot is for.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="EXTRACT yet"):
-        _ = _printed("SELECT EXTRACT(YEAR FROM x)", g, rules)
     with assert_raises(contains="TRIM yet"):
         _ = _printed("SELECT TRIM(BOTH ' ' FROM a)", g, rules)
     with assert_raises(contains="POSITION yet"):
@@ -744,15 +742,19 @@ def test_a_call_spelled_with_keywords_refuses_under_its_own_name() raises:
         _ = _printed("SELECT OVERLAY(a PLACING b FROM 1)", g, rules)
 
 
-def test_the_one_keyword_call_that_no_longer_refuses() raises:
-    # SUBSTRING was in the list above until the kernel behind it was wired up.
-    # It comes out of the transform as the call the planner reads, which is why
-    # what is printed back is not what was written.
+def test_the_keyword_calls_that_no_longer_refuse() raises:
+    # SUBSTRING and EXTRACT were in the list above until the kernels behind them
+    # were wired up. Each comes out of the transform as the call the planner
+    # reads, which is why what is printed back is not what was written.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(
         _printed("SELECT SUBSTRING(a FROM 1 FOR 2) FROM t", g, rules),
         "SELECT substring(a, 1, 2) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT EXTRACT(YEAR FROM a) FROM t", g, rules),
+        "SELECT date_part('year', a) FROM t",
     )
 
 

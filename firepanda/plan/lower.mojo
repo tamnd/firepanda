@@ -270,6 +270,7 @@ from firepanda.exec.node import (
     Limit,
     Match,
     Node,
+    Part,
     Presence,
     Project,
     Reduce,
@@ -285,6 +286,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
+from firepanda.kernel.temporal import sql_field_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
@@ -544,6 +546,8 @@ def _lower_expr(
 
     if kind == ExprKind.CALL and exprs.nodes[root].name == "substring":
         return _lower_cut(exprs, root, pipe, base, name, memo)
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "date_part":
+        return _lower_part(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "is_null"
@@ -863,6 +867,70 @@ def _lower_cut(
 
     var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
     pipe.add(Node(Cut(at, numbers[0], length, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_part(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers an `EXTRACT`.
+
+    The specifier is read here rather than per row, for the reason the positions
+    of a `SUBSTRING` are: `EXTRACT(year FROM d)` names the field in the text of
+    the query and a column of field names is not a thing anybody writes, so the
+    node carries a field code rather than an expression.
+
+    A specifier DuckDB has and firepanda has no field for is refused by name.
+    There are eight of those and the reason is different for each, which is why
+    the message comes from the table rather than from here.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, or the specifier
+            is not a name written in the query, or nothing is called that.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 2:
+        raise Error(
+            String(
+                (
+                    "lower: date_part reads a field name and a column, so two"
+                    " arguments, and was given "
+                ),
+                len(args),
+            )
+        )
+    if exprs.nodes[args[0]].kind != ExprKind.LITERAL:
+        raise Error(
+            "lower: the field an EXTRACT reads has to be written out, and this"
+            " one is an expression, which would mean a different field for"
+            " every row and there is no kernel that does that"
+        )
+    if exprs.nodes[args[0]].value.is_null():
+        raise Error(
+            "lower: an EXTRACT of a null field is null for every row, and there"
+            " is no operator that answers a column of nulls yet"
+        )
+
+    var field = sql_field_named(exprs.nodes[args[0]].value.as_string())
+    var at = _lower_expr(exprs, args[1], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Part(at, field, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

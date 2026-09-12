@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: EXTRACT, date_part and datepart
+
+`SELECT EXTRACT(YEAR FROM o_orderdate) FROM orders` was refused, and so were the two function spellings of it. Reading a field off a date is how nearly every report groups, so this is a gap that shows up early. The kernels have been in `firepanda/kernel/temporal.mojo` since the temporal layer was written, and as with the last two entries what was missing was the plumbing from a query down to them.
+
+The keyword form is a rule in the grammar rather than a call, so the transform rewrites `EXTRACT(YEAR FROM d)` into `date_part('year', d)` and everything after that point sees one shape. `datepart` is renamed to `date_part` while the plan is built, the way `substr` and `ifnull` are. The field has to be written out. A column there would mean a different field for every row and there is no kernel that does that, so the query is refused with a message saying so.
+
+The field names are their own table and not the pandas one. Two names mean different things in the two systems, which is the whole reason for a second table: pandas numbers the day of the week from Monday and DuckDB numbers it from Sunday, and pandas reads `microsecond` as the microseconds inside the second while DuckDB reads it cumulatively from the start of the second including the whole seconds. So `dow` and `dayofweek` are rewritten as `date_part('isodow', x) % 7`, which is exact and needs no new field code, and the cumulative fraction fields stay refused by name rather than answered wrongly. A name neither system has is refused with the name quoted back.
+
+The answer is a BIGINT because that is what DuckDB answers. The kernel answers the narrow types pandas answers with, and the widening happens inside the operator rather than behind a separate cast node, so it costs no second pass over the data. That matters for a query that groups on a year and joins that against a count, where the two have to be the same width.
+
+One thing this does not reach is `GROUP BY EXTRACT(MONTH FROM d)` written out in the statement. That is a gap in grouping and not in this: the select list is lowered above the aggregate over the columns the aggregate produces, and nothing there compares a select item against the group keys, so only a key that is a plain column survives. Reading the field in a derived table and grouping on it by name works today.
+
 ### Removed: the Parquet reader's direct vector route, which had become the slow one
 
 A Parquet read had two routes out of DuckDB. One asked DuckDB to convert a data chunk to Arrow. The other, in `duckvector.mojo`, described DuckDB's own vectors as Arrow arrays without converting them, on the grounds that for most types they already are one and the conversion was most of what a read cost. That was measured and true when it was written. It is not true against DuckDB 1.5.5, and the second route is now the expensive one.

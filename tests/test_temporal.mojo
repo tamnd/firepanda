@@ -48,6 +48,7 @@ from firepanda.kernel.temporal import (
     civil_from_days,
     extract_field,
     field_dtype,
+    sql_field_named,
     temporal_date,
     temporal_field,
     temporal_normalize,
@@ -623,6 +624,48 @@ def test_the_minute_field_agrees_with_duckdb_either_side_of_the_epoch() raises:
     var got = numbers(stamps(rows, TimeUnit.SECOND), TemporalField.MINUTE)
     for i in range(len(want)):
         assert_equal(got[i], want[i], "row " + String(i))
+
+
+def test_the_sql_names_reach_the_fields_they_name() raises:
+    # The specifiers DuckDB takes, against the codes here. Every one of these
+    # was checked against a running DuckDB 1.5.1 before it was written down.
+    assert_true(sql_field_named("year") == TemporalField.YEAR, "year")
+    assert_true(sql_field_named("mon") == TemporalField.MONTH, "the short one")
+    assert_true(sql_field_named("days") == TemporalField.DAY, "the plural")
+    assert_true(sql_field_named("doy") == TemporalField.DAY_OF_YEAR, "doy")
+    assert_true(sql_field_named("quarter") == TemporalField.QUARTER, "quarter")
+
+
+def test_the_sql_week_is_the_iso_week() raises:
+    # DuckDB's `week` is the ISO week, so 1 January 2021 is week 53 of 2020 and
+    # not week 1 of 2021. Reading it off the calendar instead would be wrong for
+    # a handful of days a year, which is the worst kind of wrong.
+    assert_true(sql_field_named("week") == TemporalField.ISO_WEEK, "week")
+    assert_true(
+        sql_field_named("weekofyear") == TemporalField.ISO_WEEK, "the long one"
+    )
+    assert_true(sql_field_named("isoyear") == TemporalField.ISO_YEAR, "isoyear")
+    assert_true(sql_field_named("isodow") == TemporalField.ISO_DAY, "isodow")
+
+
+def test_the_names_that_mean_different_things_are_not_in_the_sql_table() raises:
+    # `dayofweek` starts the week on a different day in the two systems and
+    # `microsecond` counts from a different place, so neither is in here. A
+    # table that answered them with the pandas field would be wrong and would
+    # look right.
+    with assert_raises(contains="no field SQL calls dayofweek"):
+        _ = sql_field_named("dayofweek")
+    with assert_raises(contains="no field SQL calls dow"):
+        _ = sql_field_named("dow")
+    with assert_raises(contains="no field SQL calls microsecond"):
+        _ = sql_field_named("microsecond")
+
+
+def test_a_field_neither_system_has_is_refused() raises:
+    with assert_raises(contains="no field SQL calls epoch"):
+        _ = sql_field_named("epoch")
+    with assert_raises(contains="no field SQL calls nosuch"):
+        _ = sql_field_named("nosuch")
 
 
 def main() raises:
