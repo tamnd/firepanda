@@ -194,6 +194,15 @@ rather than dropping them. The mark join marks such a row null rather than false
 the `NOT` over the column is null in turn, and a filter does not keep a null. So
 the null aware anti join is a mark join and a `NOT`, with nothing written for it.
 
+`x = ANY (SELECT k FROM u)` is that same `IN` and `x <> ALL (...)` is that same
+`NOT IN`, so both are read as the one they are and go to the same two joins
+rather than being lowered a second time. The nulls line up exactly as well:
+`<> ALL` over a subquery holding a null is null
+on every row that matched nothing, which is what the mark join and the `NOT`
+over it already answer. The other four quantified comparisons are refused, since
+each asks whether a comparison holds against some row or every row, which is a
+minimum and a maximum over the subquery rather than a key to join on.
+
 The subquery lowers against a scope of its own, which is the ordinary rule, and
 here it is also what makes the rewrite safe: a subquery that reads no outer
 column runs once, and running it once is what a join does with its build side. A
@@ -273,11 +282,11 @@ refusal a correlated `IN` gets and the same dependent join behind it.
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. A quantified comparison written where a value goes is
-refused: it answers a boolean per row the way an `EXISTS` and an `IN` do, and
-`ANY` and `ALL` each carry a comparison that neither the mark join nor the
-counting above is given. So are the column aliases on a derived table and a
-`LATERAL` one.
+and the joins over them. Four of the six quantified comparisons are refused:
+`= ANY` and `<> ALL` are the membership tests above and run, while `<`, `<=`,
+`>` and `>=` under either quantifier, and `= ALL` and `<> ANY`, each carry a
+comparison that neither the mark join nor the counting above is given. So are
+the column aliases on a derived table and a `LATERAL` one.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
 value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
@@ -1300,7 +1309,18 @@ def _lower_expr(
             " under the aggregate, and an aggregate hands up its keys and its"
             " folds rather than everything it read"
         )
-    if node.kind == EXPR_IN_SUBQUERY:
+    if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_QUANTIFIED:
+        var shape = _in_shape(ast, at)
+        if shape < 0:
+            raise Error(
+                "firepanda lowers the two quantified comparisons that are a"
+                " membership test, since `= ANY` is an IN and `<> ALL` is a NOT"
+                " IN, and does not lower the other four yet. Those ask whether"
+                " a comparison holds against some row or every row, which is a"
+                " minimum and a maximum over the subquery rather than a key to"
+                " join on, and neither the mark join nor the counting an EXISTS"
+                " goes through is given a comparison"
+            )
         var place = walk._mark(at)
         if place >= 0:
             # The mark join answered the `IN` itself, so what is left here is
@@ -1310,7 +1330,7 @@ def _lower_expr(
             # rather than false, a `NOT` over a null is a null, and a filter
             # does not keep a null.
             var over = plan.exprs.column(String(walk.mark_names[place]))
-            if node.payload == 1:
+            if shape == 1:
                 return plan.exprs.call("not", [over], True)
             return over
         raise Error(
@@ -1336,14 +1356,6 @@ def _lower_expr(
             " a column cross joined on above the FROM, which is under the"
             " aggregate, and an aggregate hands up its keys and its folds"
             " rather than everything it read"
-        )
-    if node.kind == EXPR_QUANTIFIED:
-        raise Error(
-            "firepanda does not lower a quantified comparison written as a"
-            " value yet. It answers a boolean per row, which is where an"
-            " EXISTS and an IN over a subquery both already go, but ANY and"
-            " ALL each have a comparison in them and neither the mark join nor"
-            " the counting an EXISTS goes through is given one"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -1688,7 +1700,7 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     return False
 
 
-def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
+def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]) raises:
     """Collects every subquery of one shape inside one expression.
 
     The same walk `_has_aggregate` does and for the same reason. A subquery in
@@ -1705,8 +1717,13 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
         kind: The expression kind to collect, which is `EXPR_SUBQUERY` for the
             ones a cross join onto one value answers, `EXPR_IN_SUBQUERY` for the
             ones a mark join does, and `EXPR_EXISTS` for the ones a count under
-            a cross join does.
+            a cross join does. Asking for the mark join's kind also collects the
+            two quantified comparisons that are a membership test, since those
+            are an `IN` and go to the same join.
         found: The list to add to, in the order the subqueries are written.
+
+    Raises:
+        If the text of a quantified comparison is not there to read.
     """
     if at == NO_NODE:
         return
@@ -1715,9 +1732,17 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
         found.append(at)
         return
     if (
+        kind == EXPR_IN_SUBQUERY
+        and node.kind == EXPR_QUANTIFIED
+        and _in_shape(ast, at) >= 0
+    ):
+        found.append(at)
+        return
+    if (
         node.kind == EXPR_SUBQUERY
         or node.kind == EXPR_IN_SUBQUERY
         or node.kind == EXPR_EXISTS
+        or node.kind == EXPR_QUANTIFIED
     ):
         # A subquery of the other shape is still a subquery, and what is written
         # inside one is lowered when that query is rather than out here.
@@ -1749,7 +1774,7 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
         _taken(ast, node.a, kind, found)
 
 
-def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]):
+def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
     """Collects every subquery written as a value inside one expression.
 
     An `EXISTS`, an `IN` and a quantified comparison are not collected. Each of
@@ -1760,26 +1785,34 @@ def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]):
         ast: The arenas.
         at: The expression.
         found: The list to add to, in the order the subqueries are written.
+
+    Raises:
+        If the text of a quantified comparison is not there to read.
     """
     _taken(ast, at, EXPR_SUBQUERY, found)
 
 
-def _marks(ast: Ast, at: UInt32, mut found: List[UInt32]):
+def _marks(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
     """Collects every `IN` over a subquery inside one expression.
 
-    An `EXISTS` and a quantified comparison are not collected, even though both
-    answer a boolean per row the same way. A mark join is given a pair of keys
-    and neither of those is written with one.
+    A `= ANY` and a `<> ALL` are collected with them, because each is a
+    membership test written the other way round and goes to the same join. The
+    other four quantified comparisons are not, and neither is an `EXISTS`, even
+    though all of those answer a boolean per row the same way. A mark join is
+    given a pair of keys and none of those is written with one.
 
     Args:
         ast: The arenas.
         at: The expression.
         found: The list to add to, in the order the subqueries are written.
+
+    Raises:
+        If the text of a quantified comparison is not there to read.
     """
     _taken(ast, at, EXPR_IN_SUBQUERY, found)
 
 
-def _askings(ast: Ast, at: UInt32, mut found: List[UInt32]):
+def _askings(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
     """Collects every `EXISTS` written as a value inside one expression.
 
     A quantified comparison is not collected. It answers the same boolean per
@@ -1791,6 +1824,9 @@ def _askings(ast: Ast, at: UInt32, mut found: List[UInt32]):
         ast: The arenas.
         at: The expression.
         found: The list to add to, in the order the subqueries are written.
+
+    Raises:
+        If the text of a quantified comparison is not there to read.
     """
     _taken(ast, at, EXPR_EXISTS, found)
 
@@ -3090,6 +3126,53 @@ def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
     return plan.values(lowered^, names^)
 
 
+def _in_shape(ast: Ast, at: UInt32) raises -> Int:
+    """Whether a node is a membership test, and whether it is a negated one.
+
+    Two of the six quantified comparisons are a membership test written the
+    other way round. `x = ANY (SELECT k FROM u)` is true when some `k` equals
+    `x`, which is the whole of `x IN (SELECT k FROM u)`, and `x <> ALL (...)`
+    is true when no `k` does, which is the whole of `x NOT IN (...)` down to
+    the nulls: both are null rather than true when nothing matched and some `k`
+    was null. `==` and `!=` are other spellings of the two comparisons and come
+    here too. `SOME` is another spelling of `ANY` and would come here as well,
+    except that the vendored grammar has no word for it and so nothing written
+    with it reaches this far.
+
+    So they are not lowered a second time. They are read as the `IN` they are
+    and go to the same semi join and the same mark join, which means the null
+    aware anti join a `<> ALL` needs is already written and already tested.
+
+    The other four ask whether a comparison holds against some row or every row
+    rather than whether a value is in a set. `= ALL` and `<> ANY` are not
+    membership either, since `x = ALL (S)` asks that every row equal `x` and
+    one matching row does not answer it.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+
+    Returns:
+        0 for an `IN` over a subquery, 1 for a `NOT IN`, and -1 for anything
+        else, including a quantified comparison that is not one of the two.
+
+    Raises:
+        If the text of the comparison is not there to read.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_IN_SUBQUERY:
+        return 1 if node.payload == 1 else 0
+    if node.kind != EXPR_QUANTIFIED:
+        return -1
+    var written = ast.text(node.payload)
+    var equality = written == "=" or written == "=="
+    if node.children == 0 and equality:
+        return 0
+    if node.children == 1 and (written == "<>" or written == "!="):
+        return 1
+    return -1
+
+
 def _in_join(
     ast: Ast,
     at: UInt32,
@@ -3136,7 +3219,7 @@ def _in_join(
         one this does not lower.
     """
     var node = ast.exprs[Int(at)]
-    if node.payload == 1:
+    if _in_shape(ast, at) == 1:
         # `_asks` does not hand a NOT IN here, because an anti join is the
         # classic wrong answer for one: a single null anywhere in the subquery
         # makes NOT IN null for every row rather than true, and an anti join
@@ -3188,6 +3271,11 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
     answer for it, so it goes to the mark join too and the `NOT` over the
     column the mark join wrote is what makes it right.
 
+    A `= ANY` is claimed, because it is an `IN` written the other way round, and
+    a `<> ALL` is not, because it is a `NOT IN` and goes where those go. The
+    other four quantified comparisons are claimed by neither and are refused
+    where an expression is lowered.
+
     An `EXISTS` is claimed only when `_may_pair` says the semi join could have a
     key pair to join on. One that could not is uncorrelated, since correlation
     written anywhere but an equality in the subquery's `WHERE` is refused rather
@@ -3206,8 +3294,8 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
         If the text of an operator is not there to read.
     """
     var node = ast.exprs[Int(at)]
-    if node.kind == EXPR_IN_SUBQUERY:
-        return NO_NODE if node.payload == 1 else at
+    if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_QUANTIFIED:
+        return at if _in_shape(ast, at) == 0 else NO_NODE
     if node.kind == EXPR_EXISTS:
         return at if _may_pair(ast, node.a) else NO_NODE
     if node.kind == EXPR_UNARY and ast.text(node.payload) == "NOT":

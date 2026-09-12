@@ -368,7 +368,7 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="one row by construction"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
-    with assert_raises(contains="written as a value"):
+    with assert_raises(contains="does not lower the other four"):
         _ = _plan("SELECT a FROM t WHERE a > ANY (SELECT b FROM u)")
     with assert_raises(contains="TRY_CAST"):
         _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
@@ -1182,6 +1182,87 @@ def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
         _ = _plan(
             "SELECT a FROM t WHERE b IN (SELECT k FROM u WHERE u.b = t.b)"
         )
+
+
+def test_an_equals_any_is_the_semi_join_an_in_is() raises:
+    # `x = ANY (S)` is true when some row of S equals x, which is the whole of
+    # `x IN (S)`, so it is read as the one it is rather than lowered twice.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b = ANY (SELECT k FROM u)"),
+        _plan("SELECT a FROM t WHERE b IN (SELECT k FROM u)"),
+    )
+
+
+def test_some_does_not_parse_because_the_grammar_omits_it() raises:
+    # DuckDB itself takes `= SOME` and answers it the way it answers `= ANY`,
+    # and the PEG grammar it publishes has `SubqueryAny <- 'ANY'` with no SOME
+    # beside it. The grammar here is vendored verbatim, so this is a syntax
+    # error until upstream adds the word rather than something to patch in.
+    with assert_raises(contains="syntax error"):
+        _ = _plan("SELECT a FROM t WHERE b = SOME (SELECT k FROM u)")
+
+
+def test_a_not_equals_all_is_the_mark_join_a_not_in_is() raises:
+    # And so it gets the null aware answer for free. A subquery holding a null
+    # marks a row that matched nothing null rather than false, the NOT over it
+    # is null, and a filter does not keep a null, which is what SQL says.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b <> ALL (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER not(__mark_0)\n"
+            "    JOIN mark [b = k] -> __mark_0\n"
+            "      SCAN t []\n"
+            "      PROJECT [k]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_the_other_spellings_of_the_two_comparisons_go_the_same_way() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b != ALL (SELECT k FROM u)"),
+        _plan("SELECT a FROM t WHERE b NOT IN (SELECT k FROM u)"),
+    )
+
+
+def test_an_equals_any_in_a_select_list_is_a_mark_join() raises:
+    assert_equal(
+        _plan("SELECT a, b = ANY (SELECT k FROM u) AS hit FROM t"),
+        (
+            "PROJECT [a, __mark_0 as hit]\n"
+            "  JOIN mark [b = k] -> __mark_0\n"
+            "    SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_an_equals_any_under_an_or_is_a_mark_join() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b = ANY (SELECT k FROM u) OR a > 5"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER or(__mark_0, a > 5)\n"
+            "    JOIN mark [b = k] -> __mark_0\n"
+            "      SCAN t []\n"
+            "      PROJECT [k]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_a_quantified_comparison_that_is_not_membership_is_refused() raises:
+    # Each of the four asks whether a comparison holds against some row or every
+    # row, which is a minimum and a maximum over the subquery rather than a key
+    # to join on, and no join here is given a comparison.
+    with assert_raises(contains="does not lower the other four"):
+        _ = _plan("SELECT a FROM t WHERE b >= ALL (SELECT k FROM u)")
+    with assert_raises(contains="does not lower the other four"):
+        _ = _plan("SELECT a FROM t WHERE b = ALL (SELECT k FROM u)")
+    with assert_raises(contains="does not lower the other four"):
+        _ = _plan("SELECT a FROM t WHERE b <> ANY (SELECT k FROM u)")
 
 
 def test_an_exists_written_under_an_or_is_counted_under_a_cross_join() raises:
