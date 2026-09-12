@@ -72,7 +72,8 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
 from firepanda.dtype.temporal import TimeUnit
-from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg, Join
+from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
+from firepanda.exec import Join
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
@@ -117,6 +118,7 @@ from firepanda.join import JoinKind, join_indices
 from firepanda.frame.concat import concat
 from firepanda.kernel import (
     AggKind,
+    LogicOp,
     ROUND_DOWN,
     TemporalField,
     add,
@@ -4931,6 +4933,100 @@ def _whole_frame_agg(var frame: DataFrame) raises -> DataFrame:
     )
 
 
+def _mask_frame(
+    rows: Int, count: Int, chunk_rows: Int, nulls: Bool
+) raises -> DataFrame:
+    """Boolean columns cut into chunks, each one true about nine rows in ten.
+
+    Nine in ten rather than half because that is what a pile of filter
+    predicates looks like in a query: each one on its own keeps most of the
+    table and it is all of them together that cut it down. It also keeps the
+    answer from being false everywhere after the third column, which would let a
+    short circuit that nothing implements look like a win.
+
+    Args:
+        rows: How many rows.
+        count: How many boolean columns.
+        chunk_rows: How many rows go in a chunk.
+        nulls: Whether to punch a null into every 1013th row of every column,
+            each column offset from the last so the nulls do not line up.
+
+    Returns:
+        A frame of `count` boolean columns, named `m0` upwards.
+
+    Raises:
+        If building or slicing a column raises.
+    """
+    var columns = List[ChunkedArray](capacity=count)
+    var fields = List[Field](capacity=count)
+    for k in range(count):
+        var col = Array[DType.bool](rows)
+        for i in range(rows):
+            col[i] = ((i * 7 + k * 13) % 100) < 90
+        if nulls:
+            for i in range(0, rows - count, 1013):
+                col.set_null(i + k)
+        var whole = AnyArray(col^)
+        var chunked = ChunkedArray(LogicalType.BOOL)
+        var begin = 0
+        while begin < rows:
+            var stop = begin + chunk_rows
+            if stop > rows:
+                stop = rows
+            chunked.append(whole.slice(begin, stop))
+            begin = stop
+        columns.append(chunked^)
+        fields.append(Field(String("m", k), LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def _connect_chain(var frame: DataFrame, count: Int) raises -> DataFrame:
+    """A conjunction as the chain of two column operators it used to lower to.
+
+    Left folded, so `count - 1` operators, and every one but the last writes a
+    whole boolean column for the next one to read straight back.
+
+    Args:
+        frame: A frame of `count` boolean columns. Consumed.
+        count: How many of them to join.
+
+    Returns:
+        One column, the conjunction.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var pipeline = Pipeline(frame^)
+    var at = 0
+    for k in range(1, count):
+        pipeline.add(Node(Connective(at, k, LogicOp.AND, String("t", k))))
+        at = count + k - 1
+    pipeline.add(Node(Project([at])))
+    return pipeline^.run()
+
+
+def _connect_once(var frame: DataFrame, count: Int) raises -> DataFrame:
+    """The same conjunction as one operator reading every operand.
+
+    Args:
+        frame: A frame of `count` boolean columns. Consumed.
+        count: How many of them to join.
+
+    Returns:
+        One column, the conjunction.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var at = List[Int](capacity=count)
+    for k in range(count):
+        at.append(k)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Connective(at^, LogicOp.AND, "all")))
+    pipeline.add(Node(Project([count])))
+    return pipeline^.run()
+
+
 def bench_pipeline(mut harness: Harness) raises:
     """The engine driver on a line of elementwise operators.
 
@@ -4968,6 +5064,13 @@ def bench_pipeline(mut harness: Harness) raises:
     memory so the first thing that reads them can add them up. `pipeline_join_only`
     against `join_frame` is what the chunking costs when nothing is fused away,
     which is what the fusing has to pay for out of what it saves.
+
+    The `connective` rows are one question asked three times: a conjunction of
+    several predicates written as one operator, against the chain of two column
+    operators the lowering used to fold it into. Three operands, twelve
+    operands, and twelve operands over columns carrying nulls. They come in
+    pairs and each pair also has a copy row, because a pipeline consumes its
+    input and the copy of twelve boolean columns is not small next to the work.
 
     Args:
         harness: The harness.
@@ -5315,6 +5418,80 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/join_frame", "rows", rows, join_whole)
+
+    # A conjunction written as one operator against the chain of two column
+    # operators the lowering used to fold it into. Same predicates, same rows,
+    # same driver, and the only thing that differs is the shape, so the pair is
+    # the plan level number for making the lowering keep the flat shape the
+    # simplify pass produces. Three operands is the small end, twelve is about
+    # what a TPC-H filter carries.
+    #
+    # A pipeline consumes the frame it is given, so every row below copies one
+    # first, and twelve chunked boolean columns of a million rows is twelve
+    # megabytes of memcpy. That is the same order as the work being measured,
+    # which is why the two copy rows are here: they are the copy and nothing
+    # else, and the gap between a chain row and a flat row is only worth
+    # reading with the matching copy row taken off both.
+    var masks_three = _mask_frame(rows, 3, MORSEL_ROWS, False)
+    var masks_twelve = _mask_frame(rows, 12, MORSEL_ROWS, False)
+    var masks_null = _mask_frame(rows, 12, MORSEL_ROWS, True)
+
+    def copy_three() raises {imm masks_three}:
+        var one = DataFrame(copy=masks_three)
+        keep(one.rows)
+
+    harness.record("exec/connective_copy_3", "rows", rows, copy_three)
+
+    def copy_twelve() raises {imm masks_twelve}:
+        var one = DataFrame(copy=masks_twelve)
+        keep(one.rows)
+
+    harness.record("exec/connective_copy_12", "rows", rows, copy_twelve)
+
+    def chain_three() raises {imm masks_three}:
+        keep(masks_three.rows)
+        var out = _connect_chain(DataFrame(copy=masks_three), 3)
+        keep(out.rows)
+
+    harness.record("exec/connective_chain_3", "rows", rows, chain_three)
+
+    def once_three() raises {imm masks_three}:
+        keep(masks_three.rows)
+        var out = _connect_once(DataFrame(copy=masks_three), 3)
+        keep(out.rows)
+
+    harness.record("exec/connective_once_3", "rows", rows, once_three)
+
+    def chain_twelve() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_chain(DataFrame(copy=masks_twelve), 12)
+        keep(out.rows)
+
+    harness.record("exec/connective_chain_12", "rows", rows, chain_twelve)
+
+    def once_twelve() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_once(DataFrame(copy=masks_twelve), 12)
+        keep(out.rows)
+
+    harness.record("exec/connective_once_12", "rows", rows, once_twelve)
+
+    # The null carrying pair, which is the one that should move most. A chain
+    # has to combine two validity bitmaps at every step and the flat form walks
+    # all twelve once.
+    def chain_nulls() raises {imm masks_null}:
+        keep(masks_null.rows)
+        var out = _connect_chain(DataFrame(copy=masks_null), 12)
+        keep(out.rows)
+
+    harness.record("exec/connective_chain_12_nulls", "rows", rows, chain_nulls)
+
+    def once_nulls() raises {imm masks_null}:
+        keep(masks_null.rows)
+        var out = _connect_once(DataFrame(copy=masks_null), 12)
+        keep(out.rows)
+
+    harness.record("exec/connective_once_12_nulls", "rows", rows, once_nulls)
 
 
 def bench_join(mut harness: Harness) raises:

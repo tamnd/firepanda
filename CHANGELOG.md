@@ -23,6 +23,7 @@ The run being looked for has to be written out in the query. A needle that came 
 The second argument is a set of characters and not a prefix, which is DuckDB's reading as well: `trim('abcxcba', 'abc')` is `x`. It has to be written out in the query, because a set that came from a column would mean a new set per row and there is no kernel for that.
 
 What comes off when no set is named is the Unicode Zs characters and nothing else, which is seventeen code points and is a narrower set than the twenty nine `str.strip` removes. A tab, a newline, a carriage return or a form feed on the end of a value survives a `TRIM` and does not survive a `.str.strip()`. That divergence is deliberate and is what DuckDB does, so `is_sql_space` sits beside `is_python_space` in `firepanda.kernel.edges` and `text_trim` sits beside `text_strip`.
+
 ### Added: a column and a frame can be asked whether a value is one of a set
 
 `s.isin([1, 2, 3])` and `df.isin(...)` are here. The hash table underneath them has been in `firepanda/kernel/member.mojo` since the indexing work and `Series.is_in` has been on the core for just as long, so what this adds is one binding and the rules about what a set is, which turned out to be most of the method.
@@ -46,6 +47,7 @@ A grouped product cannot be a grouped sum with the operator changed. A missing v
 The rule for what counts as true is now read from both paths rather than copied into the second one. `truthy` in `firepanda/kernel/agg.mojo` lost its underscore for that reason, since a whole column `any` and a grouped `any` disagreeing would be a difference that each half's own tests would pass.
 
 The signatures are pandas' own and were measured. A grouped product takes `numeric_only`, `min_count` and `skipna` and takes no `engine`, which a grouped sum does take, and a grouped truth takes nothing but `skipna`. `min_count` defaults to zero for `prod` as it does for `sum`, rather than to the minus one the four that pick a value out carry, and it is still held at its default here along with `skipna` and `numeric_only`. Specified in `docs/specs/54-reducing-a-group-with-a-product-and-with-a-truth.md`.
+
 ### Changed: a conjunction or disjunction in a plan is one operator and not a chain of them
 
 The simplify pass flattens a nested and or or into a single call with every argument on it, and the lowering then folded that call back into pairs, one operator per pair. So `a OR b OR c OR d` in a query was three operators, and the two in the middle existed only to write a boolean column for the next one to read straight back. On a chunk that is a byte a row that nothing else ever looks at, and on a query with a wide disjunction in it there are several of them.
