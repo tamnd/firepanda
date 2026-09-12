@@ -74,7 +74,17 @@ So the fallback for a category column is built as a category of its own and then
 
 The check on the value changes shape here for the same reason. There is no kind to test against, because a category column does not hold a kind, it holds what its list says it holds and nothing else. So the value is checked against the list, and a value that is not on it raises pandas' own sentence, which is that you cannot set a new category on a categorical and have to set the categories first. pandas says that because of the codes, and this says it because of the codes, which is the rarer sort of agreement: the two libraries refuse the same call for the same underlying reason rather than one of them copying the other's message.
 
-## 9. What this does not do
+## 9. A NaN is missing, and the kernel did not think so
+
+The first run of this against pandas failed on every float frame in the corpus, and the difference was one row. A float column in the suite carries the six float edges at its first six offsets and a NaN is one of them, pandas filled it and this did not.
+
+The rule the library already had is the right one and it was written down in `Series.null_count`, which counts the cleared validity bits plus the NaNs and says in its own docstring that this is the line between the two halves of the library. An `Array` is Arrow and answers what is in the buffers. A `Series` is pandas and answers what pandas would say. `isna` already followed that rule and so did `dropna`, and `fill_null` did not, which made a column that reported two missing rows come back from a fill with one of them still missing. That is worse than either answer on its own, because the two calls disagreed about the same column.
+
+The kernel was not wrong. A coalesce reads a validity bit and nothing else, that is Arrow's question, and it is also SQL's, where `COALESCE` over a NaN answers the NaN because a NaN is a value there. Changing the kernel would have made a fill agree with pandas and made the SQL engine disagree with every other database.
+
+So the fix went where the rule lives. `Series.fill_null` clears the validity bits of the NaN rows before it calls the kernel, using `present_bitmap`, which is the one function in the library that knows what missing means for a float. It costs one pass over the column, the same pass `null_count` was already paying for, and it does not copy the values, because a buffer here is shared until something writes through it and only the bitmap beside them is new. `Frame.fill_null` was rewritten to go through the series call rather than to the kernel, so that there is one place this happens rather than two.
+
+## 10. What this does not do
 
 No `limit`, for the reason in section 6. No mapping onto row labels and no fallback that carries rows, for the reason in section 7. No object dtype, so no answer where pandas widens, for the reason in section 4.
 

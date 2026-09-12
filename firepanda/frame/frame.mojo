@@ -95,7 +95,7 @@ from firepanda.kernel.group import (
     aggregate_group_many,
     aggregate_group_pair_any,
 )
-from firepanda.kernel.nulls import all_valid_mask, coalesce_any, nan_over_nulls
+from firepanda.kernel.nulls import all_valid_mask, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import (
@@ -3062,7 +3062,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """Returns the frame with one column's missing rows taken from another column.
 
         The fallback may be one row, which is used for every missing row and is
-        how filling with a scalar is spelled.
+        how filling with a scalar is spelled. The column is handed to
+        `Series.fill_null` rather than to the kernel directly, so that a NaN in
+        a float column is filled here for the reason it is filled there.
 
         Args:
             name: Which column to fill.
@@ -3078,10 +3080,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             physical layout.
         """
         var at = self.index_of(name)
-        var filled = Series(
-            name, coalesce_any(self.columns[at].only(), value.values)
-        )
-        return self.with_column(filled^)
+        var column = Series(name, AnyArray(copy=self.columns[at].only()))
+        return self.with_column(column.fill_null(value))
 
     def _rebuilt(
         self, var columns: List[Series], var index: Index

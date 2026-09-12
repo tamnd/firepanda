@@ -70,6 +70,20 @@ def gapped(
     return col^
 
 
+def one_float(value: Float64) raises -> Array[DType.float64]:
+    """Builds a single row float64 column, which is how a scalar is spelled.
+
+    Args:
+        value: The value.
+
+    Returns:
+        A column of one row.
+    """
+    var col = Array[DType.float64](1)
+    col.set_valid(0, value)
+    return col^
+
+
 def one(value: Int64) raises -> Array[DType.int64]:
     """Builds a single row int64 column, which is how a scalar is spelled.
 
@@ -504,6 +518,47 @@ def test_a_nan_counts_as_missing_and_a_count_says_so() raises:
 
     var counted = reduce_any(AnyArray(col^), AggKind.COUNT)
     assert_equal(counted.as_typed[DType.int64]()[0], 2, "two rows hold a value")
+
+
+def test_a_fill_takes_a_nan_as_missing_and_the_kernel_does_not() raises:
+    # The two halves of the library in one test. The kernel reads a validity bit
+    # and nothing else, which is Arrow's question and SQL's, so it leaves the
+    # NaN alone. The series says what pandas would say and fills both. See #170.
+    var col = nan_column([1.0, nan[DType.float64](), 3.0, 0.0], [3])
+
+    var raw = coalesce_any(AnyArray(col.copy()), AnyArray(one_float(9.0)))
+    assert_true(
+        isnan(raw.as_typed[DType.float64]()[1]), "the kernel keeps the NaN"
+    )
+    assert_equal(
+        raw.as_typed[DType.float64]()[3], 9.0, "the kernel fills a cleared bit"
+    )
+
+    var s = Series("a", col^)
+    var filled = s.fill_null(Series("anything", one_float(9.0)))
+    assert_equal(
+        filled.as_typed[DType.float64]()[1], 9.0, "the series fills the NaN"
+    )
+    assert_equal(
+        filled.as_typed[DType.float64]()[3], 9.0, "and the cleared bit"
+    )
+    assert_equal(
+        filled.null_count(), 0, "nothing left that pandas calls missing"
+    )
+
+
+def test_a_frame_fill_takes_a_nan_as_missing_too() raises:
+    # The frame door goes through the series one rather than to the kernel, so
+    # that the rule above is written in one place and not in two.
+    var columns = List[Series]()
+    columns.append(
+        Series("a", nan_column([1.0, nan[DType.float64](), 3.0], []))
+    )
+    var frame = DataFrame.from_series(columns^)
+    var filled = frame.fill_null("a", Series("v", one_float(9.0)))
+    assert_equal(
+        filled.column("a").as_typed[DType.float64]()[1], 9.0, "the NaN is gone"
+    )
 
 
 def test_a_count_over_a_float_column_with_no_nans_is_unchanged() raises:
