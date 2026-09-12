@@ -2258,5 +2258,53 @@ def test_a_semi_join_on_two_keys_is_refused_for_now() raises:
         )
 
 
+def test_a_qualified_star_runs_one_side_of_a_join() raises:
+    var got = run(
+        "SELECT shops.* FROM sales JOIN shops ON sales.shop = shops.shop",
+        session(),
+    )
+    assert_equal(got.width(), 2, "the right side and nothing of the left")
+    same(
+        read_back(got, "floor"),
+        [11, 22, 11, 22, 11, 22, 11, 22, 11, 22],
+        "the floor of each sale's shop",
+    )
+
+
+def test_an_exclude_runs_without_the_columns_it_names() raises:
+    var got = run("SELECT * EXCLUDE (price, shop) FROM sales", session())
+    assert_equal(got.width(), 1, "one column left of three")
+    same(
+        read_back(got, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "the quantities",
+    )
+
+
+def test_a_replace_computes_the_column_where_it_stood() raises:
+    var got = run("SELECT * REPLACE (qty * 2 AS qty) FROM sales", session())
+    assert_equal(got.width(), 3, "still three columns")
+    same(
+        read_back(got, "qty"),
+        [10, 40, 6, 80, 24, 16, 50, 2, 60, 30],
+        "twice each quantity, under the name it had",
+    )
+    same(
+        read_back(got, "price"),
+        [10, 2, 7, 1, 5, 9, 3, 100, 4, 6],
+        "and the rest untouched",
+    )
+
+
+def test_a_rename_changes_the_name_and_nothing_else() raises:
+    var got = run("SELECT * RENAME (qty AS many) FROM sales", session())
+    assert_equal(got.width(), 3, "still three columns")
+    same(
+        read_back(got, "many"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "the quantities under the new name",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
