@@ -178,8 +178,6 @@ def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) ->
     """Each one by name, rather than as an unexpected keyword."""
     with pytest.raises(NotImplementedError, match="append"):
         made(firepanda).set_index("k", append=True)
-    with pytest.raises(NotImplementedError, match="inplace"):
-        made(firepanda).set_index("k", inplace=True)
     with pytest.raises(NotImplementedError, match="verify_integrity"):
         made(firepanda).set_index("k", verify_integrity=True)
     with pytest.raises(NotImplementedError, match="level"):

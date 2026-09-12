@@ -216,12 +216,12 @@ def test_a_column_has_no_second_axis_to_be_read_along(firepanda):
         made.where([True, False, True], 0, axis=1)
 
 
-def test_a_column_refuses_inplace_and_a_level(firepanda):
+def test_a_column_settles_in_place_and_refuses_a_level(firepanda):
     made = firepanda.Series([1, 2, 3])
-    with pytest.raises(NotImplementedError, match="inplace"):
-        made.where([True, False, True], 0, inplace=True)
+    assert made.where([True, False, True], 0, inplace=True) is made
+    assert made.tolist() == [1, 0, 3]
     with pytest.raises(NotImplementedError, match="level"):
-        made.where([True, False, True], 0, level=0)
+        firepanda.Series([1, 2, 3]).where([True, False, True], 0, level=0)
 
 
 def test_a_frame_condition_lines_up_on_both_axes(firepanda):
@@ -302,9 +302,9 @@ def test_a_mapping_is_one_object_rather_than_a_value_per_column(firepanda):
         frame(firepanda).where(flags(firepanda), {"a": 9})
 
 
-def test_a_frame_refuses_inplace(firepanda):
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda).where(flags(firepanda), 0, inplace=True)
+def test_a_frame_settles_in_place_and_is_handed_back(firepanda):
+    made = frame(firepanda)
+    assert made.where(flags(firepanda), 0, inplace=True) is made
 
 
 def test_the_original_is_untouched(firepanda):

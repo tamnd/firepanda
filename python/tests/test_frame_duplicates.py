@@ -197,7 +197,8 @@ def test_a_column_that_is_not_there_is_refused(firepanda):
         made(firepanda).drop_duplicates("nope")
 
 
-def test_dropping_in_place_is_refused_rather_than_ignored(firepanda):
-    with pytest.raises(NotImplementedError) as raised:
-        made(firepanda).drop_duplicates("key", inplace=True)
-    assert "inplace" in str(raised.value)
+def test_dropping_in_place_settles_and_answers_nothing(firepanda):
+    frame = made(firepanda)
+    rows = len(frame)
+    assert frame.drop_duplicates("key", inplace=True) is None
+    assert len(frame) < rows

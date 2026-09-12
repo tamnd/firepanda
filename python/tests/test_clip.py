@@ -165,9 +165,11 @@ def test_a_category_takes_a_category_it_already_has(firepanda):
     assert ordered.clip("b", "c").tolist() == ["b", "b", "c"]
 
 
-def test_a_column_refuses_inplace(firepanda):
-    with pytest.raises(NotImplementedError):
-        firepanda.Series([1, 5, 10]).clip(2, 8, inplace=True)
+def test_a_column_settles_in_place_and_is_handed_back(firepanda):
+    """`clip` is on the side of the split that answers the object, not None."""
+    made = firepanda.Series([1, 5, 10])
+    assert made.clip(2, 8, inplace=True) is made
+    assert made.tolist() == [2, 5, 8]
 
 
 def test_numpys_out_is_taken_empty_and_refused_full(firepanda):
@@ -233,9 +235,10 @@ def test_a_frame_of_bounds_lines_up_on_both_axes(firepanda):
     assert cells(answered) == {"a": [2, 5, 10], "b": [0, 50, 0]}
 
 
-def test_a_frame_refuses_inplace(firepanda):
-    with pytest.raises(NotImplementedError):
-        frame(firepanda).clip(2, 8, inplace=True)
+def test_a_frame_settles_in_place_and_is_handed_back(firepanda):
+    made = frame(firepanda)
+    assert made.clip(2, 8, inplace=True) is made
+    assert cells(made) == {"a": [2, 5, 8], "b": [2, 8, 2]}
 
 
 def test_the_original_is_untouched(firepanda):

@@ -177,11 +177,14 @@ def test_a_frame_leaves_the_columns_a_pair_cannot_reach_alone(firepanda):
     assert cells(made) == {"a": [1, 9], "b": ["x", "y"]}
 
 
-def test_inplace_is_refused(firepanda):
-    with pytest.raises(NotImplementedError):
-        firepanda.Series([1, 2]).replace(2, 9, inplace=True)
-    with pytest.raises(NotImplementedError):
-        frame(firepanda).replace(2, 9, inplace=True)
+def test_inplace_settles_and_hands_the_object_back(firepanda):
+    """`replace` is on the side of the split that answers the object."""
+    column = firepanda.Series([1, 2])
+    assert column.replace(2, 9, inplace=True) is column
+    assert column.tolist() == [1, 9]
+    made = frame(firepanda)
+    assert made.replace(2, 9, inplace=True) is made
+    assert cells(made) == {"a": [1, 9, 3], "b": [9, 3, 4]}
 
 
 def test_a_pattern_is_refused(firepanda):

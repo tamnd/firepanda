@@ -1625,7 +1625,7 @@ def _transformations(py: str) -> tuple[Member, ...]:
                 ),
                 body="self._dropna(axis, how, thresh, subset, inplace, ignore_index)",
                 doc="The rows with no missing value in them.",
-                returns="DataFrame",
+                returns="DataFrame | None",
             )
         )
     else:
@@ -1639,7 +1639,7 @@ def _transformations(py: str) -> tuple[Member, ...]:
                 ),
                 body='self._transform("dropna", 0, axis, inplace, ignore_index)',
                 doc="The values that are not missing.",
-                returns="Series",
+                returns="Series | None",
             )
         )
 
@@ -1667,7 +1667,7 @@ def _transformations(py: str) -> tuple[Member, ...]:
                 name=name,
                 kind="method",
                 signature="",
-                body=f'self._transform("{name}", 0, 0, False, False)',
+                body=f'self._transformed("{name}", 0)',
                 doc=what,
                 returns=gives,
             )
@@ -1709,9 +1709,9 @@ def _transformations(py: str) -> tuple[Member, ...]:
             kind="method",
             signature="periods: int = 1, axis: Any = 0" if frame else "periods: int = 1",
             body=(
-                'self._transform("diff", periods, axis, False, False)'
+                'self._transformed("diff", periods, axis)'
                 if frame
-                else 'self._transform("diff", periods, 0, False, False)'
+                else 'self._transformed("diff", periods)'
             ),
             doc="The difference between each row and the one that many rows before it.",
             returns=gives,
@@ -2241,7 +2241,7 @@ FRAME = Exposed(
             ),
             body="self._set_index(keys, drop, append, inplace, verify_integrity)",
             doc="The frame with one of its columns moved into the row labels.",
-            returns="DataFrame",
+            returns="DataFrame | None",
         ),
         Member(
             name="reset_index",
@@ -2256,7 +2256,7 @@ FRAME = Exposed(
                 " allow_duplicates, names)"
             ),
             doc="The frame with its row labels put back to a count from zero.",
-            returns="DataFrame",
+            returns="DataFrame | None",
         ),
         Member(
             name="sort_index",
@@ -2272,7 +2272,7 @@ FRAME = Exposed(
                 " sort_remaining, ignore_index, key)"
             ),
             doc="The frame with its rows in the order of their labels.",
-            returns="DataFrame",
+            returns="DataFrame | None",
         ),
         Member(
             name="sort_values",
@@ -2288,7 +2288,7 @@ FRAME = Exposed(
                 " ignore_index, key)"
             ),
             doc="The frame with its rows in the order of some of its columns.",
-            returns="DataFrame",
+            returns="DataFrame | None",
         ),
         Member(
             name="filter",
@@ -2353,7 +2353,7 @@ FRAME = Exposed(
             ),
             body="self._drop_duplicates(subset, keep, inplace, ignore_index)",
             doc="The frame with the repeated rows removed, by a chosen rule.",
-            returns="DataFrame",
+            returns="DataFrame | None",
         ),
         Member(
             name="reindex",
