@@ -1285,12 +1285,14 @@ def _holds(printed: str, value: Any) -> bool:
     return False
 
 
-def _fallback(printed: str, value: Any) -> Any:
+def _fallback(printed: str, value: Any, column: Any = None) -> Any:
     """The fill value as a column of one row, of the type it is going into.
 
     Args:
         printed: The column's type as `dtype` spells it.
         value: What the caller wants put in the missing rows.
+        column: The column itself, which only a category column needs and which
+            only a category column is asked for.
 
     Returns:
         The inner one row series the extension takes.
@@ -1302,12 +1304,52 @@ def _fallback(printed: str, value: Any) -> Any:
     """
     from ._frame import Series
 
+    if printed == "category":
+        return _category_fallback(column, value)
     if not _holds(printed, value):
         raise DTypeError(f"Invalid value '{value}' for dtype '{printed}'")
     try:
         return Series([value])._inner.cast(printed, True)
     except Exception as error:
         raise translate(error) from None
+
+
+def _category_fallback(column: Any, value: Any) -> Any:
+    """The fill value as a one row category column carrying the same categories.
+
+    A category column is the one type whose fallback cannot be described by the
+    type's name, and the reason is what a category column stores. The values are
+    codes and a code is a position in a list, so two category columns with
+    different lists cannot be put together at all, which is what the core's
+    coalesce says when it is handed a pair. So the fallback is built as a
+    category of its own and then told to carry this column's list, which is
+    where the code it needs comes from.
+
+    That is also why the value is checked against the list rather than against a
+    kind. A category column holds what its categories say it holds and nothing
+    else, and pandas says so in the same words for the same reason.
+
+    Args:
+        column: The column being filled.
+        value: What the caller wants put in the missing rows.
+
+    Returns:
+        The inner one row series the extension takes.
+
+    Raises:
+        DTypeError: If the value is not one of the column's categories. The
+            sentence is pandas' own.
+    """
+    from ._frame import Series
+
+    categories = list(column.cat.categories)
+    if value not in categories:
+        raise DTypeError(
+            f"Cannot setitem on a Categorical with a new category ({value}),"
+            " set the categories first"
+        )
+    one = Series([value]).astype("category")
+    return one.cat.set_categories(categories, ordered=column.cat.ordered)._inner
 
 
 def _fill_values(value: Any, held: Any, owner: str) -> dict[str, Any]:
@@ -2211,7 +2253,7 @@ class DataFrameMixin:
             NotImplementedError: For `inplace`, for a limit, and for a value
                 that is a mapping onto row labels or an object with rows.
         """
-        from ._frame import DataFrame
+        from ._frame import DataFrame, Series
 
         _held_at("inplace", inplace, False, _NO_INPLACE)
         _axis_number(axis, "DataFrame", 0, (0, 1))
@@ -2229,7 +2271,14 @@ class DataFrameMixin:
         for name, one in wanted.items():
             if gaps[name] == 0:
                 continue
-            filled = _fallback(types[name], one)
+            # A category column is the one type that has to be looked at rather
+            # than named, since its fallback has to carry its own list of
+            # categories, and it is the one place here that pays for a copy of
+            # a column. It pays only when there is a gap in that column.
+            looked = None
+            if types[name] == "category":
+                looked = Series._wrap(answer._inner.column(name))
+            filled = _fallback(types[name], one, looked)
             try:
                 answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
             except Exception as error:
@@ -3780,7 +3829,7 @@ class SeriesMixin:
         wanted = _fill_values(value, [self._inner.label()], "Series")
         if not wanted or self._inner.null_count() == 0:
             return self.copy()
-        filled = _fallback(self._inner.dtype(), next(iter(wanted.values())))
+        filled = _fallback(self._inner.dtype(), next(iter(wanted.values())), self)
         try:
             return Series._wrap(self._inner.fill_null(filled))
         except Exception as error:

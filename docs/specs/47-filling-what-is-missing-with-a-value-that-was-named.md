@@ -66,7 +66,15 @@ The reason for leaving it out is scope rather than difficulty, and it is worth w
 
 A key the frame does not have is dropped rather than complained about, which is the opposite of what `drop` does with a name that is not there. The difference is what the caller was doing. `drop` was asked to remove something and the something is not there, so the call did not do what it said. `fillna` was offered a value for a column, and a column that does not exist has no gaps to fill, so nothing was left undone.
 
-## 8. What this does not do
+## 8. The one type whose fallback cannot be named
+
+Everything above treats the fallback as something that can be built from two things, the value the caller wrote and the name of the column's type. That is true of every type here except one. A category column stores codes, a code is a position in a list, and the list is carried by the column rather than by the type, so two category columns are only the same type if they carry the same list. The core says exactly that when it is handed a pair that does not match, in the words "the two columns do not have the same categories, and a code is a position in a category list", and it is right to refuse, because putting one column's code into another column's list would silently answer a different value.
+
+So the fallback for a category column is built as a category of its own and then told to carry this column's list, which is where the code it needs comes from. That is one call to `set_categories`, it keeps the column's own ordering flag, and it is the only branch in this method that has to look at a column rather than at a schema. It is also the one place the method pays for a copy of a column, and it pays only when that column actually has a gap in it, so a frame of a hundred category columns with nothing missing still costs nothing.
+
+The check on the value changes shape here for the same reason. There is no kind to test against, because a category column does not hold a kind, it holds what its list says it holds and nothing else. So the value is checked against the list, and a value that is not on it raises pandas' own sentence, which is that you cannot set a new category on a categorical and have to set the categories first. pandas says that because of the codes, and this says it because of the codes, which is the rarer sort of agreement: the two libraries refuse the same call for the same underlying reason rather than one of them copying the other's message.
+
+## 9. What this does not do
 
 No `limit`, for the reason in section 6. No mapping onto row labels and no fallback that carries rows, for the reason in section 7. No object dtype, so no answer where pandas widens, for the reason in section 4.
 

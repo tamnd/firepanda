@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.fillna and Series.fillna
+
+The coalesce these two are made of has been in the core since the fill family was written, and neither of the two calls that reach it had a binding, so `fillna` was the one member of that family that could be reached from Mojo and from nowhere else. It has the pandas 3.0 signature, which is `value` followed by `axis`, `inplace` and `limit`, and `method` and `downcast` are not declared because pandas 3.0 has deleted them.
+
+A value fills every column that has a gap, and a dict on a frame names which columns to fill. A column here is typed and stays typed, so the value is checked against the column's type before anything is written, and the rules copied are pandas' rules for its masked types rather than for numpy's, since a firepanda column carries a validity bitmap and is therefore `Int64` and not `int64`. A whole number written as a float goes into a column of whole numbers, a bool is not a number and a number is not a bool, and a number does not go into a column of text. That last one is a deliberate divergence, since pandas widens to object there and this library has no type that holds a number beside text, and document 47 argues that raising is the honest answer rather than casting the zero to a character.
+
+A column with nothing missing is untouched whatever the value is, which is pandas' own rule, so `df.fillna(0)` on a frame with a complete text column is fine and the same call with one gap in that column raises. A category column is filled with one of its own categories and a value that is not on its list raises pandas' sentence about setting the categories first, for the reason pandas has it, which is that a code is a position in a list.
+
+`axis` is checked and not used, since with one value per column the two axes name the same answer. `inplace` is refused with the standing sentence. `limit` is validated pandas' way and then refused, because a coalesce reads a validity bit without knowing how many rows came before it. A dict on a column, and a fallback that itself carries rows, are refused with a message naming the alignment that would build them.
+
+Three bindings are new. Two are the fill itself and the third is `null_counts`, which reads a frame's validity bitmaps and nothing else, so asking which columns have a gap does not copy the columns to find out.
+
 ## [0.6.79] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
