@@ -240,6 +240,28 @@ struct PyDataFrame(Movable, Writable):
         return out
 
     @staticmethod
+    def null_counts(py_self: PythonObject) raises -> PythonObject:
+        """Reports how many rows are missing from each column, in order.
+
+        This reads validity and nothing else, the way `dtypes` above reads the
+        schema and nothing else, and for the same reason. Asking a frame which
+        of its columns have a gap in them through `column` would copy every
+        column to count the bits in each one, and counting is not a reason to
+        move a frame.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A list of counts, one per column, in column order.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var out = Python.list()
+        for i in range(len(frame.columns)):
+            out.append(PythonObject(frame.columns[i].null_count()))
+        return out
+
+    @staticmethod
     def head(py_self: PythonObject, n: PythonObject) raises -> PythonObject:
         """Takes the first `n` rows.
 
@@ -402,6 +424,47 @@ struct PyDataFrame(Movable, Writable):
             )
         except cause:
             raise retagged(POSITION, cause)
+
+    @staticmethod
+    def fill_null(
+        py_self: PythonObject, name: PythonObject, value: PythonObject
+    ) raises -> PythonObject:
+        """Takes one column's missing rows from a second column.
+
+        One column at a time rather than the whole frame at once, because the
+        fallback has to be of the column's own dtype and a frame of mixed types
+        has no single fallback that fits all of them. A fill across a frame is
+        therefore this called once per column that has something to fill, and
+        each call shares the buffers of every column it did not touch.
+
+        Args:
+            py_self: The frame.
+            name: The column to fill.
+            value: The fallback, of that column's dtype and either one row or
+                as tall as the frame.
+
+        Returns:
+            A new frame of the same shape with that one column filled.
+
+        Raises:
+            Error: Tagged `dtype`, since the caller has already checked that
+                the column is there and has already been told what type to
+                send, so what is left is a dtype that does not match and a
+                height that is neither one nor all.
+        """
+        var right = PySeries._other(value, "value")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .fill_null(String(name), right[].copy())
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
 
     @staticmethod
     def cell(

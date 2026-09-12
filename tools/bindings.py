@@ -1800,6 +1800,12 @@ FRAME = Exposed(
             returns="list[str]",
         ),
         Binding(
+            mojo="PyDataFrame.null_counts",
+            name="null_counts",
+            doc="How many rows are missing from each column, in order.",
+            returns="list[int]",
+        ),
+        Binding(
             mojo="PyDataFrame.set_index",
             name="set_index",
             doc="The frame with one column moved into the row labels.",
@@ -1864,6 +1870,13 @@ FRAME = Exposed(
             name="filter_rows",
             doc="The rows a boolean column is true at.",
             params=(("mask", "Series"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.fill_null",
+            name="fill_null",
+            doc="One column's missing rows taken from another column.",
+            params=(("name", "str"), ("value", "Series")),
             returns="DataFrame",
         ),
         Binding(
@@ -2532,6 +2545,13 @@ SERIES = Exposed(
             name="filter_rows",
             doc="The rows a boolean column is true at.",
             params=(("mask", "Series"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.fill_null",
+            name="fill_null",
+            doc="Every missing row taken from another column.",
+            params=(("value", "Series"),),
             returns="Series",
         ),
         Binding(

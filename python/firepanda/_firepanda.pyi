@@ -25,6 +25,9 @@ class DataFrame:
     def dtypes(self) -> list[str]:
         """The column types, in order, as dtype spells them."""
         ...
+    def null_counts(self) -> list[int]:
+        """How many rows are missing from each column, in order."""
+        ...
     def set_index(self, name: str, drop: bool) -> DataFrame:
         """The frame with one column moved into the row labels."""
         ...
@@ -53,6 +56,9 @@ class DataFrame:
         ...
     def filter_rows(self, mask: Series) -> DataFrame:
         """The rows a boolean column is true at."""
+        ...
+    def fill_null(self, name: str, value: Series) -> DataFrame:
+        """One column's missing rows taken from another column."""
         ...
     def cell(self, row: int, at: int) -> object:
         """One value, by row and by column position."""
@@ -200,6 +206,9 @@ class Series:
         ...
     def filter_rows(self, mask: Series) -> Series:
         """The rows a boolean column is true at."""
+        ...
+    def fill_null(self, value: Series) -> Series:
+        """Every missing row taken from another column."""
         ...
     def cell(self, at: int) -> object:
         """One value, by position."""

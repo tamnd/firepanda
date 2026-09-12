@@ -443,6 +443,41 @@ struct PySeries(Movable, Writable):
             raise retagged(POSITION, cause)
 
     @staticmethod
+    def fill_null(
+        py_self: PythonObject, other: PythonObject
+    ) raises -> PythonObject:
+        """Takes every missing row from a second column.
+
+        The fallback crosses as a column and not as a value for the reason the
+        mask above does, which is that the kernel wants something typed and the
+        Python layer is the side that knows what type to make it. A fill with a
+        constant is a fallback one row tall, built up there out of the value the
+        caller wrote and cast to this column's own type before it gets here, so
+        there is no branch on this side between filling from a constant and
+        filling from a column.
+
+        Args:
+            py_self: The series.
+            other: The fallback, of this column's dtype and either one row or
+                as tall as this one.
+
+        Returns:
+            A new series missing only where both were.
+
+        Raises:
+            Error: Tagged `dtype`, since the two ways this fails are a dtype
+                that does not match and a height that is neither one nor all,
+                and the caller has already been told what type to send.
+        """
+        var right = Self._other(other, "value")
+        try:
+            return Self._wrapped(
+                Self._held(py_self)[].series[].fill_null(right[])
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def cell(py_self: PythonObject, at: PythonObject) raises -> PythonObject:
         """Reads one value out, by position.
 
