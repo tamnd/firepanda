@@ -3128,6 +3128,36 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var column = Series(name, AnyArray(copy=self.columns[at].only()))
         return self.with_column(column.fill_null(value))
 
+    def pick(
+        self, name: String, cond: Array[DType.bool], otherwise: Series
+    ) raises -> Self:
+        """Returns the frame with one column's rows chosen against another column.
+
+        One column at a time for the reason `fill_null` gives: the other side
+        has to be of that column's own dtype, and a frame of mixed types has no
+        single other side that fits all of them. A choice across a frame is
+        this called once per column, and each call shares the buffers of every
+        column it did not touch.
+
+        Args:
+            name: Which column to choose over.
+            cond: The condition, as tall as the frame.
+            otherwise: What to take where the condition does not hold, of that
+                column's dtype and either as tall as the frame or one row. Its
+                name is ignored.
+
+        Returns:
+            A frame of the same shape, with the named column chosen over.
+
+        Raises:
+            If the column does not exist, if the dtypes differ, if the other
+            side is neither one row nor as tall as the frame, or if the dtype
+            has no physical layout.
+        """
+        var at = self.index_of(name)
+        var column = Series(name, AnyArray(copy=self.columns[at].only()))
+        return self.with_column(column.pick(cond, otherwise))
+
     def _rebuilt(
         self, var columns: List[Series], var index: Index
     ) raises -> Self:

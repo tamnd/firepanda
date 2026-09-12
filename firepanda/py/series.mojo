@@ -478,6 +478,91 @@ struct PySeries(Movable, Writable):
             raise retagged(DTYPE, cause)
 
     @staticmethod
+    def missing_row(py_self: PythonObject) raises -> PythonObject:
+        """One row of this column's dtype with nothing in it.
+
+        A missing value is the one value the Python layer cannot build by
+        writing it down, because it has no type of its own: a `None` that
+        crosses over arrives as a float column, and a float column of one null
+        cannot be cast to an integer one, since that cast is the one pandas
+        refuses for exactly this value. So it is asked for here, where the dtype
+        is already known and the row can be made out of nothing rather than
+        converted into it.
+
+        The core has this already and the outer join is why. It reads a negative
+        gather position as a request for a row that is not there, which is what
+        a left row with no match on the right needs, and one such position is
+        one such row.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A new series of one row, of this column's dtype, holding nothing.
+
+        Raises:
+            Error: Tagged `dtype`, if the dtype has no physical layout.
+        """
+        var nowhere = List[Int](capacity=1)
+        nowhere.append(-1)
+        try:
+            return Self._wrapped(Self._held(py_self)[].series[].take(nowhere))
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def pick(
+        py_self: PythonObject, cond: PythonObject, other: PythonObject
+    ) raises -> PythonObject:
+        """Takes each row from this column or from a second one, on a condition.
+
+        This is what `where` and `mask` reach. Both sides cross as columns for
+        the reason `fill_null` gives, which is that the kernel wants something
+        typed and the layer above is the side that knows what type to make it,
+        and the condition crosses as a column for the reason the mask in
+        `filter_rows` does, which is that a condition written as `s > 0` is
+        already a column on this side.
+
+        A null in the condition takes the other side, which is the kernel's rule
+        and is not pandas'. pandas keeps the row where the condition is missing
+        in `mask` and replaces it in `where`, so the layer above fills the
+        condition's nulls before it gets here and this never sees one.
+
+        Args:
+            py_self: The series.
+            cond: A boolean column as tall as the series.
+            other: What to take where the condition does not hold, of this
+                column's dtype and either one row or as tall as this one.
+
+        Returns:
+            A new series of the same height.
+
+        Raises:
+            Error: Tagged `dtype`, since by the time a call gets here the layer
+                above has checked the heights and the types against what pandas
+                says about them, and what is left is a bug on this side.
+        """
+        var mask = Self._other(cond, "cond")
+        if mask[].values.dtype() != DType.bool:
+            raise tagged(
+                DTYPE,
+                String(
+                    "cannot choose with a column of ",
+                    mask[].values.type_name(),
+                    "; a condition has to be boolean",
+                ),
+            )
+        var right = Self._other(other, "other")
+        try:
+            return Self._wrapped(
+                Self._held(py_self)[]
+                .series[]
+                .pick(mask[].values.as_typed[DType.bool](), right[])
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def cell(py_self: PythonObject, at: PythonObject) raises -> PythonObject:
         """Reads one value out, by position.
 

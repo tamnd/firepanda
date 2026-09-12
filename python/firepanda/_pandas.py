@@ -1654,6 +1654,397 @@ def _is_frame(value: Any) -> bool:
     return _is_object(value) and hasattr(value, "columns")
 
 
+_SAME_SHAPE = "Array conditional must be same shape as self"
+"""What pandas says when a condition with no labels is the wrong length."""
+
+_NEEDS_AXIS = "Must specify axis=0 or 1"
+"""What pandas says when something with one axis has to be told which one."""
+
+_HIGHER = "cannot align with a higher dimensional NDFrame"
+"""What pandas says when a frame is offered to a column as the other side."""
+
+
+def _condition(cond: Any, labels: list[Any], height: int) -> Any:
+    """The condition as a boolean column, one row per row, gaps and all.
+
+    A condition that carries labels is lined up against the rows it is judging,
+    and a row it says nothing about is a false. That is not the same as a row it
+    says nothing in, and only one of them is pandas being unusual: a reindex that
+    cannot find a label normally leaves a gap, and here it leaves a decision.
+
+    A row the condition says nothing in is left saying nothing, which matters
+    because of when it is filled in rather than whether. A null is not kept by
+    either method, so `mask` has to turn the condition over first and read the
+    null as a false second. Turning a filled in false over would make it a true
+    and would keep a row pandas replaces.
+
+    Args:
+        cond: What the caller passed, carrying labels or not.
+        labels: The labels of the rows being judged, in order.
+        height: How many rows there are.
+
+    Returns:
+        The inner boolean column the extension takes, as tall as the rows, which
+        may still have gaps in it.
+
+    Raises:
+        DTypeError: If the condition is not boolean.
+        InvalidArgumentError: If it has no labels and is the wrong length, or is
+            a frame, which has one axis too many to judge a column with.
+    """
+    from ._frame import Series
+
+    if _is_frame(cond):
+        raise InvalidArgumentError(_NEEDS_AXIS)
+    if _is_object(cond):
+        held = cond if hasattr(cond, "_inner") else _labelled(list(cond.index), cond.tolist())
+        return _flags(held._inner).reindex(labels, False, False)
+    asked = [_plain(value) for value in cond]
+    if len(asked) != height:
+        raise InvalidArgumentError(_SAME_SHAPE)
+    try:
+        given = Series(asked)._inner
+    except Exception as error:
+        raise translate(error) from None
+    return _flags(given)
+
+
+def _flags(inner: Any) -> Any:
+    """The condition, having been asked whether it is a condition at all.
+
+    Args:
+        inner: The inner column.
+
+    Returns:
+        The same column.
+
+    Raises:
+        DTypeError: If it is not boolean, in pandas' words. pandas refuses a
+            column of ones and zeros here, which is worth knowing because it is
+            the obvious thing to write and every other library takes it.
+    """
+    printed = inner.dtype()
+    if printed != "bool":
+        raise DTypeError(f"Boolean array expected for the condition, not {printed}")
+    return inner
+
+
+def _no_gaps(inner: Any) -> Any:
+    """The rows to keep, with a false wherever the condition said nothing.
+
+    Called after the condition has been turned over rather than before, which is
+    the whole of the difference between the two methods on a row that says
+    nothing. Neither of them keeps such a row, so the false goes in last.
+
+    Args:
+        inner: The inner boolean column.
+
+    Returns:
+        A boolean column with no nulls left in it.
+    """
+    from ._frame import Series
+
+    if inner.null_count() == 0:
+        return inner
+    return inner.fill_null(Series([False])._inner)
+
+
+def _everywhere(labels: list[Any], value: bool) -> Any:
+    """One flag as a column of flags, one per row.
+
+    This is the one place in this area that builds a column out of Python
+    objects rather than out of another column, and it is reached by the one
+    shape that carries a decision about a whole column rather than about a row,
+    which is a column of the frame that the condition does not mention at all.
+
+    Args:
+        labels: The labels of the rows, which are counted and not read.
+        value: The flag.
+
+    Returns:
+        The inner boolean column.
+    """
+    from ._frame import Series
+
+    return Series([value] * len(labels))._inner
+
+
+def _other_side(
+    other: Any,
+    printed: str,
+    labels: list[Any],
+    replaced: Any,
+    column: Any,
+    shape: str = "",
+) -> Any:
+    """What the rows the condition did not keep are going to hold.
+
+    Everything `fillna` learned about a fill value holds here, because this is
+    the same question with a different mask in front of it. The value has to be
+    one the column's type can hold, a value that carries rows is lined up
+    against the labels and read row by row, and a row of it that holds nothing
+    leaves the row it was going to fill holding nothing.
+
+    The one shape `fillna` does not have is no value at all, which is what
+    `where` means when nobody names one, and that is a missing value in the
+    column's own type. pandas widens the column instead, to float64 for a column
+    of integers and to object for a column of words, because a numpy dtype has
+    nowhere to put a missing value. A firepanda column does, the way pandas' own
+    `Int64` does, and `Int64.where` answers `<NA>` in `Int64` over there for the
+    same reason this answers a null in int64 here.
+
+    Args:
+        other: What the caller passed, or `NO_DEFAULT` for nothing.
+        printed: The column's type as `dtype` spells it.
+        labels: The labels of the rows, in order.
+        replaced: Which rows are taking this side, as a column of flags.
+        column: The column being chosen over.
+        shape: How the shape of the thing this is going into is spelled, for the
+            sentence a value of the wrong length gets. The rows of one column
+            when it is not given.
+
+    Returns:
+        The inner series the extension takes, of one row or of every row.
+
+    Raises:
+        DTypeError: If the column cannot hold what this side offers a row it is
+            going to take.
+        InvalidArgumentError: If it carries rows without labels and is the wrong
+            length.
+        UnsupportedError: If it is a frame, which is one axis too many.
+    """
+    shape = shape or f"({len(labels)},)"
+    if other is NO_DEFAULT:
+        return column._inner.missing_row()
+    if _is_frame(other):
+        raise UnsupportedError(_HIGHER)
+    if _is_object(other):
+        return _fill_column(printed, other, labels, replaced, column)
+    if isinstance(other, dict):
+        # pandas reads a mapping here as one object rather than as a row per
+        # key, which is the opposite of what `fillna` does with the same
+        # argument, and the sentence it ends up raising is numpy's. On a frame
+        # pandas goes further and puts the mapping itself in every cell it
+        # replaces, which needs an object column and so is refused here too.
+        raise InvalidArgumentError(f"cannot reshape array of size 1 into shape {shape}")
+    if _positional(other):
+        given = [_plain(value) for value in other]
+        if len(given) != len(labels):
+            raise InvalidArgumentError(
+                f"cannot reshape array of size {len(given)} into shape {shape}"
+            )
+        return _fill_column(printed, _labelled(labels, given), labels, replaced, column)
+    return _fallback(printed, other, column)
+
+
+def _positional(value: Any) -> bool:
+    """Whether a value is a run of values to be read against the rows in order.
+
+    Args:
+        value: What the caller passed.
+
+    Returns:
+        Whether it is a sequence that carries no labels of its own. Text is not
+        one, because a word is a value in a column of words rather than a run of
+        letters, and a mapping is not one either, for the reason above.
+    """
+    if isinstance(value, (str, bytes, dict)):
+        return False
+    return hasattr(value, "__len__") or hasattr(value, "__array__")
+
+
+def _plain(value: Any) -> Any:
+    """A value that came out of an array as the Python value it stands for.
+
+    A condition written as a numpy array hands out numpy scalars rather than
+    bools, and a column here is built out of Python values, so the ones that
+    stand for a single value are asked for it. A value with a length is not
+    asked, because a row of a two dimensional array has an `item` as well and
+    has more than one thing in it.
+
+    Args:
+        value: One element of whatever the caller passed.
+
+    Returns:
+        The value, plainly.
+    """
+    if hasattr(value, "item") and not hasattr(value, "__len__"):
+        return value.item()
+    return value
+
+
+def _reshaped(size: int, height: int, width: int) -> str:
+    """What pandas says when a frame is offered the wrong number of values.
+
+    Args:
+        size: How many values arrived.
+        height: How many rows the frame has.
+        width: How many columns.
+
+    Returns:
+        The sentence, spaced the way numpy spaces it.
+    """
+    return f"cannot reshape array of size {size} into shape ({height},{width})"
+
+
+def _frame_conditions(cond: Any, names: list[str], labels: list[Any], along: int) -> dict[str, Any]:
+    """The condition as one boolean column per column of the frame.
+
+    Four shapes arrive here and each of them says something different about what
+    a flag is attached to. A frame lines up on both axes and is a flag per cell.
+    A column read down the rows is a flag per row, shared by every column, which
+    is what a condition means when nobody says otherwise. A column read across
+    the columns is a flag per column, which stands for a column of them. A plain
+    two dimensional run of values is a flag per cell again, by position.
+
+    A one dimensional run of values is not one of the four. pandas refuses it on
+    a frame even when it is exactly as tall, and this refuses it in the same
+    sentence, because the thing it would obviously mean is what a column says
+    and a caller who means that can say it.
+
+    Args:
+        cond: What the caller passed.
+        names: The frame's column names, in order.
+        labels: The frame's row labels, in order.
+        along: Which axis a column of flags is read along.
+
+    Returns:
+        A boolean column per name, each as tall as the rows with nothing
+        missing.
+
+    Raises:
+        DTypeError: If the condition is not boolean.
+        InvalidArgumentError: If it carries no labels and is not the frame's
+            shape.
+    """
+    height = len(labels)
+    if _is_frame(cond):
+        carried = {str(name) for name in cond.columns}
+        return {
+            name: _condition(cond[name], labels, height)
+            if name in carried
+            else _everywhere(labels, False)
+            for name in names
+        }
+    if _is_object(cond):
+        if along == 1:
+            return _across(cond, names, labels)
+        shared = _condition(cond, labels, height)
+        return dict.fromkeys(names, shared)
+    rows = [_plain(row) for row in cond]
+    if len(rows) != height or not all(_positional(row) for row in rows):
+        raise InvalidArgumentError(_SAME_SHAPE)
+    grid = [[_plain(value) for value in row] for row in rows]
+    if any(len(row) != len(names) for row in grid):
+        raise InvalidArgumentError(_SAME_SHAPE)
+    return {
+        name: _condition([row[at] for row in grid], labels, height) for at, name in enumerate(names)
+    }
+
+
+def _across(cond: Any, names: list[str], labels: list[Any]) -> dict[str, Any]:
+    """A column of flags read as one flag for each column of the frame.
+
+    This is the shape pandas cannot currently run. `df.where(flags, axis=1)`
+    raises a `TypeError` about a `_NoDefault` not being subscriptable from
+    inside its block manager, whatever the other side is, and the same call with
+    a scalar other raises the same sentence about an int. It is written down in
+    document 48 and reported upstream. What it is supposed to mean is not in
+    doubt, so it is implemented rather than refused.
+
+    The flags are lined up against the column names and then each one is spread
+    down the rows by gathering its row as many times as there are rows. That is
+    a longer way of writing a column of one repeated value than building one out
+    of Python, and it is the way that keeps a flag saying nothing saying nothing,
+    which the two methods read differently.
+
+    Args:
+        cond: The flags, labelled by column name.
+        names: The frame's column names, in order.
+        labels: The frame's row labels, which are counted and not read.
+
+    Returns:
+        A boolean column per name, each holding one flag in every row.
+
+    Raises:
+        DTypeError: If the condition is not boolean.
+    """
+    held = cond if hasattr(cond, "_inner") else _labelled(list(cond.index), cond.tolist())
+    lined = _flags(held._inner).reindex(names, False, False)
+    return {name: lined.take([at] * len(labels)) for at, name in enumerate(names)}
+
+
+def _frame_others(
+    other: Any, names: list[str], labels: list[Any], along: int, told: bool
+) -> dict[str, Any]:
+    """The other side as one thing per column of the frame.
+
+    A frame lines up on both axes and a column it does not carry offers nothing,
+    which leaves those rows missing. A column has to be told which way to read,
+    since a run of values against a frame could be a value per row or a value
+    per column and pandas will not guess. A plain two dimensional run is a value
+    per cell and a one dimensional one is a value per column, which is numpy's
+    broadcasting rule and is worth knowing because the other reading is the one
+    that looks right.
+
+    Args:
+        other: What the caller passed.
+        names: The frame's column names, in order.
+        labels: The frame's row labels, in order.
+        along: Which axis a column of values is read along.
+        told: Whether the caller said which axis. A column of values needs to
+            have been told.
+
+    Returns:
+        What each column's rows take, which is a value, a run of values, a
+        column, or nothing at all.
+
+    Raises:
+        InvalidArgumentError: If a column of values arrives with no axis named,
+            or a run of values is not the frame's shape.
+    """
+    height, width = len(labels), len(names)
+    if other is NO_DEFAULT:
+        return dict.fromkeys(names, NO_DEFAULT)
+    if _is_frame(other):
+        carried = {str(name) for name in other.columns}
+        return {name: other[name] if name in carried else NO_DEFAULT for name in names}
+    if _is_object(other):
+        if not told:
+            raise InvalidArgumentError(_NEEDS_AXIS)
+        if along == 0:
+            return dict.fromkeys(names, other)
+        pairs = dict(zip([str(key) for key in other.index], other.tolist(), strict=True))
+        return {name: _offered(pairs.get(name)) for name in names}
+    if _positional(other):
+        rows = [_plain(value) for value in other]
+        if rows and _positional(rows[0]):
+            grid = [[_plain(value) for value in row] for row in rows]
+            counted = sum(len(row) for row in grid)
+            if len(grid) != height or any(len(row) != width for row in grid):
+                raise InvalidArgumentError(_reshaped(counted, height, width))
+            return {name: [row[at] for row in grid] for at, name in enumerate(names)}
+        if len(rows) != width:
+            raise InvalidArgumentError(_reshaped(len(rows), height, width))
+        return dict(zip(names, rows, strict=True))
+    return dict.fromkeys(names, other)
+
+
+def _offered(value: Any) -> Any:
+    """One value out of a run of them, with a missing one read as no value.
+
+    Args:
+        value: What sat against a column's name, or None if nothing did.
+
+    Returns:
+        The value, or `NO_DEFAULT` if there was not one, which is the same thing
+        a column the other side does not carry offers.
+    """
+    if value is None or value != value:
+        return NO_DEFAULT
+    return value
+
+
 def _transforming_axis(axis: Any, owner: str) -> None:
     """Refuses a transformation along the second axis.
 
@@ -2552,6 +2943,153 @@ class DataFrameMixin:
                 filled = _fallback(types[name], one, looked)
             try:
                 answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
+            except Exception as error:
+                raise translate(error) from None
+        return answer
+
+    def where(
+        self,
+        cond: Any,
+        other: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        axis: Any = None,
+        level: Any = None,
+    ) -> DataFrame:
+        """The frame with the cells a condition did not keep taken from elsewhere.
+
+        Document 48 is the long version. The short one is that a condition is a
+        flag per cell, a cell it does not keep takes the other side, and a cell
+        it says nothing about is not kept.
+
+        With no other side named the cells that were not kept hold nothing, each
+        in its own column's type. That is where pandas widens and this does not,
+        and the comparison that settles it is pandas' own nullable types, which
+        do not widen either.
+
+        A column that keeps every one of its rows is left alone, and its side of
+        the other side is never looked at. That is pandas' rule rather than a
+        shortcut, since pandas widens a column when it puts something in one and
+        not when it is offered something.
+
+        Args:
+            cond: The flags. A frame lines up on both axes, a column is a flag
+                per row unless `axis=1` says it is a flag per column, a two
+                dimensional run of values is read by position, and a callable is
+                handed this frame and asked.
+            other: What the cells that were not kept take. A value for all of
+                them, a frame lined up on both axes, a column that needs an axis
+                named, a run of values read by position, or a callable handed
+                this frame. Nothing means a missing value.
+            inplace: Refused.
+            axis: Which way to read a condition or an other side that has one
+                axis. Named rather than guessed, the way pandas insists.
+            level: Refused.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or a column cannot hold
+                what the other side offers a cell it is going to take.
+            InvalidArgumentError: If a shape does not line up, or a column of
+                values arrives with no axis named.
+            NotImplementedError: For `inplace`.
+        """
+        return self._chosen(cond, other, inplace, axis, level, False)
+
+    def mask(
+        self,
+        cond: Any,
+        other: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        axis: Any = None,
+        level: Any = None,
+    ) -> DataFrame:
+        """The frame with the cells a condition picked out taken from elsewhere.
+
+        `where` with the condition turned over, which is how pandas describes it
+        and is how it is implemented, with one thing to watch. A cell the
+        condition says nothing about is kept by neither of them, so the turn has
+        to happen before the nulls are read as falses rather than after.
+        Document 48 section 4.
+
+        Args:
+            cond: The flags, in every shape `where` takes them.
+            other: What the cells the condition picked out take.
+            inplace: Refused.
+            axis: Which way to read a condition or an other side that has one
+                axis.
+            level: Refused.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or a column cannot hold
+                what the other side offers a cell it is going to take.
+            InvalidArgumentError: If a shape does not line up, or a column of
+                values arrives with no axis named.
+            NotImplementedError: For `inplace`.
+        """
+        return self._chosen(cond, other, inplace, axis, level, True)
+
+    def _chosen(
+        self, cond: Any, other: Any, inplace: bool, axis: Any, level: Any, flip: bool
+    ) -> DataFrame:
+        """The body `where` and `mask` share.
+
+        Args:
+            cond: The flags.
+            other: What the cells this does not keep take.
+            inplace: Refused.
+            axis: Which way to read something with one axis.
+            level: Refused.
+            flip: Whether the condition picks out the cells to replace rather
+                than the cells to keep.
+
+        Returns:
+            A new frame of the same shape and the same types.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or a column cannot hold
+                what the other side offers.
+            InvalidArgumentError: If a shape does not line up.
+            NotImplementedError: For `inplace`.
+        """
+        from ._frame import DataFrame, Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        _no_level(level)
+        along = _axis_number(axis, "DataFrame", 0, (0, 1))
+        if callable(cond):
+            cond = cond(self)
+        if callable(other):
+            other = other(self)
+        names = [str(name) for name in self.columns]
+        labels = self._inner.labels().to_list()
+        flags = _frame_conditions(cond, names, labels, along)
+        wanted = _frame_others(other, names, labels, along, axis is not None)
+        types = dict(zip(names, self._inner.dtypes(), strict=True))
+        shape = f"({len(labels)},{len(names)})"
+        answer = self.copy()
+        for name in names:
+            one = flags[name]
+            kept = _no_gaps(one.unary("invert") if flip else one)
+            replaced = kept.unary("invert")
+            if not bool(replaced.reduce("max", 0.0)):
+                continue
+            # The column itself is only wanted by the two sides that cannot be
+            # described without it, which are a missing value in this column's
+            # own type and a category, whose list of categories is part of it.
+            side = wanted[name]
+            looked = None
+            if side is NO_DEFAULT or types[name] == "category":
+                looked = Series._wrap(answer._inner.column(name))
+            taken = _other_side(side, types[name], labels, replaced, looked, shape)
+            try:
+                answer = DataFrame._wrap(answer._inner.pick(name, kept, taken))
             except Exception as error:
                 raise translate(error) from None
         return answer
@@ -4121,6 +4659,133 @@ class SeriesMixin:
             filled = _fallback(printed, value, self)
         try:
             return Series._wrap(self._inner.fill_null(filled))
+        except Exception as error:
+            raise translate(error) from None
+
+    def where(
+        self,
+        cond: Any,
+        other: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        axis: Any = None,
+        level: Any = None,
+    ) -> Series:
+        """The column with the rows a condition did not keep taken from elsewhere.
+
+        Document 48 is the long version. The short one is that a condition is a
+        column of flags lined up against these rows, a row it does not keep
+        takes the other side, and a row it says nothing about is not kept.
+
+        With no other side named the rows that were not kept hold nothing, in
+        this column's own type. That is where pandas widens and this does not,
+        and the comparison that settles it is pandas' own nullable types, which
+        do not widen either.
+
+        Args:
+            cond: The flags. A column is lined up by label, a plain sequence is
+                read by position and has to be exactly as long, and a callable
+                is handed this column and asked.
+            other: What the rows that were not kept take. A value for all of
+                them, a column lined up by label, a sequence read by position,
+                or a callable handed this column. Nothing means a missing value.
+            inplace: Refused.
+            axis: Accepted and not read, the way every axis on a column is.
+            level: Refused.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or the column cannot
+                hold what the other side offers a row it is going to take.
+            NotImplementedError: For `inplace`, and for a frame as the other
+                side.
+        """
+        return self._chosen(cond, other, inplace, axis, level, False)
+
+    def mask(
+        self,
+        cond: Any,
+        other: Any = NO_DEFAULT,
+        *,
+        inplace: bool = False,
+        axis: Any = None,
+        level: Any = None,
+    ) -> Series:
+        """The column with the rows a condition picked out taken from elsewhere.
+
+        `where` with the condition turned over, which is how pandas describes it
+        and is how it is implemented, with one thing to watch. A row the
+        condition says nothing about is kept by neither of them, so the turn has
+        to happen before the nulls are read as falses rather than after.
+        Document 48 section 4.
+
+        Args:
+            cond: The flags, in every shape `where` takes them.
+            other: What the rows the condition picked out take.
+            inplace: Refused.
+            axis: Accepted and not read.
+            level: Refused.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or the column cannot
+                hold what the other side offers a row it is going to take.
+            NotImplementedError: For `inplace`, and for a frame as the other
+                side.
+        """
+        return self._chosen(cond, other, inplace, axis, level, True)
+
+    def _chosen(
+        self, cond: Any, other: Any, inplace: bool, axis: Any, level: Any, flip: bool
+    ) -> Series:
+        """The body `where` and `mask` share.
+
+        Args:
+            cond: The flags.
+            other: What the rows this does not keep take.
+            inplace: Refused.
+            axis: Accepted and not read.
+            level: Refused.
+            flip: Whether the condition picks out the rows to replace rather
+                than the rows to keep.
+
+        Returns:
+            A new column of the same height and the same type.
+
+        Raises:
+            DTypeError: If the condition is not boolean, or the column cannot
+                hold what the other side offers.
+            NotImplementedError: For `inplace`, and for a frame as the other
+                side.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _no_level(level)
+        _axis_number(axis, "Series", 0, (0,))
+        if callable(cond):
+            cond = cond(self)
+        if callable(other):
+            other = other(self)
+        labels = self._inner.labels().to_list()
+        flags = _condition(cond, labels, len(labels))
+        kept = _no_gaps(flags.unary("invert") if flip else flags)
+        replaced = kept.unary("invert")
+        # A condition that keeps every row is the whole answer, and the other
+        # side is not looked at, let alone asked whether this column could hold
+        # it. That is pandas' rule rather than a shortcut here: pandas widens a
+        # column when it puts something in it and not when it is offered
+        # something, so `s.where(every_row, "a word")` on a column of numbers is
+        # the column over there and is the column here.
+        if not bool(replaced.reduce("max", 0.0)):
+            return self.copy()
+        taken = _other_side(other, self._inner.dtype(), labels, replaced, self)
+        try:
+            return Series._wrap(self._inner.pick(kept, taken))
         except Exception as error:
             raise translate(error) from None
 

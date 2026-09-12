@@ -1880,6 +1880,13 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.pick",
+            name="pick",
+            doc="One column's rows taken from itself or from another column.",
+            params=(("name", "str"), ("cond", "Series"), ("other", "Series")),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.cell",
             name="cell",
             doc="One value, by row and by column position.",
@@ -2552,6 +2559,20 @@ SERIES = Exposed(
             name="fill_null",
             doc="Every missing row taken from another column.",
             params=(("value", "Series"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.missing_row",
+            name="missing_row",
+            doc="One row of this column's dtype with nothing in it.",
+            params=(),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.pick",
+            name="pick",
+            doc="Every row taken from this column or from another one.",
+            params=(("cond", "Series"), ("other", "Series")),
             returns="Series",
         ),
         Binding(

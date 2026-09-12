@@ -121,6 +121,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "fill_null",
         docstring="One column's missing rows taken from another column.",
     )
+    _ = dataframe.def_method[PyDataFrame.pick](
+        "pick",
+        docstring="One column's rows taken from itself or from another column.",
+    )
     _ = dataframe.def_method[PyDataFrame.cell](
         "cell", docstring="One value, by row and by column position."
     )
@@ -272,6 +276,14 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.fill_null](
         "fill_null", docstring="Every missing row taken from another column."
+    )
+    _ = series.def_method[PySeries.missing_row](
+        "missing_row",
+        docstring="One row of this column's dtype with nothing in it.",
+    )
+    _ = series.def_method[PySeries.pick](
+        "pick",
+        docstring="Every row taken from this column or from another one.",
     )
     _ = series.def_method[PySeries.cell](
         "cell", docstring="One value, by position."

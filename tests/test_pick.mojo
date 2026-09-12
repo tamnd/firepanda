@@ -34,6 +34,7 @@ from firepanda.kernel.pick import (
     pick,
     pick_const,
     pick_constants,
+    pick_one,
     text_pick,
 )
 from firepanda.kernel.scalar import (
@@ -468,6 +469,104 @@ def test_a_picked_text_column_groups_by() raises:
             assert_equal(Int(sums[i]), 24, "the false side's group")
         else:
             assert_equal(Int(sums[i]), 3, "the long referer's group")
+
+
+def test_a_false_side_of_one_row_is_that_row_everywhere() raises:
+    var cond = flags([1, 0, 2, 1, 0])
+    var a = numbers([10, 20, 30, 40, 50])
+    agrees(
+        pick_one(cond, a, numbers([-7])),
+        pick_const(cond, a, Int64(-7)),
+        "one row against the constant it stands for",
+    )
+    var got = pick_one(cond, a, numbers([-7]))
+    assert_equal(got[0], 10)
+    assert_equal(got[1], -7)
+    # The null condition takes the false side here too, which is the one row.
+    assert_equal(got[2], -7)
+
+
+def test_a_false_side_of_one_null_row_leaves_those_rows_missing() raises:
+    # The case a `Scalar` cannot express, which is why this is a column at all.
+    var cond = flags([1, 0, 1, 2])
+    var a = numbers([10, 20, 30, 40])
+    a.set_null(2)
+    var nothing = numbers([0])
+    nothing.set_null(0)
+
+    var got = pick_one(cond, a, nothing)
+    assert_equal(got[0], 10)
+    assert_false(got.is_valid(1), "took the row with nothing in it")
+    assert_false(got.is_valid(2), "kept the true side's own null")
+    assert_false(got.is_valid(3), "a null condition took the false side")
+    assert_equal(got.null_count(), 3)
+    # The invariant the rest of the module rests on: a null holds a zero.
+    assert_equal(got[1], 0)
+
+
+def test_a_one_row_false_side_clears_the_bits_past_the_end() raises:
+    # Past a word boundary and ending part way through the next one, which is
+    # where a tail that was left set would be counted as a row.
+    var rows = 130
+    var cond = Array[DType.bool](rows)
+    var a = Array[DType.int64](rows)
+    for i in range(rows):
+        cond.set_valid(i, i % 3 == 0)
+        a.set_valid(i, Int64(i))
+    var nothing = numbers([0])
+    nothing.set_null(0)
+
+    var got = pick_one(cond, a, nothing)
+    assert_equal(len(got), rows)
+    var kept = 0
+    for i in range(rows):
+        if i % 3 == 0:
+            kept += 1
+    assert_equal(got.null_count(), rows - kept)
+
+
+def test_a_one_row_false_side_of_text_carries_its_bytes() raises:
+    # The long value is longer than a view, so it lives in the payload and both
+    # passes have to agree that every false row needs room for it.
+    var cond = flags([1, 0, 2, 0])
+    var a = strings_from_list(["first", "second", "third", "fourth"])
+    var one = strings_from_list(["a value too long to sit inside a view"])
+    var got = text_pick(cond, a, one)
+    assert_equal(len(got), 4)
+    assert_equal(String(got[0]), "first")
+    assert_equal(String(got[1]), "a value too long to sit inside a view")
+    assert_equal(String(got[2]), "a value too long to sit inside a view")
+    assert_equal(String(got[3]), "a value too long to sit inside a view")
+
+
+def test_a_series_pick_against_one_row_is_how_a_constant_is_spelled() raises:
+    var revenue = Series("revenue", numbers([100, 200, 400]))
+    var zero = Series("zero", numbers([0]))
+    var kept = revenue.pick(flags([1, 0, 1]), zero)
+    assert_equal(len(kept), 3)
+    assert_equal(kept.name, "revenue")
+    assert_equal(Int(sum_of(kept.as_typed[DType.int64]()).value), 500)
+
+
+def test_a_frame_pick_leaves_the_other_columns_alone() raises:
+    var frame = DataFrame.from_series(
+        [
+            Series("a", numbers([1, 2, 3])),
+            Series("b", numbers([10, 20, 30])),
+        ]
+    )
+    var chosen = frame.pick("a", flags([1, 0, 1]), Series("z", numbers([-1])))
+    assert_equal(len(chosen), 3)
+    assert_equal(chosen.column("a").as_typed[DType.int64]()[1], -1)
+    assert_equal(chosen.column("b").as_typed[DType.int64]()[1], 20)
+
+
+def test_a_false_side_that_is_neither_one_row_nor_all_is_refused() raises:
+    var cond = flags([1, 0, 1])
+    with assert_raises(contains="one row or as many as the condition"):
+        _ = Series("a", numbers([1, 2, 3])).pick(
+            cond, Series("b", numbers([1, 2]))
+        )
 
 
 def test_a_length_mismatch_is_refused() raises:
