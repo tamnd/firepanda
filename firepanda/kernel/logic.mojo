@@ -400,6 +400,52 @@ def _connect[
     return out^
 
 
+def _fill_fixed[
+    op: Int, count: Int
+](
+    srcs: List[Pointer[Scalar[DType.bool], ImmUntrackedOrigin]],
+    mut out: Array[DType.bool],
+    n: Int,
+) raises:
+    """Writes the values of a connective over a count known at compile time.
+
+    The values only. The validity is the caller's, because it is the same work
+    whatever the count is and there is no reason to have it in the binary more
+    than once.
+
+    Args:
+        srcs: One value pointer per operand, in order. Must hold at least
+            `count` of them.
+        out: The answer, written from row zero to row `n`.
+        n: The number of rows.
+
+    Parameters:
+        op: One of the `LOGIC_` codes.
+        count: How many operands, known at compile time so the loop over them
+            unrolls into straight line code.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[DType.bool]()
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var acc = srcs[0].unsafe_offset(i).unsafe_load[width=width]()
+            comptime for k in range(1, count):
+                var y = srcs[k].unsafe_offset(i).unsafe_load[width=width]()
+                comptime if op == LOGIC_AND:
+                    acc = acc & y
+                else:
+                    acc = acc | y
+            dst.unsafe_offset(i).unsafe_store(acc)
+            i += width
+
+    parallel_morsels(compute, n)
+
+
 def _connect_all[
     op: Int, o: ImmOrigin
 ](columns: MaskRefs[o]) raises -> Array[DType.bool]:
@@ -449,13 +495,7 @@ def _connect_all[
     # The value pointers are derived once for the whole call, not once per
     # morsel and certainly not once per vector. `columns[k].unsafe_ptr()` walks
     # the column to its data to its buffer for a load that is otherwise one
-    # instruction, and the walk is the same answer every time. Once per call
-    # rather than once per morsel because the list is a heap allocation, and a
-    # morsel of a chunk that is already only a hundred and twenty eight thousand
-    # rows does not have enough work in it to pay for a malloc: building this
-    # inside the closure made a three column conjunction slower than the two
-    # pairwise calls it replaced, on a machine where a twelve column one was
-    # nearly twice as fast.
+    # instruction, and the walk is the same answer every time.
     var srcs = List[Pointer[Scalar[DType.bool], ImmUntrackedOrigin]](
         capacity=count
     )
@@ -464,21 +504,44 @@ def _connect_all[
             columns[k][].unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin]()
         )
 
-    def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_mut_ptr()
-        var i = start
-        while i < stop:
-            var acc = srcs[0].unsafe_offset(i).unsafe_load[width=width]()
-            for k in range(1, count):
-                var y = srcs[k].unsafe_offset(i).unsafe_load[width=width]()
-                comptime if op == LOGIC_AND:
-                    acc = acc & y
-                else:
-                    acc = acc | y
-            dst.unsafe_offset(i).unsafe_store(acc)
-            i += width
+    # The narrow counts get the loop unrolled at compile time and the wide ones
+    # do not, and the split is here because it was measured. A three column
+    # conjunction with a runtime loop over the operands was slower than the two
+    # pairwise calls it replaced, since two iterations of a loop the compiler
+    # cannot unroll cost more in bookkeeping than the two ands cost in work,
+    # while the pairwise kernel is straight line code. Unrolled, the same three
+    # columns are one pass of three loads and two ands. Eight is where it stops
+    # because the wide counts already win by a wide margin and every extra case
+    # is another copy of the loop in the binary.
+    if count == 3:
+        _fill_fixed[op, 3](srcs, out, n)
+    elif count == 4:
+        _fill_fixed[op, 4](srcs, out, n)
+    elif count == 5:
+        _fill_fixed[op, 5](srcs, out, n)
+    elif count == 6:
+        _fill_fixed[op, 6](srcs, out, n)
+    elif count == 7:
+        _fill_fixed[op, 7](srcs, out, n)
+    elif count == 8:
+        _fill_fixed[op, 8](srcs, out, n)
+    else:
 
-    parallel_morsels(compute, n)
+        def compute(start: Int, stop: Int) {mut out, imm}:
+            var dst = out.unsafe_mut_ptr()
+            var i = start
+            while i < stop:
+                var acc = srcs[0].unsafe_offset(i).unsafe_load[width=width]()
+                for k in range(1, count):
+                    var y = srcs[k].unsafe_offset(i).unsafe_load[width=width]()
+                    comptime if op == LOGIC_AND:
+                        acc = acc & y
+                    else:
+                        acc = acc | y
+                dst.unsafe_offset(i).unsafe_store(acc)
+                i += width
+
+        parallel_morsels(compute, n)
 
     var validity = Bitmap(copy=columns[0][].data.validity)
     var any_null = columns[0][].null_count() != 0
