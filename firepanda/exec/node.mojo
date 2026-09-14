@@ -1527,11 +1527,22 @@ struct Compute(Movable):
         out.append(Field(self.name, binary_type(self.op, a, b)))
         return out^
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Computes the column and puts it on the end of the chunk.
+
+        An operand under a selection is gathered and kept, rather than the whole
+        chunk being flattened, so what this costs a chunk that arrived under one
+        is the one or two columns the expression names and not the columns it
+        does not. The gathered column stays in the chunk, so the next expression
+        over it gathers nothing. The computed column is at the chunk's rows,
+        which is what makes it dense.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one more column and the same number of rows.
@@ -1557,6 +1568,7 @@ struct Compute(Movable):
                 + String(width)
                 + " columns"
             )
+        chunk.materialize(self.left, spread)
         var made: AnyArray
         if self.constant:
             made = binary_value_any(
@@ -1566,13 +1578,12 @@ struct Compute(Movable):
                 self.value_on_left,
             )
         else:
+            chunk.materialize(self.right, spread)
             made = binary_any(
                 chunk.columns[self.left], chunk.columns[self.right], self.op
             )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        columns.append(made^)
-        return Chunk(columns^, rows)
+        chunk.append(made^, True)
+        return chunk^
 
 
 struct Connective(Movable):
@@ -3122,11 +3133,22 @@ struct Cast(Movable):
                 fields.append(out[i].copy())
         return Schema(fields^)
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Converts the column and hands the chunk back.
+
+        The column is gathered into place first when it is under a selection,
+        and nothing else in the chunk is. Converting it where it lies would work
+        just as well, since a cast reads a row and writes a row, but the array
+        under a selection is the one the scan handed over and converting all of
+        it to answer for a tenth of its rows is the copy this whole thing is for
+        avoiding.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one column converted, or with the converted column
@@ -3144,14 +3166,13 @@ struct Cast(Movable):
                 + String(width)
                 + " columns"
             )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        var made = cast_any(columns[self.on], self.to, self.strict)
+        chunk.materialize(self.on, spread)
+        var made = cast_any(chunk.columns[self.on], self.to, self.strict)
         if self.appends:
-            columns.append(made^)
+            chunk.append(made^, True)
         else:
-            columns[self.on] = made^
-        return Chunk(columns^, rows)
+            chunk.replace(self.on, made^, True)
+        return chunk^
 
 
 struct Constant(Movable):
@@ -6046,7 +6067,9 @@ def node_reads_selection(node: Node) -> Bool:
     chain of filters composing their selections rather than each one copying is
     most of what issue #521 is for. `Project` reads one because it moves no rows,
     so passing the positions along costs nothing and flattening would gather the
-    columns it is about to drop. Everything else is still flattened.
+    columns it is about to drop. `Compute` and `Cast` read one because an
+    expression names one or two columns and flattening gathers all of them.
+    Everything else is still flattened.
 
     Args:
         node: The node.
@@ -6054,7 +6077,12 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return node.isa[Filter]() or node.isa[Project]()
+    return (
+        node.isa[Filter]()
+        or node.isa[Project]()
+        or node.isa[Compute]()
+        or node.isa[Cast]()
+    )
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -6160,7 +6188,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():
-        return node[Compute].process(chunk^)
+        # False for the same reason the flatten above passes it.
+        return node[Compute].process(chunk^, False)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
     if node.isa[Apply]():
@@ -6189,7 +6218,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():
-        return node[Cast].process(chunk^)
+        # False for the same reason the flatten above passes it.
+        return node[Cast].process(chunk^, False)
     if node.isa[Join]():
         # False, because this is the entry point several workers share and a
         # join's own kernels would each hand themselves out to workers again.

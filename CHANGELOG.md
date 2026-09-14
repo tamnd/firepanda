@@ -198,6 +198,16 @@ A projection that keeps only columns already at the chunk's rows drops the selec
 
 The columns are taken out of the chunk and the chunk itself is kept rather than consumed and rebuilt, because the selection is one position per row and copying it to hand it back would cost more than some of the gathers this is here to put off.
 
+### Changed: an expression gathers the columns it names rather than the whole chunk
+
+`Compute` and `Cast` now read a chunk that carries a selection instead of flattening it on the way in. An expression names one or two columns and a flatten gathers every column in the chunk, so on a wide chunk between a filter and the first thing that reads a column, most of what the flatten did was work for columns the expression never mentions.
+
+The gathered column is put back into the chunk rather than handed to the kernel and thrown away, so a line of expressions over the same column costs one gather and not one each. That is the whole of `Chunk.materialize`, which is the method the two operators share. Once every column has been gathered the selection is dropped, since there is nothing left for the positions to point at.
+
+A cast could convert the array where it lies, because a cast reads a row and writes a row, and it does not: converting all of a column to answer for the rows a filter kept is the copy the selection was written to avoid.
+
+The computed column is at the chunk's rows, which is what makes it dense, and that is why a filter reading a mask computed above it finds the mask dense and composes rather than gathering.
+
 ## [0.8.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
