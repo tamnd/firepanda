@@ -242,7 +242,7 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `extract`, `extractall`, `findall` (M6)
 - [ ] `get_dummies` (M6)
 - [ ] `encode`, `decode`, `normalize` (M6)
-- [x] `isspace`, `islower`, `isupper` (M6), which answer a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
+- [x] `isspace`, `islower`, `isupper` (M6), answered out of Arrow's own character classes and exact on every code point there is, and answering a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
 - [ ] `isalnum`, `isalpha`, `isdigit`, `istitle`, `isnumeric`, `isdecimal` (M6)
 - [ ] `translate` (M6), and `casefold` is ticked above with the rest of the case group
 
