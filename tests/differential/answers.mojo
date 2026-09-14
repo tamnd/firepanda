@@ -117,14 +117,11 @@ def recorded(expression: StringSlice) -> String:
     Returns:
         The reason, or an empty string if this disagreement is a new one.
     """
-    if expression == "s LIKE '_b_'":
-        # A gap with a refusal already written for it, which is the honest
-        # shape for one. The pattern language is the part of `LIKE` that is not
-        # a substring search, and only `%` at the ends is read so far.
-        return (
-            "a LIKE pattern is read as a substring search here, so the"
-            " underscore standing for any one character is refused by name"
-        )
+    # Empty, and that is the state the harness is meant to be in. The two
+    # entries it was written with are both gone: the integer division under
+    # issue #770 and the LIKE pattern under issue #776, each one found here and
+    # fixed rather than written down and left. Anything that disagrees now is a
+    # new disagreement and the run says so.
     return ""
 
 
@@ -303,6 +300,15 @@ def expressions() -> List[String]:
     out.append("s LIKE '%a%'")
     out.append("s LIKE '_b_'")
     out.append("s NOT LIKE 'a%'")
+    # The wildcards against text that is not one byte a character, which is the
+    # part of the pattern language a byte counter gets wrong and a row of ASCII
+    # can never show. `héllo` is five characters and six bytes and `日本語です`
+    # is five characters and fifteen.
+    out.append("s LIKE 'h_llo'")
+    out.append("s LIKE '_____'")
+    out.append("s LIKE '%本%です'")
+    out.append("s LIKE 'a%c'")
+    out.append("s LIKE '%a%a%'")
 
     # Comparing text.
     out.append("s = 'abc'")

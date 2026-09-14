@@ -963,16 +963,17 @@ def _lower_like(
     """Appends whatever answers a `LIKE`.
 
     The pattern is read here rather than per row. A `LIKE` whose right side is a
-    constant, which is every one anybody writes, is one of five searches once
-    the wildcards have been counted, and which of the five it is does not change
-    from row to row. So the work of deciding is done once, at plan time, and
-    what goes in the pipeline is a node that knows what it is looking for.
+    constant, which is every one anybody writes, is one of six searches once the
+    wildcards have been read, and which of the six it is does not change from
+    row to row. So the work of deciding is done once, at plan time, and what
+    goes in the pipeline is a node that knows what it is looking for.
 
-    Four of the five are a `Match`, which is the substring kernels. The fifth is
-    a pattern with no wildcard in it at all, which is an equality against a
-    constant, and that is a `Compute` with the same kernel `x = 'abc'` already
-    runs. Writing `LIKE 'abc'` is unusual but it is legal, and it costs nothing
-    to send it somewhere that already exists.
+    Five of the six are a `Match`, which is the four substring kernels and the
+    general matcher behind them. The sixth is a pattern with no wildcard in it
+    at all, which is an equality against a constant, and that is a `Compute`
+    with the same kernel `x = 'abc'` already runs. Writing `LIKE 'abc'` is
+    unusual but it is legal, and it costs nothing to send it somewhere that
+    already exists.
 
     Args:
         exprs: The arena.
@@ -987,8 +988,8 @@ def _lower_like(
 
     Raises:
         Error: If the call has the wrong number of arguments, if the pattern is
-            not a constant, if it is null, or if it has a shape none of the five
-            searches covers.
+            not a constant, or if it is null. No pattern is refused for its
+            shape any more, the general search having taken the last of those.
     """
     var args = exprs.nodes[root].children.copy()
     if len(args) != 2:

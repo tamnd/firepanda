@@ -91,7 +91,7 @@ A ceiling of zero only means anything if the disagreements that are allowed to s
 
 The oracle is `tools/answers.py`, built the same way `tools/semantics.py` is and running DuckDB in a child process for the same reason.
 
-It has paid for itself once already. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770 and is fixed, and the fix is the shape this section predicts: the two expressions sat on the recorded list with the issue number against them until the kernels existed, and came off it when they did.
+It has paid for itself twice already, and the recorded list it was written with is now empty. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770, and `s LIKE '_b_'` refused where DuckDB answered, which is issue #776. Both are fixed and both took the shape this section predicts: the expressions sat on the recorded list with an issue number against them until the kernels existed, and came off it when they did. The list is now empty rather than deleted, because the reason for having one does not go away when it happens to be short.
 
 ## 7. The plan equality test
 
