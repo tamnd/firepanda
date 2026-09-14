@@ -129,7 +129,12 @@ from firepanda.kernel.chars import (
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.edges import text_trim
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
-from firepanda.kernel.logic import LogicOp, logic_any, logic_type
+from firepanda.kernel.logic import (
+    LogicOp,
+    logic_all_any,
+    logic_any,
+    logic_type,
+)
 from firepanda.kernel.nulls import coalesce_any, is_not_null_any, is_null_any
 from firepanda.kernel.pattern import (
     MatchKind,
@@ -1386,7 +1391,7 @@ struct Compute(Movable):
 
 
 struct Connective(Movable):
-    """Appends a column that is two boolean columns joined by and, or or not.
+    """Appends a column that is boolean columns joined by and, or or not.
 
     The same shape as `Compute` and a separate node for the same reason
     `logic.mojo` is a separate kernel: a connective decides a row where one of
@@ -1407,13 +1412,17 @@ struct Connective(Movable):
     and better for pushdown, so what is left for this node is the conjunction
     nested inside something else, the disjunction, the negation, and every
     boolean expression in a select list.
+
+    It holds as many operands as the query wrote rather than two, which is why
+    it is a list. `a OR b OR c OR d` is one node and one pass over the four
+    columns. Folded into pairs it would be three nodes, and the two in the
+    middle each write a whole boolean column for the next node to read straight
+    back, which on a chunk is a byte a row that nothing else ever looks at. The
+    kernel takes them all at once, so this hands them over that way.
     """
 
-    var left: Int
-    """The position of the left operand, or of the only one under a negation."""
-
-    var right: Int
-    """The position of the right operand. Ignored under a negation."""
+    var at: List[Int]
+    """The positions of the operands, in the order the query wrote them."""
 
     var op: LogicOp
     """The connective."""
@@ -1430,8 +1439,20 @@ struct Connective(Movable):
             op: The connective, which must read two columns.
             name: The name of the appended column.
         """
-        self.left = left
-        self.right = right
+        self.at = [left, right]
+        self.op = op
+        self.name = name
+
+    def __init__(out self, var at: List[Int], op: LogicOp, name: String):
+        """Constructs a connective over any number of columns.
+
+        Args:
+            at: The positions of the operands, in order. Consumed. There must
+                be at least two.
+            op: The connective, which must read more than one column.
+            name: The name of the appended column.
+        """
+        self.at = at^
         self.op = op
         self.name = name
 
@@ -1442,8 +1463,7 @@ struct Connective(Movable):
             column: The position of the operand.
             name: The name of the appended column.
         """
-        self.left = column
-        self.right = column
+        self.at = [column]
         self.op = LogicOp.NOT
         self.name = name
 
@@ -1464,28 +1484,24 @@ struct Connective(Movable):
             If a position is outside the schema, or an operand is not boolean.
         """
         var out = input^
-        if self.left < 0 or self.left >= len(out):
-            raise Error(
-                "connective: column "
-                + String(self.left)
-                + " is outside a schema of "
-                + String(len(out))
-                + " columns"
-            )
-        if self.right < 0 or self.right >= len(out):
-            raise Error(
-                "connective: column "
-                + String(self.right)
-                + " is outside a schema of "
-                + String(len(out))
-                + " columns"
-            )
-        # One interior reference at a time, as `Compute.bind` does, since two
-        # into the same list cannot both be alive.
-        var made = logic_type(self.op, out[self.left].dtype)
-        if self.op.reads_two_columns():
-            made = logic_type(self.op, out[self.right].dtype)
-        out.append(Field(self.name, made))
+        if len(self.at) == 0:
+            raise Error("connective: no operands")
+        for i in range(len(self.at)):
+            var k = self.at[i]
+            if k < 0 or k >= len(out):
+                raise Error(
+                    "connective: column "
+                    + String(k)
+                    + " is outside a schema of "
+                    + String(len(out))
+                    + " columns"
+                )
+            # One interior reference at a time, as `Compute.bind` does, since
+            # two into the same list cannot both be alive. Every operand is
+            # asked rather than just the last, which is what the pairwise form
+            # amounted to once the folding had checked each pair in turn.
+            _ = logic_type(self.op, out[k].dtype)
+        out.append(Field(self.name, LogicalType.BOOL))
         return out^
 
     def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -1501,29 +1517,28 @@ struct Connective(Movable):
             If a position is outside the chunk, or an operand is not boolean.
         """
         var width = chunk.width()
-        if self.left < 0 or self.left >= width:
-            raise Error(
-                "connective: column "
-                + String(self.left)
-                + " is outside a chunk of "
-                + String(width)
-                + " columns"
-            )
-        if self.right < 0 or self.right >= width:
-            raise Error(
-                "connective: column "
-                + String(self.right)
-                + " is outside a chunk of "
-                + String(width)
-                + " columns"
-            )
+        if len(self.at) == 0:
+            raise Error("connective: no operands")
+        for i in range(len(self.at)):
+            var k = self.at[i]
+            if k < 0 or k >= width:
+                raise Error(
+                    "connective: column "
+                    + String(k)
+                    + " is outside a chunk of "
+                    + String(width)
+                    + " columns"
+                )
         var made: AnyArray
         if self.op.reads_two_columns():
-            made = logic_any(
-                chunk.columns[self.left], chunk.columns[self.right], self.op
+            # Borrowed, not sliced out. The operands are columns of this chunk
+            # and taking them by value would copy every one of them to answer a
+            # question that reads each of them once.
+            made = logic_all_any(
+                borrow_columns(chunk.columns), self.at, self.op
             )
         else:
-            made = logic_any(chunk.columns[self.left], self.op)
+            made = logic_any(chunk.columns[self.at[0]], self.op)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(made^)
