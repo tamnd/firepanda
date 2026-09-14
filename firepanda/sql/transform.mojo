@@ -150,7 +150,6 @@ from .unsupported import (
     TABLE_AT,
     TABLE_MODIFIER,
     TABLE_SAMPLE,
-    TYPE_LITERAL,
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
     WITH_ORDINALITY,
@@ -233,6 +232,9 @@ comptime _TRIM: UInt8 = 77
 
 comptime _POSITION: UInt8 = 78
 """`PositionExpression`, which is `instr` with its arguments the other way."""
+
+comptime _TYPE_LITERAL: UInt8 = 79
+"""`TypeLiteral`, the `DATE '2020-01-01'` spelling, which is a cast."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -680,6 +682,7 @@ struct Transform(Movable):
         self._set(names, "StarExpression", _STAR)
         self._set(names, "CaseExpression", _CASE)
         self._set(names, "CastExpression", _CAST)
+        self._set(names, "TypeLiteral", _TYPE_LITERAL)
         self._set(names, "ListExpression", _LIST)
         self._set(names, "StructExpression", _STRUCT)
         self._set(names, "Parameter", _PARAMETER)
@@ -839,7 +842,6 @@ struct Transform(Movable):
         self._refuse(names, "ParenthesisExpression", ROW_VALUE)
         self._refuse(names, "RowExpression", ROW_VALUE)
         self._refuse(names, "IntervalLiteral", INTERVAL)
-        self._refuse(names, "TypeLiteral", TYPE_LITERAL)
         self._refuse(names, "LambdaExpression", LAMBDA)
         self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
         self._refuse(names, "NamedFunctionArgument", NAMED_ARGUMENT)
@@ -1651,6 +1653,9 @@ struct Transform(Movable):
 
         if action == _CAST:
             return self._cast(tree, sql, node, ast, work)
+
+        if action == _TYPE_LITERAL:
+            return self._type_literal(tree, sql, node, ast, work)
 
         if action == _LIST:
             return self._list(tree, sql, node, ast, work)
@@ -2952,6 +2957,48 @@ struct Transform(Movable):
             work.value(arguments[0]),
             _type_text(tree, sql, arguments[1]),
             tries,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _type_literal(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `DATE '2020-01-01'` as the cast it means.
+
+        The type in front of the string decides how the string is read, which
+        is the whole of what a cast does, so this builds the cast rather than a
+        node of its own. DuckDB does the same rewrite: `json_serialize_sql` on
+        `DATE '2020-01-01'` comes back as a cast.
+
+        It is never a `TRY_CAST`. There is no spelling of this form that says
+        a string it cannot read should become a null, so a literal that does
+        not parse is an error the way it is in DuckDB.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TypeLiteral` node.
+            ast: Where to put the nodes.
+            work: The walk, for the string.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the string is not built yet.
+        """
+        # `TypeLiteral <- Type StringLiteral`, so the type is first and reads
+        # as text, and the string is an ordinary literal the walk builds.
+        var kids = tree.children(node)
+        return ast.cast(
+            work.value(kids[1]),
+            _type_text(tree, sql, kids[0]),
+            False,
             tree.nodes[Int(node)].token_start,
         )
 

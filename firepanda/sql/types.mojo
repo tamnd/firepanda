@@ -37,6 +37,7 @@ length and that is deliberate.
 """
 
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 
 from .catalog import edit_distance, fold
 
@@ -913,4 +914,76 @@ def engine_type(type: SqlType) raises -> LogicalType:
             type.name(),
             " yet, because there is no engine type that holds one",
         )
+    )
+
+
+def instant_type(type: SqlType) raises -> LogicalType:
+    """The engine type a temporal literal is read into.
+
+    A different question from `engine_type` and answered separately, which is
+    worth saying because the two look like the same function. `engine_type`
+    asks what a column of this type would be and refuses every temporal one,
+    because converting a column to a date means converting its values and the
+    cast kernel converts layouts. This asks what one written out instant
+    becomes, which is a parse of a string rather than a conversion of a column,
+    and `parse_instant` has done that since the date work landed.
+
+    Five of the nine cross over. `DATE` is a day count and the four timestamps
+    with no zone on them are a count at their own resolution. The other four
+    are refused.
+
+    `TIME` and `TIME_NS` are a reading with no date under them, and the engine
+    has no type for a time of day on its own. A duration is not the same thing:
+    it is how long something took rather than what the clock said.
+
+    `TIMESTAMP WITH TIME ZONE` is refused for a reason that is about the query
+    rather than about the engine. DuckDB reads one against the session's time
+    zone, so the same literal is a different instant for two people running the
+    same query, and firepanda has no session time zone to read it against.
+    Writing the offset into the literal and comparing against a zoned column is
+    the spelling that means one thing wherever it runs.
+
+    Args:
+        type: The SQL type written in front of the string.
+
+    Returns:
+        The engine type the constant comes back as.
+
+    Raises:
+        Error: If it is a time, a zoned timestamp, or not temporal at all.
+    """
+    if type.id == TYPE_DATE:
+        return LogicalType.DATE32
+    if type.id == TYPE_TIMESTAMP:
+        return LogicalType.timestamp(TimeUnit.MICRO)
+    if type.id == TYPE_TIMESTAMP_S:
+        return LogicalType.timestamp(TimeUnit.SECOND)
+    if type.id == TYPE_TIMESTAMP_MS:
+        return LogicalType.timestamp(TimeUnit.MILLI)
+    if type.id == TYPE_TIMESTAMP_NS:
+        return LogicalType.timestamp(TimeUnit.NANO)
+    if type.id == TYPE_TIMESTAMP_TZ:
+        raise Error(
+            "firepanda does not read a TIMESTAMP WITH TIME ZONE literal yet,"
+            " because DuckDB reads one against the session's time zone and"
+            " firepanda has no session to ask. Compare a zoned column against"
+            " a literal with the offset written into it."
+        )
+    if (
+        type.id == TYPE_TIME
+        or type.id == TYPE_TIME_TZ
+        or type.id == TYPE_TIME_NS
+    ):
+        raise Error(
+            String(
+                "firepanda has no engine type for ",
+                type.name(),
+                (
+                    ", because a time of day with no date under it is not a"
+                    " point on any line the engine holds"
+                ),
+            )
+        )
+    raise Error(
+        String("firepanda does not read ", type.name(), " as an instant")
     )

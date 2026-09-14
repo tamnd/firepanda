@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the typed literal, so DATE '2020-01-01' is a date
+
+A type name in front of a string is read now, which is the spelling TPC-H writes its date bounds in and the one that says what it means without a column next to it. `DATE '2020-01-01'`, `TIMESTAMP '2020-01-01 06:07:08'` and the three timestamps at other resolutions all parse into a constant where the query is planned.
+
+It is the cast it means. The transform builds `CAST('2020-01-01' AS DATE)` out of it, which is the rewrite DuckDB's own parser does, so the two spellings are one path from there on and `CAST('2020-01-01' AS DATE)` reads as a date too.
+
+A cast of a column to a date is still refused, and for the reason it always was: converting a column means converting its values and the cast kernel converts layouts, so the column would come back holding the bytes and answering to a date's name. One written out instant has no column to convert.
+
+`TIME` and `TIME_NS` have no engine type, because a time of day with no date under it is not a point on any line the engine holds. `TIMESTAMP WITH TIME ZONE` is refused for a different reason: DuckDB reads one against the session's time zone, so the same literal is a different instant for two people running the same query, and firepanda has no session to ask.
+
+### Changed: a date constant in a plan prints as the day it names
+
+`EXPLAIN` used to write a temporal constant as the count underneath it, so a filter on a date read `d == 18262`. It reads `d == 2020-01-01` now, and a timestamp writes its clock reading with the fraction only where there is one. Nothing about what runs has changed.
+
 ### Added: a column of text can be written in one case or asked what case it is in
 
 `s.str.upper()`, `s.str.lower()`, `s.str.isspace()`, `s.str.islower()` and `s.str.isupper()`. The first two answer a column of text and keep a missing row missing, the other three answer a column of bools, and none of them takes an argument. A row with no cased character in it, which includes the empty row and a row of digits, is neither lower case nor upper case, which is Python's rule and the reason the two questions are not opposites.
