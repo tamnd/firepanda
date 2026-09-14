@@ -25,6 +25,7 @@ Checked against a live pandas over all 1112064 code points on their own and over
 Both kernels were already written and the byte counting one was already described as SQL's `STRLEN` in its own docstring, so the fix is that `strlen` stays its own call and the operator carries a flag saying which kernel to run. The two are a long way apart in cost as well as in meaning: counting characters walks the payload of every element, and counting bytes reads the length field out of each view and follows no pointer, which is thirteen times cheaper on a column of thirty two byte elements.
 
 ClickBench q27 and q28 average `strlen` over `URL` and `Referer`, so they were asking the expensive kernel for the wrong number.
+
 ### Added: capitalize and swapcase, built out of the table the case fix already carries
 
 `s.str.capitalize()` and `s.str.swapcase()`. Neither is a name the Mojo standard library has, so both are walked a character at a time here, and the point of the release is that neither needed any case data past the 149 corrections `upper` and `lower` got a release ago.
@@ -483,6 +484,7 @@ A `LIKE` is a call in the plan rather than a thirteenth binary operator. Its rig
 A null matches nothing and its negation is not true either, both being null, which is what the kernels already did and what DuckDB does. An empty element matches `%` and nothing else. `ESCAPE` was already refused by the front end, and a backslash in a pattern is an ordinary byte here as it is in DuckDB with no escape set.
 
 What is refused is refused by name rather than answered approximately. A `_` says it stands for any one character and that a substring search has no way to say that. A pattern with a run in the middle, like `'a%e'`, says it is none of the five shapes, because reading it as the prefix alone would keep rows the query did not ask for. `ILIKE` says it is the case fold that is missing, `GLOB` says its wildcards are not these, and `SIMILAR TO` and the regex operators say there is no regular expression engine.
+
 ### Added: inplace, on the thirty one callables that were refusing it
 
 `inplace=True` was refused everywhere, with a sentence saying that every operation here answers a new frame over Arrow buffers that are shared rather than owned. That sentence was answering a question pandas stopped asking in 3.0. Under copy on write an inplace call in pandas cannot be seen by a column taken out of the frame beforehand, by a copy, or by the frame when the call was made on one of its columns. The only thing that sees it is a second name for the same object.
@@ -520,6 +522,7 @@ Both of the kernels that compute an average in one pass already take float64 for
 `run("SELECT qty FROM sales WHERE qty = 999", catalog)` came back with a frame of no rows, which is right, and then `out[0]` raised `column has 0 chunks, not one; call combine() first`. The sink builds the empty answer from the schema, and a column built that way held no chunks at all, while `DataFrame.__getitem__` is `ChunkedArray.only`, which wants exactly one. So the frame was one nothing could read a column out of, and a predicate that happened to match nothing was a raise rather than an empty answer.
 
 The columns of that frame each hold one chunk of no rows now. It is built from the chunk rather than appended to, because `append` drops a chunk of no rows on purpose, to stop two chunks from starting at the same row and a row position from naming either, and here there is no second chunk and no row to name one with.
+
 ### Added: replace
 
 `DataFrame.replace` and `Series.replace` swap some values for others, with the pandas 3.0 signature, which has no `limit` and no `method`. On a column the thing replaced is a value, a run of values, a mapping of pairs, or a column read as a mapping because it carries a label against every row. On a frame a mapping means column names when a value arrives beside it and means values when nothing does, unless every entry in it is a mapping of its own, which is one set of pairs per column. `inplace` is refused as everywhere and `regex` is refused with a sentence saying why.
@@ -607,6 +610,7 @@ The table is fine. At a hundred million rows the skewed column's probe lengths a
 What is not fine is the third phase. On the nearly unique column at a hundred million rows the group by spends 0.35 s hashing, 0.99 s probing and 1.53 s building the answer, and on the uniform column of the same shape it is 0.21, 1.17 and 4.84. The answer is more than half the query in both, and between 73.6 million groups and 100 million it grows by a factor of three for a third more groups, which is not a shape anything in the table explains. `group/frame_nearly_unique_key` is the new benchmark row that watches it: at a million rows it is 145 ms where `group/frame_one_key`, the same rows and the same reduction over a key with a thousand values, is 2.7 ms. `hash/factorize_skewed` and `hash/factorize_skewed_tail` are the factorize on its own over the same columns.
 
 Measured on an M4 laptop, which is not a publication machine, so read the ratios rather than the seconds.
+
 ## [0.6.81] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -768,6 +772,7 @@ The qualified one turned out to need nothing new. Every column a star stands for
 The modifiers apply in the order the grammar forces them to be written, exclude then replace then rename. A bare name applies to every column that has it, so `EXCLUDE (b)` over a join where both sides have a `b` drops both, and `REPLACE` puts its expression where the column stood and keeps the column's name. Every rule and every refusal comes from `star.mojo`, which is what the binder already used, so the two stages that expand a star do not disagree about what the query said. That includes the two places DuckDB is wrong, a `REPLACE` matching twice losing a column and a duplicate `RENAME` entry being blamed on the `EXCLUDE` list, both reproduced on the argument that a query which binds here and fails there is worse than one that is wrong the same way in both.
 
 A modifier is never qualified. A dotted name in one is refused while the AST is built, since the node has nowhere to put the two halves, so nothing at this stage has a qualifier to match.
+
 ### Changed: a whole frame reduction over a column and a constant runs without building the column
 
 ClickBench q29 is `SELECT SUM(ResolutionWidth), SUM(ResolutionWidth + 1), ... SUM(ResolutionWidth + 89) FROM hits`, which is ninety sums over one column. Lowering gave each of them a `Compute` in front of the reduction, so the chunk carried ninety full columns at once and cost ninety times what the column it read cost. At ten million rows that is seven gigabytes to answer a query that needs to look at eighty megabytes.
@@ -1243,6 +1248,7 @@ A null in the mask drops the row, which is what `filter` does and what every com
 Tested against the long way round rather than against a written answer wherever the answer is longer than a line, since `filter` then `sort_limit` is the definition of what this returns and both are already tested. The tie rule is written out by hand as well, because a comparison against the long way round cannot catch the case where both of them have it wrong.
 
 Part of #481 and #478.
+
 ### Added: sorting by value, which the core had finished and Python could not reach
 
 `DataFrame.sort_values`, `Series.sort_values`, `Series.argsort`, `Index.sort_values` and `Index.argsort` all answer now. None of them needed a kernel. The multi key sort, the single key sort and the erased pair underneath both of them were already written, tested and fast in `firepanda/kernel/sort.mojo` and on the two core types, and there was simply no way to call any of it from Python, so `df.sort_values("a")` was an `AttributeError` sitting on top of a finished sort.
@@ -1392,6 +1398,7 @@ Part of #156, after #8.
 `Series.loc`, `Series.iloc`, `Series.at`, `Series.iat` and square brackets. A series has one axis, so the whole of the frame's rule about the shape of the key deciding the shape of the answer collapses to deciding between a value and a series, and the two key readers that made that decision moved out of the frame's accessor classes and became functions all four accessors share. Nothing new is computed: the core's `Series` already had the four row operations the frame's accessors reach, so the work was four bindings and a door. Square brackets are the part that is not shared and not defensible: `s[2]` is the label two even on an index of strings, and `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those numbers in another order. What decides is the slice's own bounds rather than the index's type, so `s["a":"c"]` stays a closed slice of labels while `s[0:2]` on the same index is the first two rows, which is pandas' reading and is written down in enough code that reading it any other way would be a different library. The two sentences pandas raises about a position past the end stay two sentences, since `iloc` and `iat` are told different things about the same mistake. Document 36 section 11 has the rest.
 
 Part of #156, after #8.
+
 ### Added: the hostname out of a URL, which is q28's group key without the regex
 
 `text_hostname` in `firepanda/kernel/url.mojo`. ClickBench q28 groups by `REGEXP_REPLACE(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1')`, which is a hostname extractor written as a regular expression, and it is the only query in the suite whose group by key is computed rather than read. There is no regex engine here and RE2 is the largest single item in M6, so this is the extractor by hand and the rest of q28 is built and tested against it. The day the engine lands, q28 is one substitution rather than a new query.
@@ -1585,6 +1592,7 @@ pandas has a second answer this library does not offer. `min(skipna=False)` is N
 The accessor never reaches the byte counting one, and the note in the string section of document 06 says so, so a caller who wants it asks for it by its own name rather than by a flag on `len`. The `len` box stays unticked, because the rule at the bottom of that document is that a tick means a differential test in firepanda-bench and there is not one yet.
 
 Part of #480.
+
 ### Added: a series on a set of labels it may not have
 
 `Series.reindex` answers the series on whatever labels the caller asks for, bringing a row for each label it has and a missing row for each label it does not. A `fill_value` puts a value in the rows that were not found and leaves alone any hole the series already had, and without one an integer series widens to float64 because that is where pandas keeps a missing number. The parameter list is the frame's minus the two that name an axis, so there is no `columns` and no `labels`, `axis` is taken and ignored the way pandas takes and ignores it, `method` is refused as a different operation, and `limit` or `tolerance` without a `method` gets pandas' own sentence back. Document 40 section 9 says why this is written out rather than routed through the frame.
@@ -1620,6 +1628,7 @@ A missing value is a row like any other, and a temporal value keeps the type bin
 `SELECT 1 + 1` is still refused, and it is refused above the VALUES rather than at it. A query with no `FROM` is already a literal table of one row in the plan, and what does not run is the projection over it, because a projection of a bare constant has no operator that makes a column out of one. That is the next change.
 
 Part of #309.
+
 ### Added: a frame on a set of labels it may not have
 
 `DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.
@@ -1856,6 +1865,7 @@ The cause is that a mask and a selection are two descriptions of the same answer
 
 What stays is the part that was worth having on its own. `Chunk` keeps its `picks` and `dense` fields and the flatten that `node_reads_selection` drives, which cost nothing while nothing produces a selection, and `select_positions` keeps the single pass rewrite that halved it from 118 microseconds to 62. What would have to change before this is worth trying again is the gather: a selection is always ascending, so reading a column through one is a sequential walk with holes in it and should cost close to what the filtered copy costs, and it currently costs nearly three times as much. Narrowing the positions from `Int` to `UInt32` halves the index traffic and is the other half of it. Issue #521 carries both.
 What that leaves is the intermediate nobody needs. Lowering turns each condition into a compare that writes a mask column and a filter that reads it, so the pair currently gathers the operand, writes a mask, scans the mask into positions and maps those back through the selection. Measured apart it is 379 microseconds on the chunk above; fused into one pass that loads through each position and writes the position again when it passes, with no mask and no gathered operand at any point, it is 166. That is the change worth making and this one is what makes it possible, because it needs a filter that already speaks in positions.
+
 ### Added: the n best rows of a column, without sorting the frame
 
 `DataFrame.nlargest` and `DataFrame.nsmallest`, which are the ungrouped form of the `group_nlargest` and `group_nsmallest` that have been here since the top n kernel was written. There is no new kernel: the ungrouped question is the grouped question asked about a frame with one group in it, so `_top_rows` builds a codes array of zeros as tall as the frame, says there is one group, and hands both to the same erased entry point the grouped methods use.
