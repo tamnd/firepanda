@@ -2366,11 +2366,12 @@ def _lower_in(
 ) raises -> Int:
     """Lowers `x IN (a, b, c)` into the equalities it stands for.
 
-    One equality per candidate, joined by `OR`, with the operand shared the way
-    a BETWEEN shares it. A list of three is three comparisons, which is what
-    DuckDB does with a short list as well. A long list wants a hash set instead,
-    and that is a physical choice rather than a different meaning, so it belongs
-    in the operator and not here.
+    One equality per candidate, all of them under one `OR`, with the operand
+    shared the way a BETWEEN shares it. A list of three is three comparisons,
+    which is what DuckDB does with a short list as well. A long list wants a
+    hash set instead, and that is a physical choice rather than a different
+    meaning, so it belongs in the operator and not here. `lower.mojo` reads this
+    shape back and builds one when it sees it.
 
     `NOT IN` is the negation of the whole test, which is what makes it the
     classic wrong answer when it is written any other way. `x NOT IN (1, NULL)`
@@ -2398,18 +2399,23 @@ def _lower_in(
     if len(candidates) == 0:
         raise Error("an IN with nothing in the list to be in")
     var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
-    var built = plan.exprs.binary(
-        BinaryOp.EQ,
-        over,
-        _lower_expr(ast, candidates[0], plan, walk, scope, grouped),
-    )
-    for i in range(1, len(candidates)):
-        var more = plan.exprs.binary(
-            BinaryOp.EQ,
-            over,
-            _lower_expr(ast, candidates[i], plan, walk, scope, grouped),
+    var arms = List[Int](capacity=len(candidates))
+    for i in range(len(candidates)):
+        arms.append(
+            plan.exprs.binary(
+                BinaryOp.EQ,
+                over,
+                _lower_expr(ast, candidates[i], plan, walk, scope, grouped),
+            )
         )
-        built = plan.exprs.call("or", [built, more], True)
+    # One disjunction over every member rather than a left fold of pairs. The
+    # simplify pass flattens the fold anyway, and writing it flat means a query
+    # that is lowered without the optimizer having run gets the same shape as
+    # one that goes through it, which is what the set lookup in `lower.mojo`
+    # reads.
+    var built = arms[0]
+    if len(arms) > 1:
+        built = plan.exprs.call("or", arms^, True)
     if node.payload == 1:
         return plan.exprs.call("not", [built], True)
     return built

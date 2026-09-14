@@ -150,6 +150,24 @@ def test_numbers_match_the_twin() raises:
     over(col, [0], "zero, which is also what a null holds")
 
 
+def test_every_length_around_a_block_group_matches_the_twin() raises:
+    # The linear route walks the rows in groups of `LINEAR_BLOCKS` SIMD blocks
+    # and then finishes whatever is left one block at a time, so the length at
+    # which it hands over depends on the SIMD width and is a different number on
+    # every machine. Rather than pick one, every length up to two groups of the
+    # widest block there is gets run, which covers both loops and every remainder
+    # between them whatever the width turns out to be.
+    for n in range(1, 81):
+        var col = Array[DType.int64](n)
+        for i in range(n):
+            col.set_valid(i, Int64(i % 11))
+        if n > 3:
+            col.set_null(3)
+        if n > 37:
+            col.set_null(37)
+        over(col, [2, 7], String("length ", n))
+
+
 def test_a_duplicate_member_changes_nothing() raises:
     var col = sample()
     over(col, [2, 2, 2, 7], "duplicates")

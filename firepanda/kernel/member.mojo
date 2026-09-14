@@ -56,16 +56,57 @@ comptime LINEAR_MAX = 32
 """The largest set of numbers answered by comparing against every member.
 
 A number comparison is one SIMD equal against a block that is already loaded, so
-each extra member costs about seven hundredths of a nanosecond a row. The table
-costs much more than that per row, because it hashes and then probes, and the
-probe gets longer as the table fills. That leaves the crossover a long way up.
+each extra member costs about a hundredth of a nanosecond a row. The table costs
+much more than that per row, because it hashes and then probes, and the probe
+gets longer as the table fills. That leaves the crossover a long way up.
 
-To find it, both routes were built at every set size, by moving this constant, and
-run against each other in one session on a million int64 rows. Nanoseconds a row,
-linear against table: nine, 1.30 against 2.99; sixteen, 2.03 against 4.84; thirty
-two, 3.82 against 5.03; sixty four, 7.06 against 5.15. So it turns over between
-thirty two and sixty four, and thirty two is the last size where comparing
-everything still wins with room to spare.
+To find it, both routes were run against each other on a million int64 rows, with
+the table route lifted out of here so it could be run below the threshold as
+well. Nanoseconds a row on the i9-13900K, linear against table: sixteen, 0.30
+against 0.57; twenty four, 0.43 against 0.44; thirty two, 0.53 against 0.63;
+forty eight, 0.80 against 0.32. So it turns over between thirty two and forty
+eight, and thirty two is the last size where comparing everything still wins.
+
+The table numbers do not climb with the set the way the linear ones do, and they
+are not flat either. They are sawtoothed, because the table rounds its bucket
+count up to a power of two and a set just over one of those boundaries sits in a
+half empty table and probes faster than a set just under the next one. Forty
+eight is the low tooth. That is why the crossover is read off the size where the
+two lines cross rather than off any single pair.
+"""
+
+comptime LINEAR_BLOCKS = 8
+"""How many SIMD blocks the linear route keeps live while it walks the set.
+
+One, which is the obvious way to write it, costs three times what this does, and
+the reason is worth writing down because it is not about sets. With one block
+live the loop over the set is entered once per block, so on a machine whose SIMD
+width is two that is a whole loop, with its counter and its branch and its load
+of the needle out of a list, for every two rows. None of that work is about the
+rows. A group of blocks amortises all of it across the group: the needle is
+splatted once, the loop is entered once, and its body is a compare per block with
+nothing carried between them.
+
+Eight rather than four, and getting that the right way round took two
+measurements that disagreed. Two vectors are live per block, the values and the
+answers, so eight blocks is sixteen registers, which is all of AVX2 and half of
+NEON. Run on a whole column of a million rows, that shows: on the i9-13900K four
+blocks ran 0.21, 0.30 and 0.53 nanoseconds a row for sets of four, sixteen and
+thirty two against 0.19, 0.36 and 0.63 for eight, so eight was spilling and
+losing sixteen per cent at the larger sets.
+
+Run the way the kernel is actually called it does not. A chunk at a time on every
+thread, four million rows, the two settings alternated twice: sets of four, eight
+and thirty two came out the same to within the repeat noise, and a set of two ran
+215 and 202 microseconds on eight against 231 and 232 on four. So eight is ten
+per cent ahead where it differs at all. The whole column run has eight morsels to
+give thirty two threads and measures a core that has its ports to itself, which
+is not the machine a query runs on, and a spill that costs something there costs
+nothing when the other thread on the core has work to do.
+
+The gain over one block is what this is for, and it dwarfs both of those. On the
+M series, one block ran 0.26, 0.43, 0.85 and 4.11 for sets of two, four, eight
+and thirty two, against 0.10, 0.14, 0.25 and 1.27 for eight blocks.
 """
 
 comptime TEXT_LINEAR_MAX = 2
@@ -143,11 +184,44 @@ def is_in[
 
     if k <= LINEAR_MAX:
         comptime width = simd_width_of[dt]()
+        comptime step = width * LINEAR_BLOCKS
 
         def linear(start: Int, stop: Int) {mut out, imm}:
             var src = a.unsafe_ptr()
             var dst = out.unsafe_mut_ptr()
             var i = start
+
+            # `LINEAR_BLOCKS` blocks are loaded, then the set is walked with all
+            # of them live. That is the same arithmetic as one block at a time
+            # and it is three times faster, because the needle is splatted once
+            # for the whole group instead of once per block and the loop over
+            # the set is entered once per group as well.
+            while i + step <= stop:
+                var x = InlineArray[SIMD[dt, width], LINEAR_BLOCKS](
+                    fill=SIMD[dt, width](0)
+                )
+                comptime for b in range(LINEAR_BLOCKS):
+                    x[b] = src.unsafe_offset(i + b * width).unsafe_load[
+                        width=width
+                    ]()
+
+                var first = SIMD[dt, width](wanted[0])
+                var hit = InlineArray[SIMD[DType.bool, width], LINEAR_BLOCKS](
+                    fill=SIMD[DType.bool, width](fill=False)
+                )
+                comptime for b in range(LINEAR_BLOCKS):
+                    hit[b] = x[b].eq(first)
+
+                for j in range(1, k):
+                    var next = SIMD[dt, width](wanted[j])
+                    comptime for b in range(LINEAR_BLOCKS):
+                        hit[b] |= x[b].eq(next)
+
+                comptime for b in range(LINEAR_BLOCKS):
+                    dst.unsafe_offset(i + b * width).unsafe_store(hit[b])
+                i += step
+
+            # The rows a whole group does not reach, one block at a time.
             while i < stop:
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
                 var hit = x.eq(SIMD[dt, width](wanted[0]))

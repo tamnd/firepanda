@@ -2675,10 +2675,14 @@ def test_a_between_over_a_fold_is_a_having_like_any_other() raises:
     )
 
 
-def test_an_in_is_one_equality_per_candidate() raises:
+def test_an_in_is_one_equality_per_candidate_under_one_disjunction() raises:
+    # Every member under one `or` rather than a left fold of two at a time. The
+    # simplify pass flattens the fold anyway, so the two shapes were the same
+    # query, and writing it flat is what lets a plan lowered without the
+    # optimizer having run become a set lookup rather than a node per member.
     assert_equal(
         _plan("SELECT a FROM t WHERE b IN (1, 2, 3)"),
-        "PROJECT [a]\n  FILTER or(or(b == 1, b == 2), b == 3)\n    SCAN t []\n",
+        "PROJECT [a]\n  FILTER or(b == 1, b == 2, b == 3)\n    SCAN t []\n",
     )
 
 

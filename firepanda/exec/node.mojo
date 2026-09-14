@@ -138,6 +138,7 @@ from firepanda.kernel.logic import (
     logic_any,
     logic_type,
 )
+from firepanda.kernel.member import is_in_any
 from firepanda.kernel.nulls import coalesce_any, is_not_null_any, is_null_any
 from firepanda.kernel.pattern import (
     MatchKind,
@@ -2141,6 +2142,117 @@ struct Match(Movable):
             made = text_contains_in_order(
                 text, self.first.as_bytes(), self.second.as_bytes()
             )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Member(Movable):
+    """Appends a column saying whether each element is one of a set of values.
+
+    This is SQL's `IN` against a list that is written out in the query, and it
+    is a node of its own for the reason `Match` is one: the right side is not an
+    operand. It is a set built once while the plan is lowered, and what varies
+    from row to row is only which row is being looked up.
+
+    Written as a chain of equalities it is one operator per member plus a
+    disjunction over all of them, so a set of eight is nine operators and eight
+    intermediate boolean columns that nothing but the disjunction ever reads.
+    Here it is one pass, and the kernel decides for itself whether to compare
+    against every member or to build a hash table, which is a decision that
+    depends on the width of the type and cannot be made in a plan.
+
+    The set is one column rather than a list of values because that is what the
+    kernel takes, and because building it once at plan time is the whole point.
+    Its type has to be the column's type: `is_in_any` refuses a set of a
+    different type rather than promoting, and lowering is where that is settled.
+
+    A null element gives a null answer, which the kernel already does. A null in
+    the set is a different question and lowering does not build one, because a
+    set with a null in it does not mean what the chain of equalities it came
+    from means.
+    """
+
+    var at: Int
+    """The position of the column being looked up."""
+
+    var values: AnyArray
+    """The set, as a column of the same type as the one being looked up."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, var values: AnyArray, var name: String):
+        """Constructs a lookup of a column against a set.
+
+        Args:
+            at: The position of the column being looked up.
+            values: The set. Consumed. Must be the type of that column, which
+                the bind below checks.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.values = values^
+        self.name = name^
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a boolean column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one boolean field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column of a
+            different type from the set.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "member: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype.physical != self.values.type.physical:
+            raise Error(
+                "member: column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+                + " and the set holds "
+                + String(self.values.type)
+            )
+        out.append(Field(self.name, LogicalType.BOOL))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Looks every row up in the set and puts the answer on the end.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column and the set are
+            different types.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "member: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = is_in_any(chunk.columns[self.at], self.values)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -6015,6 +6127,7 @@ comptime Node = Variant[
     Connective,
     Apply,
     Match,
+    Member,
     Cut,
     Length,
     Case,
@@ -6075,6 +6188,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Apply].bind(input^)
     if node.isa[Match]():
         return node[Match].bind(input^)
+    if node.isa[Member]():
+        return node[Member].bind(input^)
     if node.isa[Cut]():
         return node[Cut].bind(input^)
     if node.isa[Length]():
@@ -6226,7 +6341,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Length`, `Case`, `Trim`, `Locate`, `Part`,
+        `Apply`, `Match`, `Member`, `Cut`, `Length`, `Case`, `Trim`, `Locate`,
+        `Part`,
         `Truncate`,
         `Presence`,
         `Fill`,
@@ -6240,6 +6356,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Connective]()
         or node.isa[Apply]()
         or node.isa[Match]()
+        or node.isa[Member]()
         or node.isa[Cut]()
         or node.isa[Length]()
         or node.isa[Case]()
@@ -6294,20 +6411,39 @@ def node_computes_per_row(node: Node) -> Bool:
     `Presence` and `Fill` are on the memory bound side with those three. Each
     reads a validity bit per row and moves a value, and neither does any
     arithmetic in between, so there is nothing for a second core to speed up.
-    `Cut` says no for a different reason: it builds a text column, and the
-    payload offset every row writes at is a running total of the ones before it,
-    which is the serial thing `StringBuilder` exists to do. `Trim` and `Case`
-    say no for that same reason and would whatever their kernels cost, since
-    both build a text column too.
 
-    `Length` says no for a third reason. Counting characters is a compare and an
-    add per byte of payload, so it is memory bound rather than waiting on
-    arithmetic, and its kernel already spreads itself over the cores, so handing
-    the chunks out as well would be paying for two sets of tasks to do one pass.
+    The six text operators all used to be on that side and none of them belongs
+    there. `Length` and `Locate` said no on the grounds that their kernels call
+    `parallel_morsels` themselves, so handing the chunks out as well would be
+    paying for two sets of tasks to do one pass. `Cut`, `Trim` and `Case` said no
+    because they build a text column and the payload offset every row writes at
+    is a running total of the ones before it, which is the serial thing
+    `StringBuilder` exists to do. `Member` said no for `Locate`'s reason, and
+    that is how the mistake was found: the set lookup it was added for came out
+    four times slower than the chain of equalities it replaced.
 
-    `Locate` says no for `Length`'s reason. Searching is a pass over the payload
-    and its kernel spreads itself over the cores already, so a second set of
-    tasks on top of that would be paying twice to do one pass.
+    Neither argument survives the arithmetic. A morsel is `MORSEL_ROWS` rows and
+    a chunk is the same number of rows, so a kernel handed one chunk is handed
+    exactly one morsel and runs on one core however well it parallelises. A
+    kernel only spreads itself over the cores when it is called on a whole
+    column, which inside a pipeline it never is. And a running total inside one
+    chunk says nothing about two chunks, because each one builds its own column
+    and neither waits on the other. So the question this answers was never
+    whether to parallelise twice, it was whether to parallelise at all.
+
+    Measured on the i9-13900K over four million rows of forty byte text, with
+    nothing after the operator that computes per row, and with the two settings
+    alternated twice. `Length` ran 108 milliseconds on the calling thread and 7.9
+    on the cores, `Locate` 35 against 4.7, `Cut` 200 against 15, `Trim` 631
+    against 52, and `Case` 13.5 seconds against 1.7. Between six and fourteen
+    times, on operators that were being told they had nothing to gain.
+
+    `Case` is the one to look at twice, and not for its ratio. Four hundred
+    nanoseconds a row to raise forty bytes of ASCII, after the cores have been
+    handed the work, is about forty times what the walk itself should cost, so
+    there is a second thing wrong inside that kernel that this does not touch.
+    `Trim` at thirteen nanoseconds a row is the same story a great deal smaller.
+    Both are worth their own measurement.
 
     `Part` and `Truncate` say yes. Turning a day number into a year, or a year
     back into a day number, is a run of multiplies and shifts per row and not a
@@ -6318,8 +6454,9 @@ def node_computes_per_row(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Part`,
-        `Truncate`, `Choose` and `Join`.
+        True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Member`,
+        `Length`, `Locate`, `Cut`, `Trim`, `Case`, `Part`, `Truncate`, `Choose`
+        and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -6327,6 +6464,12 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Connective]()
         or node.isa[Apply]()
         or node.isa[Match]()
+        or node.isa[Member]()
+        or node.isa[Length]()
+        or node.isa[Locate]()
+        or node.isa[Cut]()
+        or node.isa[Trim]()
+        or node.isa[Case]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Choose]()
@@ -6420,6 +6563,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
+    if node.isa[Member]():
+        return node[Member].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
     if node.isa[Length]():
@@ -6501,6 +6646,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Apply].process(chunk^)
     if node.isa[Match]():
         return node[Match].process(chunk^)
+    if node.isa[Member]():
+        return node[Member].process(chunk^)
     if node.isa[Cut]():
         return node[Cut].process(chunk^)
     if node.isa[Length]():

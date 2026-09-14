@@ -1344,11 +1344,25 @@ def test_a_plain_or_in_a_where_keeps_both_sides() raises:
     )
 
 
-def test_an_in_of_several_candidates_runs_as_the_chain_it_is() raises:
+def test_an_in_of_several_candidates_runs_as_the_set_it_is() raises:
     same(
         answer("SELECT qty FROM sales WHERE qty IN (3, 25)", "qty"),
         [3, 25],
         "qty",
+    )
+
+
+def test_an_in_over_text_runs_as_a_set_of_text() raises:
+    # The other half of the set lookup, and the half with the lower threshold
+    # inside the kernel: a set of three strings is already worth a hash table
+    # where a set of three numbers is not. The row with no word in it answers
+    # null and is dropped, which is the chain of equalities' answer too.
+    same(
+        answer(
+            "SELECT n FROM words WHERE word IN ('apple', 'grape', 'pear')", "n"
+        ),
+        [1, 4],
+        "n",
     )
 
 

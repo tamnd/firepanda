@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the text operators get the cores
+
+A pipeline hands its leading operators out to the cores only if one of them works out a value for every row, and `length`, `position`, `substring`, `trim` and `upper` all said they did not. Two reasons were given. `length` and `position` said their kernels spread themselves over the cores already, so handing the chunks out as well would be paying twice to do one pass, and the three that build a text column said the payload offsets they write at are a running total, which is a serial thing.
+
+Neither holds. A morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. A running total inside one chunk says nothing about two chunks either, because each one builds its own column and neither waits on the other. The question was never whether to parallelise twice, it was whether to parallelise at all.
+
+Measured on the i9-13900K over four million rows of forty byte text, with the two settings alternated twice: `length` ran 108 milliseconds on the calling thread and 7.9 on the cores, `position` 35 against 4.7, `substring` 200 against 15, `trim` 631 against 52, and `upper` 13.5 seconds against 1.7. That is between six and fourteen times on five operators, and it is the kind of query that reads a text column and does nothing else to it that gains the most.
+
+`upper` is worth a second look for a reason that has nothing to do with this. Four hundred nanoseconds a row to raise forty bytes of ASCII, with the cores already doing the work, is roughly forty times what walking the bytes should cost, so something else inside that kernel is wrong. `trim` at thirteen nanoseconds a row is the same story a great deal smaller. Neither is touched here and both are worth their own measurement.
+
+### Changed: `IN` against a list of constants runs as one set lookup
+
+`x IN (a, b, c)` was written out as an equality per member joined by `or`, which is a node per member plus a disjunction over all of them, and every one of those nodes writes a boolean column that only the disjunction ever reads. Lowering now reads that shape back and builds a single set lookup instead. Measured on the i9-13900K over four million rows, a set of two ran 408 microseconds as a chain and 215 as a lookup, a set of four 630 against 248, a set of eight 1.149 milliseconds against 340, and a set of thirty two 5.935 milliseconds against 986 microseconds. That is 1.9x at the smallest set anybody writes and 6.0x at the largest the kernel answers by comparing.
+
+Two things inside the engine had to be fixed before the rewrite was worth making, and the first one is general rather than being about sets. The new node said it did not need the cores, on the grounds that its kernel spreads itself over them already, and that made it four times slower than the chain it replaced. The reason is that a morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. The five text operators said the same thing for the same reason, and the entry above is what fixing that came to.
+
+The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
+
+A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+
 ### Added: `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, the last of the `str` questions about what a character is
 
 The five remaining class questions of the `str` accessor, answered out of four more of Arrow's character classes held the same way the case classes are. `isalnum` needs no class of its own, because a character is alphanumeric exactly when it is alphabetic or numeric and the two have nothing in common, and the generator asserts both of those against Arrow over every code point before it writes a table rather than taking them from the standard.
