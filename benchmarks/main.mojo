@@ -5216,6 +5216,27 @@ def bench_pipeline(mut harness: Harness) raises:
         "exec/pipeline_line_narrow_third", "rows", rows, line_narrow_third
     )
 
+    # An expression above the filter rather than below it, which is what
+    # `SELECT key * value WHERE value < 100` lowers to and is the shape the
+    # rows above do not have: every compute in them runs before the filter and
+    # so never sees a selection. This one names two of the three columns in the
+    # chunk, so it says what gathering the named columns saves over gathering
+    # all of them, and the mask it does not name is dropped by the projection
+    # without ever being gathered at all.
+    def line_then_expression() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(100)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Compute(0, 1, BinaryOp.MUL, "product")))
+        pipeline.add(Node(Project([0, 1, 3])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_then_expression", "rows", rows, line_then_expression
+    )
+
     def project_small() raises {imm small}:
         keep(small.rows)
         var pipeline = Pipeline(DataFrame(copy=small))
