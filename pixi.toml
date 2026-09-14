@@ -113,7 +113,7 @@ fuzz-join = "mojo run -I . tests/fuzz/join.mojo"
 # the single-threaded result. docs/specs/09-quality-bar.md section 3.
 stress = "mojo run -I . tests/stress/main.mojo"
 
-# All three differential programs are built first and then run, rather than run
+# The differential programs are built first and then run, rather than run
 # through `mojo run`. `mojo run` compiles into the process it then runs the
 # program in, and the two do not always take each other's teardown well: the
 # generated statement comparison aborted at exit with a glibc "corrupted
@@ -124,10 +124,10 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # Building is not slower either, because `mojo run` compiles too, and this way
 # the whole job pays for its compiles once at the start.
 #
-# `inputs` and `outputs` are what keep the three steps below from compiling
-# everything three times over. Each of them depends on this task, and without a
-# cache key pixi would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics", default-environment = "differential", inputs = [
+# `inputs` and `outputs` are what keep the steps below from compiling everything
+# once per step. Each of them depends on this task, and without a cache key pixi
+# would honour that literally.
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
@@ -135,6 +135,7 @@ differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tes
   "build/differential/sql",
   "build/differential/generated",
   "build/differential/semantics",
+  "build/differential/answers",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -153,6 +154,14 @@ differential-sql = { cmd = "./build/differential/sql", default-environment = "di
 # error attached would come from. It needs no corpus either.
 # See docs/specs/sql/11-conformance.md section 5.
 differential-semantics = { cmd = "./build/differential/semantics", default-environment = "differential", depends-on = ["differential-build"] }
+
+# And the question after that one. A type comparison cannot see a kernel that
+# counts the right thing wrongly, which is how `strlen` shipped counting
+# characters where DuckDB counts bytes with every test above it agreeing. This
+# runs the same expressions over the same eight rows through both engines and
+# compares the values. It needs no corpus.
+# See docs/specs/sql/11-conformance.md section 6.
+differential-answers = { cmd = "./build/differential/answers", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison against statements nobody wrote. The grammar writes them,
 # which reaches the rules DuckDB's corpus happens to have no test for, and it
