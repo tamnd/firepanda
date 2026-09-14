@@ -103,12 +103,16 @@ from firepanda.kernel.parse_time import (
 )
 from firepanda.kernel.pattern import (
     text_contains,
+    text_contains_folded,
     text_contains_in_order,
     text_count,
     text_ends_with,
     text_equals,
+    text_equals_folded,
     text_replace,
+    text_replace_folded,
     text_starts_with,
+    text_starts_with_folded,
 )
 from firepanda.kernel.pick import pick_any
 from firepanda.kernel.select import filter_any, take_any
@@ -1671,6 +1675,111 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name.copy(),
             AnyArray(
                 text_replace(
+                    self.values.strings(),
+                    pattern.as_bytes(),
+                    repl.as_bytes(),
+                    limit,
+                )
+            ),
+        )
+
+    def chars_contains_folded(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row holds a substring, ignoring case.
+
+        This is `str.contains(pat, case=False)`. The fold is not the one
+        `chars_casefold` does: a search folds each character to exactly one
+        character, so `STRASSE` does not hold `straße` here even though the two
+        casefold to the same word. Document 69 says where that rule comes from
+        and why there are two fold tables in this library.
+
+        Args:
+            pattern: The substring to look for.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_contains_folded(self.values.strings(), pattern.as_bytes())
+            ),
+        )
+
+    def chars_match_folded(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row begins with a substring, ignoring case.
+
+        The folded half of `chars_match`, and the same two names in pandas
+        collapse onto it for the same reason.
+
+        Args:
+            pattern: The substring to look for at the front.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_starts_with_folded(
+                    self.values.strings(), pattern.as_bytes()
+                )
+            ),
+        )
+
+    def chars_full_match_folded(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row is a substring and nothing else, ignoring case.
+
+        A folded match may cover a different number of bytes than the pattern,
+        since `ſ` is two bytes and is compared as the one byte `s`, so this
+        cannot decide the answer by comparing lengths the way `chars_full_match`
+        does. It walks both sides instead and asks where the match ended.
+
+        Args:
+            pattern: The text the whole row has to be, up to case.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_equals_folded(self.values.strings(), pattern.as_bytes())
+            ),
+        )
+
+    def chars_replace_folded(
+        self, pattern: StringSlice, repl: StringSlice, limit: Int
+    ) raises -> Self:
+        """Returns each row with a substring swapped for another, ignoring case.
+
+        What was not matched keeps the case it arrived with, since only the
+        comparison is folded and the rest of the row is copied through.
+
+        Args:
+            pattern: The substring to look for, up to case.
+            repl: What to put in its place, which is written out as given.
+            limit: How many matches per row. Negative means all of them and zero
+                means none, which is what pandas' `n` means.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_replace_folded(
                     self.values.strings(),
                     pattern.as_bytes(),
                     repl.as_bytes(),

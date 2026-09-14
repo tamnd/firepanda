@@ -180,15 +180,18 @@ def test_a_dictionary_is_several_replacements_in_order(firepanda: ModuleType) ->
 
 
 @needs_pandas
-def test_case_folding_and_flags_are_refused_rather_than_ignored(
+def test_flags_are_refused_rather_than_ignored(
     firepanda: ModuleType,
 ) -> None:
-    """pandas honours both of these and this library does not have them yet."""
+    """The other half of this pair is answered now, and this half needs an engine.
+
+    `case=False` landed with the folded search and is covered by
+    `test_str_case_insensitive.py`, which is also where the odd fact lives that
+    pandas answers this one name out of `re.IGNORECASE` rather than out of Arrow.
+    """
     import re
 
     mine = made(firepanda)
-    with pytest.raises(firepanda.errors.UnsupportedError):
-        mine.str.replace("a", "X", case=False)
     with pytest.raises(firepanda.errors.UnsupportedError):
         mine.str.replace("a", "X", flags=re.IGNORECASE)
 

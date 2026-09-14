@@ -47,6 +47,21 @@ The underscore stands for one character and not for one byte, which is the thing
 One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
 
 The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+### Added: `case=False` on `contains`, `match`, `fullmatch` and `replace`
+
+The four names that look for a pattern stop refusing the argument that turns the search insensitive. They had refused it for five documents, on the grounds that ignoring an argument which changes the answer is worse than saying no to it, and `casefold` looked like the missing half. It is not.
+
+A fold that is read by a person may make a row longer, so `ß` folds to `ss` and `ﬁ` folds to `fi`. A search cannot afford that, because a match would then cover a number of bytes with no relation to the number of bytes it was found in, and pandas does not do it either. Measured: `STRASSE` does not hold `straße` in pandas and `FIANCE` does not hold `ﬁance`, because three of these four names are answered by Arrow's `match_substring` with `ignore_case=True`, which folds one code point to exactly one code point. It is not the lower case either, which misses final sigma against capital sigma, the micro sign against Greek mu, long s against s, and the Kelvin sign against k.
+
+So this library carries a second fold table of 1457 entries beside the one `casefold` uses, and `tools/gen_searchfold.py` writes it. The generator verifies rather than trusts: every entry is asked of pyarrow in both directions, and every one of the 1427 targets is swept against all 1.1 million code points to check that the set Arrow folds onto it is exactly the set the table claims. That sweep takes ninety two seconds and is why the file is committed rather than built.
+
+`replace` is the odd one and is worth a sentence. pandas refuses `case=False` in its Arrow path for that name alone and falls back to Python, where `re.escape` and `re.IGNORECASE` decide the answer. There is no reason in principle for a different engine in a different language to agree, so every pair the table calls equal was checked against `re.IGNORECASE` and they all agree, which is what lets one table serve all four names.
+
+The pattern is folded once and the row is never folded at all, so nothing column sized is copied. The cost is that the skip table and the wide scan both go: a skip is a statement about bytes, and this search compares code points the bytes in front of it do not hold. A folded match may cover a different number of bytes than its pattern, since `ſ` is two bytes and compares as the one byte `s`, so the folded `fullmatch` walks both sides rather than comparing lengths.
+
+One finding came out of sweeping the argument space. `n=0` means no replacements to `str.replace` and every replacement to `str.replace(case=False)`, because the Arrow path takes the number at its word and the fallback hands it to `re.sub`, where zero has meant unlimited since long before pandas existed. Same method, same column, two answers. This library matches pandas, and widens the zero in the Python layer so that the number still means what it says in the kernel.
+
+`flags` is still refused. Every flag is a statement about a regular expression and there is still no engine, so `re.IGNORECASE` written as a flag says no even though it is the same request `case=False` makes.
 
 ### Changed: `upper` and `lower` over ASCII text run sixty times faster
 

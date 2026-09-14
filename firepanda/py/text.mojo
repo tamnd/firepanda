@@ -89,6 +89,7 @@ def _text_name(name: String) raises -> String:
         or name == "zfill"
         or name == "repeat"
         or name == "replace"
+        or name == "replace_folded"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -122,6 +123,9 @@ def _flag_name(name: String) raises -> String:
         or name == "contains"
         or name == "match"
         or name == "fullmatch"
+        or name == "contains_folded"
+        or name == "match_folded"
+        or name == "fullmatch_folded"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -316,6 +320,11 @@ def text(
         # argument defaults to False in pandas 3. So nothing is refused on the
         # way in and `n` rides in the position slot the way a width does.
         return column.chars_replace(arg, other, _whole(start, "n"))
+    if wanted == "replace_folded":
+        # `case=False`, and the one of the four folded names whose answer is
+        # text. pandas answers this one out of Python rather than out of Arrow
+        # and the two fold the same way anyway, which document 69 measures.
+        return column.chars_replace_folded(arg, other, _whole(start, "n"))
     return column.chars_repeat(_whole(start, "repeats"))
 
 
@@ -404,6 +413,16 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         return column.chars_match(arg)
     if wanted == "fullmatch":
         return column.chars_full_match(arg)
+    # The same three with `case=False`, which is a word of its own rather than a
+    # seventh argument on the door, for the reason `strip` and `strip_chars` are
+    # two words: the name and what it does with its argument are what a caller
+    # picked, and a flag beside the name would put that choice in two places.
+    if wanted == "contains_folded":
+        return column.chars_contains_folded(arg)
+    if wanted == "match_folded":
+        return column.chars_match_folded(arg)
+    if wanted == "fullmatch_folded":
+        return column.chars_full_match_folded(arg)
     return column.chars_ends_with(arg)
 
 

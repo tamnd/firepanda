@@ -195,14 +195,16 @@ def test_contains_with_regex_off_searches_for_the_characters_themselves(
 
 
 @needs_pandas
-def test_case_folding_and_flags_are_refused_rather_than_ignored(
+def test_flags_are_refused_rather_than_ignored(
     firepanda: ModuleType,
 ) -> None:
-    """An ignored argument is the one failure mode a compatibility layer must not have."""
+    """An ignored argument is the one failure mode a compatibility layer must not have.
+
+    `case=False` used to be refused here beside this and is answered now, which
+    `test_str_case_insensitive.py` covers. Every flag is a statement about a
+    regular expression and there is still no engine, so this one stays.
+    """
     mine = made(firepanda)
-    for name in ("contains", "match", "fullmatch"):
-        with pytest.raises(firepanda.errors.UnsupportedError):
-            getattr(mine.str, name)("abc", case=False)
     for name in ("contains", "match", "fullmatch", "count"):
         with pytest.raises(firepanda.errors.UnsupportedError):
             getattr(mine.str, name)("abc", flags=re.IGNORECASE)
