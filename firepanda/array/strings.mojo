@@ -683,7 +683,9 @@ struct StringBuilder(Movable, Sized):
             self._payload_size = offset + written
         self._nulls.append(False)
 
-    def append_ascii_cased(mut self, bytes: Span[UInt8, _], upper: Bool) -> Bool:
+    def append_ascii_cased(
+        mut self, bytes: Span[UInt8, _], upper: Bool
+    ) -> Bool:
         """Appends one present element case changed, if it is all ASCII.
 
         The same shape as `append_escaped`: the answer is written straight into

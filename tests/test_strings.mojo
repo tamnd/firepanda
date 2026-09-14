@@ -379,10 +379,12 @@ def test_append_ascii_cased_matches_the_byte_at_a_time_answer() raises:
         var wanted_down = String("")
         for k in range(len(bytes)):
             var byte = Int(bytes[k])
-            var up = byte - 32 if byte >= ord("a") and byte <= ord("z") else byte
-            var down = byte + 32 if byte >= ord("A") and byte <= ord(
-                "Z"
-            ) else byte
+            var up = (
+                byte - 32 if byte >= ord("a") and byte <= ord("z") else byte
+            )
+            var down = (
+                byte + 32 if byte >= ord("A") and byte <= ord("Z") else byte
+            )
             wanted_up += String(chr(up))
             wanted_down += String(chr(down))
         assert_equal(raised[c], wanted_up, "length " + String(c) + " up")
