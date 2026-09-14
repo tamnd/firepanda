@@ -18,6 +18,12 @@ for a constant on the left, because `5 < x` is `x > 5` and the caller mirrors th
 operation rather than the operands. That mirroring is exact, NaN included: both
 readings of the pair are false when either side is not a number, so nothing is
 smuggled in by rewriting one as the other.
+
+There is a third form, at the bottom of the file, that answers a comparison
+against a constant with the rows it keeps rather than with a column. A filter
+sitting on top of a comparison is what most predicates lower to, and the column
+between them is written once and read once by nobody else, so the fused form
+writes no column at all and hands the filter its selection directly. #521.
 """
 
 from std.sys.info import simd_width_of
@@ -290,4 +296,147 @@ def compare_const[
     parallel_morsels(compute, n)
 
     out.data.validity = validity^
+    return out^
+
+
+def _holds[dt: DType, op: Int](x: Scalar[dt], y: Scalar[dt]) -> Bool:
+    """Answers one comparison.
+
+    Args:
+        x: The value.
+        y: The constant.
+
+    Parameters:
+        dt: The dtype.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        Whether the comparison is true of the pair, taking both as present.
+    """
+    comptime if op == CMP_EQ:
+        return Bool(x.eq(y))
+    elif op == CMP_NE:
+        return Bool(x.ne(y))
+    elif op == CMP_LT:
+        return Bool(x.lt(y))
+    elif op == CMP_LE:
+        return Bool(x.le(y))
+    elif op == CMP_GT:
+        return Bool(x.gt(y))
+    else:
+        return Bool(x.ge(y))
+
+
+def compare_const_positions[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt]) -> List[UInt32]:
+    """Compares a column against one constant and returns the rows it keeps.
+
+    What `compare_const` followed by `select_positions` answers, without the
+    column in the middle. A filter over a comparison is the commonest predicate
+    there is, and the mask it built was read once, by the filter directly above
+    it, and then dropped: a byte a row written and a byte a row read to carry
+    one bit the comparison already had in a register.
+
+    The rows come back as positions into `a`, so a filter that writes a
+    selection can write this one and a filter that copies can gather by it.
+
+    A null in the column drops the row, which is the rule `select_positions`
+    follows on a mask and is what makes the two routes agree. A comparison
+    against a null is null and a filter drops a row its mask is null on, so a
+    row with nothing in it is not a row this keeps.
+
+    Serial, like `select_positions` and for the same reason: the cursor is the
+    loop, and the caller is already on a worker of its own.
+
+    Args:
+        a: The column.
+        b: The constant, at the column's dtype. A null constant keeps nothing
+            and the caller answers that without coming here.
+
+    Parameters:
+        dt: The dtype.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        The positions the comparison is true on, in order.
+    """
+    var n = len(a)
+    var src = a.unsafe_ptr()
+    # Room for every row taken in front and cut back at the end, which is what
+    # `select_positions` does and for the reason written there.
+    var out = List[UInt32](unsafe_uninit_length=n)
+    var target = out.unsafe_ptr()
+    var at = 0
+
+    # The branchless cursor, again from `select_positions`. A row nobody keeps
+    # is a store the next row overwrites, and a predicate worth filtering on is
+    # a branch worth not writing.
+    if a.null_count() == 0:
+        for i in range(n):
+            var x = src.unsafe_offset(i).unsafe_load()
+            target.unsafe_offset(at).unsafe_write(UInt32(i))
+            at += Int(_holds[dt, op](x, b))
+        out.resize(at, 0)
+        return out^
+
+    for i in range(n):
+        var x = src.unsafe_offset(i).unsafe_load()
+        var valid = Int(a.data.validity.get(i))
+        target.unsafe_offset(at).unsafe_write(UInt32(i))
+        at += valid & Int(_holds[dt, op](x, b))
+    out.resize(at, 0)
+    return out^
+
+
+def compare_const_positions_through[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt], picks: List[UInt32]) -> List[UInt32]:
+    """The same comparison over a column that is read through a selection.
+
+    The rows are `a[picks[0]]`, `a[picks[1]]` and so on, and what comes back is
+    positions into `picks` rather than into `a`, so it composes with the
+    selection the chunk arrived under exactly as a mask over those rows would
+    have.
+
+    This is the half of the fused compare that pays for itself twice. Reading
+    the operand where it lies costs one indirection a row, and gathering it
+    first costs a whole column written and then read again. On a chunk a filter
+    has already narrowed, that column is longer than the rows being asked about.
+
+    Args:
+        a: The column the positions point into.
+        b: The constant, at the column's dtype.
+        picks: The selection, one position per row.
+
+    Parameters:
+        dt: The dtype.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        The positions into `picks` the comparison is true on, in order.
+    """
+    var n = len(picks)
+    var src = a.unsafe_ptr()
+    var read = picks.unsafe_ptr()
+    var out = List[UInt32](unsafe_uninit_length=n)
+    var target = out.unsafe_ptr()
+    var at = 0
+
+    if a.null_count() == 0:
+        for j in range(n):
+            var i = Int(read.unsafe_offset(j).unsafe_load())
+            var x = src.unsafe_offset(i).unsafe_load()
+            target.unsafe_offset(at).unsafe_write(UInt32(j))
+            at += Int(_holds[dt, op](x, b))
+        out.resize(at, 0)
+        return out^
+
+    for j in range(n):
+        var i = Int(read.unsafe_offset(j).unsafe_load())
+        var x = src.unsafe_offset(i).unsafe_load()
+        var valid = Int(a.data.validity.get(i))
+        target.unsafe_offset(at).unsafe_write(UInt32(j))
+        at += valid & Int(_holds[dt, op](x, b))
+    out.resize(at, 0)
     return out^

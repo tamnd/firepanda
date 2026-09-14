@@ -57,6 +57,18 @@ The three questions are not corrected and the asymmetry is deliberate. The same 
 
 The three questions answer a missing row with a missing value where pandas answers False, because the answer there is a numpy array of bools with nowhere to put a third state. Held as object pandas answers None and agrees. That is the registered entry `engine/string-predicate-null`, which already covered `startswith` and `endswith`.
 
+### Changed: a filter can do its own comparison, and then no mask is written
+
+A mask column is a byte a row, written by the comparison underneath a filter and read by the filter directly above it and by nobody else. `Filter(on, test, op)` is the filter that compares the column itself, so that column is never written.
+
+The larger half is the operand. A comparison lowered as a compute has to produce a column at the chunk's rows, so on a chunk an earlier condition has already narrowed it gathers its operand first. A filter that only wants to know which rows survive reads them where they lie, through the positions, and gathers nothing at all. The rows come back from `compare_const_positions` already numbered the way a mask over the chunk would have numbered them, which is what lets everything after that point stay exactly as it was: the same threshold between a selection and a copy, the same composition with the selection the chunk arrived under, the same narrowing to the columns somebody downstream still wants.
+
+Four benchmark rows say what it is worth, and they are pairs inside one run rather than two runs of one binary, so a busy machine moves both halves of a pair together. `exec/pipeline_fused_narrow` against `exec/pipeline_line_narrow` is one condition keeping half the rows and runs 3 to 11 percent faster. The same pair over a predicate keeping a tenth is 15 to 17 percent. `exec/pipeline_two_conditions_fused` against `exec/pipeline_two_conditions` is 23 to 25 percent, and that is the pair that matters: the second condition reads a column of a chunk the first one has already narrowed, which is the gather the fused form does not do.
+
+Text, category and temporal columns, a null constant, and any constant the column would have to be converted to meet all keep the old route: the mask is built and the rows are read off it. The answers are the same and only the cost differs. Nothing in the lowering emits the fused form yet, so no query changes with this entry.
+
+Part of #521.
+
 
 ## [0.8.1] - 2026-09-14
 
