@@ -76,6 +76,7 @@ from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
 from firepanda.exec import Join
 from firepanda.exec import Case, Cut, Length, Locate, Member, Trim
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
+from firepanda.exec import Sort
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
@@ -4997,6 +4998,46 @@ def _mask_frame(
     return DataFrame(Schema(fields^), columns^)
 
 
+def _number_frame(rows: Int, count: Int, chunk_rows: Int) raises -> DataFrame:
+    """Int64 columns cut into chunks, the first one the key a sort would use.
+
+    Column zero is a scramble rather than a ramp, so a sort has real work to do
+    and the rows a bound keeps are spread over the whole input rather than
+    sitting in the first chunk. The rest are payload: they are never read as a
+    key and their only job is to be gathered, which is what the width question
+    is about.
+
+    Args:
+        rows: How many rows.
+        count: How many columns.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of `count` int64 columns, named `c0` upwards.
+
+    Raises:
+        If building or slicing a column raises.
+    """
+    var columns = List[ChunkedArray](capacity=count)
+    var fields = List[Field](capacity=count)
+    for k in range(count):
+        var col = Array[DType.int64](rows)
+        for i in range(rows):
+            col[i] = Int64((i * 2654435761 + k * 40503) % 1000003)
+        var whole = AnyArray(col^)
+        var chunked = ChunkedArray(LogicalType.INT64)
+        var begin = 0
+        while begin < rows:
+            var stop = begin + chunk_rows
+            if stop > rows:
+                stop = rows
+            chunked.append(whole.slice(begin, stop))
+            begin = stop
+        columns.append(chunked^)
+        fields.append(Field(String("c", k), LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _connect_chain(var frame: DataFrame, count: Int) raises -> DataFrame:
     """A conjunction as the chain of two column operators it used to lower to.
 
@@ -5388,6 +5429,13 @@ def bench_pipeline(mut harness: Harness) raises:
     column operators the lowering used to fold it into. Three, four, six and
     twelve operands, plus twelve over columns carrying nulls. They come in pairs
     and share a copy row, because a pipeline consumes its input.
+
+    The `sort_limit` rows are `ORDER BY c0 LIMIT 10` with the sort told what the
+    limit needs and with it not told, at two columns and at sixteen, which is
+    the number behind letting the operator read the bound the plan writes. The
+    `deep` pair asks the same query for a tenth of the table instead of ten
+    rows, which is where a bound stops being a top n and the two rows should
+    meet. They have copy rows for the same reason the connective ones do.
 
     Args:
         harness: The harness.
@@ -6094,6 +6142,106 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/text_case_accented", "rows", rows, text_case_accented)
+
+    # `ORDER BY c0 LIMIT 10` written both ways, at two widths. The bounded row
+    # is what the plan's limit pass asks for now that the operator reads the
+    # bound, and the unbounded row is the same query with the bound thrown away,
+    # which is what the operator did before. The limit is above both, so the two
+    # answer the same ten rows and the only thing that differs is how they got
+    # there.
+    #
+    # Two columns and sixteen, because the width is the question. What the bound
+    # saves is one permutation of the whole input plus a gather per column at
+    # every row, and only the second half grows with the width, so the pair at
+    # two columns is the floor of the saving and the pair at sixteen is where it
+    # should be worth the most.
+    #
+    # The `deep` pair is the same sixteen columns asked for a tenth of the table
+    # rather than ten rows, which is where a bound stops being a top n. The
+    # kernel falls back to an ordinary sort when the bound reaches the input, so
+    # somewhere between ten and a hundred thousand the two rows have to meet, and
+    # where they meet is the number behind the rule.
+    #
+    # A pipeline consumes the frame it is given, so every row below copies one
+    # first, and the copy rows say whether that is worth subtracting.
+    var narrow_sort = _number_frame(rows, 2, MORSEL_ROWS)
+    var wide_sort = _number_frame(rows, 16, MORSEL_ROWS)
+
+    def copy_narrow_sort() raises {imm narrow_sort}:
+        var one = DataFrame(copy=narrow_sort)
+        keep(one.rows)
+
+    harness.record("exec/sort_copy_2", "rows", rows, copy_narrow_sort)
+
+    def copy_wide_sort() raises {imm wide_sort}:
+        var one = DataFrame(copy=wide_sort)
+        keep(one.rows)
+
+    harness.record("exec/sort_copy_16", "rows", rows, copy_wide_sort)
+
+    def sort_narrow_all() raises {imm narrow_sort}:
+        keep(narrow_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=narrow_sort))
+        pipeline.add(Node(Sort([0], [True], [False])))
+        pipeline.add(Node(Limit(10)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/sort_limit_2", "rows", rows, sort_narrow_all)
+
+    def sort_narrow_bound() raises {imm narrow_sort}:
+        keep(narrow_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=narrow_sort))
+        pipeline.add(Node(Sort([0], [True], [False], bound=10)))
+        pipeline.add(Node(Limit(10)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/sort_limit_2_bound", "rows", rows, sort_narrow_bound)
+
+    def sort_wide_all() raises {imm wide_sort}:
+        keep(wide_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=wide_sort))
+        pipeline.add(Node(Sort([0], [True], [False])))
+        pipeline.add(Node(Limit(10)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/sort_limit_16", "rows", rows, sort_wide_all)
+
+    def sort_wide_bound() raises {imm wide_sort}:
+        keep(wide_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=wide_sort))
+        pipeline.add(Node(Sort([0], [True], [False], bound=10)))
+        pipeline.add(Node(Limit(10)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/sort_limit_16_bound", "rows", rows, sort_wide_bound)
+
+    var deep = rows // 10 if rows >= 10 else 1
+
+    def sort_deep_all() raises {imm wide_sort, imm deep}:
+        keep(wide_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=wide_sort))
+        pipeline.add(Node(Sort([0], [True], [False])))
+        pipeline.add(Node(Limit(deep)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/sort_limit_16_deep", "rows", rows, sort_deep_all)
+
+    def sort_deep_bound() raises {imm wide_sort, imm deep}:
+        keep(wide_sort.rows)
+        var pipeline = Pipeline(DataFrame(copy=wide_sort))
+        pipeline.add(Node(Sort([0], [True], [False], bound=deep)))
+        pipeline.add(Node(Limit(deep)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/sort_limit_16_deep_bound", "rows", rows, sort_deep_bound
+    )
 
 
 def bench_join(mut harness: Harness) raises:
