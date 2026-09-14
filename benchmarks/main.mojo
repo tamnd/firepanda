@@ -5204,7 +5204,7 @@ def _length_alone(var frame: DataFrame) raises -> DataFrame:
     """
     var wide = len(frame.schema)
     var pipeline = Pipeline(frame^)
-    pipeline.add(Node(Length(0, "n")))
+    pipeline.add(Node(Length(0, False, "n")))
     pipeline.add(Node(Project([wide])))
     return pipeline^.run()
 
