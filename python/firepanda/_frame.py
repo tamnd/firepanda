@@ -518,6 +518,29 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def partition(self, sep: Any = " ", expand: Any = True) -> DataFrame:
+        """Every row cut at the first occurrence of a separator, as three columns."""
+        try:
+            return self._cut(sep, expand, False, "partition")
+        except Exception as error:
+            raise translate(error) from None
+
+    def rpartition(self, sep: Any = " ", expand: Any = True) -> DataFrame:
+        """Every row cut at the last occurrence of a separator, as three columns."""
+        try:
+            return self._cut(sep, expand, True, "rpartition")
+        except Exception as error:
+            raise translate(error) from None
+
+    def cat(
+        self, others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = "left"
+    ) -> str:
+        """The whole column folded into one string."""
+        try:
+            return self._joined(others, sep, na_rep, join)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

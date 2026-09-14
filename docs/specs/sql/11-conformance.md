@@ -93,13 +93,19 @@ A ceiling of zero only means anything if the disagreements that are allowed to s
 
 The oracle is `tools/answers.py`, built the same way `tools/semantics.py` is and running DuckDB in a child process for the same reason.
 
-It has paid for itself twice already, and the recorded list it was written with is now empty. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770, and `s LIKE '_b_'` refused where DuckDB answered, which is issue #776. Both are fixed and both took the shape this section predicts: the expressions sat on the recorded list with an issue number against them until the kernels existed, and came off it when they did. The list is now empty rather than deleted, because the reason for having one does not go away when it happens to be short.
+It has paid for itself three times. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770, and `s LIKE '_b_'` refused where DuckDB answered, which is issue #776. Both are fixed and both took the shape this section predicts: the expressions sat on the recorded list with an issue number against them until the kernels existed, and came off it when they did.
+
+The third arrived with the double literals. `CAST(2.6 AS BIGINT)` was 3 in DuckDB and 2 in firepanda, because DuckDB rounds to the nearest and firepanda truncated the way the machine instruction does. That one is issue #786 and it took longer to come off the list than the other two, because the fix was a decision rather than a kernel: `astype` on the dataframe side has to keep truncating, since that is what pandas does, so the two front ends want different answers out of one conversion. Where the difference ended up is a flag on the plan's cast, set by the SQL lowering whenever the target is an integer and left off everywhere else, and the reason it is on the plan rather than in the kernel is that the plan is the one place that knows which front end asked.
+
+The recorded list is empty as of that fix and the ceiling of zero is doing the work on its own. The list stays in the harness for the next disagreement that is a decision rather than a patch.
 
 ## 7. The plan equality test
 
 The single most valuable test in this specification, and it is not about compatibility at all.
 
 For each of the twenty two TPC-H queries, the physical plan produced by `fp.sql(q)` and the physical plan produced by the equivalent dataframe chain must be structurally equal.
+
+One expression is allowed to print differently on the two sides and it is the cast of a float to an integer, because the two front ends mean different conversions by it and the plan says which. A dataframe chain that wants the SQL answer asks the plan builder for it, and the equality test compares the plan the chain built rather than the spelling a caller reached for, so this is a difference the test can still see rather than one it has to ignore.
 
 It costs almost nothing, because the plans already print and round trip per document 08, and it is what enforces document 02's rule that SQL and dataframes are one engine. Without it, the SQL path grows its own lowering for one operator, then another, and a year later there are two engines with different bugs and different performance, which is precisely the outcome that issue #13's line about parsing into the same logical plan so the optimizer is shared exists to prevent.
 

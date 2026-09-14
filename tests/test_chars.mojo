@@ -42,6 +42,7 @@ from firepanda.kernel.chars import (
     text_is_space,
     text_is_title,
     text_is_upper,
+    text_join,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
@@ -50,7 +51,7 @@ from firepanda.kernel.chars import (
     text_translate,
 )
 from firepanda.kernel.pattern import rfind_bytes
-from firepanda.kernel.scalar import text_translate_scalar
+from firepanda.kernel.scalar import text_join_scalar, text_translate_scalar
 
 
 def made(var values: List[String]) raises -> StringArray:
@@ -1259,6 +1260,169 @@ def test_the_keys_have_to_be_in_order() raises:
     except:
         refused = True
     assert_true(refused, "the search needs them sorted and says so")
+
+
+def join_sample() raises -> StringArray:
+    """Builds the column the join tests read.
+
+    The rows are chosen so that no two of them make the same mistake look right.
+    There is a missing row in the middle rather than at an end, because a
+    dropped row takes its separator with it and a drop at an end loses a
+    separator that was never there. There is an empty row, which is readable and
+    is not the same thing as a missing one and has to keep its separator. The
+    last row is missing too, so that a trailing separator has somewhere to show
+    up if the loop puts one there.
+
+    Returns:
+        The column, with two missing rows in it.
+
+    Raises:
+        Error: If it cannot be built.
+    """
+    return made(["a", "null", "", "bb", "null"])
+
+
+def check_join(
+    column: StringArray, sep: String, na_rep: String, skip_missing: Bool
+) raises:
+    """Checks the kernel against the twin that grows its answer.
+
+    Args:
+        column: The column.
+        sep: The separator.
+        na_rep: The stand in for a missing row.
+        skip_missing: Whether a missing row is dropped.
+
+    Raises:
+        Error: If the two disagree.
+    """
+    assert_equal(
+        text_join(column, sep.as_bytes(), na_rep.as_bytes(), skip_missing),
+        text_join_scalar(column, sep, na_rep, skip_missing),
+        String("the two joins disagree on separator '", sep, "'"),
+    )
+
+
+def test_a_join_agrees_with_its_twin() raises:
+    """The counting pass and the growing one answer the same string.
+
+    Over four separators of different lengths and both answers for a missing
+    row, which is the pair of arguments that decides how many separators come
+    out.
+    """
+    var column = join_sample()
+    var seps: List[String] = ["", ",", ", ", "||"]
+    for sep in seps:
+        check_join(column, sep, "?", True)
+        check_join(column, sep, "?", False)
+
+
+def test_a_separator_goes_between_rows_and_not_at_either_end() raises:
+    """Three rows joined by one character is five characters and not seven."""
+    assert_equal(
+        text_join(made(["a", "b", "c"]), ",".as_bytes(), "".as_bytes(), True),
+        "a,b,c",
+    )
+
+
+def test_a_dropped_row_takes_its_separator_with_it() raises:
+    """A missing row does not leave a gap between two separators.
+
+    This is the half of the rule that a join written row by row gets wrong. The
+    row is not replaced by nothing, it is removed, and the count of separators
+    goes down with it.
+    """
+    assert_equal(
+        text_join(
+            made(["a", "null", "b"]), "-".as_bytes(), "".as_bytes(), True
+        ),
+        "a-b",
+    )
+
+
+def test_a_replaced_row_keeps_its_separator() raises:
+    """With a stand in text the missing row is a row like any other."""
+    assert_equal(
+        text_join(
+            made(["a", "null", "b"]), "-".as_bytes(), "?".as_bytes(), False
+        ),
+        "a-?-b",
+    )
+
+
+def test_an_empty_stand_in_is_not_the_same_as_dropping_the_row() raises:
+    """The two leave different numbers of separators behind.
+
+    Replacing a missing row with the empty string keeps its separator and
+    dropping the row does not, so an empty `na_rep` is a real request and cannot
+    be read as no request at all.
+    """
+    var column = made(["a", "null", "b"])
+    assert_equal(
+        text_join(column, "-".as_bytes(), "".as_bytes(), False), "a--b"
+    )
+    assert_equal(text_join(column, "-".as_bytes(), "".as_bytes(), True), "a-b")
+
+
+def test_an_empty_row_is_readable_and_keeps_its_separator() raises:
+    """An empty row is not a missing one and is never dropped.
+
+    So it comes out as nothing between two separators, which looks like a
+    mistake and is the answer. The row a join can drop is the missing one and
+    an empty row is readable.
+    """
+    assert_equal(
+        text_join(made(["a", "", "b"]), "-".as_bytes(), "".as_bytes(), True),
+        "a--b",
+    )
+    assert_equal(
+        text_join(made(["", ""]), "-".as_bytes(), "".as_bytes(), True), "-"
+    )
+
+
+def test_a_column_with_nothing_readable_joins_to_nothing() raises:
+    """A column of no rows and a column of only missing rows both answer empty.
+
+    The second only when the missing rows are being dropped. With a stand in
+    they are readable and the answer is the stand in, joined to itself.
+    """
+    assert_equal(
+        text_join(made(List[String]()), ",".as_bytes(), "?".as_bytes(), True),
+        "",
+    )
+    assert_equal(
+        text_join(made(["null", "null"]), ",".as_bytes(), "?".as_bytes(), True),
+        "",
+    )
+    assert_equal(
+        text_join(
+            made(["null", "null"]), ",".as_bytes(), "?".as_bytes(), False
+        ),
+        "?,?",
+    )
+
+
+def test_a_join_counts_bytes_and_the_answer_reads_back() raises:
+    """Characters wider than a byte survive the counting pass.
+
+    The first pass adds up byte lengths and the second writes bytes, and a row
+    whose character count and byte count differ is the only thing that can tell
+    a length that was counted in the wrong unit from one that was not.
+    """
+    var joined = text_join(
+        made(["héllo", "wörld"]), "•".as_bytes(), "".as_bytes(), True
+    )
+    assert_equal(joined, "héllo•wörld")
+    assert_equal(character_count(joined.as_bytes()), 11)
+    assert_equal(len(joined.as_bytes()), 15)
+
+
+def test_one_row_joins_to_itself_with_no_separator_anywhere() raises:
+    """A single row never reaches the separator, whatever it is."""
+    assert_equal(
+        text_join(made(["only"]), "!!!".as_bytes(), "".as_bytes(), True),
+        "only",
+    )
 
 
 def main() raises:
