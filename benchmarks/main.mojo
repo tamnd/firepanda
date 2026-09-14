@@ -5567,6 +5567,66 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record("exec/pipeline_line_one_chunk", "rows", rows, line_whole)
 
+    # The same one chunk frame, cut into morsels inside the timing and then run.
+    # A frame that arrives in one chunk is what every reader produces, and the
+    # row above says what that costs against the row before it. This row asks
+    # whether a scan could pay its way out: the cut is a copy of both columns
+    # today, since a slice allocates, so this is the whole cost of re-chunking
+    # plus the cheaper run, against the dearer run on its own. It cannot. On the
+    # i9-13900K at four million rows the cut and the run together are 11.9 ms
+    # against 3.46 for the run on its own, because a copy of the source costs
+    # more than the whole query does. A scan that re-chunks has to slice without
+    # allocating, which is what issue 800 is about.
+    def line_whole_split() raises {imm whole}:
+        keep(whole.rows)
+        var cut = _in_chunks(DataFrame(copy=whole), MORSEL_ROWS, 0, 1)
+        var pipeline = Pipeline(cut^)
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_one_chunk_split", "rows", rows, line_whole_split
+    )
+
+    # The same line over two chunks and over eight, which is what says why the
+    # one chunk row above is the slow one. Two chunks is as far past every cache
+    # as one chunk is, so if the cost were the size of the intermediates these
+    # would sit with the one chunk row. They do not. Measured on the i9-13900K
+    # at four million rows with the machine idle, one chunk is 3.46 ms, two is
+    # 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is
+    # 2.26. The whole of the cost is the step from one chunk to two, which is
+    # where `Pipeline._parallel_lead` stops returning zero, so what the one
+    # chunk frame is missing is the batched prefix and not a cache.
+    var halved = _in_chunks(flat, (rows + 1) // 2, 0, 1)
+    var eighths = _in_chunks(flat, (rows + 7) // 8, 0, 1)
+
+    def line_halved() raises {imm halved}:
+        keep(halved.rows)
+        var pipeline = Pipeline(DataFrame(copy=halved))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line_two_chunks", "rows", rows, line_halved)
+
+    def line_eighths() raises {imm eighths}:
+        keep(eighths.rows)
+        var pipeline = Pipeline(DataFrame(copy=eighths))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_eight_chunks", "rows", rows, line_eighths
+    )
+
     # The same line as lowering emits it: the filter is told which columns it
     # owes, so the mask it read is never written out and the projection after it
     # is not needed. This is where writing a selection rather than copying pays,

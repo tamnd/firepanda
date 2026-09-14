@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: benchmark rows that say why a frame in one chunk runs a line slowly
+
+A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.
+
+`exec/pipeline_line_two_chunks` and `exec/pipeline_line_eight_chunks` run the same line over chunks of two million and five hundred thousand rows. Both are as far past every level of cache as the four million row chunk is, so if the cost were the size of the intermediates they would sit with the one chunk row. They sit with the morsel sized row instead. On the i9-13900K at four million rows with the machine idle, one chunk is 3.46 milliseconds, two is 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is 2.26. The whole of the cost is the step from one chunk to two, which is where the driver stops running the line on the calling thread and starts handing the prefix out, so what a one chunk frame is missing is the batched prefix and not a cache.
+
+`exec/pipeline_line_one_chunk_split` cuts the one chunk frame into morsels inside the timing and then runs the line, which is what a scan that re-chunked its input would cost today. It is 11.9 milliseconds against 3.46 for leaving the frame alone, because slicing a column allocates and a copy of the source costs more than the whole query. A scan that re-chunks has to slice without allocating, and that is the work the issue describes.
+
 ### Changed: a filter counts its mask once for the chunk and not once per column
 
 A filter that copies its columns called the same kernel once per column, and that kernel began by counting the mask so it would know where each morsel's output starts. The mask is the same for every column and nothing between the calls can write to it, so a filter keeping four columns walked a byte a row four times to arrive at the same four numbers. Issue #737.
