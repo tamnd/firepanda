@@ -68,6 +68,30 @@ thirty two and sixty four, and thirty two is the last size where comparing
 everything still wins with room to spare.
 """
 
+comptime LINEAR_BLOCKS = 8
+"""How many SIMD blocks the linear route keeps live while it walks the set.
+
+One, which is the obvious way to write it, costs three times what this does, and
+the reason is worth writing down because it is not about sets either. With one
+block live the loop over the set is entered once per block, and on a machine
+whose SIMD width is two that is a whole loop, with its counter and its branch and
+its load of the needle out of a list, for every two rows. None of that work is
+about the rows.
+
+Eight blocks amortise it eight ways. The needle is splatted once for the group,
+the loop over the set is entered once for the group, and the body of that loop is
+eight compares that do not depend on each other. Measured on the ten core M
+series, nanoseconds a row for sets of two, four, eight and thirty two: one block
+0.26, 0.43, 0.85 and 4.11, against 0.10, 0.14, 0.25 and 1.27 for eight. Four
+blocks came within five per cent of eight at every size and two did not, so the
+gain is in leaving the loop rather than in the width of the group.
+
+Eight is also what a register file can hold. Two vectors are live per block, the
+values and the answers, so eight blocks is sixteen registers, which is half of
+NEON and all of AVX2. If the x86 numbers say four, four is the answer there and
+this is the one line that has to change.
+"""
+
 comptime TEXT_LINEAR_MAX = 2
 """The largest set of strings answered by comparing against every member.
 
@@ -143,11 +167,44 @@ def is_in[
 
     if k <= LINEAR_MAX:
         comptime width = simd_width_of[dt]()
+        comptime step = width * LINEAR_BLOCKS
 
         def linear(start: Int, stop: Int) {mut out, imm}:
             var src = a.unsafe_ptr()
             var dst = out.unsafe_mut_ptr()
             var i = start
+
+            # `LINEAR_BLOCKS` blocks are loaded, then the set is walked with all
+            # of them live. That is the same arithmetic as one block at a time
+            # and it is three times faster, because the needle is splatted once
+            # for the whole group instead of once per block and the loop over
+            # the set is entered once per group as well.
+            while i + step <= stop:
+                var x = InlineArray[SIMD[dt, width], LINEAR_BLOCKS](
+                    fill=SIMD[dt, width](0)
+                )
+                comptime for b in range(LINEAR_BLOCKS):
+                    x[b] = src.unsafe_offset(i + b * width).unsafe_load[
+                        width=width
+                    ]()
+
+                var first = SIMD[dt, width](wanted[0])
+                var hit = InlineArray[SIMD[DType.bool, width], LINEAR_BLOCKS](
+                    fill=SIMD[DType.bool, width](fill=False)
+                )
+                comptime for b in range(LINEAR_BLOCKS):
+                    hit[b] = x[b].eq(first)
+
+                for j in range(1, k):
+                    var next = SIMD[dt, width](wanted[j])
+                    comptime for b in range(LINEAR_BLOCKS):
+                        hit[b] |= x[b].eq(next)
+
+                comptime for b in range(LINEAR_BLOCKS):
+                    dst.unsafe_offset(i + b * width).unsafe_store(hit[b])
+                i += step
+
+            # The rows a whole group does not reach, one block at a time.
             while i < stop:
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
                 var hit = x.eq(SIMD[dt, width](wanted[0]))

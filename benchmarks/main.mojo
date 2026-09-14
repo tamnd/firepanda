@@ -74,6 +74,7 @@ from firepanda.dtype.lists import NUMERIC
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
 from firepanda.exec import Join
+from firepanda.exec import Member
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
@@ -5029,6 +5030,98 @@ def _connect_once(var frame: DataFrame, count: Int) raises -> DataFrame:
     return pipeline^.run()
 
 
+def _key_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
+    """One integer column cut into chunks, holding a thousand distinct values.
+
+    A thousand rather than a handful because the set being looked up has to be
+    small against the range for the answer to be selective, which is what a set
+    in a query looks like. A member of the set is then one row in a thousand and
+    a set of eight keeps eight rows in a thousand, so the answer column is
+    mostly false whatever the width is and no width gets an easier question than
+    another.
+
+    Args:
+        rows: How many rows.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of one int64 column called `k`.
+
+    Raises:
+        If building or slicing the column raises.
+    """
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col[i] = Int64((i * 7919) % 1000)
+    var whole = AnyArray(col^)
+    var chunked = ChunkedArray(LogicalType.INT64)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + chunk_rows
+        if stop > rows:
+            stop = rows
+        chunked.append(whole.slice(begin, stop))
+        begin = stop
+    var columns = List[ChunkedArray]()
+    columns.append(chunked^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def _member_chain(var frame: DataFrame, count: Int) raises -> DataFrame:
+    """A set lookup as the equalities and disjunction it used to lower to.
+
+    An operator per member, each writing a boolean column, and one disjunction
+    reading all of them. This is what `x IN (...)` was before lowering read the
+    shape back.
+
+    Args:
+        frame: A frame whose first column is the one being looked up. Consumed.
+        count: How many members the set has.
+
+    Returns:
+        One column, the answer.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    var at = List[Int](capacity=count)
+    for k in range(count):
+        pipeline.add(
+            Node(Compute(0, Value(Int64(k * 37)), BinaryOp.EQ, String("e", k)))
+        )
+        at.append(wide + k)
+    pipeline.add(Node(Connective(at^, LogicOp.OR, "any")))
+    pipeline.add(Node(Project([wide + count])))
+    return pipeline^.run()
+
+
+def _member_once(var frame: DataFrame, count: Int) raises -> DataFrame:
+    """The same lookup as one operator against a set built once.
+
+    Args:
+        frame: A frame whose first column is the one being looked up. Consumed.
+        count: How many members the set has.
+
+    Returns:
+        One column, the answer.
+
+    Raises:
+        If building the set or running the pipeline raises.
+    """
+    var set = Array[DType.int64](count)
+    for k in range(count):
+        set.set_valid(k, Int64(k * 37))
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Member(0, AnyArray(set^), "any")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
 def bench_pipeline(mut harness: Harness) raises:
     """The engine driver on a line of elementwise operators.
 
@@ -5516,6 +5609,80 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/connective_once_12_nulls", "rows", rows, once_nulls)
+
+    # A set lookup against the equalities and disjunction it used to lower to.
+    # Same column, same members, same driver, and the only difference is
+    # whether the members went into one operator or into one operator each.
+    #
+    # Two, four, eight and thirty two members. Two because it is the smallest
+    # set anybody writes and is where the chain is least behind, thirty two
+    # because it is the last size the kernel answers by comparing against every
+    # member rather than by building a hash table, so the pair either side of
+    # it says what that decision is worth. All four read the same column.
+    var keys = _key_frame(rows, MORSEL_ROWS)
+
+    def copy_keys() raises {imm keys}:
+        keep(keys.rows)
+        var out = DataFrame(copy=keys)
+        keep(out.rows)
+
+    harness.record("exec/member_copy", "rows", rows, copy_keys)
+
+    def set_chain_two() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_chain(DataFrame(copy=keys), 2)
+        keep(out.rows)
+
+    harness.record("exec/member_chain_2", "rows", rows, set_chain_two)
+
+    def set_once_two() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_once(DataFrame(copy=keys), 2)
+        keep(out.rows)
+
+    harness.record("exec/member_set_2", "rows", rows, set_once_two)
+
+    def set_chain_four() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_chain(DataFrame(copy=keys), 4)
+        keep(out.rows)
+
+    harness.record("exec/member_chain_4", "rows", rows, set_chain_four)
+
+    def set_once_four() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_once(DataFrame(copy=keys), 4)
+        keep(out.rows)
+
+    harness.record("exec/member_set_4", "rows", rows, set_once_four)
+
+    def set_chain_eight() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_chain(DataFrame(copy=keys), 8)
+        keep(out.rows)
+
+    harness.record("exec/member_chain_8", "rows", rows, set_chain_eight)
+
+    def set_once_eight() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_once(DataFrame(copy=keys), 8)
+        keep(out.rows)
+
+    harness.record("exec/member_set_8", "rows", rows, set_once_eight)
+
+    def set_chain_many() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_chain(DataFrame(copy=keys), 32)
+        keep(out.rows)
+
+    harness.record("exec/member_chain_32", "rows", rows, set_chain_many)
+
+    def set_once_many() raises {imm keys}:
+        keep(keys.rows)
+        var out = _member_once(DataFrame(copy=keys), 32)
+        keep(out.rows)
+
+    harness.record("exec/member_set_32", "rows", rows, set_once_many)
 
 
 def bench_join(mut harness: Harness) raises:

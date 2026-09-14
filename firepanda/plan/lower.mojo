@@ -271,6 +271,7 @@ from firepanda.exec.node import (
     Limit,
     Locate,
     Match,
+    Member,
     Node,
     Part,
     Presence,
@@ -287,6 +288,7 @@ from firepanda.frame.align import value_at
 from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.cast import cast_any
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
@@ -679,6 +681,13 @@ def _lower_connective(
     expects to see, and once there is a cost model to reorder on, reordering
     something is better than having to recover what was written.
 
+    One disjunction is not lowered as a disjunction at all. `x IN (a, b, c)` is
+    written out as an equality per member joined by `or`, and that shape read
+    back is a set lookup, which is one pass instead of a node per member. It is
+    recognised here rather than rewritten in a pass because it is a choice of
+    operator and not a change of meaning: the plan still says what the query
+    said, and which way it runs is this file's business. See `_lower_member`.
+
     Args:
         exprs: The arena.
         root: The call, already bound.
@@ -720,6 +729,11 @@ def _lower_connective(
             )
         )
 
+    if connective == LogicOp.OR and _tests_one_column(exprs, args) >= 0:
+        var made = _lower_member(exprs, root, pipe, base, name, memo)
+        if made >= 0:
+            return made
+
     var at = List[Int](capacity=len(args))
     for i in range(len(args)):
         at.append(
@@ -728,6 +742,207 @@ def _lower_connective(
     pipe.add(Node(Connective(at^, connective, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
+
+
+comptime MEMBER_MIN = 2
+"""How many equalities a disjunction needs before it becomes a set lookup.
+
+Two, which is every disjunction of equalities there is. The chain pays a node
+per member plus the disjunction over all of them, so two members is three nodes
+and two intermediate boolean columns, against one node and no intermediates. The
+crossover is therefore below the smallest disjunction anybody can write, and the
+constant exists to say that rather than to leave room to tune it.
+
+The kernel makes the other decision, which is whether to compare against every
+member or to build a hash table, and it makes it from the width of the type as
+well as the size of the set. `LINEAR_MAX` and `TEXT_LINEAR_MAX` in
+`kernel/member.mojo` carry those measurements. Nothing here needs to know.
+"""
+
+
+def _tests_one_column(exprs: Expressions, args: List[Int]) -> Int:
+    """Whether every argument tests one shared operand against a constant.
+
+    The shape of `x IN (a, b, c)` once SQL has written it out as equalities and
+    the simplify pass has flattened the disjunction. The operand is shared by
+    arena index rather than compared structurally, which is exact and is what
+    the caller wants: SQL lowers the left of an `IN` once and hands the same
+    index to every equality, and common subexpression elimination unifies the
+    ones that were written twice.
+
+    Args:
+        exprs: The arena.
+        args: The disjunction's arguments.
+
+    Returns:
+        The arena index of the shared operand, or minus one if the arguments
+        are not all equalities against a constant of one type.
+    """
+    if len(args) < MEMBER_MIN:
+        return -1
+    var operand = -1
+    var type = LogicalType.NULL
+    for i in range(len(args)):
+        ref node = exprs.nodes[args[i]]
+        if node.kind != ExprKind.BINARY:
+            return -1
+        if BinaryOp(UInt8(node.op)) != BinaryOp.EQ:
+            return -1
+        var left = node.children[0]
+        var right = node.children[1]
+        if exprs.nodes[right].kind != ExprKind.LITERAL:
+            return -1
+        ref value = exprs.nodes[right].value
+        # A null member is not one of the set. `x = NULL` is null rather than
+        # false, so a disjunction holding one answers null where the set lookup
+        # would answer false, and the two are not the same predicate.
+        if value.is_null():
+            return -1
+        if i == 0:
+            operand = left
+            type = value.type
+        elif left != operand or value.type != type:
+            return -1
+    # Both sides constant is an expression the simplify pass folds, and an
+    # operand that is itself a literal would be one.
+    if exprs.nodes[operand].kind == ExprKind.LITERAL:
+        return -1
+    return operand
+
+
+def _lower_member(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends a set lookup for a disjunction of equalities, if one will do.
+
+    The set is built here, once, out of the constants the query wrote, and what
+    goes in the pipeline is a node that has it. The alternative the caller falls
+    back to is an equality per member and a disjunction over all of them, which
+    is a boolean column per member that nothing but the disjunction reads.
+
+    The set has to be the type of the column it is looked up in, because the
+    kernel refuses a set of another type rather than promoting, and that is the
+    one thing here that can fail. The constants are converted and then converted
+    back, and the lookup is only built if every one of them came back the number
+    it went in as. An integer column against constants that are integers is the
+    case that matters and it always round trips; a float constant against an
+    integer column does not, and `x = 3.7` is false for every integer row while
+    `x IN (4)` is not, so that one takes the chain.
+
+    Args:
+        exprs: The arena.
+        root: The disjunction, already bound, already checked by
+            `_tests_one_column`.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the lookup lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer, or minus one if the set
+        cannot be held at the column's type, in which case nothing has been
+        added to the pipeline except whatever lowering the operand added, which
+        the caller wants anyway.
+
+    Raises:
+        Error: If the operand does not lower.
+    """
+    var args = exprs.nodes[root].children.copy()
+    var operand = exprs.nodes[args[0]].children[0]
+    var at = _lower_expr(exprs, operand, pipe, base, name, memo, reuse=True)
+
+    var values = List[Value](capacity=len(args))
+    for i in range(len(args)):
+        var right = exprs.nodes[args[i]].children[1]
+        values.append(Value(copy=exprs.nodes[right].value))
+
+    var made: AnyArray
+    try:
+        made = _fitted_set(values, pipe.schema[at].dtype)
+    except:
+        return -1
+
+    pipe.add(Node(Member(at, made^, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _fitted_set(values: List[Value], wanted: LogicalType) raises -> AnyArray:
+    """Builds the set at the type of the column it will be looked up in.
+
+    Args:
+        values: The constants, all of one type and none of them null.
+        wanted: The type of the column.
+
+    Returns:
+        A column of `wanted`, one row per constant.
+
+    Raises:
+        Error: If either type has no physical layout, if the conversion is one
+            the cast kernel refuses, or if a constant does not come back the
+            same number it went in as.
+    """
+    var written = values[0].type
+    var made = _set_column(values, written)
+    if made.type.physical == wanted.physical:
+        return made^
+    var moved = cast_any(made, wanted, strict=True)
+    var back = cast_any(moved, written, strict=True)
+    for i in range(len(values)):
+        if value_at(back, i) != values[i]:
+            raise Error(
+                String(
+                    "lower: the constant ",
+                    i,
+                    " of a set does not survive being held at ",
+                    wanted,
+                )
+            )
+    return moved^
+
+
+def _set_column(values: List[Value], type: LogicalType) raises -> AnyArray:
+    """Builds a column holding the constants of a set, in the order written.
+
+    The same job `_one_row` does in the simplify pass, at more than one row.
+    Duplicates are left in rather than taken out, because the kernel ignores
+    them and a query that wrote one is not saying anything by it.
+
+    Args:
+        values: The constants. None of them is null, which the caller has
+            already checked.
+        type: The type they share.
+
+    Returns:
+        A column of that type, one row per constant.
+
+    Raises:
+        Error: If the type has no physical layout.
+    """
+    if type.is_variable_width():
+        var builder = StringBuilder(capacity=len(values))
+        for i in range(len(values)):
+            builder.append(values[i].as_string().as_bytes())
+        return AnyArray(builder^.finish())
+
+    comptime for target in ALL:
+        if type.physical == target:
+            var out = Array[target](len(values))
+            for i in range(len(values)):
+                out.set_valid(i, values[i].as_scalar[target]())
+            return AnyArray(out^).retyped(type)
+    raise Error(
+        String(
+            "lower: there is no way to hold a set of type ",
+            type,
+            " in a column, so an IN over one is a chain of equalities",
+        )
+    )
 
 
 def _lower_like(

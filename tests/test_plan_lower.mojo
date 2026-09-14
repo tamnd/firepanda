@@ -671,6 +671,140 @@ def test_a_chain_of_three_ors_is_one_operator_over_three_columns() raises:
     same(read_back(out, "qty"), [3, 40, 25, 30], "the rows any arm names")
 
 
+def test_a_disjunction_of_equalities_is_one_set_lookup() raises:
+    # `qty IN (3, 25, 40)` as SQL writes it out, which is an equality per
+    # member joined by `or`. Read back it is a set, and a set is one pass
+    # rather than a comparison per member and a disjunction over all of them.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var c = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(40)))
+    )
+    var any = plan.exprs.call(String("or"), [a, b, c], rowwise=True)
+    var root = plan.filter(scan, any)
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # The lookup and the filter. As a chain it is four, three of which write a
+    # boolean column that only the fourth ever reads.
+    assert_equal(len(pipe.operators), 2, "operators")
+
+    var out = pipe^.run()
+    same(read_back(out, "qty"), [3, 40, 25], "the rows the set names")
+
+
+def test_a_set_of_two_is_a_lookup_as_well() raises:
+    # Two is the smallest disjunction anybody can write and it is still three
+    # nodes against one, so there is no width below which the chain wins and no
+    # threshold here to find.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(20)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(1)))
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("or"), [a, b], rowwise=True)
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 2, "operators")
+    var out = pipe^.run()
+    same(read_back(out, "qty"), [20, 1], "the rows the pair names")
+
+
+def test_a_set_with_a_null_in_it_stays_a_chain_of_equalities() raises:
+    # `x = NULL` is null and not false, so a disjunction holding one answers
+    # null for every row the other arms miss. A set lookup answers false there,
+    # because a null is not a member of anything, and the two are not the same
+    # predicate. Both come out to the same rows under a filter, and that is the
+    # coincidence this guards against relying on.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ,
+        qty,
+        plan.exprs.literal(Value(null=LogicalType.INT64)),
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("or"), [a, b], rowwise=True)
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 4, "operators")
+    var out = pipe^.run()
+    same(read_back(out, "qty"), [3], "the one row the present arm names")
+
+
+def test_a_disjunction_over_two_columns_stays_a_chain() raises:
+    # A set is a set of values one column is looked up in. Two columns is two
+    # lookups and a disjunction over them, which is what it already was.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ, price, plan.exprs.literal(Value(Int64(4)))
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("or"), [a, b], rowwise=True)
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 4, "operators")
+    var out = pipe^.run()
+    same(read_back(out, "qty"), [3, 30], "the rows either column names")
+
+
+def test_a_constant_the_column_cannot_hold_stays_a_chain() raises:
+    # `qty = 3.5` is false for every row of an integer column. Held in a set of
+    # integers it would become `qty = 3`, which is true for a row, so the set is
+    # built only when every constant comes back the number it went in as.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Float64(3.5)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Float64(5.5)))
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("or"), [a, b], rowwise=True)
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 4, "operators")
+    var out = pipe^.run()
+    assert_equal(out.rows, 0, "no row equals either")
+
+
 def test_a_conjunction_below_a_disjunction_reaches_the_operator() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
