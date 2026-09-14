@@ -1550,6 +1550,12 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     whatever a later conjunct still reads, and everything else is dropped in the
     same pass that does the filtering rather than by a projection afterwards.
 
+    A conjunct that compares something against a constant is not lowered into a
+    compute and a filter at all. The filter carries the comparison and does it
+    itself, so the mask column is never written and, on every conjunct after the
+    first, the operand is never gathered either. `_constant_side` is where that
+    is decided and #521 is why.
+
     Args:
         plan: The plan.
         at: The filter node.
@@ -1562,11 +1568,47 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var memo = Memo()
     var parts = _conjuncts(plan.exprs, plan.nodes[at].exprs[0])
     for i in range(len(parts)):
-        var mask = _lower_expr(plan.exprs, parts[i], pipe, base, "mask", memo)
+        # A conjunct that compares something against a written out constant is
+        # the commonest predicate there is, and the filter does that comparison
+        # itself. What the compute underneath would have written is a mask
+        # column, and the filter above it is the only thing that ever reads one.
+        # The saving is larger than that column on any conjunct after the first,
+        # because a compute has to produce its answer at the chunk's rows and so
+        # gathers its operand out of a chunk an earlier conjunct has already
+        # narrowed, where the filter reads the rows where they lie.
+        var side = _constant_side(plan.exprs, parts[i])
+        var reads: Int
+        if side == 0:
+            reads = _lower_expr(plan.exprs, parts[i], pipe, base, "mask", memo)
+        else:
+            # Only the side that is not the constant is lowered, and the
+            # comparison itself is not remembered, so a later conjunct holding
+            # the same comparison computes it again rather than reading a column
+            # that was never written. The operand underneath it is remembered as
+            # it always was, which is the part worth sharing.
+            ref pair = plan.exprs.nodes[parts[i]].children
+            var other = pair[1] if side == 2 else pair[0]
+            reads = _lower_expr(
+                plan.exprs, other, pipe, base, "mask", memo, reuse=True
+            )
         if len(pipe.schema) == base:
             # The predicate was a column of the input, so there is nothing
             # this conjunct left behind and nothing to drop.
-            pipe.add(Node(Filter(mask)))
+            if side == 0:
+                pipe.add(Node(Filter(reads)))
+            else:
+                pipe.add(
+                    Node(
+                        _comparing_filter(
+                            plan.exprs,
+                            parts[i],
+                            reads,
+                            side,
+                            List[Int](),
+                            False,
+                        )
+                    )
+                )
             continue
         var keep = List[Int](capacity=base)
         for j in range(base):
@@ -1592,9 +1634,86 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 now = len(keep)
                 keep.append(memo.at[j])
             moved.remember(memo.of[j], now)
-        pipe.add(Node(Filter(mask, keep^)))
+        if side == 0:
+            pipe.add(Node(Filter(reads, keep^)))
+        else:
+            pipe.add(
+                Node(
+                    _comparing_filter(
+                        plan.exprs, parts[i], reads, side, keep^, True
+                    )
+                )
+            )
         memo = moved^
     _trim(pipe, base)
+
+
+def _constant_side(exprs: Expressions, root: Int) -> Int:
+    """Says which side of a conjunct is a written out constant, if either is.
+
+    The question a filter that does its own comparison needs answered, and it is
+    asked of the conjunct before anything is lowered, so that the comparison is
+    never written into a column that the filter above it would be the only
+    reader of.
+
+    Args:
+        exprs: The arena.
+        root: The conjunct.
+
+    Returns:
+        1 when the constant is on the right, 2 when it is on the left, and 0
+        when the conjunct is not a comparison against one. Two constants answer
+        0 as well, since the simplify pass folds those and one that survived is
+        an error the ordinary path has the message for.
+    """
+    ref node = exprs.nodes[root]
+    if node.kind != ExprKind.BINARY:
+        return 0
+    if not BinaryOp(UInt8(node.op)).is_comparison():
+        return 0
+    var left = exprs.nodes[node.children[0]].kind == ExprKind.LITERAL
+    var right = exprs.nodes[node.children[1]].kind == ExprKind.LITERAL
+    if left and right:
+        return 0
+    if right:
+        return 1
+    if left:
+        return 2
+    return 0
+
+
+def _comparing_filter(
+    exprs: Expressions,
+    root: Int,
+    reads: Int,
+    side: Int,
+    var keep: List[Int],
+    narrows: Bool,
+) raises -> Filter:
+    """Builds the filter that does a conjunct's comparison itself.
+
+    Args:
+        exprs: The arena.
+        root: The conjunct, a comparison with a constant on one side.
+        reads: The position of the column the other side lowered to.
+        side: Which side the constant is on, from `_constant_side`.
+        keep: The positions to write, in output order. Consumed, and read only
+            when `narrows`.
+        narrows: Whether the filter writes `keep` rather than the whole chunk.
+
+    Returns:
+        The filter.
+
+    Raises:
+        Error: Only what reading the constant out of the arena raises.
+    """
+    ref node = exprs.nodes[root]
+    var op = BinaryOp(UInt8(node.op))
+    var at = node.children[0] if side == 2 else node.children[1]
+    var test = Value(copy=exprs.nodes[at].value)
+    if narrows:
+        return Filter(reads, test^, op, keep^, value_on_left=side == 2)
+    return Filter(reads, test^, op, value_on_left=side == 2)
 
 
 def _lower_project(plan: Plan, at: Int, mut pipe: Pipeline) raises:
