@@ -6061,31 +6061,32 @@ def node_computes_per_row(node: Node) -> Bool:
     `Presence` and `Fill` are on the memory bound side with those three. Each
     reads a validity bit per row and moves a value, and neither does any
     arithmetic in between, so there is nothing for a second core to speed up.
-    `Cut` says no for a different reason: it builds a text column, and the
-    payload offset every row writes at is a running total of the ones before it,
-    which is the serial thing `StringBuilder` exists to do. `Trim` says no for
-    that same reason and would whatever its kernel cost, since it builds a text
-    column too.
 
-    `Length` says no for a third reason. Counting characters is a compare and an
-    add per byte of payload, so it is memory bound rather than waiting on
-    arithmetic, and its kernel already spreads itself over the cores, so handing
-    the chunks out as well would be paying for two sets of tasks to do one pass.
+    The five text operators all used to be on that side and none of them belongs
+    there. `Length` and `Locate` said no on the grounds that their kernels call
+    `parallel_morsels` themselves, so handing the chunks out as well would be
+    paying for two sets of tasks to do one pass. `Cut` and `Trim` said no because
+    they build a text column and the payload offset every row writes at is a
+    running total of the ones before it, which is the serial thing
+    `StringBuilder` exists to do. `Member` said no for `Locate`'s reason, and
+    that is how the mistake was found: the set lookup it was added for came out
+    four times slower than the chain of equalities it replaced.
 
-    `Locate` says no for `Length`'s reason. Searching is a pass over the payload
-    and its kernel spreads itself over the cores already, so a second set of
-    tasks on top of that would be paying twice to do one pass.
+    Neither argument survives the arithmetic. A morsel is `MORSEL_ROWS` rows and
+    a chunk is the same number of rows, so a kernel handed one chunk is handed
+    exactly one morsel and runs on one core however well it parallelises. A
+    kernel only spreads itself over the cores when it is called on a whole
+    column, which inside a pipeline it never is. And a running total inside one
+    chunk says nothing about two chunks, because each one builds its own column
+    and neither waits on the other. So the question this answers was never
+    whether to parallelise twice, it was whether to parallelise at all.
 
-    `Member` says yes, and the first version of it said no for `Locate`'s reason
-    and was four times slower than the chain of equalities it replaced. The
-    reason that argument does not hold is worth writing down, because it is not
-    about sets. A morsel is `MORSEL_ROWS` rows and a chunk is the same number of
-    rows, so a kernel handed one chunk is handed exactly one morsel and runs on
-    one core however well it parallelises. A kernel only spreads itself over the
-    cores when it is called on a whole column, which inside a pipeline it never
-    is. So the choice here is between this node getting the cores and nothing
-    getting them, and a set lookup is a compare per member per row, which is
-    arithmetic and is the side `Compute` is on.
+    Measured on the i9-13900K over four million rows of forty byte text, with
+    nothing after the operator that computes per row, and with the two settings
+    alternated twice. `Length` ran 108 milliseconds on the calling thread and 7.9
+    on the cores, `Locate` 35 against 4.7, `Cut` 200 against 15, and `Trim` 631
+    against 52. Between six and fourteen times, on operators that were being told
+    they had nothing to gain.
 
     `Part` and `Truncate` say yes. Turning a day number into a year, or a year
     back into a day number, is a run of multiplies and shifts per row and not a
@@ -6097,7 +6098,8 @@ def node_computes_per_row(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Member`,
-        `Part`, `Truncate`, `Choose` and `Join`.
+        `Length`, `Locate`, `Cut`, `Trim`, `Part`, `Truncate`, `Choose` and
+        `Join`.
     """
     return (
         node.isa[Filter]()
@@ -6106,6 +6108,10 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Member]()
+        or node.isa[Length]()
+        or node.isa[Locate]()
+        or node.isa[Cut]()
+        or node.isa[Trim]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Choose]()

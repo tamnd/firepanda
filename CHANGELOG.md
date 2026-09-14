@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the text operators get the cores
+
+A pipeline hands its leading operators out to the cores only if one of them works out a value for every row, and `length`, `position`, `substring` and `trim` all said they did not. Two reasons were given. `length` and `position` said their kernels spread themselves over the cores already, so handing the chunks out as well would be paying twice to do one pass, and `substring` and `trim` said they build a text column whose payload offsets are a running total, which is a serial thing.
+
+Neither holds. A morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. A running total inside one chunk says nothing about two chunks either, because each one builds its own column and neither waits on the other. The question was never whether to parallelise twice, it was whether to parallelise at all.
+
+Measured on the i9-13900K over four million rows of forty byte text, with the two settings alternated twice: `length` ran 108 milliseconds on the calling thread and 7.9 on the cores, `position` 35 against 4.7, `substring` 200 against 15, and `trim` 631 against 52. That is between six and fourteen times on four operators, and it is the kind of query that reads a text column and does nothing else to it that gains the most.
+
 ### Changed: `IN` against a list of constants runs as one set lookup
 
 `x IN (a, b, c)` was written out as an equality per member joined by `or`, which is a node per member plus a disjunction over all of them, and every one of those nodes writes a boolean column that only the disjunction ever reads. Lowering now reads that shape back and builds a single set lookup instead. Measured on the i9-13900K over four million rows, a set of two ran 408 microseconds as a chain and 215 as a lookup, a set of four 630 against 248, a set of eight 1.149 milliseconds against 340, and a set of thirty two 5.935 milliseconds against 986 microseconds. That is 1.9x at the smallest set anybody writes and 6.0x at the largest the kernel answers by comparing.

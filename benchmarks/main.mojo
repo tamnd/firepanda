@@ -74,7 +74,7 @@ from firepanda.dtype.lists import NUMERIC
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
 from firepanda.exec import Join
-from firepanda.exec import Member
+from firepanda.exec import Cut, Length, Locate, Member, Trim
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
@@ -5138,6 +5138,134 @@ def _member_once(var frame: DataFrame, count: Int) raises -> DataFrame:
     return pipeline^.run()
 
 
+def _phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
+    """One text column cut into chunks, holding phrases of about forty bytes.
+
+    Long enough that counting the characters in one and searching it are both
+    real passes over a payload rather than a load and a compare, which is the
+    thing `Length` and `Locate` were assumed to be too memory bound to spread
+    over the cores. Every fifth row holds the needle `Locate` looks for, so the
+    search neither stops on the first byte of most rows nor runs to the end of
+    all of them.
+
+    Args:
+        rows: How many rows.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of one text column called `s`.
+
+    Raises:
+        If building or slicing the column raises.
+    """
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        if i % 5 == 0:
+            builder.append(
+                String("a phrase with the needle in it, row ", i).as_bytes()
+            )
+        else:
+            builder.append(
+                String("a phrase of about the same length, ", i).as_bytes()
+            )
+    var whole = AnyArray(builder^.finish())
+    var chunked = ChunkedArray(LogicalType.STRING)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + chunk_rows
+        if stop > rows:
+            stop = rows
+        chunked.append(whole.slice(begin, stop))
+        begin = stop
+    var columns = List[ChunkedArray]()
+    columns.append(chunked^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def _length_alone(var frame: DataFrame) raises -> DataFrame:
+    """A length with nothing after it that computes per row.
+
+    That is the shape the question is about. `node_computes_per_row` decides
+    whether the driver spreads the leading operators over the cores at all, and
+    it only asks the question once per prefix, so a prefix holding a length and
+    nothing else runs on the calling thread. The kernel underneath calls
+    `parallel_morsels`, but a chunk is one morsel, so that buys nothing.
+
+    Args:
+        frame: A frame whose first column is text. Consumed.
+
+    Returns:
+        One column, the lengths.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Length(0, "n")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
+def _cut_alone(var frame: DataFrame) raises -> DataFrame:
+    """A substring with nothing after it that computes per row.
+
+    Args:
+        frame: A frame whose first column is text. Consumed.
+
+    Returns:
+        One column, the pieces.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Cut(0, 3, Optional[Int](12), "piece")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
+def _trim_alone(var frame: DataFrame) raises -> DataFrame:
+    """A trim with nothing after it that computes per row.
+
+    Args:
+        frame: A frame whose first column is text. Consumed.
+
+    Returns:
+        One column, the trimmed text.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Trim(0, " ", False, True, True, "tidy")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
+def _locate_alone(var frame: DataFrame) raises -> DataFrame:
+    """A search with nothing after it that computes per row.
+
+    Args:
+        frame: A frame whose first column is text. Consumed.
+
+    Returns:
+        One column, the positions.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Locate(0, "needle", "at")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
 def bench_pipeline(mut harness: Harness) raises:
     """The engine driver on a line of elementwise operators.
 
@@ -5762,6 +5890,38 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/member_set_32", "rows", rows, set_once_many)
+
+    # A length and a search, each with nothing after it that computes per row.
+    # Both nodes say they do not need the cores because their kernels call
+    # `parallel_morsels` themselves, and a chunk is one morsel, so what they
+    # actually get is one core. These two rows are what that costs.
+    var phrases = _phrase_frame(rows, MORSEL_ROWS)
+
+    def text_length() raises {imm phrases}:
+        var out = _length_alone(DataFrame(copy=phrases))
+        keep(out.rows)
+
+    harness.record("exec/text_length", "rows", rows, text_length)
+
+    def text_locate() raises {imm phrases}:
+        var out = _locate_alone(DataFrame(copy=phrases))
+        keep(out.rows)
+
+    harness.record("exec/text_locate", "rows", rows, text_locate)
+
+    def text_cut() raises {imm phrases}:
+        keep(phrases.rows)
+        var out = _cut_alone(DataFrame(copy=phrases))
+        keep(out.rows)
+
+    harness.record("exec/text_cut", "rows", rows, text_cut)
+
+    def text_trim() raises {imm phrases}:
+        keep(phrases.rows)
+        var out = _trim_alone(DataFrame(copy=phrases))
+        keep(out.rows)
+
+    harness.record("exec/text_trim", "rows", rows, text_trim)
 
 
 def bench_join(mut harness: Harness) raises:
