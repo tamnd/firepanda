@@ -1121,6 +1121,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="normalize",
+            kind="method",
+            signature="form: Any",
+            body="self._normalized(form)",
+            doc="Every row in one of the four Unicode normalization forms.",
+            returns="Series",
+        ),
+        Member(
             name="isspace",
             kind="method",
             signature="",

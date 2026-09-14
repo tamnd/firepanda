@@ -9058,6 +9058,28 @@ class StringMixin:
 
         return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
 
+    def _normalized(self, form: Any) -> Series:
+        """One of the four Unicode normalization forms, applied to every row.
+
+        The form is checked here rather than being handed straight down because
+        pandas checks it in `unicodedata.normalize`, which refuses a name it
+        does not know and refuses anything that is not a string, and the two
+        refusals are different kinds. Both are reproduced. The Mojo side reads
+        the four names again for its own callers, so a wrong one never reaches
+        the kernel by either route.
+
+        pandas answers this name out of `unicodedata` on every backend it has,
+        rather than out of Arrow, which has no normalization kernel at all.
+        """
+        if not isinstance(form, str):
+            raise DTypeError(f"firepanda:dtype: form must be str, not {type(form).__name__}")
+        if form not in ("NFC", "NFD", "NFKC", "NFKD"):
+            raise InvalidArgumentError(
+                "firepanda:value: invalid normalization form, which is one of"
+                " NFC, NFD, NFKC and NFKD and is spelled in capitals"
+            )
+        return self._text("normalize", form)
+
     def _dummies(self, sep: Any, dtype: Any) -> DataFrame:
         """One column per distinct token, flagging the rows that hold it.
 

@@ -107,6 +107,7 @@ def _text_name(name: String) raises -> String:
         or name == "title"
         or name == "swapcase"
         or name == "casefold"
+        or name == "normalize"
         or name == "slice"
         or name == "slice_replace"
         or name == "get"
@@ -275,9 +276,9 @@ def text(
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The prefix, suffix or replacement, the characters to strip, or the
-            character to pad with, and the empty string for the ones that take
-            none.
+        arg: The prefix, suffix or replacement, the characters to strip, the
+            character to pad with, or the normalization form, and the empty
+            string for the ones that take none.
         other: The second string, for `replace` alone, which is the only name in
             the accessor that takes two. Every other name here leaves it empty.
         start: The first position, where the method has one, the index for
@@ -307,6 +308,21 @@ def text(
         return column.chars_swapcase()
     if wanted == "casefold":
         return column.chars_casefold()
+    if wanted == "normalize":
+        # The form rides in the `arg` slot, because it is a string and because a
+        # door picked by the shape of the answer has no other place to put one.
+        # It is read here rather than in Python for the same reason the slice
+        # step is refused twice: this door is reachable from the Mojo API, so
+        # the four names have to be known on this side as well.
+        if arg == "NFC":
+            return column.chars_normalize(False, True)
+        if arg == "NFD":
+            return column.chars_normalize(False, False)
+        if arg == "NFKC":
+            return column.chars_normalize(True, True)
+        if arg == "NFKD":
+            return column.chars_normalize(True, False)
+        raise tagged(VALUE, String("invalid normalization form"))
     if wanted == "slice":
         # The kernel refuses this as well, since it has to and since it is
         # reachable from the Mojo API too. It is refused again here so that the

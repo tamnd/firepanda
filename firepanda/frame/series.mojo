@@ -87,6 +87,7 @@ from firepanda.kernel.dictionary import (
     set_ordered,
 )
 from firepanda.kernel.member import is_in_any
+from firepanda.kernel.normalize import text_normalize
 from firepanda.kernel.nulls import (
     coalesce_any,
     fill_backward_any,
@@ -1367,6 +1368,34 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_casefold(self.values.strings())),
+        )
+
+    def chars_normalize(self, full: Bool, compose: Bool) raises -> Self:
+        """Returns every row in one of the four Unicode normalization forms.
+
+        The two arguments are the two choices the four forms are made of rather
+        than a form name. `full` picks compatibility equivalence over canonical,
+        which is the K, and `compose` picks putting characters back together
+        over leaving them apart, which is the C. So NFD is False and False and
+        NFKC is True and True.
+
+        This is the one name in the accessor that is a question about sequences
+        rather than about characters, and the one whose answers come from
+        CPython rather than from Arrow, because that is where pandas gets them.
+
+        Args:
+            full: Whether to use the compatibility decompositions as well.
+            compose: Whether to finish by composing.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_normalize(self.values.strings(), full, compose)),
         )
 
     def chars_is_space(self) raises -> Self:
