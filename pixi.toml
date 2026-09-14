@@ -127,7 +127,11 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the steps below from compiling everything
 # once per step. Each of them depends on this task, and without a cache key pixi
 # would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . -I tests/differential tests/differential/regex.mojo -o build/differential/regex && mojo build -I . -I tests/differential tests/differential/regex_match.mojo -o build/differential/regex-match && mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch", default-environment = "differential", inputs = [
+#
+# The builds themselves are in a script rather than in a chain of && here,
+# because there are eight of them now and one after another took longer than the
+# job is allowed. The script says what it does with them.
+differential-build = { cmd = "bash tools/build_differential.sh", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
