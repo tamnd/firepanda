@@ -86,7 +86,15 @@ Swapping the two alternatives fixes it and nothing else changes, because a bare 
 
 So the question is not what to do here, it is when the fix lands upstream. Report it, and drop the entry from `known` at the grammar bump that carries the fix.
 
-## 13. Questions that are settled and should stay settled
+## 13. A `main` that calls into the SQL front end hangs the compiler. Report upstream
+
+Found building the value differential in document 11 section 6. A program whose `main` calls, directly or through any chain of direct calls, something that reaches `firepanda.sql.run` does not compile. The compiler parks a few seconds after the import phase: the process goes to sleeping, its CPU time stops moving to the hundredth of a second, its resident size falls back to where it started, every thread sits in a semaphore wait, and it never comes back. It is not slow, it is stopped.
+
+It reproduces at `-O0`, at `-j 1`, under both `mojo build` and `mojo run`, in both the default and the differential environment, at two different paths, and with the Python interop taken out. It is not the disk, which was full at one point and was emptied with no effect, and it is not that a new file is cold, because a verbatim copy of an existing test compiles fine. Reduced to thirty lines the difference is two: a `main` that calls the worker parks, and the same file whose `main` is `TestSuite.discover_tests[__functions_in_module()]().run()` compiles in seconds. What changes is that the suite reaches the worker through a table of function pointers rather than a call, so whatever the compiler is doing along that call chain is not attempted.
+
+The workaround is in `tests/differential/answers.mojo` with the reason next to it, and it costs nothing, because every other program in the repository is already written that way. So this is not blocking anything. What it needs is a reduction small enough to file, which the thirty line version is, and a report. Until then, a differential program that calls `run` is written with a test function and the suite, not with a `main` that calls it.
+
+## 14. Questions that are settled and should stay settled
 
 Recorded so they are not reopened by each new contributor.
 

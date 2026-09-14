@@ -43,7 +43,7 @@ The first reading, at the commit the matcher landed on, was 2 and 1,130 out of 7
 
 **The execution harness.** Runs `.test` files against firepanda, compares values, classifies failures. It drives the CLI from document 10, so it is testing the whole stack the way a user gets it.
 
-**The semantics harness.** One case per rule in document 06, comparing value and `typeof()` against DuckDB, plus the expression fuzzer and the overload resolution fuzzer from document 07. This one catches what the corpus does not, because the corpus was written to test DuckDB's features rather than to pin down its type lattice. The half of it that asks about types rather than values is `tests/differential/semantics.mojo` and `pixi run differential-semantics`, and section 5 is what it does and what it found.
+**The semantics harness.** One case per rule in document 06, comparing value and `typeof()` against DuckDB, plus the expression fuzzer and the overload resolution fuzzer from document 07. This one catches what the corpus does not, because the corpus was written to test DuckDB's features rather than to pin down its type lattice. The half of it that asks about types is `tests/differential/semantics.mojo` and `pixi run differential-semantics`, and section 5 is what it does and what it found. The half that asks about values is `tests/differential/answers.mojo` and `pixi run differential-answers`, and section 6 is the same for that one.
 
 ## 4. Fuzzing
 
@@ -75,7 +75,23 @@ The oracle is `tools/semantics.py`, which builds a table with one column per typ
 
 It earned its keep on the first run, at 348 disagreements over five separate defects, none of which the unit tests or the generators had caught. DuckDB narrows an addition or a multiplication back to 18 digits when both sides already fit in 18, which is where `DECIMAL(9,4) * DECIMAL(9,4)` stops being `DECIMAL(18,8)` and stays there, except that a multiplication whose scale reaches 18 is left alone. The lattice gives up scale rather than digits when two decimals do not fit in 38, and does not do that when one side is an integer. `greatest` and `least` are declared over `ANY` and then insist their arguments share a common type, which no signature can say. And two of them were in the cast cost generator rather than in the binder: `EXPLAIN` wraps its output to the box width and had been splitting long casts across lines where the generator read them, which left the measured cost of reaching a `DECIMAL` wrong relative to reaching a `DOUBLE`. The harness now runs at zero disagreements over 15,001 expressions, with 359 cases in a `known` list, each carrying the reason it is there.
 
-## 6. The plan equality test
+## 6. The value differential harness
+
+The question after the type question, and the one nothing above it can reach. `strlen` shipped counting characters where DuckDB counts bytes, and everything agreed with it: the type was `BIGINT` on both sides, the plan printed the way it was meant to, the parse harnesses never look at a result, the type harness saw two `BIGINT`s and moved on, and the unit tests asserted the wrong number because they had been written from the same misreading. A kernel that returns the right type and the wrong value is invisible to every other harness here, and this is the one that sees it. It is `tests/differential/answers.mojo` and `pixi run differential-answers`.
+
+The probe is one table of eight rows, described once as SQL literal text and built twice from that description, so the two sides cannot drift the way two fixtures maintained separately do. firepanda parses the literals into a frame and DuckDB inserts them. The rows are chosen so that every reading a kernel can get wrong is in the table: a row of ASCII, a row that is not ASCII, a row whose character count and byte count differ, an empty row, a row with spaces on its ends, a null in every column, a negative number, a zero, a date before the epoch and a leap day. A row number goes in front of the columns so that both sides order by the same thing and the answers line up.
+
+Every answer is compared as text, because text is the one rendering both sides can be asked for without either of them having an opinion about formatting, and a whole number and a boolean render identically either way. Floating point does not, so nothing in the list answers one, and the decimals and the timestamps are the obvious next thing to add rather than something the harness pretends to cover. A null is a separate character rather than an empty field, because an empty string is a value an expression can really answer and the two have to stay apart.
+
+The expressions are written by hand rather than generated. What is worth asking is the surface firepanda actually runs, and a generator over the tier 1 catalog would spend the whole run on names nothing is wired to. The order is the order the functions were wired in, so a diff against a later version of the list reads as the list of what was added.
+
+Three things can happen to an expression. Both sides answer and the answers agree, which is the point. Both sides refuse, which is agreement of a weaker kind and is counted rather than failed. Or they disagree, and there are two ways to do that. The same rows with different values in them is the defect the harness exists to catch and its ceiling is zero. One side answering where the other refuses is the gap list in executable form, and its ceiling is zero too, because the list was written to the surface firepanda covers and a new entry that refuses is either a gap worth recording on the stage issue or an expression that does not belong in the list yet.
+
+A ceiling of zero only means anything if the disagreements that are allowed to stand carry the reason they are, which is what the recorded list in the harness is for. An expression on it is either a decision, meaning firepanda answers differently on purpose and the reason says why, or a gap with an issue number against it. Either way the expression stays in the list and its two answers are printed every run with the reason underneath, rather than being deleted from the list, because an expression quietly dropped is a comparison nobody makes again. The same shape as the type harness's list, for the same reason.
+
+The oracle is `tools/answers.py`, built the same way `tools/semantics.py` is and running DuckDB in a child process for the same reason.
+
+## 7. The plan equality test
 
 The single most valuable test in this specification, and it is not about compatibility at all.
 
@@ -83,13 +99,13 @@ For each of the twenty two TPC-H queries, the physical plan produced by `fp.sql(
 
 It costs almost nothing, because the plans already print and round trip per document 08, and it is what enforces document 02's rule that SQL and dataframes are one engine. Without it, the SQL path grows its own lowering for one operator, then another, and a year later there are two engines with different bugs and different performance, which is precisely the outcome that issue #13's line about parsing into the same logical plan so the optimizer is shared exists to prevent.
 
-## 7. The optimizer equivalence test
+## 8. The optimizer equivalence test
 
 From document 08, restated because it belongs to conformance as much as to the optimizer: every query in the corpus runs twice, once with all optimizer passes disabled and once with all enabled, and the results must be identical including order.
 
 This is the test that catches a filter pushed through a node that does not preserve its meaning, a join reordered across an outer join that is not reorderable, or a decorrelation that changed null semantics. Those bugs produce plausible wrong answers on real queries and are nearly impossible to find any other way.
 
-## 8. What runs when
+## 9. What runs when
 
 **Every commit:** the parse differential over the full corpus, the semantics cases, unit tests, and the pathological input ceilings. Minutes.
 
@@ -99,7 +115,7 @@ This is the test that catches a filter pushed through a node that does not prese
 
 **Weekly:** the grammar bump check from document 03 against the latest upstream tag.
 
-## 9. What the corpus does not cover
+## 10. What the corpus does not cover
 
 Stated so that the published number is read correctly.
 

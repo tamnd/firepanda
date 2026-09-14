@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a value differential, which is what would have caught the STRLEN bug
+
+`pixi run differential-answers` runs the same expressions over the same eight rows through firepanda and through DuckDB and compares the values that come back.
+
+Nothing here did that before. Two harnesses ask whether a statement parses and a third asks what type an expression comes out as, and all three agreed about `strlen` while it returned the wrong number, because the type was `BIGINT` on both sides and no harness ever looked at a result. A kernel that answers the right type and the wrong value was invisible to the whole suite.
+
+The probe table is described once as SQL literal text and built twice from that description, so the two sides cannot drift the way two fixtures maintained separately do. The rows are chosen to sit on the edges a kernel gets wrong: text that is not ASCII, text whose character count and byte count differ, an empty string, spaces on both ends, a null in every column, a negative number, a zero, a date before the epoch and a leap day.
+
+Answers are compared as text, which is the one rendering both engines can be asked for without either having an opinion about formatting. That covers whole numbers, text and booleans. Floating point renders differently on the two sides, so nothing in the list answers one yet, and the decimals and the timestamps come with the renderings being settled rather than being papered over now.
+
+It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, and until it is fixed the two expressions are on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
+
+It runs on every commit and needs no corpus. It takes a couple of minutes, almost all of it DuckDB answering seventy expressions one query at a time.
+
 ### Added: `contains`, `match`, `fullmatch` and `count`, the first four `str` names about patterns
 
 The four questions about where a pattern sits in a row: anywhere, at the front, the whole row, and how many times. pandas reads the argument to all four as a regular expression and there is no regular expression engine here yet, so these ship on a smaller promise than pandas makes.
