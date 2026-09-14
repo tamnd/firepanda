@@ -884,13 +884,14 @@ def _datetime_members() -> tuple[Member, ...]:
 def _string_members() -> tuple[Member, ...]:
     """Writes the members of the `str` accessor.
 
-    Twenty one of pandas' fifty seven, in two groups. Twelve of them have one
+    Twenty six of pandas' fifty seven, in three groups. Twelve of them have one
     idea between them, which is that a position in a string is a character
-    rather than a byte, and the other nine have a second, which is that the two
-    ends of a row can be trimmed or padded without anything looking at the
-    middle. The rest of the accessor is case conversion, the predicates,
-    splitting and the regex methods, and each of those groups has an idea of its
-    own that is worth landing on its own.
+    rather than a byte. Nine have a second, which is that the two ends of a row
+    can be trimmed or padded without anything looking at the middle. The five
+    newest have a third, which is that case is not a property of a byte and not
+    quite a property of a character either. The rest of the accessor is
+    splitting, joining and the regex methods, and each of those groups has an
+    idea of its own that is worth landing on its own.
 
     `center`, `ljust` and `rjust` are `pad` with the side already chosen, and
     they are written out rather than being left to the caller because pandas
@@ -983,6 +984,46 @@ def _string_members() -> tuple[Member, ...]:
             signature="pat: Any, na: Any = None",
             body='self._begins("endswith", pat, na)',
             doc="Whether every row ends with a string, or with any of several.",
+            returns="Series",
+        ),
+        Member(
+            name="upper",
+            kind="method",
+            signature="",
+            body='self._text("upper")',
+            doc="Every row written in upper case.",
+            returns="Series",
+        ),
+        Member(
+            name="lower",
+            kind="method",
+            signature="",
+            body='self._text("lower")',
+            doc="Every row written in lower case.",
+            returns="Series",
+        ),
+        Member(
+            name="isspace",
+            kind="method",
+            signature="",
+            body='self._flag("isspace", "")',
+            doc="Whether every row is whitespace and nothing else.",
+            returns="Series",
+        ),
+        Member(
+            name="islower",
+            kind="method",
+            signature="",
+            body='self._flag("islower", "")',
+            doc="Whether every row is lower case.",
+            returns="Series",
+        ),
+        Member(
+            name="isupper",
+            kind="method",
+            signature="",
+            body='self._flag("isupper", "")',
+            doc="Whether every row is upper case.",
             returns="Series",
         ),
         Member(
@@ -3839,10 +3880,15 @@ ACCESSORS: tuple[Accessor, ...] = (
             " of numbers is an `AttributeError` there and here. The same reasoning"
             " the `cat` accessor gives applies, since a caller writing `s.str` has"
             " already decided what the column is.\n\n"
-            "Twelve of the fifty seven names so far, and the twelve share one idea:"
-            " a position in a string is a character and not a byte. Every other"
-            " kernel in this library counts bytes, which is right for a `LIKE`"
-            " pattern and for a sort order and is not what `s.str.len()` answers."
+            "Twenty six of the fifty seven names so far. Most of them share one"
+            " idea, which is that a position in a string is a character and not a"
+            " byte. Every other kernel in this library counts bytes, which is right"
+            " for a `LIKE` pattern and for a sort order and is not what"
+            " `s.str.len()` answers.\n\n"
+            "The five newest share the other half of the same idea. Case is not a"
+            " property of a byte either, and it is not even a property of one"
+            " character, since `ß` raises to two letters and a row can come back"
+            " longer than it went in."
         ),
         mixin="StringMixin",
         members=_string_members(),

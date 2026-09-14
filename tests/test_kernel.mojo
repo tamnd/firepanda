@@ -37,6 +37,8 @@ from firepanda.kernel import (
     invert,
     less,
     less_equal,
+    mask_keeps_more_than,
+    mask_kept,
     max_of,
     mean_of,
     min_of,
@@ -1131,6 +1133,105 @@ def test_a_mask_that_keeps_nothing_selects_nothing() raises:
     var picks = select_positions(full)
     assert_equal(len(picks), 64, "positions out of everything")
     assert_equal(Int(picks[63]), 63, "the last position")
+
+
+def test_the_count_a_mask_keeps_agrees_with_the_positions_it_keeps() raises:
+    # The count is what a filter asked for no columns at all answers with, so
+    # the one number it has to agree with is the length of the selection the
+    # same mask would have produced. Nulls scattered through the mask, since
+    # that is the route where the two loops could disagree about the rule.
+    var mask = Array[DType.bool](1000)
+    for i in range(1000):
+        mask[i] = i % 3 != 0
+    for i in range(0, 1000, 7):
+        mask.set_null(i)
+
+    assert_equal(
+        mask_kept(mask),
+        len(select_positions(mask)),
+        "the count and the positions",
+    )
+
+    var clean = Array[DType.bool](1000)
+    for i in range(1000):
+        clean[i] = i % 3 != 0
+    assert_equal(
+        mask_kept(clean),
+        len(select_positions(clean)),
+        "and the same with no nulls in it",
+    )
+
+
+def test_the_count_of_a_mask_that_keeps_all_or_none_is_all_or_none() raises:
+    # Both ends, because a count that is off by one at either of them sends a
+    # filter down the wrong route on the chunks where the route matters most.
+    var empty = Array[DType.bool](64)
+    for i in range(64):
+        empty[i] = False
+    assert_equal(mask_kept(empty), 0, "nothing kept")
+
+    var full = Array[DType.bool](64)
+    for i in range(64):
+        full[i] = True
+    assert_equal(mask_kept(full), 64, "everything kept")
+
+    var none = Array[DType.bool](64)
+    for i in range(64):
+        none[i] = True
+        none.set_null(i)
+    assert_equal(mask_kept(none), 0, "a mask that is all nulls keeps nothing")
+
+
+def test_the_share_a_mask_keeps_is_read_off_a_sample() raises:
+    # Sixteen thousand rows, which is over the floor, so this is the sampled
+    # route rather than the exact one. A third of the rows kept, and the two
+    # shares either side of a third are what a filter would ask.
+    var third = Array[DType.bool](16 * 1024)
+    for i in range(len(third)):
+        third[i] = i % 3 == 0
+
+    assert_true(
+        mask_keeps_more_than(third, 0.25), "a third is more than a quarter"
+    )
+    assert_false(
+        mask_keeps_more_than(third, 0.4), "and less than two fifths of them"
+    )
+
+    # The shape a predicate over a sorted column leaves, and the one an evenly
+    # spread sample of single rows would read wrongly. The blocks are what
+    # carries it: half of them land in the stretch that keeps nothing.
+    var sorted = Array[DType.bool](16 * 1024)
+    for i in range(len(sorted)):
+        sorted[i] = i >= 8 * 1024
+
+    assert_true(
+        mask_keeps_more_than(sorted, 0.4), "half is more than two fifths"
+    )
+    assert_false(
+        mask_keeps_more_than(sorted, 0.6), "and less than three fifths"
+    )
+
+
+def test_a_small_or_null_mask_is_counted_rather_than_sampled() raises:
+    # Under the floor, so the answer is the exact count and not an estimate of
+    # it, which is what keeps the route an operator takes on a small chunk
+    # something a test can state.
+    var small = Array[DType.bool](1000)
+    for i in range(1000):
+        small[i] = i % 3 == 0
+    assert_equal(mask_kept(small), 334, "a third of a thousand, rounded up")
+    assert_true(mask_keeps_more_than(small, 0.33), "and over a third exactly")
+    assert_false(mask_keeps_more_than(small, 0.334), "but not over 0.334")
+
+    # A mask with nulls in it is counted in full whatever its length, since the
+    # loop that reads a bit a row is the one the sample cannot use.
+    var nulls = Array[DType.bool](16 * 1024)
+    for i in range(len(nulls)):
+        nulls[i] = True
+    for i in range(0, len(nulls), 2):
+        nulls.set_null(i)
+    assert_true(mask_keeps_more_than(nulls, 0.4), "half the rows are valid")
+    assert_false(mask_keeps_more_than(nulls, 0.6), "and no more than half")
 
 
 def test_filter_matches_the_twin() raises:

@@ -8,10 +8,11 @@ layer is where each word has a name a caller was invited to type.
 ### Why there are three doors and not one
 
 The rule `transform.mojo` set is that the shape of the answer picks the door. On
-this accessor there are three shapes: `startswith` answers a mask, `len` and
-`find` answer a number, and everything else answers text. A name sent through
-the wrong door is refused rather than being quietly served, which is what makes
-these worth being three functions instead of one with a branch at the end.
+this accessor there are three shapes: `startswith` and the questions about case
+answer a mask, `len` and `find` answer a number, and everything else answers
+text. A name sent through the wrong door is refused rather than being quietly
+served, which is what makes these worth being three functions instead of one
+with a branch at the end.
 
 Argument shape does not pick a door and deliberately does not, because it varies
 almost per method and grouping by it would give a door per method. So the widest
@@ -36,7 +37,7 @@ not a slice of one character: a slice past the end of a short row is the empty
 string and `get` past the end is a null, which is pandas and is worth the
 separate kernel it takes.
 
-The forty odd names this file does not spell do not resolve at all rather than
+The thirty odd names this file does not spell do not resolve at all rather than
 resolving and refusing, for the reason document 07 gives: an absent name reads as
 unimplemented on the board and a refusing one reads as a failure, and the second
 is a lie about a method nobody has written yet.
@@ -60,7 +61,9 @@ def _text_name(name: String) raises -> String:
         Error: Tagged `value` if it is not one of them.
     """
     if (
-        name == "slice"
+        name == "upper"
+        or name == "lower"
+        or name == "slice"
         or name == "slice_replace"
         or name == "get"
         or name == "removeprefix"
@@ -93,7 +96,13 @@ def _flag_name(name: String) raises -> String:
     Raises:
         Error: Tagged `value` if it is not one of them.
     """
-    if name == "startswith" or name == "endswith":
+    if (
+        name == "startswith"
+        or name == "endswith"
+        or name == "isspace"
+        or name == "islower"
+        or name == "isupper"
+    ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
 
@@ -224,6 +233,10 @@ def text(
     """
     _text_column(column)
     var wanted = _text_name(kind)
+    if wanted == "upper":
+        return column.chars_upper()
+    if wanted == "lower":
+        return column.chars_lower()
     if wanted == "slice":
         # The kernel refuses this as well, since it has to and since it is
         # reachable from the Mojo API too. It is refused again here so that the
@@ -275,7 +288,8 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The prefix or the suffix.
+        arg: The prefix or the suffix, and the empty string for the three
+            questions about case, which take no argument at all.
 
     Returns:
         A bool column, as tall as the one it read.
@@ -288,6 +302,12 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
     var wanted = _flag_name(kind)
     if wanted == "startswith":
         return column.chars_starts_with(arg)
+    if wanted == "isspace":
+        return column.chars_is_space()
+    if wanted == "islower":
+        return column.chars_is_lower()
+    if wanted == "isupper":
+        return column.chars_is_upper()
     return column.chars_ends_with(arg)
 
 

@@ -2785,9 +2785,9 @@ def test_giving_up_the_columns_flattens_first() raises:
 
 
 def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
-    """The safety property the whole step rests on. Nothing has been taught to
-    read a selection yet, so a node handed a selected chunk sees it flattened
-    and gives the answer it would have given anyway."""
+    """The safety property the whole step rests on. A projection has not been
+    taught to read a selection, so a projection handed a selected chunk sees it
+    flattened and gives the answer it would have given anyway."""
     var keep = List[Int]()
     keep.append(1)
     keep.append(0)
@@ -2802,6 +2802,256 @@ def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
     var under = ints_of(got.columns[1], 2)
     assert_equal(under[0], 2, "and what was column 0, gathered")
     assert_equal(under[1], 4, "and its second row")
+
+
+def truths_of(col: AnyArray, rows: Int) raises -> List[Bool]:
+    """Reads a whole boolean column out, the way `ints_of` reads an int64 one.
+    """
+    ref view = col.as_typed_view[DType.bool]()
+    var out = List[Bool](capacity=rows)
+    for i in range(rows):
+        out.append(Bool(view[i]))
+    return out^
+
+
+def masked_chunk(keep: List[Bool]) raises -> Chunk:
+    """A counting column and a mask over it, with no selection.
+
+    Column 0 counts from one, so a value says which row of the input it came
+    from and an answer can be read without keeping a second list around. Column
+    1 is the mask, which is where every filter in the suite gets its predicate.
+    """
+    var values = List[Int64](capacity=len(keep))
+    for i in range(len(keep)):
+        values.append(Int64(i + 1))
+    var columns = List[AnyArray]()
+    columns.append(numbers(values))
+    columns.append(flags(keep))
+    return Chunk(columns^)
+
+
+def selected_masked_chunk() raises -> Chunk:
+    """Six values under a selection of three, with a dense mask over them.
+
+    What a second filter in a pipeline is handed. Column 0 is the values and is
+    read through the selection, so its rows are at positions 1, 3 and 5. Column
+    1 is the mask a comparison wrote after the first filter ran, so it holds one
+    value per row of the chunk rather than one per value underneath, and it
+    keeps the first row and the third.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True]))
+    var picks = List[UInt32]()
+    picks.append(1)
+    picks.append(3)
+    picks.append(5)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(True)
+    return Chunk(columns^, picks^, dense^)
+
+
+def test_a_filter_over_a_chunk_with_no_selection_writes_one() raises:
+    """The point of the whole exercise. Two rows of six survive and not one
+    value is moved: the column that comes back is the column that went in, and
+    the two rows are the two positions the mask was true on."""
+    var out = node_apply(
+        Node(Filter(1)), masked_chunk([True, False, False, True, False, False])
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "and it carries a selection")
+    assert_equal(len(got), 2, "two rows")
+    assert_equal(len(got.columns[0]), 6, "over a column that still holds six")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 1, "the first row the mask kept")
+    assert_equal(values[1], 4, "the second")
+    var mask = truths_of(got.column(1), 2)
+    assert_true(mask[0], "the mask read through its own selection is all true")
+    assert_true(mask[1], "including the last row of it")
+
+
+def test_a_filter_that_keeps_nearly_every_row_copies_instead() raises:
+    """Five rows of six, well over `SELECTION_KEEP_LIMIT`, so the gathers a
+    selection would cost downstream come to more than the copy does. The answer
+    is the same answer, and it arrives flat."""
+    var out = node_apply(
+        Node(Filter(1)), masked_chunk([True, True, False, True, True, True])
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "copied rather than selected")
+    assert_equal(len(got), 5, "five rows")
+    var values = ints_of(got.columns[0], 5)
+    assert_equal(values[0], 1, "the first row")
+    assert_equal(values[2], 4, "the row after the one that was dropped")
+    assert_equal(values[4], 6, "and the last")
+
+
+def test_a_filter_over_a_selected_chunk_composes_the_two() raises:
+    """The case #532 could not do. The values are not touched a second time,
+    the two selections are composed into one, and only the mask, which is the
+    column written since the first filter, is gathered."""
+    var out = node_apply(Node(Filter(1)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 2, "two of the three rows")
+    assert_equal(len(got.columns[0]), 6, "the values were left where they were")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 2, "position 1 of the original six")
+    assert_equal(values[1], 6, "and position 5, which the mask kept")
+    assert_equal(len(got.columns[1]), 2, "the mask was gathered down to them")
+    var mask = truths_of(got.column(1), 2)
+    assert_true(mask[0], "and what it kept is what it says")
+    assert_true(mask[1], "on both rows")
+
+
+def test_a_filter_narrowing_to_gathered_columns_comes_back_flat() raises:
+    """A filter that asks only for columns computed above it gathers every one
+    of them, so there is nothing left for a selection to point at. Handing one
+    on would make every operator downstream flatten a chunk already flat."""
+    var keep = List[Int]()
+    keep.append(1)
+    var out = node_apply(Node(Filter(1, keep^)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "no selection to carry")
+    assert_equal(len(got), 2, "two rows")
+    assert_equal(got.width(), 1, "one column, the one that was asked for")
+    var mask = truths_of(got.columns[0], 2)
+    assert_true(mask[0], "gathered, not read through anything")
+    assert_true(mask[1], "and its second row")
+
+
+def test_a_mask_read_through_a_selection_picks_the_right_rows() raises:
+    """The rare shape: the mask itself arrived under the selection, because
+    nothing computed it since the last filter. It is gathered before it is read,
+    which costs a byte a row, and the positions it gives are positions into the
+    chunk's rows like any other mask."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True, False, True, False]))
+    var picks = List[UInt32]()
+    picks.append(1)
+    picks.append(2)
+    picks.append(4)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(False)
+    var out = node_apply(Node(Filter(1)), Chunk(columns^, picks^, dense^))
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "under a composed selection")
+    assert_equal(len(got), 2, "the rows at positions 2 and 4 survived")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 3, "position 2 of the original six")
+    assert_equal(values[1], 5, "and position 4")
+
+
+def test_a_filter_that_keeps_nothing_under_a_selection_drops_it() raises:
+    """A chunk of no rows is work for everything downstream and no information,
+    so it is dropped here rather than passed on, whichever route the filter
+    would have taken."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([False, False, False]))
+    var picks = List[UInt32]()
+    picks.append(1)
+    picks.append(3)
+    picks.append(5)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(True)
+    var out = node_apply(Node(Filter(1)), Chunk(columns^, picks^, dense^))
+    assert_false(out.__bool__(), "nothing came back")
+
+
+def test_a_repeated_column_under_a_selection_comes_back_twice() raises:
+    """A narrowing filter is a projection, and a projection may repeat a
+    position. The last use of an array can take it and an earlier one has to
+    copy, which is the same rule `Project` follows."""
+    var keep = List[Int]()
+    keep.append(0)
+    keep.append(0)
+    var out = node_apply(Node(Filter(1, keep^)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "both columns are read through the selection")
+    assert_equal(got.width(), 2, "two columns out of one")
+    var left = ints_of(got.column(0), 2)
+    var right = ints_of(got.column(1), 2)
+    assert_equal(left[0], 2, "the first copy")
+    assert_equal(left[1], 6, "and its second row")
+    assert_equal(right[0], 2, "the second copy, which is the same rows")
+    assert_equal(right[1], 6, "and the same second row")
+
+
+def two_masked_chunk(first: List[Bool], second: List[Bool]) raises -> Chunk:
+    """A counting column and two masks over it, with no selection.
+
+    A chain of two filters needs two predicates in the chunk before the first
+    one runs, since the second mask is not computed anywhere in a test that
+    calls the operators by hand.
+    """
+    var values = List[Int64](capacity=len(first))
+    for i in range(len(first)):
+        values.append(Int64(i + 1))
+    var columns = List[AnyArray]()
+    columns.append(numbers(values))
+    columns.append(flags(first))
+    columns.append(flags(second))
+    return Chunk(columns^)
+
+
+def test_two_filters_agree_with_the_same_pair_flattened_between() raises:
+    """The equivalence the step rests on. Two filters over eight rows, once
+    with the selection carried from the first into the second and once with the
+    chunk flattened in the middle, and the answers have to agree row for row."""
+    var first: List[Bool] = [
+        True,
+        False,
+        False,
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    var second: List[Bool] = [
+        True,
+        False,
+        True,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+
+    var composed = node_apply(Node(Filter(1)), two_masked_chunk(first, second))
+    assert_true(composed.__bool__(), "the first filter kept three rows")
+    var carried = node_apply(Node(Filter(2)), composed.take())
+    assert_true(carried.__bool__(), "and the second kept two of them")
+    var under = carried.take()
+    var through = ints_of(under.column(0), len(under))
+
+    var again = node_apply(Node(Filter(1)), two_masked_chunk(first, second))
+    assert_true(again.__bool__(), "the same three rows")
+    var flat = again.take()
+    flat.flatten()
+    var copied = node_apply(Node(Filter(2)), flat^)
+    assert_true(copied.__bool__(), "and the same two")
+    var plain = copied.take()
+    var moved = ints_of(plain.column(0), len(plain))
+
+    assert_equal(len(through), 2, "two rows either way")
+    assert_equal(len(moved), 2, "two the other way too")
+    for i in range(2):
+        assert_equal(through[i], moved[i], "the same row in the same place")
+    assert_equal(through[0], 1, "the first row both masks kept")
+    assert_equal(through[1], 7, "and the second")
 
 
 def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:
