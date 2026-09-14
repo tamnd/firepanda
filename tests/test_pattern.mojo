@@ -53,6 +53,7 @@ from firepanda.kernel.pattern import (
     text_count,
     text_ends_with,
     text_equals,
+    text_replace,
     text_starts_with,
 )
 from firepanda.kernel.scalar import (
@@ -61,6 +62,7 @@ from firepanda.kernel.scalar import (
     text_count_scalar,
     text_ends_with_scalar,
     text_equals_scalar,
+    text_replace_scalar,
     text_starts_with_scalar,
 )
 
@@ -505,6 +507,89 @@ def test_an_empty_pattern_is_equal_to_the_empty_row_alone() raises:
     assert_true(got[0])
     assert_false(got[1])
     assert_true(got[2])
+
+
+def check_replace(
+    col: StringArray, needle: String, repl: String, limit: Int
+) raises:
+    """Runs the replace kernel and its twin and asserts they agree.
+
+    Args:
+        col: The column.
+        needle: The substring to look for.
+        repl: What to put in its place.
+        limit: How many matches per row.
+
+    Raises:
+        AssertionError: If they disagree.
+    """
+    var got = text_replace(col, needle.as_bytes(), repl.as_bytes(), limit)
+    var want = text_replace_scalar(col, needle, repl, limit)
+    var what = "replace " + needle + " with " + repl
+    assert_equal(len(got), len(want), what + ": lengths differ")
+    for i in range(len(got)):
+        assert_equal(got.is_valid(i), want.is_valid(i), what + ": validity")
+        if got.is_valid(i):
+            assert_equal(got[i], want[i], what + " row " + String(i))
+
+
+def test_replace_matches_the_twin() raises:
+    var col = sample()
+    check_replace(col, "green", "GREEN", -1)
+    check_replace(col, "green", "", -1)
+    check_replace(col, "g", "..", -1)
+    check_replace(col, "green", "GREEN", 1)
+    check_replace(col, "green", "GREEN", 2)
+    check_replace(col, "green", "GREEN", 0)
+    check_replace(col, "missing", "x", -1)
+    check_replace(col, "", "-", -1)
+    check_replace(col, "", "-", 3)
+
+
+def test_replace_does_not_let_matches_overlap() raises:
+    var col = strings_from_list(["aaaa", "aaaaa", "abab", "aa", "a"])
+    var got = text_replace(col, "aa".as_bytes(), "X".as_bytes(), -1)
+    assert_equal(got[0], "XX", "four a's hold two runs of two")
+    assert_equal(got[1], "XXa", "five a's hold two and a leftover")
+    assert_equal(got[2], "abab", "no run of two here")
+    assert_equal(got[3], "X", "exactly one run")
+    assert_equal(got[4], "a", "not long enough to hold one")
+
+
+def test_an_empty_pattern_is_replaced_between_characters() raises:
+    """Which is characters, where the same argument to count is bytes."""
+    var col = strings_from_list(["hello", "h\u00e9llo", "", "\u65e5\u672c"])
+    var got = text_replace(col, "".as_bytes(), "-".as_bytes(), -1)
+    assert_equal(got[0], "-h-e-l-l-o-", "five characters take six dashes")
+    assert_equal(
+        got[1], "-h-\u00e9-l-l-o-", "six bytes but still five characters"
+    )
+    assert_equal(got[2], "-", "an empty row takes one")
+    assert_equal(got[3], "-\u65e5-\u672c-", "two characters take three")
+
+
+def test_an_empty_pattern_stops_when_the_limit_is_reached() raises:
+    var col = strings_from_list(["abcabc", "ab", ""])
+    var got = text_replace(col, "".as_bytes(), "-".as_bytes(), 2)
+    assert_equal(got[0], "-a-bcabc", "two dashes and then the rest")
+    assert_equal(got[1], "-a-b", "the row ends before the limit does")
+    assert_equal(got[2], "-", "one place to put a dash and the limit is two")
+
+
+def test_a_limit_of_zero_hands_the_row_back() raises:
+    var col = sample()
+    var got = text_replace(col, "green".as_bytes(), "X".as_bytes(), 0)
+    for i in range(len(col)):
+        assert_equal(got.is_valid(i), col.is_valid(i), "validity is kept")
+        if col.is_valid(i):
+            assert_equal(got[i], col[i], "row " + String(i) + " is unchanged")
+
+
+def test_replace_keeps_a_missing_row_missing() raises:
+    var col = sample()
+    var got = text_replace(col, "green".as_bytes(), "X".as_bytes(), -1)
+    assert_false(got.is_valid(2), "a missing row has nothing to replace")
+    assert_false(got.is_valid(4), "and neither has the other one")
 
 
 def main() raises:

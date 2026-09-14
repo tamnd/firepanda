@@ -17,7 +17,12 @@ three functions instead of one with a branch at the end.
 Argument shape does not pick a door and deliberately does not, because it varies
 almost per method and grouping by it would give a door per method. So the widest
 of the three carries the arguments the others do not need and hands them along:
-one string, two positions that are allowed to be absent, and a step.
+two strings, two positions that are allowed to be absent, and a step.
+
+The second string arrived with `replace`, which is the only name on the accessor
+that takes two of them, and it was worth widening the door rather than opening a
+fourth one. A fourth door would have been picked by argument shape, which is the
+one rule this file has.
 
 ### Why a position crosses as an absence rather than as a number
 
@@ -83,6 +88,7 @@ def _text_name(name: String) raises -> String:
         or name == "pad_both"
         or name == "zfill"
         or name == "repeat"
+        or name == "replace"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -220,6 +226,7 @@ def text(
     column: Series,
     kind: String,
     arg: String,
+    other: String,
     start: Optional[Int],
     stop: Optional[Int],
     step: Int,
@@ -232,9 +239,11 @@ def text(
         arg: The prefix, suffix or replacement, the characters to strip, or the
             character to pad with, and the empty string for the ones that take
             none.
+        other: The second string, for `replace` alone, which is the only name in
+            the accessor that takes two. Every other name here leaves it empty.
         start: The first position, where the method has one, the index for
-            `get`, and the width or the repeat count for the ones that take a
-            number rather than a position.
+            `get`, the width or the repeat count for the ones that take a number
+            rather than a position, and how many matches to replace.
         stop: The position to stop before, where the method has one.
         step: How far to move between characters, for `slice` alone.
 
@@ -301,6 +310,12 @@ def text(
         )
     if wanted == "zfill":
         return column.chars_zfill(_whole(start, "width"))
+    if wanted == "replace":
+        # The only name here that takes two strings, and the only one in the
+        # accessor that pandas reads as a literal by default, since its `regex`
+        # argument defaults to False in pandas 3. So nothing is refused on the
+        # way in and `n` rides in the position slot the way a width does.
+        return column.chars_replace(arg, other, _whole(start, "n"))
     return column.chars_repeat(_whole(start, "repeats"))
 
 
