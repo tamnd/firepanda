@@ -127,7 +127,7 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the steps below from compiling everything
 # once per step. Each of them depends on this task, and without a cache key pixi
 # would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers", default-environment = "differential", inputs = [
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . tests/differential/regex.mojo -o build/differential/regex", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
@@ -136,6 +136,7 @@ differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tes
   "build/differential/generated",
   "build/differential/semantics",
   "build/differential/answers",
+  "build/differential/regex",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -168,6 +169,15 @@ differential-answers = { cmd = "./build/differential/answers", default-environme
 # needs no corpus so it is cheap to run anywhere.
 # See docs/specs/sql/11-conformance.md section 4.
 differential-sql-generated = { cmd = "./build/differential/generated", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The same idea one layer down, about regular expressions rather than SQL. pandas
+# parses every pattern with Python's parser and routes the call to Python or to
+# Arrow on what comes back, so the parse is the thing that decides which engine
+# answers, and a front end that reads one pattern differently sends that pattern
+# to the other engine. This builds patterns out of the grammar and compares both
+# decisions against pandas' own predicate. It needs no corpus.
+# See docs/specs/76-two-engines-and-the-parser-that-picks-one.md section 6.
+differential-regex = { cmd = "./build/differential/regex", default-environment = "differential", depends-on = ["differential-build"] }
 
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
