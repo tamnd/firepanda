@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-14
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release, and nearly all of it is performance.
+
+One mistake runs through two of the entries. Several operators told the pipeline they did not need the cores, on the grounds that their kernels spread themselves over the cores already. That is true of a kernel called on a whole column and false of one called on a chunk, because a chunk and a morsel are the same number of rows, so those operators were running on one thread and saying they were running on all of them. `length`, `position`, `substring`, `trim` and `upper` all said it, and so did the set lookup below, which is how it was found. Fixing it is between six and fourteen times on the five text operators.
+
+The other two entries are about work that was being done and thrown away. `x IN (a, b, c)` was an equality per member joined by `or`, and every one of those equalities wrote out a boolean column that only the disjunction ever read. It is one set lookup now, 1.9 times faster at the smallest set anybody writes and 6 times at the largest the kernel answers by comparing. And a sort under a limit was ordering the whole input to hand ten rows over, even though the plan's limit pass had already written down how many rows the limit needed. The operator reads that bound now, which is nine times on two columns and fourteen on sixteen.
+
+The one addition is `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, the five remaining class questions of the `str` accessor, exact against a live pandas over every code point in Unicode.
+
 ### Changed: the text operators get the cores
 
 A pipeline hands its leading operators out to the cores only if one of them works out a value for every row, and `length`, `position`, `substring`, `trim` and `upper` all said they did not. Two reasons were given. `length` and `position` said their kernels spread themselves over the cores already, so handing the chunks out as well would be paying twice to do one pass, and the three that build a text column said the payload offsets they write at are a running total, which is a serial thing.
@@ -27,6 +39,7 @@ Two things inside the engine had to be fixed before the rewrite was worth making
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+
 ### Changed: a sort under a limit keeps the rows the limit needs instead of ordering everything
 
 The plan's limit pass has written a bound onto the sort node for several releases and nothing read it. The sort operator reads it now, so `ORDER BY x LIMIT 10` over a million rows scans for the best ten rather than building a permutation of a million and gathering every column at every row. The limit above stays where it is and goes on doing the cutting, which is why the answers are identical and why a plan that never ran the limit pass still lowers to a sort of everything.
@@ -7011,7 +7024,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
 [0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
