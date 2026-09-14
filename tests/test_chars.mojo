@@ -458,37 +458,49 @@ def test_an_accented_letter_changes_case_like_a_plain_one() raises:
     assert_equal(cased(["CAFÉ"], False)[0], "café")
 
 
-def test_a_row_can_come_back_longer_than_it_went_in() raises:
-    # The one that proves a case change is not a byte for a byte rewrite, and
-    # not a character for a character one either.
+def test_a_sharp_s_raises_to_one_letter_and_not_two() raises:
+    # The standard library gives `SS` here, which is Python's answer. pandas
+    # holds text in Arrow and Arrow gives the capital sharp s, so the table in
+    # casefix.mojo overrides the library and the row keeps its length.
     var raised = cased(["straße"], True)
-    assert_equal(raised[0], "STRASSE")
-    assert_equal(len(raised[0].as_bytes()), 7)
+    assert_equal(raised[0], "STRAẞE")
+    assert_equal(len(raised[0].as_bytes()), 8)
 
 
-def test_a_capital_i_with_a_dot_lowers_to_the_letter_and_the_dot() raises:
-    # Python writes U+0130 out as `i` followed by a combining dot above, so
-    # that the dot the capital carries is not lost. The standard library here
-    # drops it, and the kernel puts it back, because this one reaches a Latin
-    # alphabet and the rest of the difference does not.
+def test_a_ligature_is_left_alone_where_python_would_split_it() raises:
+    # The same difference in a different alphabet, and the second row of the
+    # conformance corpus that depends on it.
+    assert_equal(cased(["ﬁance"], True)[0], "ﬁANCE")
+
+
+def test_a_capital_i_with_a_dot_lowers_to_a_plain_letter() raises:
+    # Python writes U+0130 out as `i` followed by a combining dot above and
+    # Arrow writes a plain `i`, so the row loses the dot and keeps its length.
+    # This is the row of the corpus that says which of the two is being copied.
     var dropped = cased(["İstanbul"], False)
-    var bytes = dropped[0].as_bytes()
-    assert_equal(len(bytes), 10)
-    assert_equal(Int(bytes[0]), 0x69)
-    assert_equal(Int(bytes[1]), 0xCC)
-    assert_equal(Int(bytes[2]), 0x87)
-    assert_equal(dropped[0][codepoint=2:], "stanbul")
+    assert_equal(dropped[0], "istanbul")
+    assert_equal(len(dropped[0].as_bytes()), 8)
 
 
-def test_the_dot_is_put_back_wherever_the_capital_sits() raises:
-    var dropped = cased(["AİB", "İİ", "plain"], False)
-    assert_equal(len(dropped[0].as_bytes()), 5)
-    assert_equal(len(dropped[1].as_bytes()), 6)
-    assert_equal(dropped[2], "plain")
+def test_a_correction_is_made_wherever_the_character_sits() raises:
+    # Not just at the front, and not just once, and a row with nothing in the
+    # table goes through the fast path beside them unchanged.
+    var raised = cased(["aßb", "ßß", "plain"], True)
+    assert_equal(raised[0], "AẞB")
+    assert_equal(raised[1], "ẞẞ")
+    assert_equal(raised[2], "PLAIN")
 
 
 def test_a_dotless_i_raises_to_a_plain_capital() raises:
     assert_equal(cased(["ıstanbul"], True)[0], "ISTANBUL")
+
+
+def test_an_accented_row_with_nothing_to_correct_keeps_its_accents() raises:
+    # This row has a byte large enough to reach the table's first test and no
+    # character that is in the table, which is the path most non ASCII text
+    # takes, so it is worth a row of its own.
+    assert_equal(cased(["éèê"], True)[0], "ÉÈÊ")
+    assert_equal(cased(["ÉÈÊ"], False)[0], "éèê")
 
 
 def test_bytes_that_are_not_utf8_come_back_as_they_went_in() raises:
