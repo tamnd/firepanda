@@ -1,10 +1,10 @@
-"""The five `str` methods that are about case, checked against pandas.
+"""The seven `str` methods that are about case, checked against pandas.
 
-Two of them write a row out in one case or the other and three of them ask a
+Four of them write a row out in some case or other and three of them ask a
 question about the case a row is already in. They are one group because they all
 rest on the same piece of data, which is the table that says what the other case
 of a character is, and because the interesting rows are the same rows for all
-five.
+seven.
 
 Which table that is turns out to matter more than anything else here. pandas 3
 holds a text column in Arrow and answers `upper` and `lower` out of an Arrow
@@ -22,6 +22,14 @@ standard library underneath this carries an older copy of the Unicode data than
 Arrow does, and document 64 measures exactly how much older. The three names
 that ask a question still answer out of that copy, so they differ on characters
 neither table here corrects.
+
+`capitalize` and `swapcase` need nothing beyond that same correction table and
+are exact, which was measured rather than hoped for: both were run against
+pandas over every code point in Unicode on its own and over sixty thousand
+random words, with no row differing. `title` is the name of this group that is
+not here, because deciding where a word starts means knowing whether a character
+is cased at all, and that is the thousand and more the questions are still wrong
+about.
 """
 
 from __future__ import annotations
@@ -217,3 +225,84 @@ def test_three_measured_differences_in_the_case_questions(firepanda: ModuleType)
     assert theirs(["ĸ"]).str.islower().tolist() == [True]
     assert made(firepanda, ["\u2102"]).str.isupper().tolist() == [False]
     assert theirs(["\u2102"]).str.isupper().tolist() == [True]
+
+
+@needs_pandas
+def test_capitalize_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
+    """The same ten rows, including the two where Arrow and Python disagree."""
+    assert like(made(firepanda).str.capitalize().tolist(), theirs().str.capitalize().tolist())
+
+
+@needs_pandas
+def test_swapcase_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
+    """And the same ten again, the only one of the seven with no library call under it."""
+    assert like(made(firepanda).str.swapcase().tolist(), theirs().str.swapcase().tolist())
+
+
+def test_capitalize_drops_everything_after_the_first_character(
+    firepanda: ModuleType,
+) -> None:
+    """Which is the thing about this method that surprises people."""
+    column = made(firepanda, ["hello world", "HELLO WORLD", "hello WORLD"])
+    assert column.str.capitalize().tolist() == ["Hello world"] * 3
+
+
+def test_capitalize_starts_at_the_first_character_and_not_the_first_letter(
+    firepanda: ModuleType,
+) -> None:
+    """A row that opens with a digit or a space keeps its first letter lower."""
+    column = made(firepanda, ["1abc def", "  spaced", "", None])
+    assert column.str.capitalize().tolist() == ["1abc def", "  spaced", "", None]
+
+
+def test_swapcase_leaves_a_character_in_neither_case_alone(
+    firepanda: ModuleType,
+) -> None:
+    """Digits and punctuation, and the titlecase characters, which look like capitals."""
+    column = made(firepanda, ["1 2 !?", "\u01c5ungla", "\u1f88\u03b1"])
+    assert column.str.swapcase().tolist() == ["1 2 !?", "\u01c5UNGLA", "\u1f88\u0391"]
+
+
+@needs_pandas
+def test_the_titlecase_rule_is_what_pandas_does_and_not_an_invention(
+    firepanda: ModuleType,
+) -> None:
+    """Both pandas backends agree here, which is worth pinning since so few rows do."""
+    import pandas as pd
+
+    rows = ["\u01c5ungla"]
+    assert pd.Series(rows, dtype="str").str.swapcase().tolist() == ["\u01c5UNGLA"]
+    assert pd.Series(rows, dtype="object").str.swapcase().tolist() == ["\u01c5UNGLA"]
+    assert made(firepanda, rows).str.swapcase().tolist() == ["\u01c5UNGLA"]
+
+
+def test_swapping_twice_gives_the_row_back(firepanda: ModuleType) -> None:
+    """True for these rows and not for every row, which is why the next test exists."""
+    for row in ("Hello World", "o'neill", "MiXeD 42"):
+        assert made(firepanda, [row]).str.swapcase().str.swapcase().tolist() == [row]
+
+
+def test_swapping_twice_does_not_always_give_the_row_back(
+    firepanda: ModuleType,
+) -> None:
+    """A Turkish capital I loses its dot on the way down and does not get it back.
+
+    A sharp s does come back, which is worth having next to it: it swaps up to a
+    capital sharp s and down again to the small one it started as, because Arrow
+    holds both halves of that pair. The Turkish letter has no pair to hold, since
+    the lower case of a capital I with a dot is a plain i to Arrow, and a plain i
+    raises to a plain I. Both are facts about Unicode rather than about this
+    library, and both are what pandas answers.
+    """
+    assert made(firepanda, ["stra\u00dfe"]).str.swapcase().tolist() == ["STRA\u1e9eE"]
+    assert made(firepanda, ["stra\u00dfe"]).str.swapcase().str.swapcase().tolist() == [
+        "stra\u00dfe"
+    ]
+    assert made(firepanda, ["\u0130stanbul"]).str.swapcase().tolist() == ["iSTANBUL"]
+    assert made(firepanda, ["\u0130stanbul"]).str.swapcase().str.swapcase().tolist() == ["Istanbul"]
+
+
+def test_the_two_new_names_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
+    """The same rule as the other five, asserted again because it is easy to lose."""
+    assert made(firepanda, ["a", None]).str.capitalize().tolist() == ["A", None]
+    assert made(firepanda, ["a", None]).str.swapcase().tolist() == ["A", None]

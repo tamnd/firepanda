@@ -1431,44 +1431,60 @@ def test_a_character_count_counts_characters_rather_than_bytes() raises:
     # Rows two and three are both five characters long and are six and fifteen
     # bytes, so a count that measured the payload would answer them differently.
     same(
-        answer("SELECT STRLEN(word) AS c FROM glyphs WHERE n < 5", "c"),
+        answer("SELECT LENGTH(word) AS c FROM glyphs WHERE n < 5", "c"),
         [3, 5, 5, 0],
         "c",
     )
 
 
-def test_the_three_names_for_a_character_count_answer_the_same() raises:
-    var one = answer("SELECT STRLEN(word) AS c FROM glyphs WHERE n = 3", "c")
-    var two = answer("SELECT LENGTH(word) AS c FROM glyphs WHERE n = 3", "c")
-    var three = answer("SELECT LEN(word) AS c FROM glyphs WHERE n = 3", "c")
-    same(one, [5], "strlen")
-    same(two, [5], "length")
-    same(three, [5], "len")
+def test_a_byte_count_counts_bytes_rather_than_characters() raises:
+    # The other question, and the reason the two are separate calls. DuckDB
+    # answers 3, 6, 15 and 0 for these four rows and so does this.
+    same(
+        answer("SELECT STRLEN(word) AS c FROM glyphs WHERE n < 5", "c"),
+        [3, 6, 15, 0],
+        "c",
+    )
+
+
+def test_the_two_names_for_a_character_count_answer_the_same() raises:
+    var one = answer("SELECT LENGTH(word) AS c FROM glyphs WHERE n = 3", "c")
+    var two = answer("SELECT LEN(word) AS c FROM glyphs WHERE n = 3", "c")
+    same(one, [5], "length")
+    same(two, [5], "len")
 
 
 def test_a_row_with_nothing_known_about_it_has_no_length() raises:
     # DuckDB answers null rather than zero, and the two are different things to
-    # anything that folds the column afterwards.
-    var out = run("SELECT STRLEN(word) AS c FROM glyphs WHERE n = 5", session())
-    var col = out.column("c").as_typed[DType.int64]()
-    assert_equal(len(col), 1, "one row")
-    assert_true(not col.is_valid(0), "and nothing in it")
+    # anything that folds the column afterwards. Both kernels, because the
+    # repair is per kernel and one of them could have it without the other.
+    for sql in [
+        String("SELECT LENGTH(word) AS c FROM glyphs WHERE n = 5"),
+        String("SELECT STRLEN(word) AS c FROM glyphs WHERE n = 5"),
+    ]:
+        var out = run(sql, session())
+        var col = out.column("c").as_typed[DType.int64]()
+        assert_equal(len(col), 1, "one row")
+        assert_true(not col.is_valid(0), "and nothing in it")
 
 
-def test_a_character_count_folds_the_way_q27_folds_one() raises:
+def test_a_byte_count_folds_the_way_q27_folds_one() raises:
     # The shape ClickBench q27 is: a length worked out per row and folded per
-    # group, with the group key read back beside it.
+    # group, with the group key read back beside it. q27 averages `strlen` over
+    # `URL`, so this is the byte counting one.
     var out = run(
         "SELECT g, SUM(STRLEN(word)) AS s FROM glyphs GROUP BY g ORDER BY g",
         session(),
     )
     same(read_back(out, "g"), [1, 2], "g")
-    same(read_back(out, "s"), [8, 5], "s")
+    same(read_back(out, "s"), [9, 15], "s")
 
 
-def test_a_character_count_of_a_number_says_so() raises:
-    with assert_raises(contains="'length' counts the characters of text"):
+def test_a_length_of_a_number_says_so() raises:
+    with assert_raises(contains="'strlen' measures text"):
         _ = run("SELECT STRLEN(n) FROM glyphs", session())
+    with assert_raises(contains="'length' measures text"):
+        _ = run("SELECT LENGTH(n) FROM glyphs", session())
 
 
 def test_a_like_with_a_percent_at_the_end_is_a_prefix() raises:
@@ -1850,7 +1866,7 @@ def test_a_trim_folds_the_way_a_character_count_folds() raises:
     # The shape that matters: a trim worked out per row and read back by the
     # length of what came off it.
     var got = answer(
-        "SELECT strlen(trim(word)) AS c FROM padded WHERE n < 3", "c"
+        "SELECT length(trim(word)) AS c FROM padded WHERE n < 3", "c"
     )
     same(got, [2, 4], "c")
 

@@ -78,6 +78,17 @@ others. `casefix.mojo` is the list of all hundred and forty nine with Arrow's
 answer for each, an element is tested for holding one before it is handed over,
 and one that does is written out a code point at a time instead. Document 64
 measures the difference and says why the list is carried here.
+
+`capitalize` and `swapcase` are the two case kernels the standard library has no
+call for, so they are walked here rather than borrowed. Neither needs any case
+data past the corrections. Capitalising is the first character raised and the
+rest dropped, and swapping is decided by the mappings themselves, since a
+character that lowers to something else was upper and one that raises to
+something else was lower. The thirty one titlecase characters are the only ones
+the mappings cannot classify, because they are in neither case while both of
+their mappings would move them, and `KEPT_BY_SWAP` is that list. Both rules are
+checked against Arrow over every code point there is by the generator, which
+refuses to write a table if either one stops holding.
 """
 
 from std.collections.span import Span
@@ -93,6 +104,7 @@ from .casefix import (
     CORRECTED_DOWN,
     CORRECTED_FROM,
     CORRECTED_UP,
+    KEPT_BY_SWAP,
     LOWEST_CORRECTED_LEAD,
 )
 from .mask import repair_range
@@ -673,15 +685,17 @@ def _well_formed(bytes: Span[UInt8, _]) -> Bool:
     return True
 
 
-def _corrected_at(keys: Span[UInt32, _], point: UInt32) -> Int:
-    """Where a code point sits in the correction table, or minus one.
+def _listed_at(keys: Span[UInt32, _], point: UInt32) -> Int:
+    """Where a code point sits in one of the tables, or minus one.
 
-    A binary search over a hundred and fifty entries, so eight comparisons at
-    worst, and it is only ever asked about a code point that survived the byte
-    test below.
+    A binary search over a hundred and fifty entries at most, so eight
+    comparisons at worst. Both tables in `casefix.mojo` are in order and both
+    are searched with this, the correction table to find what Arrow answers for
+    a code point and the swapcase table to find whether there is anything to
+    answer at all.
 
     Args:
-        keys: `CORRECTED_FROM`, which is in order.
+        keys: A table from `casefix.mojo`, which is in order.
         point: The code point being asked about.
 
     Returns:
@@ -794,7 +808,7 @@ def _holds_a_correction(text: StringSlice, keys: Span[UInt32, _]) -> Bool:
         True if a code point of the element is in the table.
     """
     for point in text.codepoints():
-        if _corrected_at(keys, point.to_u32()) >= 0:
+        if _listed_at(keys, point.to_u32()) >= 0:
             return True
     return False
 
@@ -828,16 +842,213 @@ def _one_at_a_time(
     """
     into = String()
     for point in text.codepoints():
-        var at = _corrected_at(keys, point.to_u32())
-        if at >= 0:
-            var answer = raised[at] if upper else dropped[at]
-            into += String(Codepoint(unsafe_unchecked_codepoint=answer))
+        into += _case_one(point, keys, raised, dropped, upper)
+
+
+def _case_one(
+    point: Codepoint,
+    keys: Span[UInt32, _],
+    raised: Span[UInt32, _],
+    dropped: Span[UInt32, _],
+    upper: Bool,
+) raises -> String:
+    """One character in the other case, spelled the way Arrow spells it.
+
+    The table is asked first and the standard library is asked second, which is
+    the order that makes the answer always one code point long: every mapping
+    the library would have expanded is in the table, so what comes back from
+    here is a character rather than a run of them. The three kernels that walk
+    a code point at a time all go through this, and the two that pick a case
+    per character rely on the length as well as on the answer.
+
+    Args:
+        point: The character.
+        keys: `CORRECTED_FROM`.
+        raised: `CORRECTED_UP`.
+        dropped: `CORRECTED_DOWN`.
+        upper: Which way this is going.
+
+    Returns:
+        The character in the asked for case, unchanged when it has no other
+        case to be in.
+
+    Raises:
+        Error: If a string cannot be allocated.
+    """
+    var at = _listed_at(keys, point.to_u32())
+    if at >= 0:
+        var answer = raised[at] if upper else dropped[at]
+        return String(Codepoint(unsafe_unchecked_codepoint=answer))
+    var one = String(point)
+    if upper:
+        return one.upper()
+    return one.lower()
+
+
+def text_capitalize(a: StringArray) raises -> StringArray:
+    """Raises the first character of every element and drops the rest.
+
+    That is the whole of what Arrow's kernel does, measured rather than read
+    off the documentation: `tools/gen_casefix.py` runs the rule here against
+    Arrow over every code point on its own and over four thousand words built
+    out of the cased ones, and refuses to write a table if a single answer
+    differs. So this needs no case data of its own beyond the corrections that
+    `upper` and `lower` already need, and it is exactly right wherever those
+    two are.
+
+    Worth saying what it does not do, because the name suggests otherwise. It
+    has no idea what a word is, so a row of several words comes back with one
+    capital in it, and it does not leave a character that is already capital
+    alone, so a row that arrived shouting comes back whispering after the
+    first letter. Both are what pandas does.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var keys = materialize[CORRECTED_FROM]()
+    var raised = materialize[CORRECTED_UP]()
+    var dropped = materialize[CORRECTED_DOWN]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
             continue
-        var one = String(point)
-        if upper:
-            into += one.upper()
+        var bytes = a.unsafe_bytes(i)
+        if len(bytes) == 0 or not _well_formed(bytes):
+            built.append(bytes)
+            continue
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        if _may_need_correcting(bytes) and _holds_a_correction(
+            text, Span(keys)
+        ):
+            var out = String()
+            var first = True
+            for point in text.codepoints():
+                out += _case_one(
+                    point, Span(keys), Span(raised), Span(dropped), first
+                )
+                first = False
+            built.append(out.as_bytes())
+            continue
+        var cut = 1
+        while cut < len(bytes) and not starts_character(bytes[cut]):
+            cut += 1
+        var whole = text[byte=0:cut].upper()
+        whole += text[byte = cut : len(bytes)].lower()
+        built.append(whole.as_bytes())
+    return built^.finish()
+
+
+def text_swapcase(a: StringArray) raises -> StringArray:
+    """Writes every upper case character lower and every lower case one upper.
+
+    This is the one case kernel the standard library cannot be asked for, so it
+    is walked here in full, and walking it needs a way to tell which case a
+    character is already in. The mappings answer that on their own almost
+    everywhere: a character that lowers to something else was upper, one that
+    raises to something else was lower, and one that neither raises nor lowers
+    has no case to swap. The exceptions are the thirty one titlecase
+    characters, which are in neither case and which Arrow therefore leaves
+    alone even though both of their mappings would move them, and they are
+    `KEPT_BY_SWAP`. With that list the rule is exact against Arrow over every
+    code point there is, which the generator checks each time it runs.
+
+    What it deliberately does not use is `islower` and `isupper`, which are the
+    two questions in this file that are still answered out of the standard
+    library's category data and are wrong about more than a thousand code
+    points. Asking the mappings instead is both cheaper and right, and it is
+    why this name is exact while `title`, which really does need to know
+    whether a character is cased, is not written yet.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var keys = materialize[CORRECTED_FROM]()
+    var raised = materialize[CORRECTED_UP]()
+    var dropped = materialize[CORRECTED_DOWN]()
+    var kept = materialize[KEPT_BY_SWAP]()
+    var swapped = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if not _well_formed(bytes):
+            built.append(bytes)
+            continue
+        if _is_ascii(bytes):
+            _swap_ascii(bytes, swapped)
+            built.append(Span(swapped))
+            continue
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        var out = String()
+        for point in text.codepoints():
+            var here = String(point)
+            if _listed_at(Span(kept), point.to_u32()) >= 0:
+                out += here
+                continue
+            var down = _case_one(
+                point, Span(keys), Span(raised), Span(dropped), False
+            )
+            if down != here:
+                out += down
+                continue
+            out += _case_one(
+                point, Span(keys), Span(raised), Span(dropped), True
+            )
+        built.append(out.as_bytes())
+    return built^.finish()
+
+
+def _is_ascii(bytes: Span[UInt8, _]) -> Bool:
+    """Whether a run of bytes is all ASCII.
+
+    Args:
+        bytes: The element.
+
+    Returns:
+        True if no byte has its top bit set.
+    """
+    for k in range(len(bytes)):
+        if bytes[k] >= 0x80:
+            return False
+    return True
+
+
+def _swap_ascii(bytes: Span[UInt8, _], mut into: List[UInt8]):
+    """Swaps the case of an element that is all ASCII, a byte at a time.
+
+    The common case by a wide margin, and the one place case really is a byte,
+    since the two cases of an ASCII letter differ in one bit and nothing else
+    in the range has a case at all.
+
+    Args:
+        bytes: The element, already known to be ASCII.
+        into: Where to write, cleared first and reused across elements.
+    """
+    into.clear()
+    into.reserve(len(bytes))
+    for k in range(len(bytes)):
+        var b = bytes[k]
+        if (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A):
+            into.append(b ^ 0x20)
         else:
-            into += one.lower()
+            into.append(b)
 
 
 def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:

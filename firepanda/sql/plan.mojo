@@ -2163,12 +2163,13 @@ def _lower_expr(
             return _lower_date_part(plan, lowered^)
         if name == "date_trunc" or name == "datetrunc":
             return _lower_date_trunc(plan, lowered^)
-        if name == "strlen" or name == "length" or name == "len":
-            # The three names DuckDB gives the character count of a string, and
-            # the plan holds the middle one. `len` is also DuckDB's name for the
-            # number of elements of a list, and a list here binds as text and is
-            # refused as text, which is the right answer until there is a list
-            # type to answer about.
+        if name == "len":
+            # DuckDB's other name for the character count, and the plan holds
+            # `length`. `strlen` is not one of these: it counts bytes rather
+            # than characters and stays its own call. `len` is also DuckDB's
+            # name for the number of elements of a list, and a list here binds
+            # as text and is refused as text, which is the right answer until
+            # there is a list type to answer about.
             return plan.exprs.call("length", lowered^, True)
         if name == "ucase" or name == "lcase":
             # DuckDB's other two names for the case changes, and the plan holds

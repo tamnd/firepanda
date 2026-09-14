@@ -127,6 +127,7 @@ from firepanda.kernel.chars import (
     text_character_substring,
     text_find,
 )
+from firepanda.kernel.substr import text_byte_length
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.edges import text_trim
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
@@ -1529,11 +1530,22 @@ struct Compute(Movable):
         out.append(Field(self.name, binary_type(self.op, a, b)))
         return out^
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Computes the column and puts it on the end of the chunk.
+
+        An operand under a selection is gathered and kept, rather than the whole
+        chunk being flattened, so what this costs a chunk that arrived under one
+        is the one or two columns the expression names and not the columns it
+        does not. The gathered column stays in the chunk, so the next expression
+        over it gathers nothing. The computed column is at the chunk's rows,
+        which is what makes it dense.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one more column and the same number of rows.
@@ -1559,6 +1571,7 @@ struct Compute(Movable):
                 + String(width)
                 + " columns"
             )
+        chunk.materialize(self.left, spread)
         var made: AnyArray
         if self.constant:
             made = binary_value_any(
@@ -1568,13 +1581,12 @@ struct Compute(Movable):
                 self.value_on_left,
             )
         else:
+            chunk.materialize(self.right, spread)
             made = binary_any(
                 chunk.columns[self.left], chunk.columns[self.right], self.op
             )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        columns.append(made^)
-        return Chunk(columns^, rows)
+        chunk.append(made^, True)
+        return chunk^
 
 
 struct Connective(Movable):
@@ -2187,12 +2199,19 @@ struct Cut(Movable):
 
 
 struct Length(Movable):
-    """Appends a column holding how many characters each element holds.
+    """Appends a column holding how long each element is.
 
-    This is SQL's `STRLEN`, and `LENGTH` and `LEN`, which are DuckDB's other two
-    names for it. Characters and not bytes, the way `Cut` counts characters, so
-    a column of text that is not ASCII answers what somebody reading the strings
-    would count rather than what the payload measures.
+    This is SQL's `LENGTH` and `LEN`, which count characters, and `STRLEN`,
+    which counts bytes. Those are two questions and not one, and DuckDB spells
+    them apart exactly this way: `length('café')` is 4 and `strlen('café')` is
+    5. Which one is asked is a flag here, because the node is the same shape
+    either way and only the kernel under it changes.
+
+    The two kernels are a long way apart in cost as well as in meaning.
+    `text_character_length` walks the payload of every element counting the
+    bytes that are not continuations, and `text_byte_length` reads the length
+    field out of each view and follows no pointer at all, which is thirteen
+    times cheaper on a column of thirty two byte elements.
 
     It is a node rather than another code on `Apply` because the four operations
     that share `Apply` all answer the type they were given and this one does not:
@@ -2208,17 +2227,22 @@ struct Length(Movable):
     var at: Int
     """The position of the column being measured."""
 
+    var bytes: Bool
+    """Whether to count bytes rather than characters."""
+
     var name: String
     """The name the appended column gets in the output schema."""
 
-    def __init__(out self, at: Int, name: String):
+    def __init__(out self, at: Int, bytes: Bool, name: String):
         """Constructs a length over a column.
 
         Args:
             at: The position of the column being measured.
+            bytes: Whether to count bytes rather than characters.
             name: The name of the appended column.
         """
         self.at = at
+        self.bytes = bytes
         self.name = name
 
     def bind(mut self, var input: Schema) raises -> Schema:
@@ -2245,7 +2269,7 @@ struct Length(Movable):
             )
         if out[self.at].dtype != LogicalType.STRING:
             raise Error(
-                "length: a character count reads text and column "
+                "length: a length reads text and column "
                 + String(self.at)
                 + " holds "
                 + String(out[self.at].dtype)
@@ -2274,7 +2298,11 @@ struct Length(Movable):
                 + String(width)
                 + " columns"
             )
-        var made = text_character_length(chunk.columns[self.at].strings())
+        var made: Array[DType.int64]
+        if self.bytes:
+            made = text_byte_length(chunk.columns[self.at].strings())
+        else:
+            made = text_character_length(chunk.columns[self.at].strings())
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -3339,11 +3367,22 @@ struct Cast(Movable):
                 fields.append(out[i].copy())
         return Schema(fields^)
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Converts the column and hands the chunk back.
+
+        The column is gathered into place first when it is under a selection,
+        and nothing else in the chunk is. Converting it where it lies would work
+        just as well, since a cast reads a row and writes a row, but the array
+        under a selection is the one the scan handed over and converting all of
+        it to answer for a tenth of its rows is the copy this whole thing is for
+        avoiding.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one column converted, or with the converted column
@@ -3361,14 +3400,13 @@ struct Cast(Movable):
                 + String(width)
                 + " columns"
             )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        var made = cast_any(columns[self.on], self.to, self.strict)
+        chunk.materialize(self.on, spread)
+        var made = cast_any(chunk.columns[self.on], self.to, self.strict)
         if self.appends:
-            columns.append(made^)
+            chunk.append(made^, True)
         else:
-            columns[self.on] = made^
-        return Chunk(columns^, rows)
+            chunk.replace(self.on, made^, True)
+        return chunk^
 
 
 struct Constant(Movable):
@@ -6298,7 +6336,9 @@ def node_reads_selection(node: Node) -> Bool:
     chain of filters composing their selections rather than each one copying is
     most of what issue #521 is for. `Project` reads one because it moves no rows,
     so passing the positions along costs nothing and flattening would gather the
-    columns it is about to drop. Everything else is still flattened.
+    columns it is about to drop. `Compute` and `Cast` read one because an
+    expression names one or two columns and flattening gathers all of them.
+    Everything else is still flattened.
 
     Args:
         node: The node.
@@ -6306,7 +6346,12 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return node.isa[Filter]() or node.isa[Project]()
+    return (
+        node.isa[Filter]()
+        or node.isa[Project]()
+        or node.isa[Compute]()
+        or node.isa[Cast]()
+    )
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -6416,7 +6461,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():
-        return node[Compute].process(chunk^)
+        # False for the same reason the flatten above passes it.
+        return node[Compute].process(chunk^, False)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
     if node.isa[Apply]():
@@ -6449,7 +6495,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():
-        return node[Cast].process(chunk^)
+        # False for the same reason the flatten above passes it.
+        return node[Cast].process(chunk^, False)
     if node.isa[Join]():
         # False, because this is the entry point several workers share and a
         # join's own kernels would each hand themselves out to workers again.

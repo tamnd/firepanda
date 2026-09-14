@@ -973,7 +973,7 @@ def test_a_cut_over_a_column_that_is_not_text_is_caught_at_plan_time() raises:
 
 def test_a_length_counts_the_characters_of_every_row() raises:
     var pipeline = Pipeline(word_frame())
-    pipeline.add(Node(Length(1, "wide")))
+    pipeline.add(Node(Length(1, False, "wide")))
     var out = pipeline^.run()
     assert_equal(out.width(), 4, "the answer was appended")
     assert_true(out.schema[3].dtype == LogicalType.INT64, "a number out")
@@ -986,21 +986,33 @@ def test_a_length_counts_the_characters_of_every_row() raises:
 
 def test_a_length_keeps_the_column_it_read_where_it_was() raises:
     var pipeline = Pipeline(word_frame())
-    pipeline.add(Node(Length(1, "wide")))
+    pipeline.add(Node(Length(1, False, "wide")))
     var out = pipeline^.run()
     assert_equal(out.column("status").as_strings()[1], "fail", "as it was")
+
+
+def test_a_length_counts_the_bytes_when_it_is_asked_to() raises:
+    # The other half of the flag. `word_frame` is all ASCII, so this pair says
+    # the flag reaches the kernel and `test_sql_run` says the two kernels
+    # answer different things on a row that is not.
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Length(1, True, "wide")))
+    var out = pipeline^.run()
+    var got = read_back(out, "wide")
+    assert_equal(got[0], 2, "two bytes and two characters")
+    assert_equal(got[1], 4, "and four of each here")
 
 
 def test_a_length_over_a_missing_column_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="is outside a schema of 3 columns"):
-        pipeline.add(Node(Length(9, "nope")))
+        pipeline.add(Node(Length(9, False, "nope")))
 
 
 def test_a_length_over_a_column_that_holds_no_text_is_refused() raises:
     var pipeline = Pipeline(word_frame())
-    with assert_raises(contains="a character count reads text"):
-        pipeline.add(Node(Length(0, "nope")))
+    with assert_raises(contains="a length reads text"):
+        pipeline.add(Node(Length(0, False, "nope")))
 
 
 def test_a_case_change_rewrites_every_row() raises:
@@ -3191,6 +3203,148 @@ def test_a_projection_agrees_with_the_same_one_flattened_first() raises:
         assert_equal(through[i], moved[i], "the same row in the same place")
     assert_equal(through[0], 1, "the first row the mask kept")
     assert_equal(through[2], 7, "and the last")
+
+
+def two_under_a_selection() raises -> Chunk:
+    """Two columns of six, neither dense, under a selection of three.
+
+    What a chunk looks like between a filter and the first thing that reads a
+    column. Both columns are still the arrays the scan handed over and the rows
+    of the chunk are at positions 1, 3 and 5 of them.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([10, 20, 30, 40, 50, 60]))
+    var picks = List[UInt32]()
+    picks.append(1)
+    picks.append(3)
+    picks.append(5)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(False)
+    return Chunk(columns^, picks^, dense^)
+
+
+def test_a_computed_column_gathers_only_the_operands_it_names() raises:
+    """An expression names one or two columns and a flatten gathers all of
+    them, which on a wide chunk is most of the work the selection was written to
+    avoid. The column that was not named is left exactly as the scan handed it
+    over."""
+    var out = node_apply(
+        Node(Compute(0, Value(Int64(2)), BinaryOp.MUL, "double")),
+        two_under_a_selection(),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under the selection")
+    assert_equal(got.width(), 3, "the computed column is on the end")
+    assert_equal(len(got.columns[0]), 3, "the operand was gathered into place")
+    assert_equal(len(got.columns[1]), 6, "and the other column was not touched")
+    var made = ints_of(got.columns[2], 3)
+    assert_equal(made[0], 4, "twice the value at position 1")
+    assert_equal(made[1], 8, "at position 3")
+    assert_equal(made[2], 12, "and at position 5")
+
+
+def test_computing_twice_over_one_column_gathers_it_once() raises:
+    """The gathered column goes back into the chunk, so a line of expressions
+    over the same column costs one gather rather than one each. The second
+    compute finds it already at the chunk's rows."""
+    var first = node_apply(
+        Node(Compute(0, Value(Int64(2)), BinaryOp.MUL, "double")),
+        two_under_a_selection(),
+    )
+    assert_true(first.__bool__(), "the first came back")
+    var once = first.take()
+    assert_equal(len(once.columns[0]), 3, "gathered by the first compute")
+    var second = node_apply(
+        Node(Compute(0, Value(Int64(1)), BinaryOp.ADD, "up")), once^
+    )
+    assert_true(second.__bool__(), "the second came back")
+    var got = second.take()
+    assert_true(got.selected(), "the other column still needs the positions")
+    assert_equal(got.width(), 4, "both computed columns are there")
+    var up = ints_of(got.columns[3], 3)
+    assert_equal(up[0], 3, "one more than the value at position 1")
+    assert_equal(up[2], 7, "and than the one at position 5")
+
+
+def test_computing_over_every_column_drops_the_selection() raises:
+    """Once every column has been gathered there is nothing left for the
+    positions to point at, so the chunk comes out flat and nothing above it
+    flattens a chunk that is already flat."""
+    var out = node_apply(
+        Node(Compute(0, 1, BinaryOp.ADD, "both")), two_under_a_selection()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "no selection left")
+    assert_equal(len(got), 3, "three rows")
+    var sum = ints_of(got.columns[2], 3)
+    assert_equal(sum[0], 22, "2 and 20")
+    assert_equal(sum[1], 44, "4 and 40")
+    assert_equal(sum[2], 66, "6 and 60")
+
+
+def test_a_cast_under_a_selection_converts_only_its_own_column() raises:
+    """A cast reads a row and writes a row, so it could convert the array where
+    it lies, but that converts six values to answer for three. The column is
+    gathered first and the rest of the chunk is left alone."""
+    var out = node_apply(
+        Node(Cast(0, LogicalType.INT32)), two_under_a_selection()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "the other column still reads through it")
+    assert_equal(len(got.columns[0]), 3, "converted down to the rows")
+    assert_equal(len(got.columns[1]), 6, "and the other one was not touched")
+    ref view = got.columns[0].as_typed_view[DType.int32]()
+    assert_equal(Int(view[0]), 2, "the value at position 1")
+    assert_equal(Int(view[2]), 6, "and the one at position 5")
+
+
+def test_a_compute_agrees_with_the_same_one_over_a_flattened_chunk() raises:
+    """The equivalence the step rests on, for the two operators it was added
+    to. The same expression over a selected chunk and over the same chunk
+    flattened first has to give the same rows."""
+    var under = node_apply(
+        Node(Compute(0, 1, BinaryOp.MUL, "product")), two_under_a_selection()
+    )
+    assert_true(under.__bool__(), "a chunk came back")
+    var carried = under.take()
+    var through = ints_of(carried.column(2), len(carried))
+
+    var flat = two_under_a_selection()
+    flat.flatten()
+    var over = node_apply(Node(Compute(0, 1, BinaryOp.MUL, "product")), flat^)
+    assert_true(over.__bool__(), "and one the other way")
+    var plain = over.take()
+    var moved = ints_of(plain.column(2), len(plain))
+
+    assert_equal(len(through), 3, "three rows either way")
+    assert_equal(len(moved), 3, "three the other way too")
+    for i in range(3):
+        assert_equal(through[i], moved[i], "the same row in the same place")
+    assert_equal(through[0], 40, "2 times 20")
+    assert_equal(through[2], 360, "and 6 times 60")
+
+
+def test_materializing_a_column_leaves_it_where_it_can_be_found() raises:
+    """The chunk method the two operators share. One column is gathered and put
+    back, the rest of the chunk is untouched, and a second call on the same
+    column does nothing at all."""
+    var chunk = two_under_a_selection()
+    chunk.materialize(0)
+    assert_true(chunk.selected(), "one column still reads through it")
+    assert_equal(len(chunk.columns[0]), 3, "gathered down to the rows")
+    assert_equal(len(chunk.columns[1]), 6, "and the other one is as it was")
+    chunk.materialize(0)
+    var values = ints_of(chunk.columns[0], 3)
+    assert_equal(values[0], 2, "not gathered through the positions again")
+    assert_equal(values[2], 6, "nor this one")
+    chunk.materialize(1)
+    assert_false(chunk.selected(), "and with both gathered the selection goes")
+    assert_equal(len(chunk), 3, "three rows, which is what it said")
 
 
 def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:

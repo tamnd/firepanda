@@ -557,7 +557,9 @@ def _lower_expr(
         return _lower_part(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and exprs.nodes[root].name == "date_trunc":
         return _lower_truncate(exprs, root, pipe, base, name, memo)
-    if kind == ExprKind.CALL and exprs.nodes[root].name == "length":
+    if kind == ExprKind.CALL and (
+        exprs.nodes[root].name == "length" or exprs.nodes[root].name == "strlen"
+    ):
         return _lower_length(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "upper" or exprs.nodes[root].name == "lower"
@@ -1245,11 +1247,15 @@ def _lower_length(
     name: String,
     mut memo: Memo,
 ) raises -> Int:
-    """Appends whatever answers a `STRLEN`.
+    """Appends whatever answers a `LENGTH` or a `STRLEN`.
 
     The shortest of these. There is nothing to read at plan time, because a
-    character count has no specifier and no window, so the argument is lowered
-    wherever it lands and a `Length` reads the column it landed in.
+    length has no specifier and no window, so the argument is lowered wherever
+    it lands and a `Length` reads the column it landed in.
+
+    Which of the two questions it is comes off the name. `length` and `len`
+    count characters and `strlen` counts bytes, which is DuckDB's split and not
+    an invention here: `length(\'café\')` is 4 there and `strlen(\'café\')` is 5.
 
     Args:
         exprs: The arena.
@@ -1269,13 +1275,13 @@ def _lower_length(
     if len(args) != 1:
         raise Error(
             String(
-                "lower: a character count reads one column and was given ",
+                "lower: a length reads one column and was given ",
                 len(args),
                 " arguments",
             )
         )
     var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
-    pipe.add(Node(Length(at, name)))
+    pipe.add(Node(Length(at, exprs.nodes[root].name == "strlen", name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

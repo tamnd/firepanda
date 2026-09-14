@@ -221,6 +221,43 @@ struct Chunk(Movable, Sized):
             return AnyArray(copy=self.columns[at])
         return gather_any(self.columns[at], self.picks, spread)
 
+    def materialize(mut self, at: Int, spread: Bool = True) raises:
+        """Gathers one column into place and keeps it there.
+
+        What `column` does, except that the gathered array goes back into the
+        chunk, so an operator that reads the same column again does not gather
+        it again. That is the difference between a line of expressions over one
+        column costing one gather and costing one each.
+
+        Does nothing to a dense column or to a chunk with no selection, and
+        drops the selection once every column has been gathered, since then
+        there is nothing left for the positions to point at.
+
+        Args:
+            at: The column.
+            spread: Whether a gather may use more than one core.
+
+        Raises:
+            If the position is out of range, or the dtype has no layout.
+        """
+        if at < 0 or at >= len(self.columns):
+            raise Error(
+                "chunk: column "
+                + String(at)
+                + " is outside a chunk of "
+                + String(len(self.columns))
+                + " columns"
+            )
+        if not self.selected() or self.dense[at]:
+            return
+        self.columns[at] = gather_any(self.columns[at], self.picks, spread)
+        self.dense[at] = True
+        for i in range(len(self.dense)):
+            if not self.dense[i]:
+                return
+        self.picks = List[UInt32]()
+        self.dense = List[Bool]()
+
     def append(mut self, var column: AnyArray, dense: Bool):
         """Puts a column on the end, saying whether it is at the chunk's rows.
 

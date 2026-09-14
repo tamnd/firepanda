@@ -423,15 +423,19 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 )
             )
         return LogicalType.INT64
-    if name == "length":
+    if name == "length" or name == "strlen":
         if len(args) != 1:
             raise Error(
-                String("'length' takes 1 argument and was given ", len(args))
+                String(
+                    "'", name, "' takes 1 argument and was given ", len(args)
+                )
             )
         if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
             raise Error(
                 String(
-                    "'length' counts the characters of text and argument 0 is ",
+                    "'",
+                    name,
+                    "' measures text and argument 0 is ",
                     args[0],
                 )
             )

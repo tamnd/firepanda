@@ -27,6 +27,22 @@ Two things inside the engine had to be fixed before the rewrite was worth making
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+### Fixed: STRLEN counts bytes, which is what DuckDB counts
+
+`strlen` was answering the number of characters and DuckDB answers the number of bytes. `strlen('café')` is 5 there and was 4 here. `length` and `len` count characters in both, so what was wrong was folding all three names into one call when DuckDB documents two different questions under them.
+
+Both kernels were already written and the byte counting one was already described as SQL's `STRLEN` in its own docstring, so the fix is that `strlen` stays its own call and the operator carries a flag saying which kernel to run. The two are a long way apart in cost as well as in meaning: counting characters walks the payload of every element, and counting bytes reads the length field out of each view and follows no pointer, which is thirteen times cheaper on a column of thirty two byte elements.
+
+ClickBench q27 and q28 average `strlen` over `URL` and `Referer`, so they were asking the expensive kernel for the wrong number.
+### Added: capitalize and swapcase, built out of the table the case fix already carries
+
+`s.str.capitalize()` and `s.str.swapcase()`. Neither is a name the Mojo standard library has, so both are walked a character at a time here, and the point of the release is that neither needed any case data past the 149 corrections `upper` and `lower` got a release ago.
+
+Capitalising is the first character raised and every other character dropped, which is pandas' rule and is not what the name suggests: a row of several words comes back with one capital in it, a row that arrived in capitals comes back lower case after the first letter, and a row that starts with a digit comes back unchanged because it starts at the first character rather than the first letter.
+
+Swapping case has to know which case a character is already in, and the interesting part is that it does not ask. `islower` and `isupper` are the two names this library is still wrong about for more than a thousand code points, so a kernel built on them would have inherited all of it. The mappings answer the same question and are corrected: a character that lowers to something else was upper, one that raises to something else was lower, one that neither raises nor lowers has no case. The only characters the mappings cannot classify are the thirty one titlecase ones, which are in neither case and which Arrow leaves alone even though both of their mappings would move them, so `casefix.mojo` carries them as a fourth table and the generator derives that table from Arrow rather than from a list somebody typed. An ASCII row skips all of it and flips one bit per letter.
+
+Both rules are now asserted by `tools/gen_casefix.py`, which refuses to write a table if either stops holding, and both names were checked against a live pandas over all 1112064 code points on their own and over sixty thousand random words with no row differing. `title` is the name of this shape that is not here: its word boundary needs to know whether a character is cased at all, which is the category question rather than the mapping question, and it is wrong for 1295 code points. It waits on carrying our own Unicode tables. Document 64 has all of it.
 
 ### Added: UPPER and LOWER in SQL
 
@@ -59,6 +75,19 @@ The Mojo standard library underneath uses the full mappings for 39 code points a
 The three questions are not corrected and the asymmetry is deliberate. The same measurement counts 1384 code points where the library and Arrow disagree about whether a character is whitespace or has a case, which is a table rather than a list, and the general case of it is carrying our own Unicode data. Three of those, one per question, are asserted in the test suite so that replacing the data cannot change behaviour quietly. Document 64 has all the counts and the reasoning.
 
 The three questions answer a missing row with a missing value where pandas answers False, because the answer there is a numpy array of bools with nowhere to put a third state. Held as object pandas answers None and agrees. That is the registered entry `engine/string-predicate-null`, which already covered `startswith` and `endswith`.
+
+
+## [0.8.1] - 2026-09-14
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release, so nothing here changes the meaning of anything that already worked. Most of it is the Python surface catching up with what the core has held all along. A frame and a column can now be printed the way pandas prints them, walked, asked how big they are, asked what they hold, asked how much memory they are using and asked whether a value is one of a set, and `info()` reports all of it in pandas' own layout. Four of those members used to raise `AttributeError`, which reads to a library handed one of our frames as this not being a dataframe at all.
+
+The printing work is three fixes that turned out to be one. A float was rendered from the value and pandas renders it from the column, a negative number was written one place to the right of where pandas writes it, and a column with labels printed its positions instead, which is issue 719. The tests compare whole renderings against a running pandas rather than against a literal, which is the assertion that would have caught 719 on its own.
+
+On the SQL side, `POSITION`, `STRPOS`, `INSTR`, `TRIM`, `LTRIM` and `RTRIM` run now, in both the keyword and the call spellings. And `ORDER BY 1` sorts on the first column rather than on the number one, which it had been doing silently: every row sorted on the same value and the sort was a node that did no work, so a query whose rows happened to arrive in order looked correct. Two tests in this repo were written that way and passed for that reason.
+
+Below the frame, a grouped `prod`, `any` and `all` complete the eighteen reductions `AggKind` carries, and a conjunction in a plan is one operator rather than a chain of them. That last one is measured at 1.80x on twelve operands and 1.88x when the columns carry nulls, and it is slower than the chain below five operands, which the entry explains rather than hides.
 
 ### Fixed: a float column is formatted as a column
 
@@ -225,6 +254,16 @@ A projection keeps some columns of a chunk in the order the plan asked for, whic
 A projection that keeps only columns already at the chunk's rows drops the selection on the way out, since there is nothing left for the positions to point at, and carrying it on would make every operator above it flatten a chunk that is already flat. That is the rule a narrowing filter follows for the same reason.
 
 The columns are taken out of the chunk and the chunk itself is kept rather than consumed and rebuilt, because the selection is one position per row and copying it to hand it back would cost more than some of the gathers this is here to put off.
+
+### Changed: an expression gathers the columns it names rather than the whole chunk
+
+`Compute` and `Cast` now read a chunk that carries a selection instead of flattening it on the way in. An expression names one or two columns and a flatten gathers every column in the chunk, so on a wide chunk between a filter and the first thing that reads a column, most of what the flatten did was work for columns the expression never mentions.
+
+The gathered column is put back into the chunk rather than handed to the kernel and thrown away, so a line of expressions over the same column costs one gather and not one each. That is the whole of `Chunk.materialize`, which is the method the two operators share. Once every column has been gathered the selection is dropped, since there is nothing left for the positions to point at.
+
+A cast could convert the array where it lies, because a cast reads a row and writes a row, and it does not: converting all of a column to answer for the rows a filter kept is the copy the selection was written to avoid.
+
+The computed column is at the chunk's rows, which is what makes it dense, and that is why a filter reading a mask computed above it finds the mask dense and composes rather than gathering.
 
 ## [0.8.0] - 2026-09-12
 
@@ -6873,7 +6912,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
 [0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
 [0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1
 [0.7.0]: https://github.com/tamnd/firepanda/releases/tag/v0.7.0
