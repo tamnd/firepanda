@@ -23,6 +23,13 @@ one elided by three, a name held in by a sign that the column will never print.
 inputs are the ones a frame is unlikely to contain by accident. Negative zero,
 both infinities, a NaN and the two magnitudes where fixed point rendering is
 abandoned are all in here.
+
+`float_column` gets its own tests for a different reason. What a float prints as
+is not a fact about the float, it is a fact about the column it is in, so the
+inputs that matter are pairs: a value that is fine beside a value that is not,
+the same value with and without a longer one next to it, a value in the part of
+the column that will not be printed. Every expected string in that group came
+off a running pandas.
 """
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
@@ -35,11 +42,14 @@ from firepanda.array.strings import strings_from_list
 from firepanda.dtype.lists import ALL
 from firepanda.frame.display import (
     DisplayOptions,
+    fixed_text,
+    float_column,
     format_float,
     pad_right,
     render_column,
     render_table,
     render_value,
+    scientific_text,
     visible,
 )
 from firepanda.frame.frame import DataFrame
@@ -281,7 +291,12 @@ def test_floats_are_rounded_and_stripped() raises:
 def test_the_precision_is_configurable() raises:
     assert_equal(format_float(Float64(1) / Float64(3), 2), "0.33", "two places")
     assert_equal(format_float(Float64(2) / Float64(3), 2), "0.67", "rounds up")
-    assert_equal(format_float(1.0 / 3.0, 0), "0", "no places at all")
+    # At no places at all a third is smaller than the last place being printed,
+    # which is the one thing that sends a column to an exponent on its own.
+    # pandas prints `3e-01` here and rounding it to `0` would be a lie about a
+    # value that is not zero.
+    assert_equal(format_float(1.0 / 3.0, 0), "3e-01", "no places at all")
+    assert_equal(format_float(123.456, 0), "123", "a value that still fits")
 
 
 def test_the_special_values_have_their_own_spellings() raises:
@@ -292,13 +307,148 @@ def test_the_special_values_have_their_own_spellings() raises:
     assert_equal(format_float(-zero, 6), "-0.0", "negative zero keeps its sign")
 
 
-def test_the_extremes_fall_back_to_mojo_formatting() raises:
-    # Above 1e15 the integer part is beyond what six decimals adds anything to,
-    # and below 1e-4 every printed place would be a zero. Both switch to an
-    # exponent rather than lying about the value.
-    assert_true(has(format_float(1.0e20, 6), "e"), "large magnitude")
-    assert_true(has(format_float(1.0e-20, 6), "e"), "small magnitude")
+def test_the_extremes_are_written_with_an_exponent() raises:
+    # Above 1e15 the integer part is beyond what an `Int` can write out, and
+    # below the last printed place every printed place would be a zero. Both
+    # switch to an exponent rather than lying about the value.
+    assert_equal(format_float(1.0e20, 6), "1.000000e+20", "large magnitude")
+    assert_equal(format_float(1.0e-20, 6), "1.000000e-20", "small magnitude")
     assert_equal(format_float(1.0e-20, 6) != "0.0", True, "not rounded to zero")
+
+
+def floats(
+    var values: List[Float64], precision: Int = 6
+) raises -> List[String]:
+    """A whole column of values, all of them present, rendered together."""
+    var present = List[Bool](capacity=len(values))
+    for _ in range(len(values)):
+        present.append(True)
+    return float_column(values, present, precision, String("<NA>"))
+
+
+def test_the_zeros_come_off_a_column_and_not_off_a_value() raises:
+    # `2.0` on its own is `2.0`, and beside a value with three places it is
+    # `2.000`, because a place comes off every value in the column or off none.
+    var alone = floats([2.0])
+    assert_equal(alone[0], String("2.0"), "on its own")
+    var beside = floats([1234567.125, 2.0])
+    assert_equal(beside[0], String("1234567.125"), "the long one")
+    assert_equal(beside[1], String("2.000"), "the short one, padded out")
+
+
+def test_one_place_always_survives_the_stripping() raises:
+    var cells = floats([2.0, 4.0])
+    assert_equal(cells[0], String("2.0"), "an integral value is still a float")
+    assert_equal(cells[1], String("4.0"), "and so is the one beside it")
+
+
+def test_a_column_goes_to_an_exponent_when_it_gets_too_long() raises:
+    # Twelve characters counting the place kept in front of the value is the
+    # most a fixed column may be. `123456789.0` is twelve and stays, and the
+    # value ten times larger is thirteen and takes the whole column with it.
+    var stays = floats([123456789.0, 2.0])
+    assert_equal(stays[0], String("123456789.0"), "still fixed")
+    assert_equal(stays[1], String("2.0"), "and so is what is beside it")
+    var goes = floats([1234567890.0, 2.0])
+    assert_equal(goes[0], String("1.234568e+09"), "too long")
+    assert_equal(goes[1], String("2.000000e+00"), "taken along with it")
+
+
+def test_the_place_in_front_of_a_value_counts_towards_the_length() raises:
+    # A negative spends that place on its minus, so `-123456789.0` is twelve
+    # like the positive is and stays fixed for the same reason.
+    var stays = floats([-123456789.0, 2.0])
+    assert_equal(stays[0], String("-123456789.0"), "twelve with the minus")
+    var goes = floats([-1234567890.0, 2.0])
+    assert_equal(goes[0], String("-1.234568e+09"), "thirteen with the minus")
+
+
+def test_length_alone_is_not_enough_to_send_a_column_to_an_exponent() raises:
+    # Nothing in here is larger than 1e6, so the length does not matter and a
+    # long rendering stays fixed.
+    var cells = floats([0.123456789, 2.0])
+    assert_equal(cells[0], String("0.123457"), "long but small")
+
+
+def test_a_value_under_the_last_place_sends_the_column_to_an_exponent() raises:
+    var goes = floats([1.0e-10, 1.0])
+    assert_equal(goes[0], String("1.000000e-10"), "under the last place")
+    assert_equal(goes[1], String("1.000000e+00"), "taken along with it")
+    # The boundary is the last place itself, which prints fixed.
+    assert_equal(floats([1.0e-6])[0], String("0.000001"), "the last place")
+    assert_equal(floats([1.0e-5])[0], String("0.00001"), "one place above it")
+
+
+def test_a_null_and_a_special_value_are_not_numbers_for_any_of_this() raises:
+    # An infinity is larger than any threshold there is and none of them apply
+    # to it, so the column beside it stays fixed and prints as it would alone.
+    var present: List[Bool] = [True, True, False]
+    var cells = float_column(
+        [Float64(1.0) / Float64(0.0), 1.0, 0.0], present, 6, String("<NA>")
+    )
+    assert_equal(cells[0], String("inf"), "the infinity")
+    assert_equal(cells[1], String("1.0"), "the value beside it")
+    assert_equal(cells[2], String("<NA>"), "the null")
+
+
+def test_the_rounding_goes_to_the_even_digit() raises:
+    # Which is what C's own formatting does and therefore what pandas prints.
+    # The values that show it are the ones whose half is exact.
+    assert_equal(fixed_text(0.0078125, 6), String("0.007812"), "down to even")
+    assert_equal(fixed_text(0.0234375, 6), String("0.023438"), "up to even")
+    assert_equal(fixed_text(2.5, 0), String("2"), "a half at no places")
+    assert_equal(fixed_text(3.5, 0), String("4"), "the next one up")
+
+
+def test_an_exponent_is_signed_and_at_least_two_digits_wide() raises:
+    assert_equal(scientific_text(1.0, 6), String("1.000000e+00"), "no exponent")
+    assert_equal(scientific_text(1.0e100, 6), String("1.000000e+100"), "three")
+    assert_equal(scientific_text(-1.0e-7, 6), String("-1.000000e-07"), "signed")
+
+
+def test_the_rounding_of_a_mantissa_can_carry_into_the_exponent() raises:
+    # 9.9999999 rounds to ten, which is not a mantissa, so the exponent takes
+    # the extra place instead.
+    assert_equal(
+        scientific_text(9.9999999e20, 6), String("1.000000e+21"), "carried"
+    )
+
+
+def float_series(name: String, values: List[Float64]) raises -> Series:
+    """A fully valid float64 series."""
+    var col = Array[DType.float64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return Series(name, col^)
+
+
+def test_a_value_in_the_elided_middle_does_not_decide_the_column() raises:
+    # pandas elides first and formats second, so a value nobody will see cannot
+    # push the values around it into an exponent.
+    var values = List[Float64]()
+    for _ in range(6):
+        values.append(1.0)
+    values.append(1.0e16)
+    for _ in range(6):
+        values.append(2.0)
+    var rendered = String(float_series("v", values))
+    assert_true(has(rendered, "1.0"), "the printed values are still fixed")
+    assert_false(has(rendered, "e+16"), "and the elided one is not in there")
+
+
+def test_each_column_of_a_frame_decides_on_its_own() raises:
+    var columns = List[Series]()
+    columns.append(float_series("a", [1.0e16, 2.0]))
+    columns.append(float_series("b", [1.0, 2.0]))
+    var rendered = String(DataFrame.from_series(columns^))
+    assert_equal(
+        rendered,
+        String(
+            "              a    b\n0  1.000000e+16  1.0\n1  2.000000e+00 "
+            " 2.0\n\n[2 rows x 2 columns]"
+        ),
+        "one column scientific and one not",
+    )
 
 
 def test_visible_keeps_both_ends_and_marks_the_gap() raises:

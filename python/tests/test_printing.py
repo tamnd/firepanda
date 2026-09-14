@@ -274,3 +274,115 @@ def test_a_long_column_elides_its_middle_and_keeps_its_labels(firepanda: ModuleT
     assert lines[6] == "       .."
     assert lines[7].startswith("r7")
     assert lines[11].startswith("r11")
+
+
+# ---------------------------------------------------------------------------
+# How a float column decides its format
+# ---------------------------------------------------------------------------
+
+
+def floats(module: ModuleType, values: list[float]) -> Any:
+    """One float column with a range index, which is the shape all of this is about."""
+    return module.DataFrame({"f": values})["f"]
+
+
+@needs_pandas
+def test_the_zeros_come_off_the_column_and_not_off_the_value(firepanda: ModuleType) -> None:
+    """There is no rule applied to `2.0` on its own that prints it as `2.000`."""
+    import pandas as pd
+
+    values = [1234567.125, 2.0]
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_one_place_always_survives_the_stripping(firepanda: ModuleType) -> None:
+    """A column of whole numbers strips down to `1.` and then puts a zero back."""
+    import pandas as pd
+
+    values = [1.0, 2.0]
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_a_long_column_goes_to_an_exponent(firepanda: ModuleType) -> None:
+    """Twelve characters with the leading place stays fixed and thirteen does not."""
+    import pandas as pd
+
+    for values in ([123456789.0, 2.0], [1234567890.0, 2.0], [1234567.125], [1234567.0625]):
+        assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_length_alone_does_not_send_a_column_to_an_exponent(firepanda: ModuleType) -> None:
+    """Fourteen characters and nothing over a million in it, so it stays fixed."""
+    import pandas as pd
+
+    values = [999999.123456, 2.0]
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_a_value_under_the_last_place_sends_the_column_to_an_exponent(
+    firepanda: ModuleType,
+) -> None:
+    """At six places the boundary is exactly `1e-6`, which is representable and stays."""
+    import pandas as pd
+
+    for values in ([1e-6, 1.0], [9.9e-7, 1.0], [1e-5, 1.0]):
+        assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_an_infinity_is_not_a_number_for_any_of_this(firepanda: ModuleType) -> None:
+    """It neither blocks the stripping nor counts towards the length nor gets stripped."""
+    import pandas as pd
+
+    values = [float("inf"), 1.0, 2.5]
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_the_rounding_goes_to_the_even_digit(firepanda: ModuleType) -> None:
+    """`0.0078125` is an exact binary value, so the tie is real rather than decimal noise."""
+    import pandas as pd
+
+    values = [0.0078125, 1.0]
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_each_column_decides_on_its_own(firepanda: ModuleType) -> None:
+    """Read one at a time, because a frame prints its schema here rather than its rows."""
+    import pandas as pd
+
+    data: dict[str, list[Any]] = {"a": [1e16, 2.0], "b": [1.0, 2.0]}
+    assert repr(firepanda.DataFrame(data)["a"]) == repr(pd.DataFrame(data)["a"])
+    assert repr(firepanda.DataFrame(data)["b"]) == repr(pd.DataFrame(data)["b"])
+
+
+@needs_pandas
+def test_a_value_in_the_elided_middle_does_not_decide_the_column(firepanda: ModuleType) -> None:
+    """The rows that will not be printed are cut before the format is chosen."""
+    import pandas as pd
+
+    values = [float(i) for i in range(100)]
+    values[50] = 1e16
+    assert repr(floats(firepanda, values)) == repr(floats(pd, values))
+
+
+@needs_pandas
+def test_the_labels_are_a_column_and_decide_the_same_way(firepanda: ModuleType) -> None:
+    """A float level goes to an exponent as a whole, the same as a float column of values."""
+    import pandas as pd
+
+    data: dict[str, list[Any]] = {"k": [1e16, 2.0], "v": [1, 2]}
+    assert repr(firepanda.DataFrame(data).set_index("k")["v"]) == repr(
+        pd.DataFrame(data).set_index("k")["v"]
+    )
+
+
+def test_a_null_is_not_a_number_for_any_of_this(firepanda: ModuleType) -> None:
+    """Asserted here rather than against pandas, which spells the missing cell `NaN`."""
+    column = firepanda.DataFrame({"f": [1.5, None, 2.25]})["f"]
+    assert listing(column) == ["0    1.50", "1    <NA>", "2    2.25"]

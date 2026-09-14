@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a float column is formatted as a column
+
+A float value was rendered from the value, and pandas renders it from the column it is in, so several things that look like formatting bugs in isolation were one bug. `fp.Series([1234567.125, 2.0])` printed `2.0` where pandas prints `2.000`, because the trailing zeros come off the whole column at once and only while every value in it still ends in one. `fp.Series([1e-5])` printed `1e-05` where pandas prints `0.00001`. And a column holding one enormous value now sends every value in it to scientific notation, so `[1e16, 2.0]` prints `1.000000e+16` over `2.000000e+00` the way pandas does.
+
+The switch to scientific notation needs two things to be true at once, a longest cell over twelve characters at the default precision and a value over a million somewhere in the column, which is why `123456789.0` stays fixed and `1234567890.0` does not, and why `1234567.125` stays fixed and `1234567.0625` does not. A value that is nonzero and smaller than the last place printed sends the column to an exponent on its own, with no length test, because writing it fixed would print a different number. Rounding is half to even the way C's `printf` is, so `0.0078125` at six places is `0.007812`.
+
+The labels down the side go through the same code, so a float index decides its format the same way a float column does, and each column of a frame decides on its own. The rows that will not be printed are cut before any of this runs, so a value in the elided middle of a tall frame cannot change what the printed values look like. Document 62 has the measurements.
+
 ### Fixed: a value is written where pandas writes it
 
 A column holding a negative number printed one place to the right of where pandas prints it, so `fp.DataFrame({"k": [1, 2], "b": [1.5, -0.5]}).set_index("k")["b"]` gave `1     1.5` where pandas gives `1    1.5`. pandas writes every value one place in from the separator and lets a negative number spend that place on its minus, which is one rule and was not being followed, and it showed up on most numeric columns because most numeric columns hold a negative sooner or later.
