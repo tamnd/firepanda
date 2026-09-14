@@ -5,7 +5,8 @@ size for a kernel and the wrong size for a query. A query has a plan in it, and
 a plan has a join order, a group, a sort and a limit, and every one of those is
 a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
-criteria: TPC-H q1, q3 and q6.
+criteria, TPC-H q1, q3 and q6, together with every other query that answers what
+DuckDB answers.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -85,14 +86,16 @@ def tables() -> List[String]:
 def queries() -> List[Int]:
     """Which queries this asks about.
 
-    The three S4 names as its exit criteria. The other nineteen want a dependent
-    join, a decimal, or both, and each one is added here the day it runs rather
-    than sitting in a list of pending failures.
+    The three S4 names as its exit criteria, and q18, which answered what DuckDB
+    answers as soon as the two agreed on what to call a column the query did not
+    name. The other eighteen want a dependent join, a decimal, or both, and each
+    one is added here the day it runs rather than sitting in a list of pending
+    failures.
 
     Returns:
         The query numbers.
     """
-    return [1, 3, 6]
+    return [1, 3, 6, 18]
 
 
 def recorded(number: Int) -> String:
@@ -150,7 +153,7 @@ def _rendered(frame: DataFrame) raises -> Tuple[String, String]:
     return (header^, body^)
 
 
-def test_the_three_queries_answer_what_duckdb_answers() raises:
+def test_the_queries_answer_what_duckdb_answers() raises:
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
     var helper = Python.import_module("tpch")
