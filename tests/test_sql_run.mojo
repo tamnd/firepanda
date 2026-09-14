@@ -3808,6 +3808,81 @@ def test_a_clock_reading_against_a_date_column_is_refused() raises:
         )
 
 
+def test_a_date_literal_written_with_its_type_is_the_same_bound() raises:
+    # The spelling with the type in front of it, which is the one TPC-H writes
+    # and the one that says what it means without the column next to it.
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= DATE"
+                " '2013-07-01' AND eventdate <= DATE '2013-07-31'"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "the two rows inside July",
+    )
+
+
+def test_a_date_literal_and_a_bare_string_are_the_same_bound() raises:
+    # Both spellings end up as one typed constant, so the plan cannot tell them
+    # apart by the time it runs and neither can the answer.
+    same(
+        answer(
+            "SELECT advengineid FROM hits WHERE eventdate = DATE '2013-07-15'",
+            "AdvEngineID",
+        ),
+        answer(
+            "SELECT advengineid FROM hits WHERE eventdate = '2013-07-15'",
+            "AdvEngineID",
+        ),
+        "one day, written twice",
+    )
+
+
+def test_a_date_literal_reads_before_the_column_is_looked_at() raises:
+    # The string is read where the query is planned rather than once per row,
+    # which is the whole reason the literal becomes a constant. Nothing here
+    # sees that directly, so what is checked is the consequence: a literal that
+    # is not a date is refused by a query that never reaches a row.
+    with assert_raises(contains="'the first of July'"):
+        _ = run(
+            (
+                "SELECT count(*) AS c FROM hits WHERE eventdate >= DATE 'the"
+                " first of July'"
+            ),
+            session(),
+        )
+
+
+def test_a_date_literal_carrying_a_clock_reading_is_refused() raises:
+    # Same refusal the bare string gets, and for the same reason: a date holds
+    # whole days and the time of day would have nowhere to go.
+    with assert_raises(contains="carries a time of day"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= DATE"
+                " '2013-07-01 12:00:00'"
+            ),
+            session(),
+        )
+
+
+def test_a_timestamp_literal_against_a_date_column_is_refused() raises:
+    # A timestamp literal is a count of microseconds and the column is a count
+    # of days, and the promotion has no common type for the two. DuckDB widens
+    # the date to a timestamp here and firepanda does not, which is a
+    # divergence and a refusal rather than a wrong answer.
+    with assert_raises(contains="differ in kind"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate = TIMESTAMP"
+                " '2013-07-15 00:00:00'"
+            ),
+            session(),
+        )
+
+
 def test_an_extract_reads_the_field_off_every_row() raises:
     same(
         answer("SELECT EXTRACT(YEAR FROM eventdate) AS y FROM hits", "y"),

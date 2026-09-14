@@ -36,9 +36,13 @@ the input too, since there the name on its own is not the whole of what was
 written, and it stops printing it the moment binding makes it redundant.
 """
 
+from firepanda.array.value import Value
+from firepanda.dtype.logical import TypeKind
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.temporal import civil_from_days
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
@@ -62,6 +66,95 @@ def _compound(tree: Expressions, at: Int) -> Bool:
     """
     ref node = tree.nodes[at]
     return not (node.kind == ExprKind.COLUMN or node.kind == ExprKind.LITERAL)
+
+
+def _padded(value: Int64, width: Int) -> String:
+    """Writes a number out with leading zeroes to a fixed width.
+
+    Args:
+        value: The number, which is never negative here.
+        width: How many digits.
+
+    Returns:
+        The digits.
+    """
+    var digits = String(value)
+    var out = String()
+    for _ in range(width - digits.byte_length()):
+        out += "0"
+    return out + digits
+
+
+def _instant(value: Value) raises -> String:
+    """Writes a date or timestamp constant out as the instant it names.
+
+    A constant holds a count and a `Value` prints the count, which is the right
+    answer for a number and an unreadable one for an instant. `d == 18262` says
+    nothing that `d == 2020-01-01` does not say better, and a plan is read by
+    people.
+
+    It lives here rather than on `Value` because of which way the imports run.
+    `firepanda/array` sits under the kernel that knows the calendar, so a value
+    cannot ask what day it is without the two importing each other. A plan is
+    above both and can ask.
+
+    Args:
+        value: The constant, whose type is a date or a naive or zoned
+            timestamp.
+
+    Returns:
+        ISO 8601, with the clock reading only where there is one and the
+        fraction only where it is not zero.
+
+    Raises:
+        Error: Only what reading the constant raises.
+    """
+    var count = value.as_scalar[DType.int64]()
+    var per_second = Int64(0)
+    var days: Int64
+    var rest = Int64(0)
+    if value.type.kind == TypeKind.DATE:
+        days = count
+    else:
+        # Floor rather than truncate, so an instant before the epoch lands on
+        # the day it is in rather than on the one after it.
+        per_second = value.type.unit.per_second()
+        var per_day = per_second * 86400
+        days = count // per_day
+        rest = count - days * per_day
+
+    var civil = civil_from_days[1](days)
+    var out = String(
+        _padded(civil.year[0], 4),
+        "-",
+        _padded(civil.month[0], 2),
+        "-",
+        _padded(civil.day[0], 2),
+    )
+    if value.type.kind == TypeKind.DATE:
+        return out^
+
+    out += String(
+        " ",
+        _padded(rest // (per_second * 3600), 2),
+        ":",
+        _padded((rest // (per_second * 60)) % 60, 2),
+        ":",
+        _padded((rest // per_second) % 60, 2),
+    )
+    var fraction = rest % per_second
+    if fraction != 0:
+        # As many digits as the unit has and no more, so a millisecond column
+        # writes three and a nanosecond column writes nine.
+        var digits = 3
+        if value.type.unit == TimeUnit.MICRO:
+            digits = 6
+        elif value.type.unit == TimeUnit.NANO:
+            digits = 9
+        out += String(".", _padded(fraction, digits))
+    if not value.type.zone.is_naive():
+        out += String(" ", value.type.zone)
+    return out^
 
 
 def render_expr(tree: Expressions, root: Int) raises -> String:
@@ -91,6 +184,14 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
         return node.name
 
     if node.kind == ExprKind.LITERAL:
+        # A duration is temporal too and is not an instant, so this asks for the
+        # two kinds that name a point rather than for the predicate that covers
+        # all three.
+        if node.value.present and (
+            node.value.type.kind == TypeKind.DATE
+            or node.value.type.kind == TypeKind.TIMESTAMP
+        ):
+            return _instant(node.value)
         return String(node.value)
 
     if node.kind == ExprKind.UNARY:

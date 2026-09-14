@@ -18,6 +18,7 @@ from std.testing import (
 )
 
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.sql.types import (
     DECIMAL_DEFAULT_SCALE,
     DECIMAL_DEFAULT_WIDTH,
@@ -51,6 +52,7 @@ from firepanda.sql.types import (
     VARCHAR,
     decimal,
     engine_type,
+    instant_type,
     nearest_type,
     parse_type,
     spellings,
@@ -300,6 +302,43 @@ def test_the_temporal_types_wait_on_a_cast_that_converts_values() raises:
         _ = engine_type(TIMESTAMP)
     with assert_raises(contains="the integer underneath"):
         _ = engine_type(parse_type("time"))
+
+
+def test_a_written_out_instant_is_read_where_a_column_cannot_be() raises:
+    # The other half of the sentence above. A column has to be converted and a
+    # literal only has to be read, so the five types a literal reaches are the
+    # five the cast still refuses.
+    assert_equal(instant_type(DATE), LogicalType.DATE32)
+    assert_equal(instant_type(TIMESTAMP), LogicalType.timestamp(TimeUnit.MICRO))
+    assert_equal(
+        instant_type(parse_type("timestamp_s")),
+        LogicalType.timestamp(TimeUnit.SECOND),
+    )
+    assert_equal(
+        instant_type(parse_type("timestamp_ms")),
+        LogicalType.timestamp(TimeUnit.MILLI),
+    )
+    assert_equal(
+        instant_type(parse_type("timestamp_ns")),
+        LogicalType.timestamp(TimeUnit.NANO),
+    )
+
+
+def test_a_zoned_instant_has_no_session_to_be_read_against() raises:
+    with assert_raises(contains="session's time zone"):
+        _ = instant_type(TIMESTAMP_TZ)
+
+
+def test_a_time_of_day_on_its_own_is_not_an_instant() raises:
+    with assert_raises(contains="no engine type for TIME"):
+        _ = instant_type(parse_type("time"))
+    with assert_raises(contains="no engine type for TIME_NS"):
+        _ = instant_type(parse_type("time_ns"))
+
+
+def test_a_type_that_is_not_temporal_is_not_read_as_an_instant() raises:
+    with assert_raises(contains="does not read BIGINT as an instant"):
+        _ = instant_type(BIGINT)
 
 
 def test_the_types_with_nowhere_to_land_say_so_by_name() raises:

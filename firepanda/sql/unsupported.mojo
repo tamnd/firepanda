@@ -165,46 +165,43 @@ comptime ROW_VALUE: UInt16 = 27
 comptime INTERVAL: UInt16 = 28
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
-comptime TYPE_LITERAL: UInt16 = 29
-"""A type name in front of a string, as in `DATE '2020-01-01'`."""
-
-comptime SPECIAL_CALL: UInt16 = 30
+comptime SPECIAL_CALL: UInt16 = 29
 """A function the grammar gives a rule of its own, such as `TRIM`."""
 
-comptime LAMBDA: UInt16 = 31
+comptime LAMBDA: UInt16 = 30
 """`lambda x: x + 1`, a function written in the query."""
 
-comptime LIST_COMPREHENSION: UInt16 = 32
+comptime LIST_COMPREHENSION: UInt16 = 31
 """`[x + 1 FOR x IN l]`, a list built by running an expression."""
 
-comptime NAMED_ARGUMENT: UInt16 = 33
+comptime NAMED_ARGUMENT: UInt16 = 32
 """`f(a := 1)`, an argument passed by name."""
 
-comptime COLUMNS: UInt16 = 34
+comptime COLUMNS: UInt16 = 33
 """`COLUMNS('regex')`, a pattern standing for a set of columns."""
 
-comptime MAP_LITERAL: UInt16 = 35
+comptime MAP_LITERAL: UInt16 = 34
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime GROUPING: UInt16 = 36
+comptime GROUPING: UInt16 = 35
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
-comptime POSITIONAL: UInt16 = 37
+comptime POSITIONAL: UInt16 = 36
 """`#1`, a column named by its place in the select list."""
 
-comptime DEFAULT_VALUE: UInt16 = 38
+comptime DEFAULT_VALUE: UInt16 = 37
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 39
+comptime UNPIVOT_NULLS: UInt16 = 38
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 40
+comptime UNPIVOT_GROUPS: UInt16 = 39
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 41
+comptime QUANTIFIED_VALUE: UInt16 = 40
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 42
+comptime NO_CASE: UInt16 = 41
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -478,18 +475,6 @@ def sql_support() -> List[Refusal]:
                 "A duration is its own type with its own arithmetic, and"
                 " firepanda has no column type for one yet. It arrives with the"
                 " date and time work."
-            ),
-            STAGE_ISSUE,
-        ),
-        Refusal(
-            "type-literal",
-            "a typed literal such as DATE '2020-01-01'",
-            (
-                "The type in front of the string decides how the string is"
-                " read, which is a cast, and a cast is written CAST(x AS t)"
-                " here. The types a cast reaches are the boolean, the eight"
-                " fixed width integers, FLOAT, DOUBLE and VARCHAR, so a date"
-                " literal waits on the date work either way."
             ),
             STAGE_ISSUE,
         ),

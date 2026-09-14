@@ -2998,6 +2998,85 @@ def test_a_search_of_one_thing_is_refused_while_it_binds() raises:
         _ = _plan("SELECT strpos(g) FROM t")
 
 
+def test_a_date_literal_is_a_constant_where_a_bare_string_is_text() raises:
+    # The two read the same and are not the same node. A bare string stays
+    # text in the plan and is read against the column it meets, which is why it
+    # needs a column to meet. A typed literal says its own type and is read
+    # where the query is lowered, so it is a day count by the time anything
+    # looks at it. Both print as the day they name.
+    assert_equal(
+        _plan("SELECT n FROM w WHERE d = DATE '2020-01-01'"),
+        "PROJECT [n]\n  FILTER d == 2020-01-01\n    SCAN w []\n",
+    )
+    assert_equal(
+        _plan("SELECT n FROM w WHERE d = '2020-01-01'"),
+        "PROJECT [n]\n  FILTER d == 2020-01-01\n    SCAN w []\n",
+    )
+
+
+def test_a_timestamp_literal_keeps_the_clock_reading_it_was_given() raises:
+    assert_equal(
+        _plan("SELECT n FROM w WHERE ts = TIMESTAMP '2020-01-01 06:07:08'"),
+        "PROJECT [n]\n  FILTER ts == 2020-01-01 06:07:08\n    SCAN w []\n",
+    )
+
+
+def test_a_cast_of_a_string_to_a_date_is_the_same_constant_again() raises:
+    # The typed literal is the cast spelled the short way, which is what the
+    # transform builds out of it, so the long spelling has to agree.
+    assert_equal(
+        _plan("SELECT n FROM w WHERE d = CAST('2020-01-01' AS DATE)"),
+        _plan("SELECT n FROM w WHERE d = DATE '2020-01-01'"),
+    )
+
+
+def test_a_date_literal_stands_on_its_own_without_a_column() raises:
+    # Nothing here reads a column, which is the part a bare string cannot do:
+    # a bare string with no column next to it is text and stays text.
+    assert_equal(
+        _plan("SELECT DATE '2020-01-01' FROM w"),
+        "PROJECT [2020-01-01 as __expr_0]\n  SCAN w []\n",
+    )
+
+
+def test_a_cast_of_a_column_to_a_date_is_still_refused() raises:
+    # Only the written out instant is read. A column of text would need a
+    # conversion per row and the cast kernel converts layouts, so this keeps
+    # the refusal it had.
+    with assert_raises(contains="does not cast to DATE yet"):
+        _ = _plan("SELECT CAST(g AS DATE) FROM t")
+
+
+def test_a_date_literal_carrying_a_clock_reading_is_refused() raises:
+    with assert_raises(contains="carries a time of day"):
+        _ = _plan("SELECT DATE '2020-01-01 06:07:08' FROM w")
+
+
+def test_a_date_literal_that_is_not_a_date_is_refused_and_quoted() raises:
+    with assert_raises(contains="'not a date'"):
+        _ = _plan("SELECT DATE 'not a date' FROM w")
+
+
+def test_a_time_literal_has_no_engine_type_to_be_read_into() raises:
+    with assert_raises(contains="no engine type for TIME"):
+        _ = _plan("SELECT TIME '06:07:08' FROM w")
+
+
+def test_a_zoned_timestamp_literal_waits_on_a_session() raises:
+    with assert_raises(contains="session's time zone"):
+        _ = _plan("SELECT TIMESTAMPTZ '2020-01-01 06:07:08+02' FROM w")
+
+
+def test_a_typed_literal_over_a_type_that_is_not_temporal_is_a_cast() raises:
+    # `INTEGER '42'` is a cast of a string and always was. It goes through the
+    # same node as the date literal now, and the cast it means is the one that
+    # already ran.
+    assert_equal(
+        _plan("SELECT INTEGER '42' FROM w"),
+        _plan("SELECT CAST('42' AS INTEGER) FROM w"),
+    )
+
+
 def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
     assert_equal(
         _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),
