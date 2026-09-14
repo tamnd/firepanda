@@ -27,6 +27,15 @@ Two things inside the engine had to be fixed before the rewrite was worth making
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+### Changed: a sort under a limit keeps the rows the limit needs instead of ordering everything
+
+The plan's limit pass has written a bound onto the sort node for several releases and nothing read it. The sort operator reads it now, so `ORDER BY x LIMIT 10` over a million rows scans for the best ten rather than building a permutation of a million and gathering every column at every row. The limit above stays where it is and goes on doing the cutting, which is why the answers are identical and why a plan that never ran the limit pass still lowers to a sort of everything.
+
+The bound is the offset plus the length, because the rows a limit skips still have to be found before the ones it keeps. On a million rows with `LIMIT 10`, two columns go from 19.5 ms to 2.1 ms and sixteen columns go from 75.1 ms to 5.3 ms. The rule pays at every width and pays more as the frame gets wider, since what it saves is one permutation plus a gather per column, so there is no column count below which it is turned off.
+
+It keeps paying well past a top ten. Asking for a tenth of the table, a hundred thousand rows out of a million over sixteen columns, is 71.3 ms unbounded and 28.5 ms bounded. The kernel falls back to one ordinary sort once the bound reaches the input, so a bound that bounds nothing costs nothing.
+
+A bounded sort still holds every row that arrives. What the bound saves is the permutation and the gathers, not the memory. Holding a heap per chunk instead would be a third operator rather than a flag on this one, and the gathers are where a wide sort spends its time, so that is the half worth having first.
 
 ### Added: `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, the last of the `str` questions about what a character is
 

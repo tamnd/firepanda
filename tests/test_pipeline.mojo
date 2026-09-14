@@ -3701,6 +3701,97 @@ def test_a_sort_on_two_keys_breaks_the_first_key_ties() raises:
     assert_equal(got[5], 1, "down to the smallest")
 
 
+def test_a_bounded_sort_gives_what_the_limit_above_would_have_taken() raises:
+    # The whole claim. A sort told it only needs two rows and a limit of two
+    # over an unbounded sort are the same two rows in the same order, and the
+    # bounded one never builds a permutation of the six.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False], bound=2)))
+    pipeline.add(Node(Limit(2)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 6, "first")
+    assert_equal(got[1], 5, "second")
+
+
+def test_a_bound_covers_the_offset_as_well_as_the_length() raises:
+    # The rows a limit skips still have to be found, so the bound the plan
+    # writes is the offset plus the length. A bound of two under a limit that
+    # skips one would answer with a row the sort never looked for.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False], bound=3)))
+    pipeline.add(Node(Limit(2, 1)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 5, "the second largest, since one was skipped")
+    assert_equal(got[1], 4, "and the third")
+
+
+def test_a_bound_wider_than_the_input_sorts_the_whole_thing() raises:
+    # A bound that bounds nothing has to answer what an unbounded sort answers,
+    # every row and not the first n of them, because the operator above it may
+    # not be a limit at all.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False], bound=99)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 6, "every row")
+    for i in range(6):
+        assert_equal(got[i], Int64(6 - i), "row " + String(i))
+
+
+def test_a_bounded_sort_over_two_keys_breaks_the_ties_the_same_way() raises:
+    # The bounded route is a different kernel, so the tie rule is worth asking
+    # again rather than assuming. The mask is the dominant key and the number
+    # refines it, which is the unbounded test above with a bound on it.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([1, 0], [False, True], [False, False], bound=3)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 3, "the three the bound asked for")
+    assert_equal(got[0], 5, "the largest of the two it dropped")
+    assert_equal(got[1], 2, "then the other")
+    assert_equal(got[2], 6, "then the largest it kept")
+
+
+def test_a_bounded_sort_puts_the_nulls_where_it_was_told_to() raises:
+    # Two rows of the six are missing and the nulls are asked for first, so a
+    # bound of two answers with the two rows that have nothing in them.
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Sort([0], [False], [True], bound=2)))
+    var out = pipeline^.run()
+    var there = present(out, "n")
+    assert_equal(len(there), 2, "rows")
+    assert_false(there[0], "the first is missing")
+    assert_false(there[1], "and so is the second")
+
+
+def test_a_bound_of_nothing_answers_nothing() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False], bound=0)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 0, "rows")
+    assert_equal(out.width(), 2, "and the schema still describes the result")
+
+
+def test_a_bounded_sort_cuts_its_answer_at_the_chunks_it_was_given() raises:
+    # A sort hands back the chunk sizes it was given, and a bounded one hands
+    # back as many of them as the bound reached. The frame arrives as two, three
+    # and one, so a bound of four is the first chunk and most of the second.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False], bound=4)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 4, "rows")
+    assert_equal(out.columns[0].num_chunks(), 2, "two of the three")
+
+
+def test_a_sort_bounded_at_a_number_that_is_not_one_is_refused() raises:
+    with assert_raises(contains="is not a number of rows to keep"):
+        _ = Sort([0], [True], [False], bound=-2)
+
+
 def test_a_sort_with_no_key_is_refused() raises:
     with assert_raises(contains="does not order anything"):
         _ = Sort(List[Int](), List[Bool](), List[Bool]())

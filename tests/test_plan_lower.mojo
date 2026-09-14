@@ -27,6 +27,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
+from firepanda.plan.limits import limits
 from firepanda.plan.lower import lower
 from firepanda.plan.merge import merge
 from firepanda.plan.node import NO_LIMIT, SET_EXCEPT, SET_INTERSECT, Plan
@@ -1538,6 +1539,102 @@ def test_a_sort_under_a_limit_is_the_top_of_it() raises:
     var qty = plan.exprs.column("qty")
     var sorted = plan.sort(scan, [qty], [True], [True])
     var root = plan.limit(sorted, 0, 3)
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [40, 30, 25], "the three largest")
+
+
+def test_a_bounded_sort_answers_what_the_unbounded_one_would_have() raises:
+    # The limit pass writes the bound and the lowering hands it over, so this is
+    # the test above with the pass in the middle. The limit is still there and
+    # still does the cutting, which is why the two answers have to agree.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var sorted = plan.sort(scan, [plan.exprs.column("qty")], [True], [True])
+    var root = plan.limit(sorted, 0, 3)
+    _ = limits(plan, root, schemas())
+    assert_equal(plan.nodes[sorted].length, 3, "the sort owes three rows")
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [40, 30, 25], "the three largest")
+
+
+def test_a_bounded_sort_carries_the_other_columns_with_the_row() raises:
+    # The bounded route gathers the columns that are not keys at the rows it
+    # chose, the same as the unbounded one, and getting that wrong is a wrong
+    # answer that reads like a right one.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var sorted = plan.sort(scan, [plan.exprs.column("qty")], [True], [True])
+    var root = plan.limit(sorted, 0, 3)
+    _ = limits(plan, root, schemas())
+    var out = run(plan, root)
+
+    same(read_back(out, "price"), [1, 4, 3], "the price of each row")
+
+
+def test_a_bound_covers_the_rows_an_offset_skips() raises:
+    # The pass bounds the sort at the offset plus the length, because the rows
+    # the limit throws away still have to be found to know what is behind them.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var sorted = plan.sort(scan, [plan.exprs.column("qty")], [True], [True])
+    var root = plan.limit(sorted, 2, 3)
+    _ = limits(plan, root, schemas())
+    assert_equal(plan.nodes[sorted].length, 5, "three rows after two")
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [25, 20, 15], "the third, fourth and fifth")
+
+
+def test_a_bounded_sort_on_two_keys_breaks_the_ties_the_same_way() raises:
+    # A second key on the bounded route, which is a different kernel from the
+    # passes the unbounded one runs, so the tie rule is worth asking again.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var band = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("qty"), ten)
+    var over = plan.project(
+        scan, [band, plan.exprs.column("qty")], ["over", "qty"]
+    )
+    var sorted = plan.sort(
+        over,
+        [plan.exprs.column("over"), plan.exprs.column("qty")],
+        [False, True],
+        [True, True],
+    )
+    var root = plan.limit(sorted, 0, 5)
+    _ = limits(plan, root, schemas())
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [8, 5, 3, 1, 40], "the second key inside")
+
+
+def test_a_bound_wider_than_the_table_is_the_whole_sort() raises:
+    # A bound that bounds nothing has to give every row back, since the limit
+    # above it is not cutting anything either.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var sorted = plan.sort(scan, [plan.exprs.column("qty")], [False], [True])
+    var root = plan.limit(sorted, 0, 50)
+    _ = limits(plan, root, schemas())
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "qty"),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "ascending, all ten",
+    )
+
+
+def test_a_sort_the_pass_never_saw_still_sorts_everything() raises:
+    # The bound is an opportunity, so a plan that skipped the limit pass has to
+    # lower to a sort of the whole table and answer the same way.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var sorted = plan.sort(scan, [plan.exprs.column("qty")], [True], [True])
+    var root = plan.limit(sorted, 0, 3)
+    assert_equal(plan.nodes[sorted].length, NO_LIMIT, "no bound was written")
     var out = run(plan, root)
 
     same(read_back(out, "qty"), [40, 30, 25], "the three largest")
