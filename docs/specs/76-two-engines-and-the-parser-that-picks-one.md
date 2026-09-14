@@ -116,11 +116,11 @@ This parser reads `\z`, which matches 3.14 and the version the differential runs
 
 ## 11. What is not here yet
 
-The matching engines. Both of them, with two class tables and two end anchors so that the RE2 side and the Python side diverge in exactly the four places document 73 section 6 measured and nowhere else. Both have to be linear time, for the reason issue #158 gave originally, which does not weaken because the semantics being copied are Python's.
+The matching engines. Both of them, with two class tables and two end anchors so that the RE2 side and the Python side diverge in exactly the four places document 73 section 6 measured and nowhere else. Both have to be linear time, for the reason issue #158 gave originally, which does not weaken because the semantics being copied are Python's. The RE2 side is now document 77 and the Python side is still out.
 
 The wiring. None of `contains`, `match`, `fullmatch`, `count` or `replace` consults any of this yet, and the gate in `python/firepanda/_pandas.py` that refuses any pattern holding one of twelve metacharacters is still the thing a caller meets.
 
-Scoped flags. `(?i:a)` parses and the flags are dropped rather than carried on the node, because there is nothing yet that could act on them. The node it leaves is the same node `(?:a)` leaves, which is deliberate: a subpattern numbered zero would have been the obvious place to hang them and would also have been a lie, since zero is the whole match.
+Scoped flags. `(?i:a)` parses and the flags are dropped rather than carried on the node, because there is nothing yet that could act on them. The node it leaves is the same node `(?:a)` leaves, which is deliberate: a subpattern numbered zero would have been the obvious place to hang them and would also have been a lie, since zero is the whole match. What the parse does carry is which letters a scoped group mentioned, so that the compiler in document 77 can refuse the pattern rather than answer it as though they were never written.
 
 The measurements document 73 section 10 listed are still not taken: the empty match rule in `replace` and `count` on each side, which of several equal length alternatives a capture group ends up holding, what `(?i)` does to a Unicode class in each, and whether RE2's leftmost first is leftmost first everywhere. Each is a place a compatibility layer can be quietly wrong, and each should be measured before the piece that depends on it is written.
 

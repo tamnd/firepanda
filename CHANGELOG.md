@@ -15,6 +15,19 @@ A frame that arrives in one chunk runs a filtering line about 1.65 times slower 
 `exec/pipeline_line_two_chunks` and `exec/pipeline_line_eight_chunks` run the same line over chunks of two million and five hundred thousand rows. Both are as far past every level of cache as the four million row chunk is, so if the cost were the size of the intermediates they would sit with the one chunk row. They sit with the morsel sized row instead. On the i9-13900K at four million rows with the machine idle, one chunk is 3.46 milliseconds, two is 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is 2.26. The whole of the cost is the step from one chunk to two, which is where the driver stops running the line on the calling thread and starts handing the prefix out, so what a one chunk frame is missing is the batched prefix and not a cache.
 
 `exec/pipeline_line_one_chunk_split` cuts the one chunk frame into morsels inside the timing and then runs the line, which is what a scan that re-chunked its input would cost today. It is 11.9 milliseconds against 3.46 for leaving the frame alone, because slicing a column allocates and a copy of the source costs more than the whole query. A scan that re-chunks has to slice without allocating, and that is the work the issue describes.
+### Added: a compiler and a matching engine for the RE2 side of the string accessor
+
+Document 76 read a pattern with Python's grammar and worked out which of the two engines pandas would hand it to. This turns one of those parsed patterns into instructions and runs them, for the RE2 side, which is the side that answers the common case. Issue #8 M6.
+
+The program is Thompson's shape, so every place the pattern could be after reading the same number of characters is held at once and the text is read once. `(a+)+b` against sixty letters is sixty steps here and is the textbook way to make a backtracking engine take longer than anyone will wait, which matters because the pattern comes from a caller and the text comes from a column.
+
+A refusal carries a flag saying whose it is. Either RE2 refuses the pattern too, in which case refusing is agreement and the caller gets the same Arrow error out of pandas today, or firepanda cannot answer it yet, in which case it is a gap with a name. That one bit puts every decision about what can be answered in the compiler, next to the facts about RE2, instead of leaving it as a guess about the pattern text somewhere further out.
+
+Six of the constructs RE2 refuses were already known and the rest were measured here. Two of them look like nothing at all: a backslash in front of a character outside ASCII is an ordinary way to write that character to Python and an error to RE2, and `[\1]` is the character with code one to Python and an error to RE2, which will not read a nonzero octal escape of fewer than two digits. A third is a budget rather than a construct, since RE2 will not repeat anything more than a thousand times and counts the whole way down, so `(a{11}){91}` is refused for asking for 1001 copies written as two numbers neither of which is over the limit.
+
+`pixi run differential-regex-match` runs thirty thousand generated patterns against sixteen pieces of text through both this engine and pandas, and compares the refusals and the answers. It agrees on every pattern it compares across five seeds, with the held out patterns counted by reason so that setting one aside is a number somebody watches rather than a silence. The first run disagreed about 66 patterns in three families and every one was a fact about RE2 that had not been measured, which is the same thing the routing corpus did and the reason it was written before the hand written tests.
+
+Nothing is wired to the string accessor yet, and captures, case folding and the Python engine are named in document 77 section 8 rather than half done.
 
 ### Changed: a filter counts its mask once for the chunk and not once per column
 

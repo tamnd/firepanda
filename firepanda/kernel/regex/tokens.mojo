@@ -143,6 +143,37 @@ comptime CATEGORY_NOT_WORD: UInt8 = 6
 """`\\W`."""
 
 
+comptime FLAG_IGNORECASE: Int32 = 1
+"""`(?i)`. RE2 has it and Python has it and they fold different alphabets, which
+is a table nobody here has written yet."""
+
+comptime FLAG_LOCALE: Int32 = 2
+"""`(?L)`, which asks for the C library's idea of a letter. RE2 refuses the
+letter outright, so a pattern carrying this one is an error rather than a
+difference."""
+
+comptime FLAG_MULTILINE: Int32 = 4
+"""`(?m)`, which turns `^` and `$` into line anchors. The two engines agree
+about this one."""
+
+comptime FLAG_DOTALL: Int32 = 8
+"""`(?s)`, which lets a full stop match a newline. They agree about this one
+too."""
+
+comptime FLAG_VERBOSE: Int32 = 16
+"""`(?x)`. RE2 refuses the letter. Python reads it and throws away whitespace
+and comments before the grammar sees them, which this parser does not do, so a
+verbose pattern is read wrongly here and has to be refused rather than run."""
+
+comptime FLAG_ASCII: Int32 = 32
+"""`(?a)`, which narrows Python's classes to the ones RE2 already has. RE2
+refuses the letter, so asking for RE2's own behaviour in RE2's own syntax is an
+error."""
+
+comptime FLAG_UNICODE: Int32 = 64
+"""`(?u)`, which is what Python does anyway. RE2 refuses this letter as well."""
+
+
 comptime MAXREPEAT: Int32 = 0x7FFFFFFF
 """What the upper bound of an unbounded quantifier holds. Python calls the same
 thing `MAXREPEAT` and gives it a number too, for the same reason: a repeat with
