@@ -378,10 +378,23 @@ aggregate, and a part that reads the outer query any other way is refused.
 The join is a left one because an outer row whose group has no rows in it still
 comes out, with a null where the subquery's value goes, and null is what a fold
 over nothing answers in SQL. That is exactly true of a sum, a minimum, a maximum
-and an average, and exactly false of a count, which answers zero. So a count is
-refused here rather than answered wrong. That refusal is the count bug, named
-after the wrong answer decorrelation gives when nobody checks for it, and it
-goes away when the plan can say `coalesce`.
+and an average, and exactly false of a count, which answers zero. That is the
+count bug, named after the wrong answer decorrelation gives when nobody checks
+for it, and it is a wrong answer twice over: the count comes back null, and null
+is a row a filter does not keep, so the outer row the count was zero for goes
+missing as well.
+
+The zero goes back on above the join, where the expression the subquery was
+taken out of reads the column, because that is the one place that knows the null
+is the join padding a row rather than anything the count answered. It is written
+as the conditional it is rather than a `coalesce` the plan does not have.
+
+That reading only says what it means when the whole value is the count.
+`count(k) + 1` over an empty group is one rather than zero, and the addition
+happens under the join where the count is not there to be zero yet, so there is
+no one constant the padding stands for and that shape is refused instead. It is
+the shape a dependent join pass answers, by rebuilding the value with each fold
+replaced by what it answers over nothing.
 
 Correlation written anywhere but a `WHERE`, or written as anything but an
 equality, is still refused. Both are the dependent join, which is a pass over
@@ -1701,6 +1714,11 @@ struct _Walk(Movable):
     var scalar_names: List[String]
     """What the one column each of those produced is called."""
 
+    var scalar_zeroes: List[Bool]
+    """Whether each of those columns reads a null as a zero. True for a
+    correlated count, whose group having no rows in it is the join padding a
+    row rather than the count answering null, and false for everything else."""
+
     var marks: List[UInt32]
     """The `IN` over a subquery a mark join has already been built for, as they
     are written in the SQL arena."""
@@ -1730,6 +1748,7 @@ struct _Walk(Movable):
         self.window_keys = List[String]()
         self.scalars = List[UInt32]()
         self.scalar_names = List[String]()
+        self.scalar_zeroes = List[Bool]()
         self.marks = List[UInt32]()
         self.mark_names = List[String]()
         self.asked = List[UInt32]()
@@ -2303,7 +2322,18 @@ def _lower_expr(
     if node.kind == EXPR_SUBQUERY:
         var place = walk._scalar(at)
         if place >= 0:
-            return plan.exprs.column(String(walk.scalar_names[place]))
+            var held = plan.exprs.column(String(walk.scalar_names[place]))
+            if not walk.scalar_zeroes[place]:
+                return held
+            # A correlated count, where the null on the column is the left join
+            # padding an outer row whose group had no rows in it rather than
+            # anything the count answered. A count of nothing is zero, and this
+            # is the one place that knows the null stands for one.
+            return plan.exprs.conditional(
+                plan.exprs.call("is_null", [held], True),
+                plan.exprs.literal(Value(Int64(0))),
+                held,
+            )
         raise Error(
             "firepanda lowers an uncorrelated subquery that answers one value"
             " where it is written in a WHERE, or in the select list of a query"
@@ -4888,7 +4918,9 @@ def _counting(exprs: Expressions, at: Int) -> Bool:
     A count does and every other fold here does not, which is the whole of the
     count bug and the reason this is asked at all. `count` over nothing is zero
     and `count(DISTINCT x)` over nothing is zero, where a sum, a minimum and an
-    average over nothing are all null.
+    average over nothing are all null. So a count is the one fold whose answer
+    over an empty group is not the null a left join pads with, and the one that
+    has to have that null read back as something.
 
     Args:
         exprs: The arena.
@@ -5012,6 +5044,9 @@ def _scalar_join(
     var one_row = plan.project(root, only^, renamed^)
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
+    # A cross join onto one row pads nothing, so a null here is the subquery's
+    # own answer and is read as one.
+    walk.scalar_zeroes.append(False)
     return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
 
 
@@ -5050,8 +5085,11 @@ def _folded_join(
     still comes out, with a null where the subquery's value goes, and null is
     what SQL says a fold over nothing answers. That is exactly true of a sum, a
     minimum, a maximum and an average and exactly false of a count, which
-    answers zero. So a count is refused here rather than answered wrong, and
-    that refusal is the count bug named after the wrong answer it gives.
+    answers zero. That is the count bug, and the zero goes back on above the
+    join where the column is read, since that is the one place that knows the
+    null is the padding rather than an answer. A count inside a larger
+    expression is refused instead, there being no one constant the padding
+    stands for once something has been done to the count under the join.
 
     The aggregate's own columns are renamed on the way out, both the keys and
     the value, because the query around it may already have a column called
@@ -5076,8 +5114,8 @@ def _folded_join(
 
     Raises:
         If the subquery is a shape this does not decorrelate, if it does not
-        fold, if it folds a count, or if it reads the outer query any way but
-        through equalities.
+        fold, if it counts inside a larger expression, or if it reads the outer
+        query any way but through equalities.
     """
     var node = ast.exprs[Int(at)]
     var top = ast.stmts[Int(node.a)]
@@ -5219,15 +5257,36 @@ def _folded_join(
     # `avg(qty) + 1` be a projection over the aggregate rather than a refusal.
     var fold_walk = _Walk()
     var value = _lower_expr(ast, item.a, plan, fold_walk, scope, True)
+
+    # The count bug, and where the zero for it is put back. A left join pads an
+    # outer row whose group has no rows in it with null, which is what a sum or
+    # an average over nothing answers and is not what a count answers. So the
+    # padding is read as the zero it stands for, above the join, where the
+    # expression the subquery was taken out of reads the column.
+    #
+    # That reading only says what it means when the whole value is the count.
+    # `count(*) + 1` over an empty group is one rather than zero, and the
+    # addition happens under the join where the count is not there to be zero
+    # yet, so there is no one constant the padding stands for. Which is a
+    # refusal rather than a wrong answer.
+    var zeroed = False
     for i in range(len(fold_walk.aggs)):
-        if _counting(plan.exprs, fold_walk.aggs[i]):
-            raise Error(
-                "firepanda does not decorrelate a correlated subquery that"
-                " counts yet. A left join answers null for an outer row whose"
-                " group has no rows in it, which is what a sum or an average"
-                " over nothing answers and is not what a count answers, and a"
-                " count of nothing is zero"
-            )
+        if not _counting(plan.exprs, fold_walk.aggs[i]):
+            continue
+        if (
+            len(fold_walk.aggs) == 1
+            and plan.exprs.nodes[value].kind == ExprKind.COLUMN
+            and plan.exprs.nodes[value].name == fold_walk.agg_names[0]
+        ):
+            zeroed = True
+            continue
+        raise Error(
+            "firepanda decorrelates a correlated subquery whose value is a"
+            " count, and this one counts inside a larger expression. A left"
+            " join answers null for an outer row whose group has no rows in"
+            " it, a count of nothing is zero rather than null, and the zero"
+            " can only be put back where the count is the whole of the value"
+        )
 
     # A group key keeps the name of the column it reads, because the physical
     # group by carries the input field through and refuses a key the plan
@@ -5267,6 +5326,7 @@ def _folded_join(
     scope.hide(reach, merged)
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
+    walk.scalar_zeroes.append(zeroed)
     return plan.join(left.at, one_each, outer^, against^, JoinKind.LEFT)
 
 
