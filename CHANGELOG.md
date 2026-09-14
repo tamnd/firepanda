@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `upper` and `lower` over ASCII text run sixty times faster
+
+The last release measured `upper` at four hundred nanoseconds a row over forty bytes of ASCII, with every core already on it, and said that something else inside the kernel had to be wrong. It was. An ASCII element was paying for four walks and a heap allocation, and it needs none of them: a pass to check the bytes are valid UTF-8, a pass looking for a lead byte the correction table could know about, the standard library's walk into a fresh `String`, and then a copy of that `String` into the column being built before it is dropped.
+
+One pass answers an ASCII element now. The letters are found by two compares and flipped by an exclusive or, and whether any byte sits at or above 0x80 is accumulated in the same registers and asked once at the end rather than branched on per byte. The answer is written straight into the payload of the column being built, the way an unescaped CSV field already is, so there is no temporary at all.
+
+Measured on the i9-13900K over four million rows of forty byte ASCII, alternated twice: 1.674 seconds and 1.525 seconds without the fast path, 26.5 milliseconds with it both times. That is 6.6 nanoseconds a row against four hundred, which is sixty times, and it is the difference between a case change being the most expensive thing in a query and being cheaper than the substring beside it.
+
+An element with a byte at or above 0x80 is refused and takes exactly the path it took before, so none of the Unicode answers move and the hundred and forty nine corrections keep their table. A refusal is not free, because whether an element is ASCII is only known once every byte has been looked at, so it is one wasted pass over bytes that get walked again. The same four million rows with an accent in every one of them ran 1.692 and 1.665 seconds before and 1.702 and 1.688 after, which is under one and a half per cent, and there is a benchmark row holding it there.
+
 ## [0.8.3] - 2026-09-14
 
 Built against Mojo 1.0.0 (ed45d567).

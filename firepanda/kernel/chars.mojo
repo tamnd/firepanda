@@ -908,13 +908,18 @@ def text_case(a: StringArray, upper: Bool) raises -> StringArray:
     about, the standard library's walk into a fresh `String`, and then a copy of
     that `String` into the builder before it is dropped. Measured on the
     i9-13900K over four million rows of forty byte ASCII, with the work already
-    spread over the cores, that came to four hundred and twenty two nanoseconds
-    a row. Issue 756 has the numbers.
+    spread over the cores, the four walks came to four hundred nanoseconds a row
+    and the one pass comes to 6.6, which is sixty times. Issue 756 has the rest
+    of the numbers.
 
     Nothing about the Unicode answers changes. An element with any byte at or
     above 0x80 is one the fast path refuses, and it goes to exactly the path it
     went to before, so the thirty nine full mappings and the hundred and ten
-    the standard library does not know keep the walk and the table.
+    the standard library does not know keep the walk and the table. A refusal
+    costs one wasted pass, because whether an element is ASCII is only known
+    once every byte has been looked at. The same four million rows with an
+    accent in every one of them ran 1.69 seconds either way, which is the
+    `exec/text_case_accented` benchmark row and the reason it exists.
 
     Args:
         a: The column.
