@@ -94,7 +94,7 @@ Verified the same way as everything else here: over all 1112064 code points on t
 
 That was not a list, it was the same table section 6 declined to build. That table is built now and document 65 is about it, and `title` and `istitle` shipped on top of it. Whether a character is cased is the three case classes ORed together and needed nothing new, and the mapping needed nothing new either, since Arrow's titlecase mapping is its upper case mapping for every code point there is. What they did need is a rule about what comes before a character rather than about the character, which is the first thing in this part of the library that cannot be answered a code point at a time, and document 65 section 9 is that rule.
 
-`isalpha`, `isalnum`, `isnumeric`, `isdigit` and `isdecimal` need four more classes of exactly the kind document 65 section 10 sizes, and `isascii` needed no class at all and is already in. Those five are the only names of this group still missing.
+`isalpha`, `isalnum`, `isnumeric`, `isdigit` and `isdecimal` came next on four more classes of exactly the kind document 65 section 4 describes, and document 65 sections 10 and 11 are about them. Nothing in the accessor that asks what a character is is missing now, and `isascii` needed no class at all.
 
 ## 10. What this does to the board
 

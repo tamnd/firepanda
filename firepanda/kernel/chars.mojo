@@ -128,6 +128,30 @@ The character a word starts with is Arrow's upper case and not its titlecase,
 which sounds wrong and is measured: Arrow's titlecase mapping equals its upper
 case mapping for every code point in Unicode, so there is no third mapping
 table here and `ǅungla` titles to `Ǆungla`.
+
+### The five that are one rule
+
+`isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum` are the simple
+shape the case questions are not: the row has a character in it and every
+character it has is in the class, so the loop stops at the first character that
+is not a member. Four of them read one class each and `isalnum` reads two,
+because Arrow has no alphanumeric class and a character is alphanumeric exactly
+when it is a letter or a number. That identity and the nesting of the three
+number classes are measured against Arrow over every code point by the
+generator rather than taken from the standard.
+
+The three number questions narrow, and not where a Python programmer expects.
+An ASCII four is all three. A superscript two and a half sign are numeric and
+digits and not decimal, because Arrow calls anything written as a single number
+sign a digit, where Python calls `½` numeric and not a digit. A Roman numeral is
+numeric and neither of the others, because it is a number and a letter at once.
+Arrow and Python disagree about 877 code points on the digit question alone and
+pandas answers Arrow, so Arrow is what these tables hold.
+
+The three are held as three separate classes rather than one with two range
+tests inside it, because the whole of the three is under three kilobytes and a
+search that answers directly beats a search that answers a question you then
+have to ask again.
 """
 
 from std.collections.span import Span
@@ -148,9 +172,21 @@ from .casefix import (
 )
 from .casefold import FOLDED_AT, FOLDED_FROM, FOLDED_TO
 from .charclass import (
+    ALPHA_ASCII_HIGH,
+    ALPHA_ASCII_LOW,
+    ALPHA_EDGES,
+    DECIMAL_ASCII_HIGH,
+    DECIMAL_ASCII_LOW,
+    DECIMAL_EDGES,
+    DIGIT_ASCII_HIGH,
+    DIGIT_ASCII_LOW,
+    DIGIT_EDGES,
     LOWER_ASCII_HIGH,
     LOWER_ASCII_LOW,
     LOWER_EDGES,
+    NUMERIC_ASCII_HIGH,
+    NUMERIC_ASCII_LOW,
+    NUMERIC_EDGES,
     SPACE_ASCII_HIGH,
     SPACE_ASCII_LOW,
     SPACE_EDGES,
@@ -174,6 +210,21 @@ comptime EVERY_UPPER = 2
 
 comptime EVERY_TITLE = 3
 """Ask `_every_character` whether the text is in title case."""
+
+comptime ALL_ALPHA = 0
+"""Ask `_all_in_class` whether every character is a letter."""
+
+comptime ALL_NUMERIC = 1
+"""Ask `_all_in_class` whether every character is a number."""
+
+comptime ALL_DIGIT = 2
+"""Ask `_all_in_class` whether every character is a digit."""
+
+comptime ALL_DECIMAL = 3
+"""Ask `_all_in_class` whether every character is a decimal digit."""
+
+comptime ALL_ALNUM = 4
+"""Ask `_all_in_class` whether every character is a letter or a number."""
 
 
 def starts_character(b: UInt8) -> Bool:
@@ -1557,3 +1608,183 @@ def text_is_title(a: StringArray) raises -> Array[DType.bool]:
         Error: Only what the morsel runtime raises.
     """
     return _every_character(a, EVERY_TITLE)
+
+
+def _all_in_class(a: StringArray, kind: Int) raises -> Array[DType.bool]:
+    """Asks whether every character of every element is in one class.
+
+    The five questions that are not about case are all this one rule, which is
+    that the element has a character in it and every character it has is in the
+    class. There is no flag to carry and no second class to rule a row out, so
+    the loop stops at the first character that is not a member rather than
+    walking to the end to find out whether one of them was.
+
+    Alphanumeric is the one of the five that reads two classes, because Arrow
+    has no such class and a character is alphanumeric exactly when it is a
+    letter or a number. The two have nothing in common, so which one is read
+    first only decides how quickly a letter is accepted.
+
+    An element that is not valid UTF-8 answers False for the reason `text_case`
+    gives, which is that it is not text to be asked about.
+
+    Args:
+        a: The column.
+        kind: Which question, one of the five `ALL_` words above.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var alphas = materialize[ALPHA_EDGES]()
+    var numerics = materialize[NUMERIC_EDGES]()
+    var digits = materialize[DIGIT_EDGES]()
+    var decimals = materialize[DECIMAL_EDGES]()
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var bytes = a.unsafe_bytes(i)
+            var answer = False
+            if len(bytes) > 0 and _well_formed(bytes):
+                var text = StringSlice(unsafe_from_utf8=bytes)
+                answer = True
+                for point in text.codepoints():
+                    var cp = point.to_u32()
+                    var here = False
+                    if kind == ALL_DIGIT:
+                        here = _in_class(
+                            cp,
+                            DIGIT_ASCII_LOW,
+                            DIGIT_ASCII_HIGH,
+                            Span(digits),
+                        )
+                    elif kind == ALL_DECIMAL:
+                        here = _in_class(
+                            cp,
+                            DECIMAL_ASCII_LOW,
+                            DECIMAL_ASCII_HIGH,
+                            Span(decimals),
+                        )
+                    else:
+                        if kind != ALL_NUMERIC:
+                            here = _in_class(
+                                cp,
+                                ALPHA_ASCII_LOW,
+                                ALPHA_ASCII_HIGH,
+                                Span(alphas),
+                            )
+                        if not here and kind != ALL_ALPHA:
+                            here = _in_class(
+                                cp,
+                                NUMERIC_ASCII_LOW,
+                                NUMERIC_ASCII_HIGH,
+                                Span(numerics),
+                            )
+                    if not here:
+                        answer = False
+                        break
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](answer))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_is_alpha(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is a letter.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _all_in_class(a, ALL_ALPHA)
+
+
+def text_is_numeric(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is a number.
+
+    Which is the widest of the three number questions, and takes in the Roman
+    numerals and the Runic counting marks as well as everything the digit
+    question takes in.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _all_in_class(a, ALL_NUMERIC)
+
+
+def text_is_digit(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is a digit.
+
+    Narrower than the numeric question by the 239 characters that are a number
+    and a letter at once, which are the Roman numerals and the Runic counting
+    marks. A superscript two and a half sign are both digits here, which is
+    Arrow's answer and not Python's, and pandas gives Arrow's.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _all_in_class(a, ALL_DIGIT)
+
+
+def text_is_decimal(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is a decimal digit.
+
+    The narrowest of the three number questions and the only one whose members
+    can all be a place in a base ten number, so a superscript two and a half
+    sign are digits and are not decimal ones.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _all_in_class(a, ALL_DECIMAL)
+
+
+def text_is_alnum(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is a letter or a number.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _all_in_class(a, ALL_ALNUM)

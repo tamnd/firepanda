@@ -1,28 +1,32 @@
 """Writes the tables that say which class a character belongs to.
 
-`isspace`, `islower` and `isupper` are not questions about a mapping, they are questions
-about a class, and a class is the one thing the Mojo standard library's character data
-does not have enough of. It disagrees with Arrow about 1384 code points, which is what
-issue #748 measured, and that is not a list of exceptions to patch, it is whole blocks of
-Unicode that one side knows about and the other does not.
+The class questions of the `str` accessor are not questions about a mapping, they are
+questions about what a character is, and a class is the one thing the Mojo standard
+library's character data does not have enough of. It disagrees with Arrow about 1384 code
+points on the three case questions alone, which is what issue #748 measured, and that is
+not a list of exceptions to patch, it is whole blocks of Unicode that one side knows about
+and the other does not.
 
 The answer here is the same shape as Arrow's own: a class is a sorted run of ranges, the
 ranges are dense because Unicode assigns properties in blocks, and membership is a binary
-search rather than a table with a row per code point. Four classes at a few hundred ranges
+search rather than a table with a row per code point. Eight classes at a few hundred ranges
 each come to a handful of kilobytes, against the megabyte a code point per row would cost.
 
 The classes are read out of pyarrow rather than out of the published Unicode data files.
-That is deliberate and it is not laziness. pandas answers these three names out of Arrow,
-so Arrow is not an approximation of the right answer here, it is the right answer, and a
+That is deliberate and it is not laziness. pandas answers these names out of Arrow, so
+Arrow is not an approximation of the right answer here, it is the right answer, and a
 table generated from the UCD would be a second opinion this library would then have to
 reconcile with the first. Reading Arrow means a code point cannot disagree, ever, rather
 than agreeing until utf8proc and the UCD release we happened to read drift apart.
 
     uv run --no-project --python 3.13 --with pyarrow python tools/gen_charclass.py
 
-It checks the three string level rules the kernel rests on before it writes anything, over
-every code point on its own and over sixty thousand random words built out of the classes
-that matter, and refuses to write if pyarrow disagrees with any of them.
+It checks the string level rules the kernel rests on before it writes anything, over every
+code point on its own and over sixty thousand random words built out of the classes that
+matter, and refuses to write if pyarrow disagrees with any of them. Two of those rules are
+identities rather than walks: alphanumeric is exactly alphabetic or numeric, so there is no
+ALNUM class, and no character is both, so a row of letters and a row of digits cannot be
+confused by a rule that reads either one.
 """
 
 from __future__ import annotations
@@ -34,16 +38,17 @@ from pathlib import Path
 
 HEADER = '''"""Which class each character belongs to.
 
-Three of the string predicates are not about what a character maps to, they
-are about what it is. `isspace` asks whether every character is a space,
-`islower` and `isupper` ask about case but not about any case mapping, and all
-three want a class rather than a table of pairs.
+Most of the string predicates are not about what a character maps to, they are
+about what it is. `isspace` asks whether every character is a space, `islower`
+and `isupper` ask about case but not about any case mapping, and `isalpha` and
+the four number questions ask about nothing else at all. All of them want a
+class rather than a table of pairs.
 
 The classes here are Arrow's, read straight out of pyarrow by
-tools/gen_charclass.py, because pandas answers all three names out of Arrow and
-a class read from anywhere else would be a second opinion rather than the
+tools/gen_charclass.py, because pandas answers all of these names out of Arrow
+and a class read from anywhere else would be a second opinion rather than the
 answer. The Mojo standard library has its own, which is close, and close is
-worth 1384 code points of disagreement across these three questions alone.
+worth 1384 code points of disagreement across the three case questions alone.
 
 Each class is a sorted run of ranges held flat, as a start, one past an end,
 the next start, and so on, so an even number of entries and a code point is in
@@ -61,6 +66,20 @@ is neither lower nor upper to Arrow, so it is in neither class, and `TITLE_ONLY`
 is the {titles} code points of that kind. A row holding one is not lower and not
 upper either, which is why both questions have to read a class they are not
 named after.
+
+There is no class here for the alphanumeric characters, because a character is
+alphanumeric exactly when it is alphabetic or numeric and the two classes have
+nothing in common. Both of those are measured against pyarrow rather than
+assumed, since a subset relation nobody checked is how a table gets one entry
+wrong for a decade. DECIMAL is inside DIGIT is inside NUMERIC for the same
+reason and is stored separately anyway, because three narrowing searches are
+cheaper than one search and two range tests and the whole of the three is under
+three kilobytes.
+
+DIGIT is the one of these a Python programmer will read wrong. Arrow calls
+anything written as a single number sign a digit, so `½` and `²` are both
+digits to it, where Python calls `½` numeric and not a digit. That is 877 code
+points of disagreement, and pandas answers Arrow, so the table is Arrow's.
 
 Generated by tools/gen_charclass.py against pyarrow {pyarrow}, committed rather
 than built because the Mojo build has no pyarrow in it. The generator asserts
@@ -115,16 +134,19 @@ def emit(name: str, points: list[int], doc: str) -> str:
 
 
 def check(sets: dict[str, set[int]], points: list[int]) -> None:
-    """Asserts the three string level rules against pyarrow before writing.
+    """Asserts the string level rules against pyarrow before writing.
 
     The kernel walks an element a character at a time and folds the classes
     into an answer, and the folding is the part worth doubting. Whether a row
     of several characters is lower case is not whether each character is, it is
     whether one of them is and none of them is upper or titlecase, and an empty
-    row and a row of digits both answer no for the same reason. This measures
-    that rule rather than assuming it, over every code point on its own and
-    then over sixty thousand random words drawn from the classes that make the
-    rule interesting.
+    row and a row of digits both answer no for the same reason. The five
+    questions that are not about case are the simpler rule, which is that the
+    row is not empty and every character is in the class, and that is worth
+    measuring too rather than assumed by analogy with the case ones.
+
+    Measured over every code point on its own and then over sixty thousand
+    random words drawn from the classes that make the rules interesting.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -144,19 +166,34 @@ def check(sets: dict[str, set[int]], points: list[int]) -> None:
         seen = [ord(c) for c in row]
         return any(c in upper for c in seen) and not any(c in lower or c in titles for c in seen)
 
-    def is_space(row: str) -> bool:
-        return len(row) > 0 and all(ord(c) in spaces for c in row)
+    def every(members: set[int]):
+        def rule(row: str) -> bool:
+            return len(row) > 0 and all(ord(c) in members for c in row)
+
+        return rule
+
+    rules = {
+        "utf8_is_lower": is_lower,
+        "utf8_is_upper": is_upper,
+        "utf8_is_space": every(spaces),
+        "utf8_is_alpha": every(sets["ALPHA"]),
+        "utf8_is_numeric": every(sets["NUMERIC"]),
+        "utf8_is_digit": every(sets["DIGIT"]),
+        "utf8_is_decimal": every(sets["DECIMAL"]),
+        "utf8_is_alnum": every(sets["ALPHA"] | sets["NUMERIC"]),
+    }
 
     rng = random.Random(7)
-    pool = sorted(lower | upper | titles | spaces | {ord("a"), ord("Z"), ord("1")})
+    wide = lower | upper | titles | spaces | sets["NUMERIC"]
+    # The alphabetic class is 145672 code points and every other class here is
+    # under 2400, so drawing from the union unweighted would give words made of
+    # letters and nothing else and would measure one rule eight times.
+    pool = sorted(wide | set(rng.sample(sorted(sets["ALPHA"]), 2000)))
+    pool += [ord("a"), ord("Z"), ord("1"), ord(" "), ord("-")]
     rows = [chr(c) for c in points]
     rows += ["".join(chr(rng.choice(pool)) for _ in range(rng.randint(0, 5))) for _ in range(60000)]
     column = pa.array(rows)
-    for name, rule in (
-        ("utf8_is_lower", is_lower),
-        ("utf8_is_upper", is_upper),
-        ("utf8_is_space", is_space),
-    ):
+    for name, rule in rules.items():
         for row, want in zip(rows, getattr(pc, name)(column).to_pylist(), strict=True):
             if rule(row) != want:
                 raise SystemExit(f"{name} is not the rule we thought for {row!r}")
@@ -186,12 +223,32 @@ def main() -> int:
     upper = held("utf8_is_upper")
     title = held("utf8_is_title")
     space = held("utf8_is_space")
+    alpha = held("utf8_is_alpha")
+    numeric = held("utf8_is_numeric")
+    digit = held("utf8_is_digit")
+    decimal = held("utf8_is_decimal")
+    alnum = held("utf8_is_alnum")
     if not upper <= title:
         raise SystemExit("an upper case character that is not titlecase")
     if lower & title:
         raise SystemExit("a character that is both lower case and titlecase")
+    if alnum != alpha | numeric:
+        raise SystemExit("alphanumeric is not alphabetic or numeric after all")
+    if alpha & numeric:
+        raise SystemExit("a character that is both a letter and a number")
+    if not decimal <= digit <= numeric:
+        raise SystemExit("the three number classes are not nested after all")
 
-    sets = {"LOWER": lower, "UPPER": upper, "TITLE_ONLY": title - upper, "SPACE": space}
+    sets = {
+        "LOWER": lower,
+        "UPPER": upper,
+        "TITLE_ONLY": title - upper,
+        "SPACE": space,
+        "ALPHA": alpha,
+        "NUMERIC": numeric,
+        "DIGIT": digit,
+        "DECIMAL": decimal,
+    }
     check(sets, points)
 
     lines = []
@@ -214,6 +271,14 @@ def main() -> int:
         "The four Croatian digraphs and the Greek letters with an iota under them.",
         "SPACE": "The space characters, as ranges. Wider than the ASCII six by the "
         "non breaking space, the en and em quads and the rest of the U+2000 run.",
+        "ALPHA": "The alphabetic characters, as ranges. By far the largest class "
+        "here and not by far the most ranges, because alphabets arrive in blocks.",
+        "NUMERIC": "The numeric characters, as ranges. Wider than the digits by the "
+        "239 that are a number and a letter at once, the Roman numerals and the rest.",
+        "DIGIT": "The digit characters, as ranges. Wider than Python's digits by the "
+        "915 written as one sign rather than a place, the fractions and superscripts.",
+        "DECIMAL": "The decimal digit characters, as ranges. The narrowest of the "
+        "three and the only one whose members can be a place in a base ten number.",
     }
     for name, members in sets.items():
         body += emit(name, sorted(members), docs[name])

@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, the last of the `str` questions about what a character is
+
+The five remaining class questions of the `str` accessor, answered out of four more of Arrow's character classes held the same way the case classes are. `isalnum` needs no class of its own, because a character is alphanumeric exactly when it is alphabetic or numeric and the two have nothing in common, and the generator asserts both of those against Arrow over every code point before it writes a table rather than taking them from the standard.
+
+All five are exact against a live pandas over every code point in Unicode and over every arrangement of three characters drawn from an alphabet chosen to cross the classes. They answer a missing row with a missing value where pandas answers False, which is the registered `engine/string-predicate-null` difference the other string questions already carry.
+
+One answer here will read as a bug and is pandas'. Arrow calls anything written as a single number sign a digit, so `½` and `¼` are digits to it and are not digits to `str.isdigit`, which is 877 code points of difference. pandas 3 answers the name out of Arrow, so this library does too, and the test writes both answers out side by side.
+
 ## [0.8.2] - 2026-09-14
 
 Built against Mojo 1.0.0 (ed45d567).
