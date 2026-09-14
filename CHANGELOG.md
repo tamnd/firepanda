@@ -18,6 +18,44 @@ The dense half of the count also stopped being a byte at a time. It adds a regis
 
 Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
 
+### Fixed: an average over a column of times answered one thing from SQL and another from the frame
+
+`df.group_by(["k"], [AggSpec("ts", AggKind.MEAN)])` answered a point in time and `SELECT avg(ts) FROM t GROUP BY k` answered a count of seconds over the same column. Neither half was wrong on its own terms, which is why every test of either half passed. The frame path runs the grouped kernel, which reads the pandas table and puts the label back. The SQL path runs the streaming group operator, which keeps a running sum and a running count and divides at the end, and a division of two numbers is a number. Issue #552.
+
+The hole was in `agg_type`, the function that says what a reduction produces. It had a paragraph admitting it did not handle a column of times and returned float64 anyway, which was not a description of what either path produced. It now hands a temporal input straight to `temporal_agg_type`, the same table both kernels already read, so there is no second copy left to drift.
+
+Reading that table means inheriting its refusals, and those now happen at bind time. `SELECT sum(ts) FROM t` used to report the error about a sum, but it reported it from inside a mean the user never wrote, because the operator split every mean into a sum and the sum went past the same table. A variance over instants is refused for the same reason it always was, that the answer would be in units of time squared, and it is refused about the query now rather than after the first chunk arrives.
+
+A mean over a column of times no longer folds. Its running state would have to hold a sum of points in time, which is a value this library refuses to produce by name, so the operator holds the column and calls the whole frame kernel once at the end, which is the route a median and a distinct count already take. The two front doors agree because they are the same call. It costs memory on a query that is rare next to a mean of numbers.
+
+The reductions that do still fold over a column of times needed a smaller fix: an accumulator is widened and settled against the physical dtype, so a total of lengths of time came out as the int64 it is counted in, with the right numbers and no label. The declared type is put back at the point the state becomes output and nowhere else.
+
+### Fixed: which side of a `JOIN` a table is written on decided whether the query ran
+
+`SELECT band, qty FROM tiers JOIN sales ON band = qty` raised `column has 3 chunks, not one; call combine() first`, and the same join written the other way round answered. Nothing about the query decided it. The right side of a join is the build side, `sales` is ten rows in three chunks, and the operator read the build side's columns with the borrow that only a column of exactly one chunk has. Issue #583.
+
+A build side of several chunks is stacked into one array now, once, when the node binds. Everything the operator does after that indexes the build side by a single row number: the hash table, the null bitmap and both of the gathers that write the output. A row number means nothing against a list of pieces, so this is not a borrow that could be taught about chunks, it is a shape the rest of the node is built on.
+
+The stack is a copy of the build side and it is the only case here that costs anything. The pieces are borrowed rather than collected into a list first, so the bytes move once and not twice. A build side of one chunk, which is what a table read or materialized in one piece gives and is the common case, still lends its chunk and copies nothing, and a build side of no chunks still gets the empty column it always did.
+
+It was easy to miss because almost every frame in the tests has one chunk. It is not easy to hit accidentally: a table read from several row groups is the ordinary case for anything real, and a derived table on the right of a join reaches it too.
+
+## [0.8.4] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release in two halves. One is the `str` accessor learning about patterns, which is five new names and a sixth search inside LIKE, and the other is the second and last of the text kernels that were doing far more work than the answer needs.
+
+The pattern half starts from a gap being admitted rather than papered over. There is no regular expression engine here, so `contains`, `match`, `fullmatch`, `count` and `replace` answer a pattern holding none of the fourteen metacharacters exactly and refuse anything else by name. Searching for a `.` literally without saying so would turn a filter that keeps nearly every row into one that keeps nearly none and say nothing about it. The four names that look for a pattern then learned `case=False`, which needed a second fold table of 1457 entries beside the one `casefold` uses, because a fold a person reads can make a row longer and a search cannot afford that. On the SQL side a LIKE pattern can now hold an underscore and a run at each end, added as a sixth search below the five fast ones so that nothing which was a prefix test became a walk.
+
+The kernel half finishes what the last release flagged. `upper` over ASCII was paying four walks and a heap allocation for an answer that needs one pass, and it is sixty times faster now, 6.6 nanoseconds a row against four hundred. `trim` was counting in character ordinals, and every ordinal is found by scanning from the front of the element, so a row with nothing to trim was walked about five times end to end. Walking the two ends in byte offsets instead is two times on that row and 4.8 times on a row with spaces on both ends. Both changes ship with a benchmark row for the case they cannot help, so neither claim can quietly become a trade.
+
+Four more wrong answers came out of the same harness while the release was being cut. A cast of a double to an integer in SQL truncated where DuckDB rounds, an integer literal past a BIGINT wrapped around to a negative number instead of being read as the wider thing it is, the number literals DuckDB reads as doubles were not being lowered as doubles, and a join written as a comma with the equality down in the `WHERE` would not run at all, which is the oldest way there is to write a join. The last of those is a plan change rather than a kernel one: a cross join with an equality above it is turned into the join it means.
+
+The other two additions are the two `str` names whose answer is not one column. `str.partition` and `str.rpartition` give three, and `str.cat` gives one row where there were many, which is the first answer in the accessor narrower than the column it came from.
+
+One wrong answer is fixed and it is worth reading. `SELECT -7 // 3` came back `-3` and `SELECT -7 % 3` came back `2`, because the SQL front end was lowering onto the dataframe kernels and those follow Python's rule where SQL follows C's. The two agree on every pair of positive numbers, which is why thousands of checked queries had never shown it. What found it is the other addition here, a value differential that runs the same expressions over the same eight rows through this engine and through DuckDB and compares what comes back. Three harnesses already asked whether a statement parses and what type it comes out as, and all three agreed about `strlen` while it returned the wrong number, because none of them ever looked at a result.
+
 ### Fixed: a SQL cast of a double to an integer rounds where it used to truncate
 
 `SELECT CAST(2.6 AS BIGINT)` answered 2 and DuckDB answers 3. The conversion loses a fraction and there are two ways to lose it: truncate towards zero, which is what the machine instruction does and what pandas and NumPy mean by `astype`, or round to the nearest whole number with a tie going to the even one, which is what a SQL cast means. firepanda did the first for both front ends and only one of them was asking for it. Issue #786.
@@ -41,6 +79,30 @@ It runs before the transitive copying rather than after, so a filter on one side
 That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equalities in the `WHERE`. It runs now, and its ten order keys and their revenues agree with DuckDB 1.5 at scale factor 0.01. The claim in `firepanda/sql/plan.mojo` that a comma in the `FROM` and a written `JOIN` reach the same plan was there before any of this was, and it was not true. It is a test now.
 
 Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
+
+### Added: `str.normalize`, the one name on the accessor that Arrow does not answer
+
+`s.str.normalize("NFC")` rewrites every row in one of the four Unicode normalization forms, so that two rows a reader would call the same string come out as the same bytes. All four forms are here, and they are the two independent choices they are made of rather than four names: NFKD is the compatibility relation without composing, NFC is the canonical one with it.
+
+The interesting part is where the answers come from. Most of this accessor is Arrow, because pandas holds text in Arrow and answers out of an Arrow kernel, and where Arrow and Python's standard library disagree Arrow is what gets copied here. This name is the other way round. pandas defines it once as `unicodedata.normalize` applied a row at a time, nothing overrides it, and Arrow has no normalization kernel for anything to override it with, so on every backend pandas has this is CPython's answer. The rule is not that Arrow is the authority for this accessor, it is that the authority for a name is whichever library pandas actually calls, and that has to be read rather than assumed.
+
+The tables are generated from CPython by `tools/gen_normalize.py`, which checks the whole algorithm against `unicodedata` over every code point and a hundred thousand sequences built to be awkward before it writes anything. Both decomposition tables are fully expanded at generation time, so a lookup gives the final sequence and the kernel has no recursion in it and no depth to bound. The composition table is derived by handing every candidate pair to CPython and keeping the ones it puts back together, which applies the composition exclusions and the singleton and non starter rules without this code knowing what any of the three are: 941 pairs out of 1026 candidates survive, and the 85 that do not are those rules.
+
+Two things cost no table. Hangul is arithmetic in both directions, so 11172 syllables that would be the largest thing in the generated file are a formula instead. An element that is entirely ASCII is already in all four forms and is copied straight through, which is checked in the generator rather than assumed.
+
+Both of pandas' refusals are reproduced in kind. A form that is not one of the four is a `ValueError`, including the lower case spelling, which is not an alias. A form that is not a string at all is a `TypeError`.
+
+### Added: `str.get_dummies`, an answer whose width is in the data
+
+`s.str.get_dummies()` splits every row at a separator and answers a frame with one column per distinct piece, labelled with the piece and holding a 1 where the row held it. It is the third answer shape on the `str` accessor after a column and a scalar, and the first whose width nobody can work out before the column has been read, since both how many columns there are and what they are called are properties of the data.
+
+The answer is a membership and not a count. A row holding the same token twice still gives a 1, and there is no 2 anywhere in the output, even though the columns come back as int64 because that is what pandas answers. `dtype=bool` reads them as flags instead. Any other `dtype` is refused by name rather than ignored.
+
+What falls out between two separators is a token even when it is nothing, so an empty row, a row starting with the separator, a row ending with one and two separators together all contribute the empty string as a column label. The columns are sorted in byte order, which for UTF-8 is code point order, and no locale is consulted.
+
+A missing row is a row of zeros rather than a row of nulls, and it contributes no label. That is the one place on this accessor where a missing row does not stay missing, and it follows from the answer being a membership: a row that says nothing holds no tokens, which is a no rather than an unknown.
+
+A column of only missing rows answers a frame of no columns here, which is the same answer as a column of no rows at all. pandas answers that second one and raises `ValueError: Empty data passed with indices specified.` for the first, out of its own frame constructor rather than out of any rule about this method.
 
 ### Added: `str.cat`, the first answer narrower than a column
 
@@ -7244,7 +7306,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1

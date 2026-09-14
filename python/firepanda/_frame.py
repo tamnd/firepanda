@@ -541,6 +541,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def get_dummies(self, sep: Any = "|", dtype: Any = None) -> DataFrame:
+        """One column per distinct token, flagging the rows that hold it."""
+        try:
+            return self._dummies(sep, dtype)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:
@@ -580,6 +587,13 @@ class StringAccessor(StringMixin):
         """Every row folded, which is the form two equal rows agree on."""
         try:
             return self._text("casefold")
+        except Exception as error:
+            raise translate(error) from None
+
+    def normalize(self, form: Any) -> Series:
+        """Every row in one of the four Unicode normalization forms."""
+        try:
+            return self._normalized(form)
         except Exception as error:
             raise translate(error) from None
 

@@ -4231,7 +4231,9 @@ def aggregate_group_many[
     return out^
 
 
-def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
+def agg_type(
+    kind: AggKind, input: LogicalType, whole_column: Bool
+) raises -> LogicalType:
     """Returns the logical type a reduction produces over a column.
 
     Lived in `exec/node.mojo` while the only caller was the group node. It is
@@ -4255,21 +4257,31 @@ def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
     and a plan whose declared type is not the type of the data under it is the
     one thing this function exists to prevent.
 
-    A temporal column is not asked about here, and that is a limit rather than a
-    rule. `temporal_agg_type` below is the pandas table for those and the
-    grouped kernel already reads it, while the streaming group operator computes
-    a mean of instants as a float and declares one. Those two answers disagree
-    and reconciling them is its own change rather than a line in this function.
-    The four that report an element are right either way, and they are the ones
-    a query over a column of times actually asks for.
+    A column of times is handed straight to `temporal_agg_type` below, which is
+    the pandas table for those and is what both kernels already read. It used to
+    be left out here, so a schema said float64 over a mean of instants while the
+    grouped kernel answered an instant, and the two front doors of the library
+    gave different answers to the same question. See #552. Reading one table is
+    the only way two paths stay in step, and it brings the refusals with it: a
+    sum over instants has no answer and saying so here is better than declaring
+    a type for a call that raises when the rows arrive.
 
     Args:
         kind: The reduction.
         input: The logical type of the column being reduced.
+        whole_column: True when there is no grouping. Only a column of times
+            reads it, and only for the one reduction pandas answers for a group
+            and refuses for a whole column.
 
     Returns:
         The logical type of the output column.
+
+    Raises:
+        If the input is a column of times and pandas has no answer for this
+        reduction on it.
     """
+    if input.is_temporal():
+        return temporal_agg_type(input, kind, whole_column)
     if kind == AggKind.COUNT or kind == AggKind.SIZE or kind == AggKind.NUNIQUE:
         return LogicalType.INT64
     if (

@@ -50,6 +50,8 @@ from firepanda.py.reduce import reduction
 from firepanda.py.text import flag as text_flag
 from firepanda.py.text import number as text_number
 from firepanda.py.text import text as text_text
+from firepanda.py.text import dummies as text_dummies
+from firepanda.py.text import dummy_tokens as text_dummy_tokens
 from firepanda.py.text import join as text_join
 from firepanda.py.text import partition as text_partition
 from firepanda.py.text import translate as text_translate
@@ -1391,6 +1393,46 @@ struct PySeries(Movable, Writable):
         for _ in range(3):
             out.append(PythonObject(alloc=Self(ArcPointer(parts.pop(0)))))
         return out
+
+    @staticmethod
+    def string_dummies(
+        py_self: PythonObject, sep: PythonObject
+    ) raises -> PythonObject:
+        """Splits every row at a separator and flags the tokens it holds.
+
+        The only `str` method whose answer has a width that is not knowable
+        before the column has been read. It comes back as a pair, the labels and
+        the columns, rather than as a frame, because the labels are the tokens
+        themselves and a frame here would have to be taken apart again on the
+        other side to name anything.
+
+        Args:
+            py_self: The series.
+            sep: The separator, which the Python layer has already checked is a
+                string and is not empty.
+
+        Returns:
+            A Python tuple of the list of token labels and the list of wrapped
+            int64 series, both in the order the columns go in and both the same
+            length.
+
+        Raises:
+            Error: Tagged `value` if the column is not text.
+        """
+        var separator = words(sep, "sep")
+        var tokens = text_dummy_tokens(
+            Self._held(py_self)[].series[], separator
+        )
+        var flags = text_dummies(
+            Self._held(py_self)[].series[], separator, tokens
+        )
+
+        var labels = Python.list()
+        var columns = Python.list()
+        for i in range(len(tokens)):
+            labels.append(PythonObject(tokens[i]))
+            columns.append(PythonObject(alloc=Self(ArcPointer(flags.pop(0)))))
+        return Python.tuple(labels, columns)
 
     @staticmethod
     def string_join(

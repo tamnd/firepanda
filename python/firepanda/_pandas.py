@@ -9058,6 +9058,80 @@ class StringMixin:
 
         return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
 
+    def _normalized(self, form: Any) -> Series:
+        """One of the four Unicode normalization forms, applied to every row.
+
+        The form is checked here rather than being handed straight down because
+        pandas checks it in `unicodedata.normalize`, which refuses a name it
+        does not know and refuses anything that is not a string, and the two
+        refusals are different kinds. Both are reproduced. The Mojo side reads
+        the four names again for its own callers, so a wrong one never reaches
+        the kernel by either route.
+
+        pandas answers this name out of `unicodedata` on every backend it has,
+        rather than out of Arrow, which has no normalization kernel at all.
+        """
+        if not isinstance(form, str):
+            raise DTypeError(f"firepanda:dtype: form must be str, not {type(form).__name__}")
+        if form not in ("NFC", "NFD", "NFKC", "NFKD"):
+            raise InvalidArgumentError(
+                "firepanda:value: invalid normalization form, which is one of"
+                " NFC, NFD, NFKC and NFKD and is spelled in capitals"
+            )
+        return self._text("normalize", form)
+
+    def _dummies(self, sep: Any, dtype: Any) -> DataFrame:
+        """One column per distinct token, flagging the rows that hold it.
+
+        The only method on this accessor whose answer has a width that is not
+        knowable before the column has been read. `partition` always answers
+        three columns and `cat` always answers one string, and this one answers
+        however many distinct tokens turned up, labelled with the tokens.
+
+        The labels being the tokens is what keeps this clear of the divergence
+        `partition` ran into. A token is text, a firepanda frame holds text
+        column labels, and so for once the labels match pandas exactly.
+
+        A missing row is a row of zeros rather than a row of nulls, which is
+        pandas and is worth saying because it is the one place on this accessor
+        where a missing row does not stay missing. The answer is a frame of
+        counts and a count of a row that says nothing is nothing.
+
+        What falls out between two separators is a token even when it is
+        nothing, so an empty row and a row starting with the separator both
+        contribute the empty string as a column label. That reads like an
+        accident and is pandas, and it is measured in the tests rather than
+        taken on trust.
+
+        A column with no readable rows has no tokens and so the frame has no
+        columns. pandas agrees for an empty column and cannot build the answer
+        at all for a column of only missing rows, where it raises `ValueError:
+        Empty data passed with indices specified.` out of its own frame
+        constructor. That is pandas failing to build a frame it described rather
+        than a rule about this method, so this library answers the frame.
+        """
+        from ._frame import DataFrame, Series
+
+        if not isinstance(sep, str):
+            raise DTypeError(f"firepanda:dtype: sep must be str, not {type(sep).__name__}")
+        if sep == "":
+            raise InvalidArgumentError("firepanda:value: empty separator")
+        if dtype is not None and dtype not in ("int64", "bool", int, bool):
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.get_dummies with dtype={dtype!r} is not"
+                " written, only int64 which is the pandas default and bool"
+            )
+        try:
+            labels, columns = self._series._inner.string_dummies(sep)
+        except Exception as error:
+            raise translate(error) from None
+        built = DataFrame(
+            {label: Series._wrap(column) for label, column in zip(labels, columns, strict=True)}
+        )
+        if dtype in ("bool", bool):
+            return built.astype("bool")
+        return built
+
     def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> str:
         """The whole column folded into one string.
 

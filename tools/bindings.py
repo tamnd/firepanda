@@ -1065,6 +1065,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="str",
         ),
         Member(
+            name="get_dummies",
+            kind="method",
+            signature='sep: Any = "|", dtype: Any = None',
+            body="self._dummies(sep, dtype)",
+            doc="One column per distinct token, flagging the rows that hold it.",
+            returns="DataFrame",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",
@@ -1110,6 +1118,14 @@ def _string_members() -> tuple[Member, ...]:
             signature="",
             body='self._text("casefold")',
             doc="Every row folded, which is the form two equal rows agree on.",
+            returns="Series",
+        ),
+        Member(
+            name="normalize",
+            kind="method",
+            signature="form: Any",
+            body="self._normalized(form)",
+            doc="Every row in one of the four Unicode normalization forms.",
             returns="Series",
         ),
         Member(
@@ -3061,6 +3077,13 @@ SERIES = Exposed(
                 ("skip_missing", "bool"),
             ),
             returns="str",
+        ),
+        Binding(
+            mojo="PySeries.string_dummies",
+            name="string_dummies",
+            doc="The token labels and one flag column for each of them.",
+            params=(("sep", "str"),),
+            returns="tuple[list[str], list[Series]]",
         ),
         Binding(
             mojo="PySeries.window_agg",

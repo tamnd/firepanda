@@ -687,7 +687,11 @@ def _instant_literal(
 
 
 def bind_expr(
-    mut exprs: Expressions, root: Int, schema: Schema, origin: List[Int]
+    mut exprs: Expressions,
+    root: Int,
+    schema: Schema,
+    origin: List[Int],
+    whole_column: Bool = False,
 ) raises:
     """Binds one expression tree against the columns a node can see.
 
@@ -699,6 +703,10 @@ def bind_expr(
         root: The expression.
         schema: The columns that are visible.
         origin: Where each of those columns came from.
+        whole_column: True when this is an aggregate with nothing to group by,
+            which pandas answers differently from a grouped one for a standard
+            error over a column of times. False everywhere else, including on a
+            window, which reduces a partition and is grouped by definition.
 
     Raises:
         If a name does not resolve, or an operation has no answer for the types
@@ -721,7 +729,7 @@ def bind_expr(
 
     var kids = exprs.nodes[root].children.copy()
     for i in range(len(kids)):
-        bind_expr(exprs, kids[i], schema, origin)
+        bind_expr(exprs, kids[i], schema, origin, whole_column)
     var below = List[LogicalType]()
     for i in range(len(kids)):
         below.append(exprs.nodes[kids[i]].type)
@@ -744,7 +752,9 @@ def bind_expr(
         exprs.nodes[root].type = _call_type(exprs.nodes[root].name, below)
     elif kind == ExprKind.AGGREGATE or kind == ExprKind.WINDOW:
         exprs.nodes[root].type = agg_type(
-            AggKind(UInt8(exprs.nodes[root].op)), below[0]
+            AggKind(UInt8(exprs.nodes[root].op)),
+            below[0],
+            whole_column=whole_column and kind == ExprKind.AGGREGATE,
         )
     else:
         if not _bool(below[0]):
@@ -1012,8 +1022,12 @@ def _bind_node(
 
     ref input = done[plan.nodes[at].inputs[0]]
     var exprs = plan.nodes[at].exprs.copy()
+    # An aggregate with no group key reduces the whole column, and that is the
+    # one thing about a node rather than about an expression that an aggregate's
+    # type depends on. `parts` is the group key count on this kind.
+    var whole = kind == NodeKind.AGGREGATE and plan.nodes[at].parts == 0
     for i in range(len(exprs)):
-        bind_expr(plan.exprs, exprs[i], input.schema, input.origin)
+        bind_expr(plan.exprs, exprs[i], input.schema, input.origin, whole)
 
     if kind == NodeKind.FILTER:
         var t = plan.exprs.nodes[exprs[0]].type

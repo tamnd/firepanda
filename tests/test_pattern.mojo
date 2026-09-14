@@ -57,6 +57,8 @@ from firepanda.kernel.pattern import (
     text_contains_folded,
     text_equals_folded,
     text_like,
+    text_dummies,
+    text_dummy_tokens,
     text_partition,
     text_replace,
     text_replace_folded,
@@ -1169,6 +1171,202 @@ def test_a_cut_keeps_a_missing_row_missing_in_all_three() raises:
     var back = text_partition(col, " ".as_bytes(), True)
     assert_false(back[2].is_valid(2), "the other way round as well")
     assert_true(got[0].is_valid(0), "and a row that is there is still there")
+
+
+def dummy_sample() raises -> StringArray:
+    """Builds the column the dummy tests read.
+
+    The first row holds two tokens. The second shares one of them and brings a
+    new one, so the token set is a union and not a copy. The third is missing.
+    The fourth is empty, which is not missing and which contributes the empty
+    token. The fifth holds the same token twice, so the answer is a set and not
+    a count. The sixth starts with the separator, which is the other way the
+    empty token gets in. The last two hold characters wider than a byte, on both
+    sides of a separator, because a split is a byte offset and a row that is all
+    ASCII cannot notice a kernel that thought otherwise.
+
+    Returns:
+        The column, with one missing row in it.
+
+    Raises:
+        Error: If it cannot be built.
+    """
+    var built = StringBuilder(capacity=8)
+    built.append("a|b".as_bytes())
+    built.append("b|c".as_bytes())
+    built.append_null()
+    built.append("".as_bytes())
+    built.append("b|b".as_bytes())
+    built.append("|a".as_bytes())
+    built.append("é|ö".as_bytes())
+    built.append("日|本".as_bytes())
+    return built^.finish()
+
+
+def token_list(column: StringArray, sep: String) raises -> List[String]:
+    """The token set of a column, as a list.
+
+    Args:
+        column: The column.
+        sep: The separator.
+
+    Returns:
+        The tokens in the order the columns go in.
+
+    Raises:
+        Error: If the split fails.
+    """
+    return text_dummy_tokens(column, sep.as_bytes())
+
+
+def test_the_tokens_come_back_in_byte_order() raises:
+    """Which is code point order, so a digit sorts before a letter.
+
+    The empty token sorts first because a prefix sorts before what it is a
+    prefix of, and the empty string is a prefix of everything.
+    """
+    var built = StringBuilder(capacity=1)
+    built.append("b|a|C|_|1|é|".as_bytes())
+    var tokens = token_list(built^.finish(), "|")
+    assert_equal(len(tokens), 7)
+    assert_equal(tokens[0], "")
+    assert_equal(tokens[1], "1")
+    assert_equal(tokens[2], "C")
+    assert_equal(tokens[3], "_")
+    assert_equal(tokens[4], "a")
+    assert_equal(tokens[5], "b")
+    assert_equal(tokens[6], "é")
+
+
+def test_a_token_seen_twice_is_one_column() raises:
+    """The tokens are a set, so a row holding one twice adds it once."""
+    var built = StringBuilder(capacity=1)
+    built.append("a|a|a".as_bytes())
+    var tokens = token_list(built^.finish(), "|")
+    assert_equal(len(tokens), 1)
+    assert_equal(tokens[0], "a")
+
+
+def test_an_empty_row_contributes_the_empty_token() raises:
+    """And so does a row that starts or ends with the separator.
+
+    All three of those reach the same token by different routes, and a kernel
+    that skipped empty pieces would answer no columns for the first and one for
+    the other two.
+    """
+    var built = StringBuilder(capacity=3)
+    built.append("".as_bytes())
+    built.append("|a".as_bytes())
+    built.append("a|".as_bytes())
+    var tokens = token_list(built^.finish(), "|")
+    assert_equal(len(tokens), 2)
+    assert_equal(tokens[0], "")
+    assert_equal(tokens[1], "a")
+
+
+def test_a_missing_row_contributes_no_token() raises:
+    """It is skipped rather than being read as an empty row."""
+    var built = StringBuilder(capacity=2)
+    built.append("a".as_bytes())
+    built.append_null()
+    var tokens = token_list(built^.finish(), "|")
+    assert_equal(len(tokens), 1)
+    assert_equal(tokens[0], "a")
+
+
+def test_a_column_with_nothing_readable_has_no_tokens() raises:
+    """So the frame built from it has no columns at all."""
+    var built = StringBuilder(capacity=2)
+    built.append_null()
+    built.append_null()
+    assert_equal(len(token_list(built^.finish(), "|")), 0)
+
+
+def test_every_row_is_marked_against_the_tokens_it_holds() raises:
+    """The flags, read column by column against the sample."""
+    var column = dummy_sample()
+    var tokens = token_list(column, "|")
+    var flags = text_dummies(column, "|".as_bytes(), tokens)
+    assert_equal(len(flags), len(tokens))
+    # The sample's tokens in byte order are the empty one, a, b and c, then the
+    # four wider than a byte, which all sort after ASCII.
+    assert_equal(tokens[0], "")
+    assert_equal(tokens[1], "a")
+    assert_equal(tokens[2], "b")
+    assert_equal(tokens[3], "c")
+    # Row zero is "a|b", so it has a and b and nothing else.
+    assert_equal(flags[0][0], 0)
+    assert_equal(flags[1][0], 1)
+    assert_equal(flags[2][0], 1)
+    assert_equal(flags[3][0], 0)
+    # Row three is the empty row, which has the empty token and only that.
+    assert_equal(flags[0][3], 1)
+    assert_equal(flags[1][3], 0)
+    # Row five is "|a", which has both.
+    assert_equal(flags[0][5], 1)
+    assert_equal(flags[1][5], 1)
+
+
+def test_a_token_twice_in_a_row_is_still_a_one() raises:
+    """The flags are a membership and not a count."""
+    var built = StringBuilder(capacity=1)
+    built.append("b|b|b".as_bytes())
+    var column = built^.finish()
+    var tokens = token_list(column, "|")
+    var flags = text_dummies(column, "|".as_bytes(), tokens)
+    assert_equal(flags[0][0], 1)
+
+
+def test_a_missing_row_is_a_row_of_zeros_rather_than_a_missing_row() raises:
+    """The one place this method does not propagate a null.
+
+    pandas answers a frame of counts here, and a count of a row that says
+    nothing is nothing rather than unknown, so every column is valid and holds a
+    zero at that row.
+    """
+    var column = dummy_sample()
+    var tokens = token_list(column, "|")
+    var flags = text_dummies(column, "|".as_bytes(), tokens)
+    for c in range(len(tokens)):
+        assert_true(flags[c].is_valid(2), "a dummy column has no missing rows")
+        assert_equal(flags[c][2], 0)
+
+
+def test_a_split_counts_bytes_and_wide_characters_survive() raises:
+    """A row that is all ASCII cannot notice an offset counted in characters."""
+    var column = dummy_sample()
+    var tokens = token_list(column, "|")
+    var flags = text_dummies(column, "|".as_bytes(), tokens)
+    var found = 0
+    for t in range(len(tokens)):
+        if tokens[t] == "é" or tokens[t] == "ö":
+            found += 1
+            assert_equal(flags[t][6], 1)
+        if tokens[t] == "日" or tokens[t] == "本":
+            found += 1
+            assert_equal(flags[t][7], 1)
+    assert_equal(found, 4, "all four wide tokens are their own column")
+
+
+def test_a_separator_of_more_than_one_byte_splits_the_same_way() raises:
+    """The separator is bytes and nothing assumes it is one of them."""
+    var built = StringBuilder(capacity=2)
+    built.append("a--b".as_bytes())
+    built.append("b--c".as_bytes())
+    var tokens = token_list(built^.finish(), "--")
+    assert_equal(len(tokens), 3)
+    assert_equal(tokens[0], "a")
+    assert_equal(tokens[1], "b")
+    assert_equal(tokens[2], "c")
+
+
+def test_a_row_without_the_separator_is_one_whole_token() raises:
+    """Not dropped and not split into characters."""
+    var built = StringBuilder(capacity=1)
+    built.append("abc".as_bytes())
+    var tokens = token_list(built^.finish(), "|")
+    assert_equal(len(tokens), 1)
+    assert_equal(tokens[0], "abc")
 
 
 def main() raises:

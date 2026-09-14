@@ -358,8 +358,52 @@ def padded() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def moments(values: List[Int64]) raises -> AnyArray:
+    """Builds a column of instants counted in seconds since the epoch."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return AnyArray(col^.into_data(), LogicalType.timestamp(TimeUnit.SECOND))
+
+
+def lengths(values: List[Int64]) raises -> AnyArray:
+    """Builds a column of lengths of time counted in seconds."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return AnyArray(col^.into_data(), LogicalType.duration(TimeUnit.SECOND))
+
+
+def shifts() raises -> DataFrame:
+    """Six shifts in two chunks, two crews, each shift a start and a length.
+
+    A point in time and a length of one are the two halves of the temporal
+    table and they answer different reductions, so both are here. The starts
+    average to a fraction on purpose, since the answer truncates towards zero
+    and a whole number would not show that.
+    """
+    var crew = ChunkedArray(LogicalType.INT64)
+    crew.append(numbers([1, 2, 1]))
+    crew.append(numbers([2, 1, 2]))
+    var start = ChunkedArray(LogicalType.timestamp(TimeUnit.SECOND))
+    start.append(moments([100, 10, 200]))
+    start.append(moments([20, 301, 31]))
+    var span = ChunkedArray(LogicalType.duration(TimeUnit.SECOND))
+    span.append(lengths([100, 10, 200]))
+    span.append(lengths([20, 301, 31]))
+    var columns = List[ChunkedArray]()
+    columns.append(crew^)
+    columns.append(start^)
+    columns.append(span^)
+    var fields = List[Field]()
+    fields.append(Field("crew", LogicalType.INT64))
+    fields.append(Field("start", LogicalType.timestamp(TimeUnit.SECOND)))
+    fields.append(Field("span", LogicalType.duration(TimeUnit.SECOND)))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the twelve frames the queries write by name."""
+    """A catalog holding the thirteen frames the queries write by name."""
     var catalog = Catalog()
     catalog.register("words", words())
     catalog.register("glyphs", glyphs())
@@ -373,6 +417,7 @@ def session() raises -> Catalog:
     catalog.register("hits", hits())
     catalog.register("visits", visits())
     catalog.register("padded", padded())
+    catalog.register("shifts", shifts())
     return catalog^
 
 
@@ -980,6 +1025,32 @@ def test_a_where_about_the_right_table_alone_still_runs() raises:
     )
     same(read_back(out, "qty"), [3, 40], "qty")
     same(read_back(out, "rate"), [300, 400], "rate")
+
+
+def test_a_table_of_three_chunks_joins_from_either_side() raises:
+    # Issue #583. `sales` is ten rows in three chunks and `tiers` is four rows
+    # in one, and writing `sales` on the right put a chunked frame on the build
+    # side, which raised out of the operator before a row was probed. Which side
+    # of the word JOIN a table is written on is not supposed to decide whether
+    # the query runs, and both spellings answer the same rows now.
+    var one_way = run(
+        "SELECT qty, rate FROM sales JOIN tiers ON qty = band ORDER BY qty",
+        session(),
+    )
+    var other_way = run(
+        "SELECT qty, rate FROM tiers JOIN sales ON band = qty ORDER BY qty",
+        session(),
+    )
+    same(read_back(one_way, "qty"), [3, 20, 40], "qty")
+    same(read_back(one_way, "rate"), [300, 200, 400], "rate")
+    same(
+        read_back(other_way, "qty"), read_back(one_way, "qty"), "qty either way"
+    )
+    same(
+        read_back(other_way, "rate"),
+        read_back(one_way, "rate"),
+        "rate either way",
+    )
 
 
 def test_the_whole_shape_of_a_query_runs_at_once() raises:
@@ -3552,6 +3623,62 @@ def test_a_sum_of_large_ids_still_wraps() raises:
         Int64(5_553_255_926_290_448_414),
         "six times 4e18 plus 30, wrapped back round",
     )
+
+
+def test_an_average_of_instants_is_an_instant() raises:
+    """`avg` over a column of times answered a count of seconds from SQL and a
+    point in time from `DataFrame.group_by`, on the same column. See #552.
+
+    The frame API is the specification here, because that is the half with a
+    pandas to be measured against, and the test that runs the same reduction
+    both ways lives beside the node in `test_group_node.mojo`. What this checks
+    is that a query reaches it.
+    """
+    var out = run(
+        "SELECT crew, avg(start) AS m FROM shifts GROUP BY crew ORDER BY crew",
+        session(),
+    )
+    assert_equal(len(out), 2, "two crews")
+    assert_true(
+        out.schema[1].dtype == LogicalType.timestamp(TimeUnit.SECOND),
+        "the mean of a set of points in time is a point in time",
+    )
+    same(read_back(out, "m"), [200, 20], "each crew's average start")
+
+
+def test_an_average_of_instants_over_the_whole_table_is_one_too() raises:
+    """The other operator. A query with no group by reduces the whole column
+    through `Reduce`, which keeps its own state and had its own answer."""
+    var out = run("SELECT avg(start) AS m FROM shifts", session())
+    assert_equal(len(out), 1, "one row")
+    assert_true(
+        out.schema[0].dtype == LogicalType.timestamp(TimeUnit.SECOND),
+        "and it is still an instant",
+    )
+    same(read_back(out, "m"), [110], "the six starts average to 110.33")
+
+
+def test_an_average_of_spans_is_a_span() raises:
+    var out = run("SELECT avg(span) AS m FROM shifts", session())
+    assert_true(
+        out.schema[0].dtype == LogicalType.duration(TimeUnit.SECOND),
+        "the mean of a set of lengths is a length",
+    )
+    same(read_back(out, "m"), [110], "truncated towards zero, as pandas does")
+
+
+def test_a_total_of_spans_is_a_span_and_a_total_of_instants_is_refused() raises:
+    """A sum is the reduction the two halves of the table differ on. Adding two
+    lengths of time gives a length of time, and adding two points in time gives
+    nothing, so one of these answers and the other says why not."""
+    var out = run("SELECT sum(span) AS t FROM shifts", session())
+    assert_true(
+        out.schema[0].dtype == LogicalType.duration(TimeUnit.SECOND),
+        "a total of lengths keeps its units",
+    )
+    same(read_back(out, "t"), [662], "all six added up")
+    with assert_raises(contains="a sum over datetime64[s] has no answer"):
+        _ = run("SELECT sum(start) AS t FROM shifts", session())
 
 
 def test_a_median_comes_back_through_sql() raises:
