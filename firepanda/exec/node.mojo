@@ -634,6 +634,17 @@ struct Project(Movable):
     `SELECT qty AS howmany` is, and what every aggregate with an alias is, since
     the aggregate writes its answer to a column of its own naming and the
     projection above it is the only thing that knows what the query called it.
+
+    A selection passes straight through, because reordering columns and dropping
+    some of them moves no rows and a selection is about rows. The dense flags are
+    rearranged with the columns they belong to and the positions are not touched
+    at all. That is the whole of it, and it is worth having because a projection
+    over a filter is one of the commonest pairs there is: flattening here would
+    gather the columns this is about to drop.
+
+    A projection that keeps only dense columns drops the selection on the way
+    out, since there is nothing left for the positions to point at. A filter that
+    narrows does the same thing for the same reason.
     """
 
     var keep: List[Int]
@@ -668,12 +679,12 @@ struct Project(Movable):
             chunk: The chunk. Consumed.
 
         Returns:
-            A chunk of the kept columns, with the same number of rows.
+            A chunk of the kept columns, with the same number of rows, under the
+            same selection it arrived with if any of the kept columns needs one.
 
         Raises:
             If a position is outside the chunk.
         """
-        var rows = len(chunk)
         var width = chunk.width()
         for i in range(len(self.keep)):
             if self.keep[i] < 0 or self.keep[i] >= width:
@@ -684,8 +695,14 @@ struct Project(Movable):
                     + String(width)
                     + " columns"
                 )
+        var composing = chunk.selected()
+        var dense = List[Bool](copy=chunk.dense)
         var held = List[Optional[AnyArray]](capacity=width)
-        var backwards = chunk^.into_columns()
+        # The columns are taken out and the chunk is kept, rather than the chunk
+        # being consumed, so that the selection stays where it is. It is one
+        # position per row and copying it to hand it back would cost more than
+        # some of the gathers this is here to put off.
+        var backwards = chunk.columns^
         var flipped = List[AnyArray](capacity=width)
         while len(backwards) > 0:
             flipped.append(backwards.pop())
@@ -697,12 +714,23 @@ struct Project(Movable):
             last[i] = not seen[self.keep[i]]
             seen[self.keep[i]] = True
         var out = List[AnyArray](capacity=len(self.keep))
+        var out_dense = List[Bool](capacity=len(self.keep))
+        var all_dense = True
         for i in range(len(self.keep)):
             if last[i]:
                 out.append(held[self.keep[i]].take())
             else:
                 out.append(AnyArray(copy=held[self.keep[i]].value()))
-        return Chunk(out^, rows)
+            if composing:
+                out_dense.append(dense[self.keep[i]])
+                all_dense = all_dense and dense[self.keep[i]]
+        chunk.columns = out^
+        if composing and not all_dense:
+            chunk.dense = out_dense^
+            return chunk^
+        chunk.picks = List[UInt32]()
+        chunk.dense = List[Bool]()
+        return chunk^
 
 
 struct Limit(Movable):
@@ -6016,7 +6044,9 @@ def node_reads_selection(node: Node) -> Bool:
 
     `Filter` reads one, because it is also the only thing that writes one, and a
     chain of filters composing their selections rather than each one copying is
-    most of what issue #521 is for. Everything else is still flattened.
+    most of what issue #521 is for. `Project` reads one because it moves no rows,
+    so passing the positions along costs nothing and flattening would gather the
+    columns it is about to drop. Everything else is still flattened.
 
     Args:
         node: The node.
@@ -6024,7 +6054,7 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return node.isa[Filter]()
+    return node.isa[Filter]() or node.isa[Project]()
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
