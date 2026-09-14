@@ -911,6 +911,32 @@ def test_a_join_pairs_the_rows_that_match() raises:
     same(read_back(out, "rate"), [300, 200, 400], "rate")
 
 
+def test_a_comma_in_the_from_pairs_the_same_rows_a_join_does() raises:
+    # Two tables and the condition in the `WHERE`, which lowers to a cross join
+    # under a filter and is turned back into the pairing by the optimizer. The
+    # answer is the one the test above gets, which is the point of it.
+    var out = run(
+        "SELECT qty, rate FROM sales, tiers WHERE qty = band ORDER BY qty",
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 20, 40], "qty")
+    same(read_back(out, "rate"), [300, 200, 400], "rate")
+
+
+def test_a_comma_join_with_more_than_the_condition_in_the_where() raises:
+    # The equality becomes the join's and what is left of the `WHERE` is still
+    # a filter, pushed onto the side that can answer it.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales, tiers WHERE qty = band AND rate > 250"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 40], "qty")
+    same(read_back(out, "rate"), [300, 400], "rate")
+
+
 def test_a_condition_that_reads_both_sides_runs_above_the_join() raises:
     # A condition on one side is pushed below the join by the optimizer and a
     # condition on both cannot be, so this one is the residual filter that stays

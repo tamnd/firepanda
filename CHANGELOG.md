@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a join written as a comma and a `WHERE` would not run
+
+`SELECT count(*) FROM orders, customer WHERE c_custkey = o_custkey` refused to run, and the same query written with a `JOIN` and an `ON` answered 15000. They are the same query. The first one lowers to a cross join with the equality in a filter above it, and pairing 15,000 rows against 1,500 is 22 million pairs built before the filter ever sees one, so the operator behind a cross join declines to start rather than spend the memory.
+
+Predicate pushdown puts the equality back on the join now. A conjunct carried over a cross join whose two halves are a plain column of one side and a plain column of the other becomes a key pair, the join becomes an inner join, and whatever is left of the `WHERE` routes the way it always did. Both halves have to be plain columns because the operator builds its hash table from a column and a computed key would have to be computed on the build side too. A name both sides have counts as neither, which is the ambiguity the rest of the pass already refuses.
+
+It runs before the transitive copying rather than after, so a filter on one side of a condition that has only just become a key still reaches the other side in the same sweep.
+
+That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equalities in the `WHERE`. It runs now, and its ten order keys and their revenues agree with DuckDB 1.5 at scale factor 0.01. The claim in `firepanda/sql/plan.mojo` that a comma in the `FROM` and a written `JOIN` reach the same plan was there before any of this was, and it was not true. It is a test now.
+
+Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
+
 ### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
 
 The other half of what the last release flagged. `trim` ran at 13.5 nanoseconds a row over forty byte text against `substring` at 4.3 on the same column, and both build a text column and read every element, so three times the cost had to come from somewhere.
@@ -87,6 +99,7 @@ The underscore stands for one character and not for one byte, which is the thing
 One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
 
 The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+
 ### Added: `str.partition` and `str.rpartition`, the first answers wider than a column
 
 Every `str` name written so far hands back one column. These two hand back three: what came before the separator, the separator, and what came after. That makes them the first on this accessor whose answer is a frame, which is why they were picked next out of the fourteen names still missing. Everything else about them is a substring search the library already had, so nothing else confounds the question.
