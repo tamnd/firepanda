@@ -88,13 +88,13 @@ Two rows are worth having in your head. `İstanbul` folds to a plain i followed 
 
 Verified the same way as everything else here: over all 1112064 code points on their own and over sixty thousand random words against a live pandas, with no row differing. The generator also checks the one rule the walk rests on, which is that folding a row is folding each of its characters and sticking the answers together, and it refuses to write a table if that stops holding.
 
-## 9. `title` is the name that is not here
+## 9. `title` was the name that was not here
 
-`title` is the last member of this shape and it is missing on purpose. It needs to know where a word starts, pandas and Arrow agree that a word starts at a character that is cased, and whether a character is cased is the category question rather than the mapping question. Measured the same way as everything else here: the boundary rule built out of the corrected mappings disagrees with Arrow on 1295 code points, all of them letters that are cased and have no case mapping at all, `ĸ` and `ƍ` and their kind.
+`title` was the last member of this shape and it was missing on purpose. It needs to know where a word starts, and whether a character is cased is the category question rather than the mapping question. Measured the same way as everything else here: the boundary rule built out of the corrected mappings disagrees with Arrow on 1295 code points, all of them letters that are cased and have no case mapping at all, `ĸ` and `ƍ` and their kind.
 
-That is not a list, it is the same table section 6 declined to build. That table is built now and document 65 is about it, so `title` no longer waits on data. Whether a character is cased is the lower class and the titlecase class together and needs nothing new. What it waits on instead is a rule about what comes before a character rather than about the character, which is the first thing in this part of the library that cannot be answered a code point at a time.
+That was not a list, it was the same table section 6 declined to build. That table is built now and document 65 is about it, and `title` and `istitle` shipped on top of it. Whether a character is cased is the three case classes ORed together and needed nothing new, and the mapping needed nothing new either, since Arrow's titlecase mapping is its upper case mapping for every code point there is. What they did need is a rule about what comes before a character rather than about the character, which is the first thing in this part of the library that cannot be answered a code point at a time, and document 65 section 9 is that rule.
 
-`istitle` is on the same footing, and `isalpha`, `isalnum`, `isnumeric` and `isdecimal` need four more classes of exactly the kind document 65 section 9 sizes. Those are the only names of this group still missing.
+`isalpha`, `isalnum`, `isnumeric`, `isdigit` and `isdecimal` need four more classes of exactly the kind document 65 section 10 sizes, and `isascii` needed no class at all and is already in. Those five are the only names of this group still missing.
 
 ## 10. What this does to the board
 
@@ -104,7 +104,7 @@ Nothing else here is a divergence. All eight names are scored on all four string
 
 ## 11. What is left
 
-The twenty eight names of the accessor that are still missing, most of which need a regex engine, a splitter that can answer more than one column, or both. `title` is covered in section 9 and is the nearest of them, and since document 65 it is nearest to a rule rather than to a table.
+The twenty five names of the accessor that are still missing, most of which need a regex engine, a splitter that can answer more than one column, or both.
 
 `normalize` is worth naming separately. It is the name that exists because a visible letter can arrive composed or decomposed, which is also the reason a character count can surprise somebody, and it needs the normalization tables rather than the case ones.
 

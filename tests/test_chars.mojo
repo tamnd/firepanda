@@ -32,13 +32,16 @@ from firepanda.kernel.chars import (
     text_character_slice,
     text_character_substring,
     text_find,
+    text_is_ascii,
     text_is_lower,
     text_is_space,
+    text_is_title,
     text_is_upper,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
     text_swapcase,
+    text_title,
 )
 from firepanda.kernel.pattern import rfind_bytes
 
@@ -890,6 +893,133 @@ def test_folding_leaves_bytes_that_are_not_utf8_alone() raises:
     var col = built^.finish()
     assert_equal(len(rows(text_casefold(col))[0].as_bytes()), 2)
     assert_equal(rows(text_casefold(col))[1], "ab")
+
+
+def titled(var values: List[String]) raises -> List[String]:
+    """Titles a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_title(made(values^)))
+
+
+def test_titling_raises_the_first_character_of_every_word() raises:
+    var out = titled(["hello world", "ABC DEF", "a b  c"])
+    assert_equal(out[0], "Hello World")
+    assert_equal(out[1], "Abc Def")
+    assert_equal(out[2], "A B  C")
+
+
+def test_a_word_starts_after_anything_that_is_in_no_case() raises:
+    # A word does not end at whitespace, it ends at any character in no case at
+    # all, so an apostrophe and a digit both start a new word and the letter
+    # after them is raised. That is the rule pandas has and it surprises people.
+    var out = titled(["don't", "abc1def", "_ab"])
+    assert_equal(out[0], "Don'T")
+    assert_equal(out[1], "Abc1Def")
+    assert_equal(out[2], "_Ab")
+
+
+def test_titling_raises_a_titlecase_character_all_the_way() raises:
+    # The obvious guess is that a digraph at the start of a word becomes the
+    # titlecase form, and it does not. Arrow's titlecase mapping is its upper
+    # case mapping everywhere, so the whole capital is what comes out, and the
+    # second digraph is inside the word and drops instead.
+    var out = titled(["ǆx", "ǅ", "ǄǄ"])
+    assert_equal(out[0], "Ǆx")
+    assert_equal(out[1], "Ǆ")
+    assert_equal(out[2], "Ǆǆ")
+
+
+def test_titling_corrects_the_same_code_points_the_other_names_do() raises:
+    # A sharp s inside a word stays a sharp s because lowering leaves it alone,
+    # and one at the start becomes the capital the correction table carries
+    # rather than the two letters the standard library would give.
+    var out = titled(["straße", "ßx"])
+    assert_equal(out[0], "Straße")
+    assert_equal(out[1], "ẞx")
+
+
+def test_titling_an_empty_row_and_a_missing_row() raises:
+    var out = titled(["", "null", "çA"])
+    assert_equal(out[0], "")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "Ça")
+
+
+def test_titling_leaves_bytes_that_are_not_utf8_alone() raises:
+    var truncated = List[UInt8]()
+    truncated.append(0x61)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("ab cd".as_bytes())
+    var col = built^.finish()
+    assert_equal(len(rows(text_title(col))[0].as_bytes()), 2)
+    assert_equal(rows(text_title(col))[1], "Ab Cd")
+
+
+def test_the_title_question_is_asked_of_every_word() raises:
+    var out = asked(text_is_title(made(["Hello World", "Hello world", "A "])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+
+
+def test_a_row_with_no_cased_character_is_not_titled() raises:
+    var out = asked(text_is_title(made(["1", "", " ", "Abc Def"])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "no")
+    assert_equal(out[3], "yes")
+
+
+def test_the_title_question_counts_a_digit_as_a_word_break() raises:
+    # `A1b` is not titled, because the digit ends the word and the `b` after it
+    # is the start of a new one and is not raised. `A1B` is titled.
+    var out = asked(text_is_title(made(["A1b", "A1B", "Don'T", "Don't"])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "no")
+
+
+def test_a_titlecase_character_starts_a_word_and_does_not_continue_one() raises:
+    var out = asked(text_is_title(made(["ǅx", "ǅX", "ǅ", "Ǆ"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "yes")
+
+
+def test_the_title_question_keeps_a_missing_row_missing() raises:
+    var out = asked(text_is_title(made(["Ab", "null"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "null")
+
+
+def test_the_ascii_question_reads_bytes_and_not_characters() raises:
+    var out = asked(text_is_ascii(made(["abc", "café", "~", one(0x0080)])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "no")
+
+
+def test_the_ascii_question_is_the_one_that_says_yes_to_an_empty_row() raises:
+    # Every other question about a row wants a character to answer yes. This one
+    # is about what a row does not contain, so a row containing nothing passes.
+    var out = asked(text_is_ascii(made(["", "null", "x"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "yes")
 
 
 def main() raises:

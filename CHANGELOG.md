@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `title`, `istitle` and `isascii`, the three names that needed a rule rather than a table
+
+`str.title` raises the first character of every word and drops the rest, `str.istitle` asks whether a row is already written that way, and `str.isascii` asks whether a row is made of ASCII and nothing else. All three are exact against pandas on every code point in Unicode, and the first two are exact on every arrangement of four characters drawn from the seven the word rule treats differently.
+
+A word does not end at whitespace, it ends at the first character in no case at all, so a digit and an apostrophe both start a new one. `don't` titles to `Don'T` and `abc1def` titles to `Abc1Def`, and `A1b` is not titled while `A1B` is. That is pandas' answer and it catches people out, so it is worth knowing before you reach for the method.
+
+Neither `title` nor `istitle` needed a new table. Whether a character is cased is the three classes in `charclass.mojo` ORed together, and Arrow's titlecase mapping is its upper case mapping for every code point there is, which has the consequence that `ǆ` at the start of a word becomes `Ǆ` rather than the titlecase `ǅ` that exists for exactly that purpose. `isascii` needs no table and no decoding at all, and is the one question in this group that a row of nothing answers yes to. The two questions carry the same `engine/string-predicate-null` divergence the rest of the group does, which is that a missing row answers a missing value here and False in pandas. Document 65 sections 9 and 10.
+
 ### Fixed: `isspace`, `islower` and `isupper` on the 1384 code points they were wrong about
 
 These three answered out of the Mojo standard library's character data, which is close to Arrow's and is not Arrow's, and pandas answers them out of Arrow. Measured over all 1111998 code points the two disagreed about 1384 of them: the standard library had never heard of the non breaking space or the space separators from U+1680 to U+3000, it was missing 841 lower case and 526 upper case characters that Arrow has, and it counted the titlecase characters like `ǅ` as both cases at once where Arrow counts them as neither.

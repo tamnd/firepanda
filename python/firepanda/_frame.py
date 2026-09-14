@@ -487,6 +487,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def title(self) -> Series:
+        """Every row with each word's first character raised and the rest dropped."""
+        try:
+            return self._text("title")
+        except Exception as error:
+            raise translate(error) from None
+
     def swapcase(self) -> Series:
         """Every row with its upper case and lower case exchanged."""
         try:
@@ -519,6 +526,20 @@ class StringAccessor(StringMixin):
         """Whether every row is upper case."""
         try:
             return self._flag("isupper", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def istitle(self) -> Series:
+        """Whether every word in every row starts with a raised character."""
+        try:
+            return self._flag("istitle", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isascii(self) -> Series:
+        """Whether every row is made of ASCII characters only."""
+        try:
+            return self._flag("isascii", "")
         except Exception as error:
             raise translate(error) from None
 
