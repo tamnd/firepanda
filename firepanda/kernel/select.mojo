@@ -46,6 +46,7 @@ the operation paid twice.
 """
 
 from std.memory import unsafe_memcpy
+from std.sys.info import simd_width_of
 from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
@@ -114,6 +115,31 @@ comptime FILTER_PACK_WORDS = 1 << 10
 A word is sixty four output rows, so this is the same sixty five thousand rows
 as the morsel above, and the packing pass is over the output rather than the
 input.
+"""
+
+comptime MASK_SAMPLE_BLOCK = 64
+"""Rows `mask_keeps_more_than` reads at each place it looks.
+
+A cache line, which is what a mask costs to reach at all, so the rows after the
+first one in a block are free. Reading a run rather than a row is also what
+makes the estimate survive a mask whose true rows come in stretches.
+"""
+
+comptime MASK_SAMPLE_STRIDE = 8
+"""Blocks `mask_keeps_more_than` steps over between the ones it reads.
+
+So an eighth of the mask is read and the other seven eighths are never touched,
+which on a chunk is the difference between 1.7 microseconds and 8.4. The
+`select/keeps_more_50` and `select/kept_50` rows are the pair.
+"""
+
+comptime MASK_SAMPLE_FLOOR = 1 << 12
+"""Below this many rows a mask is counted rather than sampled.
+
+Four thousand bytes is a few microseconds to count in full and there is nothing
+to save by looking at five hundred of them instead. It also keeps the answer
+exact on the sizes tests are written at, which is worth having where the thing
+being decided is which route an operator takes.
 """
 
 comptime TAKE_LOOKAHEAD = 8
@@ -1323,6 +1349,132 @@ def select_positions(mask: Array[DType.bool]) -> List[UInt32]:
         at += valid & truth
     out.resize(at, 0)
     return out^
+
+
+def _kept_run[
+    origin: ImmOrigin
+](values: Pointer[Scalar[DType.bool], origin], begin: Int, stop: Int) -> Int:
+    """Counts the true bytes in a stretch of a mask, taking every one as valid.
+
+    A mask is a byte a row, so this adds lanes at a time and the count comes
+    out of one horizontal add at the end. The lanes are thirty two bits wide
+    and a lane sees the stretch divided by the register width, so nothing here
+    overflows on a chunk or on a whole frame read as one chunk either.
+
+    Args:
+        values: The mask's values.
+        begin: The first row to read.
+        stop: One past the last row to read.
+
+    Parameters:
+        origin: Where `values` is borrowed from.
+
+    Returns:
+        How many of those bytes are true.
+    """
+    comptime width = simd_width_of[DType.bool]()
+    var lanes = SIMD[DType.int32, width](0)
+    var at = begin
+    while at + width <= stop:
+        var block = values.unsafe_offset(at).unsafe_load[width=width]()
+        lanes += block.cast[DType.int32]()
+        at += width
+    var kept = Int(lanes.reduce_add())
+    while at < stop:
+        kept += Int(Bool(values.unsafe_offset(at).unsafe_load()))
+        at += 1
+    return kept
+
+
+def mask_kept(mask: Array[DType.bool]) -> Int:
+    """Returns how many rows a mask keeps, without writing anything down.
+
+    What a filter asked for no columns at all answers with, since the number of
+    rows is the whole result and building a column to read its length would be
+    a pass of stores for a number that is already there to be counted.
+
+    A null drops the row, the same rule `select_positions` and `filter_rows`
+    follow, so the number this gives is the number of rows either of them would
+    produce over the same mask.
+
+    The route with no nulls in it is `_kept_run` over everything. The route with
+    nulls probes a bit per row and stays scalar, like the null route of
+    `select_positions` and for the same reason.
+
+    Serial. The caller is an operator already running on a worker.
+
+    Args:
+        mask: The mask.
+
+    Returns:
+        How many rows are true and valid.
+    """
+    var n = len(mask)
+    var values = mask.unsafe_ptr()
+
+    if mask.null_count() == 0:
+        return _kept_run(values, 0, n)
+
+    var kept = 0
+    for i in range(n):
+        var valid = Int(mask.data.validity.get(i))
+        var truth = Int(Bool(values.unsafe_offset(i).unsafe_load()))
+        kept += valid & truth
+    return kept
+
+
+def mask_keeps_more_than(mask: Array[DType.bool], share: Float64) -> Bool:
+    """Reports whether a mask keeps more than a share of its rows.
+
+    What `Filter` asks before it decides whether to write a selection or copy
+    its columns. The question is which route is cheaper and not how many rows
+    there are, and neither route needs to be told the count: a copy reads it off
+    the column it wrote and a selection reads it off its own length. So this
+    reads a sample rather than the whole mask, which on a chunk of a hundred and
+    thirty one thousand rows is 1.7 microseconds against 8.4, and the whole count
+    left the line of operators in `exec/pipeline_line` 14 percent slower than the
+    copying filter it was there to beat.
+
+    A sample can answer it wrongly and the cost of being wrong is bounded by
+    the difference between the two routes, which near the share they cross at is
+    nothing at all, because that is what crossing means. Being wrong where it
+    would cost something takes an estimate that is off by the distance from the
+    share the mask really keeps to the crossing, and the sample is an eighth of
+    the rows spread over the whole mask. A mask below `MASK_SAMPLE_FLOOR` is
+    counted exactly, since a few thousand bytes is not worth estimating, and so
+    is a mask with nulls in it, whose count is a bit probe a row that does not
+    vectorize and is rare enough not to be worth a second loop.
+
+    Blocks of `MASK_SAMPLE_BLOCK` rather than rows spread evenly, because a row
+    costs a cache line to reach and the other sixty three rows on the line are
+    free once it arrives. Reading them is what makes the estimate hold up on a
+    mask whose true rows are clustered, which is what a predicate over a sorted
+    column produces and is the shape an evenly spread sample of single rows
+    would be worst at.
+
+    Args:
+        mask: The mask.
+        share: The share of the rows to compare against, between zero and one.
+
+    Returns:
+        True if the rows kept look like more than that share of them.
+    """
+    var n = len(mask)
+    if n == 0:
+        return False
+
+    if n < MASK_SAMPLE_FLOOR or mask.null_count() != 0:
+        return Float64(mask_kept(mask)) > share * Float64(n)
+
+    var values = mask.unsafe_ptr()
+    var kept = 0
+    var seen = 0
+    var at = 0
+    while at + MASK_SAMPLE_BLOCK <= n:
+        kept += _kept_run(values, at, at + MASK_SAMPLE_BLOCK)
+        seen += MASK_SAMPLE_BLOCK
+        at += MASK_SAMPLE_BLOCK * MASK_SAMPLE_STRIDE
+    return Float64(kept) > share * Float64(seen)
 
 
 def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:

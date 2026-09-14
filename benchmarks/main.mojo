@@ -158,6 +158,8 @@ from firepanda.kernel import (
     is_in,
     is_null,
     less,
+    mask_keeps_more_than,
+    mask_kept,
     mean_of,
     min_of,
     missing_count_any,
@@ -1412,6 +1414,20 @@ def bench_select(mut harness: Harness) raises:
         keep(len(picks))
 
     harness.record("select/positions_nulls", "rows", rows, positions_nulls)
+
+    # What a filter asked for no columns at all answers with: the whole mask
+    # read, nothing written. Beside the row below it, it is also the price of
+    # deciding a route by counting exactly rather than by sampling, which is
+    # the argument `mask_keeps_more_than` is there to make.
+    def kept() raises {imm half}:
+        keep(mask_kept(half))
+
+    harness.record("select/kept_50", "rows", rows, kept)
+
+    def keeps_more() raises {imm half}:
+        keep(mask_keeps_more_than(half, 0.4))
+
+    harness.record("select/keeps_more_50", "rows", rows, keeps_more)
 
     var picks_half = select_positions(half)
     var picks_most = select_positions(most)
@@ -5144,6 +5160,14 @@ def bench_pipeline(mut harness: Harness) raises:
     close to the driver on its own: three moves of a column list per chunk and
     whatever the batch costs.
 
+    `pipeline_line_narrow` is the same line as lowering writes it, with the
+    filter told which columns it owes rather than a projection behind it. Beside
+    `pipeline_line` it says what the dead mask column costs, and it is the shape
+    the filter's selection route was built for. The `_tenth` and `_third` rows
+    are the same two lines over a sparser predicate, which is what says how much
+    of what a filter costs is the rows it keeps and how much is the rows it
+    reads to find them.
+
     The last four rows are about the reduction node rather than the driver.
     `pipeline_reduce` against `pipeline_reduce_two_steps` is the same query
     written both ways, fused and not, and the gap is a round trip to memory of
@@ -5229,6 +5253,61 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/pipeline_line_one_chunk", "rows", rows, line_whole)
+
+    # The same line as lowering emits it: the filter is told which columns it
+    # owes, so the mask it read is never written out and the projection after it
+    # is not needed. This is where writing a selection rather than copying pays,
+    # since the filter moves no column data at all and the only gather is the
+    # two columns something downstream reads.
+    def line_narrow() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line_narrow", "rows", rows, line_narrow)
+
+    # The same two lines over a predicate that keeps a tenth of the rows rather
+    # than half. A filtered copy reads every input row whatever it keeps, so it
+    # costs the same here as it does above, while anything that works off the
+    # rows that survived gets ten times less to do. Beside the two rows above,
+    # these say how much of a filter's cost is the selectivity.
+    def line_tenth() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(100)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line_tenth", "rows", rows, line_tenth)
+
+    def line_narrow_tenth() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(100)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_narrow_tenth", "rows", rows, line_narrow_tenth
+    )
+
+    def line_narrow_third() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(300)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_narrow_third", "rows", rows, line_narrow_third
+    )
 
     def project_small() raises {imm small}:
         keep(small.rows)

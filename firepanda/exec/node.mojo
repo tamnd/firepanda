@@ -153,7 +153,14 @@ from firepanda.kernel.running import (
     state_capacity,
     widen_any,
 )
-from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.select import (
+    filter_any,
+    gather_any,
+    mask_keeps_more_than,
+    mask_kept,
+    select_positions,
+    take_any,
+)
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
 from firepanda.kernel.temporal import (
     TRUNC_CODES,
@@ -232,6 +239,47 @@ struct NodeStatus(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("finished")
 
 
+comptime SELECTION_KEEP_LIMIT = 0.4
+"""Above this share of rows kept, a filter copies rather than select.
+
+A filtered copy reads the mask and writes the survivors, once per column. A
+selection costs the positions as well, and then a gather per column that reads a
+position for every value it moves, so it is ahead when there are fewer values to
+move and behind when there are nearly as many as the copy would move anyway.
+
+Two fifths sits below where the two routes cross on every shape measured, and
+that is the point of it rather than a half: a selection is written where it is
+known to win and not where which one wins depends on the shape. The rows are the
+`exec/pipeline_line` ones in `benchmarks/main.mojo`, a comparison, a filter and a
+projection over eight chunks of a hundred and thirty one thousand rows, run once
+with the filter always selecting and once with it always copying. At a tenth of
+the rows kept selecting is 434 microseconds against 1.06 milliseconds, at a third
+613 against 813, at a half 882 against 970, and at a half over a single chunk of
+a million rows 1.26 milliseconds against 988 microseconds. So it is worth 2.4x
+where the predicate is selective and a fifth where it keeps a third, and at a
+half it is a wash on a chunked pipeline and a loss on one wide chunk, where the
+gather has no other chunk to run beside it.
+
+The share is read off a sample of the mask rather than counted, for the reason
+`mask_keeps_more_than` gives: the answer decides a route and not a result, and
+reading the whole mask to decide it left the same line 14 percent slower than
+the copying filter it was there to beat.
+
+The `select/` rows put the crossover for one column nearer two thirds, and the
+difference between the two readings is the machine rather than the kernel. Those
+are one chunk on one core, where what is scarce is instructions. A pipeline runs
+every core at once, and a gather reads a position as well as a value for every
+row it moves, so what is scarce there is bandwidth and the extra read counts
+against it. The operator rows are the ones that decide the threshold, since that
+is the shape a query runs in.
+
+A chunk that arrived under a selection is composed whatever the share, since
+composing reads and writes four bytes a surviving row and touches no column at
+all. The only alternative there is flattening it first, which is the copy this
+exists to avoid.
+"""
+
+
 struct Filter(Movable):
     """Keeps the rows a boolean column of the chunk is true on.
 
@@ -293,11 +341,20 @@ struct Filter(Movable):
         self.keep = keep^
         self.narrows = True
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Keeps the rows the mask is true on.
+
+        Writes a selection rather than copying unless the mask keeps nearly
+        everything, and composes with the selection the chunk arrived under if
+        it had one. `SELECTION_KEEP_LIMIT` is where the two routes cross and why.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather here may use more than one core. False when
+                this is already running on a worker. The copy route ignores it
+                and spreads either way, for the reason written beside it.
 
         Returns:
             The surviving rows, or None if none survived, since a chunk of no
@@ -306,46 +363,146 @@ struct Filter(Movable):
         Raises:
             If a position is out of range or the mask column is not boolean.
         """
-        if self.on < 0 or self.on >= chunk.width():
+        var width = chunk.width()
+        if self.on < 0 or self.on >= width:
             raise Error(
                 "filter: column "
                 + String(self.on)
                 + " is outside a chunk of "
-                + String(chunk.width())
+                + String(width)
                 + " columns"
             )
-        ref mask = chunk.columns[self.on].as_typed_view[DType.bool]()
-        if not self.narrows:
-            var all = List[AnyArray](capacity=chunk.width())
-            for i in range(chunk.width()):
-                all.append(filter_any(chunk.columns[i], mask))
-            var every = 0 if len(all) == 0 else len(all[0])
-            if every == 0:
-                return None
-            return Chunk(all^, every)
-        var kept = List[AnyArray](capacity=len(self.keep))
         for i in range(len(self.keep)):
-            if self.keep[i] < 0 or self.keep[i] >= chunk.width():
+            if self.keep[i] < 0 or self.keep[i] >= width:
                 raise Error(
                     "filter: column "
                     + String(self.keep[i])
                     + " is outside a chunk of "
-                    + String(chunk.width())
+                    + String(width)
                     + " columns"
                 )
-            kept.append(filter_any(chunk.columns[self.keep[i]], mask))
-        # A filter asked for no columns at all still knows how many rows
-        # survived, and the only thing that knows what a null in the mask means
-        # is the kernel, so the count comes from filtering the mask by itself
-        # rather than from reading it here.
-        var rows: Int
-        if len(kept) > 0:
-            rows = len(kept[0])
+
+        var composing = chunk.selected()
+        var count = len(self.keep) if self.narrows else width
+
+        var kept_rows: Int
+        var sel: List[UInt32]
+        if not composing or chunk.dense[self.on]:
+            ref mask = chunk.columns[self.on].as_typed_view[DType.bool]()
+            if count == 0:
+                # A filter asked for no columns at all is a row count, and it
+                # has no route to choose because neither route has anything to
+                # move. Counted rather than filtered: the number is the whole
+                # answer, and the kernel that gives it writes nothing, where
+                # filtering the mask by itself wrote a column to be measured
+                # and dropped.
+                var only = mask_kept(mask)
+                if only == 0:
+                    return None
+                return Chunk(List[AnyArray](), only)
+            if not composing and mask_keeps_more_than(
+                mask, SELECTION_KEEP_LIMIT
+            ):
+                # The copy is left to spread whatever this was told, which is
+                # what it did before there was anything else for a filter to do,
+                # and the `exec/pipeline_line` rows say it was right: a filter
+                # copying on a worker and spreading anyway is 1.26 milliseconds
+                # against 1.95 for the same copy kept on one core. The morsel
+                # loop above hands out one chunk at a time, so on eight chunks
+                # and ten cores there is room underneath it, and a filter is
+                # where the room gets used.
+                var copied = List[AnyArray](capacity=count)
+                for i in range(count):
+                    var at = self.keep[i] if self.narrows else i
+                    copied.append(filter_any(chunk.columns[at], mask))
+                # Read off the first column rather than counted, so that the
+                # route which is here because counting was not worth it does not
+                # go and count anyway. Every column was filtered by the same
+                # mask, so they are all this length.
+                var every = len(copied[0])
+                if every == 0:
+                    return None
+                return Chunk(copied^, every)
+            sel = select_positions(mask)
         else:
-            rows = len(filter_any(chunk.columns[self.on], mask))
-        if rows == 0:
+            # The cheapest column in the chunk to gather, a mask being a byte a
+            # row, and the rare case: a mask is written by whatever computed it,
+            # which sat above the selection, so it is nearly always dense. A
+            # chunk that arrived under a selection composes whatever the mask
+            # keeps, so there is no route to choose here.
+            var at_rows = chunk.column(self.on, spread)
+            ref mask = at_rows.as_typed_view[DType.bool]()
+            sel = select_positions(mask)
+
+        kept_rows = len(sel)
+        if kept_rows == 0:
             return None
-        return Chunk(kept^, rows)
+
+        # A column that is already read through a selection keeps its array and
+        # gets the two selections composed, which moves four bytes a surviving
+        # row. A column that is at the chunk's rows has to be gathered, since
+        # the positions being written point into the arrays underneath and its
+        # rows are not there. Those are the columns computed since the last
+        # filter, which is what makes them few.
+        var dense = List[Bool](copy=chunk.dense)
+        var out_picks = List[UInt32]()
+        if composing:
+            out_picks = List[UInt32](unsafe_uninit_length=kept_rows)
+            var target = out_picks.unsafe_ptr()
+            for j in range(kept_rows):
+                target.unsafe_offset(j).unsafe_write(chunk.picks[Int(sel[j])])
+
+        # The last use of a position can give its array up and an earlier one
+        # cannot, which is how `Project` avoids copying an ordinary projection,
+        # and a filter that narrows is a projection. A gathered column needs no
+        # copy either way, since a gather writes a new array.
+        var held = List[Optional[AnyArray]](capacity=width)
+        var backwards = chunk^.into_raw_columns()
+        var flipped = List[AnyArray](capacity=width)
+        while len(backwards) > 0:
+            flipped.append(backwards.pop())
+        while len(flipped) > 0:
+            held.append(Optional[AnyArray](flipped.pop()))
+
+        var last = List[Bool](length=count, fill=True)
+        var seen = List[Bool](length=width, fill=False)
+        for i in range(count - 1, -1, -1):
+            var at = self.keep[i] if self.narrows else i
+            last[i] = not seen[at]
+            seen[at] = True
+
+        var out = List[AnyArray](capacity=count)
+        var out_dense = List[Bool](capacity=count)
+        var all_dense = True
+        for i in range(count):
+            var at = self.keep[i] if self.narrows else i
+            if composing and not dense[at]:
+                if last[i]:
+                    out.append(held[at].take())
+                else:
+                    out.append(AnyArray(copy=held[at].value()))
+                out_dense.append(False)
+                all_dense = False
+            elif composing:
+                out.append(gather_any(held[at].value(), sel, spread))
+                out_dense.append(True)
+            else:
+                if last[i]:
+                    out.append(held[at].take())
+                else:
+                    out.append(AnyArray(copy=held[at].value()))
+                out_dense.append(False)
+                all_dense = False
+
+        # Every column gathered, so there is nothing left for the selection to
+        # point at. A filter that narrows to the columns computed above it lands
+        # here, and handing the selection on would leave every operator
+        # downstream flattening a chunk that is already flat.
+        if all_dense:
+            return Chunk(out^, kept_rows)
+        if composing:
+            return Chunk(out^, out_picks^, out_dense^)
+        return Chunk(out^, sel^, out_dense^)
 
 
 struct Expand(Movable):
@@ -5985,7 +6142,9 @@ def node_reads_selection(node: Node) -> Bool:
     it. That is what lets the selection be turned on one operator at a time
     without any answer changing in between.
 
-    Nothing reads one yet. Issue #521 turns them on.
+    `Filter` reads one, because it is also the only thing that writes one, and a
+    chain of filters composing their selections rather than each one copying is
+    most of what issue #521 is for. Everything else is still flattened.
 
     Args:
         node: The node.
@@ -5993,7 +6152,7 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return False
+    return node.isa[Filter]()
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -6094,7 +6253,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         # worker, so a gather here must not hand itself out to workers again.
         chunk.flatten(False)
     if node.isa[Filter]():
-        return node[Filter].process(chunk^)
+        # False for the same reason the flatten above passes it.
+        return node[Filter].process(chunk^, False)
     if node.isa[Expand]():
         return node[Expand].process(chunk^)
     if node.isa[Project]():

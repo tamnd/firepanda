@@ -46,10 +46,14 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
+    text_case,
     text_character_get,
     text_character_length,
     text_character_slice,
     text_find,
+    text_is_lower,
+    text_is_space,
+    text_is_upper,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
@@ -1233,6 +1237,83 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_repeat(self.values.strings(), times)),
+        )
+
+    def chars_upper(self) raises -> Self:
+        """Returns every row written in upper case.
+
+        Not a character for a character. `ß` raises to two letters and some
+        rows come back longer than they went in, which is why this builds a new
+        column rather than rewriting the bytes where they lie.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_case(self.values.strings(), True)),
+        )
+
+    def chars_lower(self) raises -> Self:
+        """Returns every row written in lower case.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_case(self.values.strings(), False)),
+        )
+
+    def chars_is_space(self) raises -> Self:
+        """Returns whether each row is whitespace and nothing else.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be whitespace.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_space(self.values.strings())),
+        )
+
+    def chars_is_lower(self) raises -> Self:
+        """Returns whether each row is lower case.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on a row with no cased character in it.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_lower(self.values.strings())),
+        )
+
+    def chars_is_upper(self) raises -> Self:
+        """Returns whether each row is upper case.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on a row with no cased character in it.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_upper(self.values.strings())),
         )
 
     def chars_starts_with(self, prefix: StringSlice) raises -> Self:

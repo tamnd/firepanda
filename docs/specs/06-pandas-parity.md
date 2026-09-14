@@ -227,7 +227,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 `len` counts characters and not bytes, which is worth writing down because there are two kernels underneath and only one of them is this. `str.len` is `Series.chars_length`, which runs `text_character_length` in `chars.mojo`, walking the payload and counting anything that is not a continuation byte, and it is the one that answers `'café'` with 4 the way pandas does. `text_byte_length` in `substr.mojo` is SQL's `STRLEN` and answers 5, and it is a read of the length field in each view rather than a pass over anything, which is thirteen times cheaper on a column of thirty two byte elements. DuckDB spells the two apart as well, `length` against `strlen`, so this is a difference between two questions rather than between two libraries. The accessor never reaches the byte length one: it is reached from SQL and from the kernel package, and a caller who wants it in Python asks for it by its own name rather than by a flag on `len`. Written up in document 30.
 
 - [ ] `len` (M6), which ships as `chars_length` and stays unticked until there is a differential test for it in firepanda-bench, per the rule at the bottom of this document
-- [ ] `lower`, `upper`, `title`, `capitalize`, `casefold`, `swapcase` (M6)
+- [x] `lower`, `upper` (M6), which agree with pandas on every Latin script row and differ on a handful of others because the case data underneath is an older copy of Unicode than CPython's, measured in document 64
+- [ ] `title`, `capitalize`, `casefold`, `swapcase` (M6)
 - [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
 - [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)
@@ -239,7 +240,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `extract`, `extractall`, `findall` (M6)
 - [ ] `get_dummies` (M6)
 - [ ] `encode`, `decode`, `normalize` (M6)
-- [ ] `isalnum`, `isalpha`, `isdigit`, `isspace`, `islower`, `isupper`, `istitle`, `isnumeric`, `isdecimal` (M6)
+- [x] `isspace`, `islower`, `isupper` (M6), which answer a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
+- [ ] `isalnum`, `isalpha`, `isdigit`, `istitle`, `isnumeric`, `isdecimal` (M6)
 - [ ] `translate`, `casefold` (M6)
 
 ## 5. The `.dt` accessor
