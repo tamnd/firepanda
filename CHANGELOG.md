@@ -18,6 +18,18 @@ Measured on the i9-13900K over four million rows of forty byte ASCII, alternated
 
 An element with a byte at or above 0x80 is refused and takes exactly the path it took before, so none of the Unicode answers move and the hundred and forty nine corrections keep their table. A refusal is not free, because whether an element is ASCII is only known once every byte has been looked at, so it is one wasted pass over bytes that get walked again. The same four million rows with an accent in every one of them ran 1.692 and 1.665 seconds before and 1.702 and 1.688 after, which is under one and a half per cent, and there is a benchmark row holding it there.
 
+### Fixed: a query that divided two integers answered the wrong number
+
+`SELECT -7 // 3` came back `-3` and `SELECT -7 % 3` came back `2`. DuckDB answers `-2` and `-1`, and so does every other SQL engine. Issue #770.
+
+The SQL front end was lowering `//` and `%` onto the kernels the dataframe surface uses, and those are pandas': a quotient rounds towards minus infinity and the remainder takes the sign of the divisor, which is Python's rule. SQL truncates towards zero and gives the remainder the sign of the dividend, which is C's. The two agree on every pair of positive numbers, which is why a front end that had been checked against thousands of queries had never shown it.
+
+Both answers are right where they are asked, so this is two operators now rather than one with a flag. `//` written in a query and `//` written on a frame go to different kernels, `sql_divide` and `floor_divide`, and the frame surface is untouched. The alternative was a mode on the shared kernel, which would have put a question about who is calling inside a loop that runs per register.
+
+Two more differences came out of measuring the dialect rather than assuming it. On a float `//` is not a floor division at all in DuckDB, so `-7.5 // 3` is `-2.5` and not `-3.0`, because the name there is the division that is integral only when its operands are. And a zero divisor is a null whatever the dtype, so `7.0 // 0.0` is `NULL` while `7.0 / 0.0` next to it is an infinity, which looks like a gap in DuckDB's own overload set and is what it answers today either way. Two bools are refused rather than widened to an int8 zero, which is the pandas answer and not one DuckDB has.
+
+The value differential added below found this on its first run, which is what that harness is for, and the two expressions come off its recorded list with this change. Both operators are pinned at all four sign combinations on both surfaces, both kernels have a scalar twin the fuzzer compares them against over a million cases, and three end to end tests run the queries and read the rows.
+
 ### Added: a value differential, which is what would have caught the STRLEN bug
 
 `pixi run differential-answers` runs the same expressions over the same eight rows through firepanda and through DuckDB and compares the values that come back.
@@ -28,7 +40,7 @@ The probe table is described once as SQL literal text and built twice from that 
 
 Answers are compared as text, which is the one rendering both engines can be asked for without either having an opinion about formatting. That covers whole numbers, text and booleans. Floating point renders differently on the two sides, so nothing in the list answers one yet, and the decimals and the timestamps come with the renderings being settled rather than being papered over now.
 
-It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, and until it is fixed the two expressions are on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
+It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, fixed in the entry above, and until it was the two expressions sat on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
 
 It runs on every commit and needs no corpus. It takes a couple of minutes, almost all of it DuckDB answering seventy expressions one query at a time.
 

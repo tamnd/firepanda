@@ -117,17 +117,6 @@ def recorded(expression: StringSlice) -> String:
     Returns:
         The reason, or an empty string if this disagreement is a new one.
     """
-    if expression == "n // 3" or expression == "n % 3":
-        # A gap and not a decision. The kernel under both is pandas', and the
-        # two rules part company only on a negative left side, which is why
-        # nothing above this noticed.
-        return (
-            "firepanda floors the division and gives the remainder the sign of"
-            " the divisor, which is Python's rule and so pandas'. DuckDB"
-            " truncates toward zero and gives the remainder the sign of the"
-            " dividend, which is C's. -2 // 3 is -1 here and 0 there, and"
-            " -2 % 3 is 1 here and -2 there. See issue #770"
-        )
     if expression == "s LIKE '_b_'":
         # A gap with a refusal already written for it, which is the honest
         # shape for one. The pattern language is the part of `LIKE` that is not

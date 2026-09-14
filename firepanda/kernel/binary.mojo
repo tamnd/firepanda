@@ -3,7 +3,7 @@
 `arith.mojo` and `compare.mojo` hold the loops, one per dtype, and both take the
 dtype as a parameter. A frame does not have one: at the frame boundary a column
 is an `AnyArray` and its dtype is a field. This is the boundary crossing, and it
-is the only file that has to know that the thirteen operations are two families.
+is the only file that has to know that the fifteen operations are two families.
 
 Three things happen before a loop runs. The two operand types are promoted to a
 common type, by the same `promote` a concat and a coalesce use, so int32 with
@@ -30,6 +30,15 @@ keep the operand type in pandas, so they promote like addition does and an
 integer column stays an integer column. What they do about a zero divisor is
 `arith.mojo`'s subject and is the one place in the file where firepanda answers
 something pandas does not.
+
+Two of the fifteen are here for the SQL front end and nothing else. `SQLDIV` and
+`SQLMOD` are `//` and `%` as DuckDB means them, which round a negative quotient
+towards zero rather than towards minus infinity and give the remainder the sign
+of the dividend rather than the divisor. They promote and type exactly like the
+pandas pair, so everything in this file treats them the same way, and the only
+thing that differs is the kernel at the end of the dispatch. Which of the two
+pairs an expression gets is decided where the expression is written down, by the
+front end, rather than here.
 
 A constant on either side goes through `binary_value_any`, which is the same
 three steps with a `Value` where the second column would be, plus one step in
@@ -99,6 +108,10 @@ from .arith import (
     multiply,
     power,
     power_const,
+    sql_divide,
+    sql_divide_const,
+    sql_modulo,
+    sql_modulo_const,
     subtract,
 )
 from .cast import cast_any
@@ -124,7 +137,7 @@ from .text import compare_text, compare_text_const
 
 
 struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """One of the thirteen elementwise operations over a pair of columns.
+    """One of the fifteen elementwise operations over a pair of columns.
 
     The codes are not arbitrary. Every arithmetic operation sorts below every
     comparison, because that is what lets `is_comparison` be one integer
@@ -157,22 +170,29 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime POW = Self(6)
     """Raising to a power."""
 
-    comptime EQ = Self(7)
+    comptime SQLDIV = Self(7)
+    """The division SQL means by `//`, which truncates towards zero on integers
+    and does not round at all on floats."""
+
+    comptime SQLMOD = Self(8)
+    """The remainder that goes with it, taking the sign of the dividend."""
+
+    comptime EQ = Self(9)
     """Equality."""
 
-    comptime NE = Self(8)
+    comptime NE = Self(10)
     """Inequality."""
 
-    comptime LT = Self(9)
+    comptime LT = Self(11)
     """Less than."""
 
-    comptime LE = Self(10)
+    comptime LE = Self(12)
     """Less than or equal."""
 
-    comptime GT = Self(11)
+    comptime GT = Self(13)
     """Greater than."""
 
-    comptime GE = Self(12)
+    comptime GE = Self(14)
     """Greater than or equal."""
 
     def __init__(out self, code: UInt8):
@@ -209,7 +229,7 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Reports whether the operation answers a bool column.
 
         Returns:
-            True for the six comparisons, false for the seven arithmetic ones.
+            True for the six comparisons, false for the nine arithmetic ones.
         """
         return self.code >= Self.EQ.code
 
@@ -259,6 +279,10 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("%")
         elif self == Self.POW:
             writer.write("**")
+        elif self == Self.SQLDIV:
+            writer.write("//sql")
+        elif self == Self.SQLMOD:
+            writer.write("%sql")
         elif self == Self.EQ:
             writer.write("==")
         elif self == Self.NE:
@@ -293,7 +317,7 @@ def binary_type(
 
     Returns:
         The result type: bool for a comparison, the promoted operand type for
-        six of the seven arithmetic operations, and for division the promoted
+        eight of the nine arithmetic operations, and for division the promoted
         type when that is already a float and float64 when it is not. Floor
         division and the remainder are in the first group and not with division,
         because `//` and `%` keep the operand type in pandas and `/` does not.
@@ -319,6 +343,13 @@ def binary_type(
     if op.is_comparison():
         return LogicalType.BOOL
     if common.kind == TypeKind.BOOL:
+        if op == BinaryOp.SQLDIV or op == BinaryOp.SQLMOD:
+            # The answers below are pandas', and the SQL pair has no business
+            # borrowing them. DuckDB has no boolean overload for either operator
+            # and says so, so these refuse rather than inventing an int8 zero.
+            raise Error(
+                "binary: " + String(op) + " is not defined on " + String(common)
+            )
         return bool_arithmetic_type(op)
     if not common.is_numeric():
         raise Error(
@@ -1177,6 +1208,10 @@ def _binary_erased(
                     return AnyArray(floor_divide(x, y))
                 if op == BinaryOp.MOD:
                     return AnyArray(modulo(x, y))
+                if op == BinaryOp.SQLDIV:
+                    return AnyArray(sql_divide(x, y))
+                if op == BinaryOp.SQLMOD:
+                    return AnyArray(sql_modulo(x, y))
                 if op == BinaryOp.POW:
                     return AnyArray(power(x, y))
                 # Division is the one operation whose answer is not the type it
@@ -1592,6 +1627,10 @@ def _binary_const_erased(
                     return AnyArray(floor_divide_const[target](x, y, flip))
                 if op == BinaryOp.MOD:
                     return AnyArray(modulo_const[target](x, y, flip))
+                if op == BinaryOp.SQLDIV:
+                    return AnyArray(sql_divide_const[target](x, y, flip))
+                if op == BinaryOp.SQLMOD:
+                    return AnyArray(sql_modulo_const[target](x, y, flip))
                 if op == BinaryOp.POW:
                     return AnyArray(power_const[target](x, y, flip))
                 comptime if target.is_floating_point():

@@ -662,6 +662,14 @@ def _binary_op(text: String) raises -> BinaryOp:
     one place the text becomes a code. `AND` and `OR` are not here, because the
     plan holds them as calls rather than as binary operations.
 
+    Two of these are not the code the frame surface uses for the same symbol.
+    `//` and `%` are `SQLDIV` and `SQLMOD`, which round a negative quotient
+    towards zero and give the remainder the sign of the dividend, and that is
+    what DuckDB answers: `-2 // 3` is `0` and `-2 % 3` is `-2`. The pair the
+    frame surface writes `//` and `%` for follows Python, so it answers `-1` and
+    `1`, and a query that went through those kernels was quietly answering a
+    different question. See issue #770.
+
     Args:
         text: The operator as SQL spells it.
 
@@ -680,9 +688,9 @@ def _binary_op(text: String) raises -> BinaryOp:
     if text == "/":
         return BinaryOp.DIV
     if text == "//":
-        return BinaryOp.FLOORDIV
+        return BinaryOp.SQLDIV
     if text == "%":
-        return BinaryOp.MOD
+        return BinaryOp.SQLMOD
     if text == "**" or text == "^":
         return BinaryOp.POW
     if text == "=" or text == "==":
