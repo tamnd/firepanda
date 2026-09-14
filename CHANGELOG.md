@@ -15,6 +15,7 @@ A frame that arrives in one chunk runs a filtering line about 1.65 times slower 
 `exec/pipeline_line_two_chunks` and `exec/pipeline_line_eight_chunks` run the same line over chunks of two million and five hundred thousand rows. Both are as far past every level of cache as the four million row chunk is, so if the cost were the size of the intermediates they would sit with the one chunk row. They sit with the morsel sized row instead. On the i9-13900K at four million rows with the machine idle, one chunk is 3.46 milliseconds, two is 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is 2.26. The whole of the cost is the step from one chunk to two, which is where the driver stops running the line on the calling thread and starts handing the prefix out, so what a one chunk frame is missing is the batched prefix and not a cache.
 
 `exec/pipeline_line_one_chunk_split` cuts the one chunk frame into morsels inside the timing and then runs the line, which is what a scan that re-chunked its input would cost today. It is 11.9 milliseconds against 3.46 for leaving the frame alone, because slicing a column allocates and a copy of the source costs more than the whole query. A scan that re-chunks has to slice without allocating, and that is the work the issue describes.
+
 ### Added: a compiler and a matching engine for the RE2 side of the string accessor
 
 Document 76 read a pattern with Python's grammar and worked out which of the two engines pandas would hand it to. This turns one of those parsed patterns into instructions and runs them, for the RE2 side, which is the side that answers the common case. Issue #8 M6.
@@ -28,6 +29,18 @@ Six of the constructs RE2 refuses were already known and the rest were measured 
 `pixi run differential-regex-match` runs thirty thousand generated patterns against sixteen pieces of text through both this engine and pandas, and compares the refusals and the answers. It agrees on every pattern it compares across five seeds, with the held out patterns counted by reason so that setting one aside is a number somebody watches rather than a silence. The first run disagreed about 66 patterns in three families and every one was a fact about RE2 that had not been measured, which is the same thing the routing corpus did and the reason it was written before the hand written tests.
 
 Nothing is wired to the string accessor yet, and captures, case folding and the Python engine are named in document 77 section 8 rather than half done.
+
+### Changed: a column the query did not name is named after what it was written as
+
+`SELECT sum(x) FROM t` used to come back with a column called `__expr_0`. It comes back with one called `sum(x)` now, which is what DuckDB calls it, and `SELECT 1` comes back with a column called `1`.
+
+The name is printed by the printer that already prints an AST back to SQL, which is the same arrangement DuckDB has, and it is why the two agree on as much of this as they do without either side aiming at the other. Both normalize rather than copying the text, so `SUM( x  )` is `sum(x)` in both. Both parenthesize every operand of an operator, so `x * 2 + 1` is `((x * 2) + 1)` in both. Neither makes a duplicate name unique, so two columns written the same way come back with the same name in both.
+
+Five shapes are still named differently and all five are the printer disagreeing rather than the rule disagreeing. DuckDB names `count(*)` as `count_star()`, negation as `-(x)`, a cast by the type it resolved to rather than by the type text that was written, a `CASE` with the `ELSE` it filled in, and a call to a function whose name is a keyword with the schema it found the function in. Four of the five would not read back as themselves, so closing them means a printer that prints for a name rather than for a reparse.
+
+This is a change to what queries answer, not only to what `EXPLAIN` prints. A caller reading a column back by the name firepanda gave it has to read it back by the new name, and a caller that wrote an alias is unaffected. TPC-H q18 agrees with DuckDB because of it, and it was the only thing standing between that query and agreement.
+
+The lowering takes the grammar now, because the printer needs the keyword table to know when a name has to be quoted. `lower` has one more argument and so does everything between it and the select list.
 
 ### Changed: a filter counts its mask once for the chunk and not once per column
 
