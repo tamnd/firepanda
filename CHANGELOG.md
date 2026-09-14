@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release in two halves. One is the `str` accessor learning about patterns, which is five new names and a sixth search inside LIKE, and the other is the second and last of the text kernels that were doing far more work than the answer needs.
+
+The pattern half starts from a gap being admitted rather than papered over. There is no regular expression engine here, so `contains`, `match`, `fullmatch`, `count` and `replace` answer a pattern holding none of the fourteen metacharacters exactly and refuse anything else by name. Searching for a `.` literally without saying so would turn a filter that keeps nearly every row into one that keeps nearly none and say nothing about it. The four names that look for a pattern then learned `case=False`, which needed a second fold table of 1457 entries beside the one `casefold` uses, because a fold a person reads can make a row longer and a search cannot afford that. On the SQL side a LIKE pattern can now hold an underscore and a run at each end, added as a sixth search below the five fast ones so that nothing which was a prefix test became a walk.
+
+The kernel half finishes what the last release flagged. `upper` over ASCII was paying four walks and a heap allocation for an answer that needs one pass, and it is sixty times faster now, 6.6 nanoseconds a row against four hundred. `trim` was counting in character ordinals, and every ordinal is found by scanning from the front of the element, so a row with nothing to trim was walked about five times end to end. Walking the two ends in byte offsets instead is two times on that row and 4.8 times on a row with spaces on both ends. Both changes ship with a benchmark row for the case they cannot help, so neither claim can quietly become a trade.
+
+Four more wrong answers came out of the same harness while the release was being cut. A cast of a double to an integer in SQL truncated where DuckDB rounds, an integer literal past a BIGINT wrapped around to a negative number instead of being read as the wider thing it is, the number literals DuckDB reads as doubles were not being lowered as doubles, and a join written as a comma with the equality down in the `WHERE` would not run at all, which is the oldest way there is to write a join. The last of those is a plan change rather than a kernel one: a cross join with an equality above it is turned into the join it means.
+
+The other two additions are the two `str` names whose answer is not one column. `str.partition` and `str.rpartition` give three, and `str.cat` gives one row where there were many, which is the first answer in the accessor narrower than the column it came from.
+
+One wrong answer is fixed and it is worth reading. `SELECT -7 // 3` came back `-3` and `SELECT -7 % 3` came back `2`, because the SQL front end was lowering onto the dataframe kernels and those follow Python's rule where SQL follows C's. The two agree on every pair of positive numbers, which is why thousands of checked queries had never shown it. What found it is the other addition here, a value differential that runs the same expressions over the same eight rows through this engine and through DuckDB and compares what comes back. Three harnesses already asked whether a statement parses and what type it comes out as, and all three agreed about `strlen` while it returned the wrong number, because none of them ever looked at a result.
+
 ### Fixed: a SQL cast of a double to an integer rounds where it used to truncate
 
 `SELECT CAST(2.6 AS BIGINT)` answered 2 and DuckDB answers 3. The conversion loses a fraction and there are two ways to lose it: truncate towards zero, which is what the machine instruction does and what pandas and NumPy mean by `astype`, or round to the nearest whole number with a tie going to the even one, which is what a SQL cast means. firepanda did the first for both front ends and only one of them was asking for it. Issue #786.
@@ -7234,7 +7250,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
