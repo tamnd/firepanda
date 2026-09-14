@@ -56,40 +56,51 @@ comptime LINEAR_MAX = 32
 """The largest set of numbers answered by comparing against every member.
 
 A number comparison is one SIMD equal against a block that is already loaded, so
-each extra member costs about seven hundredths of a nanosecond a row. The table
-costs much more than that per row, because it hashes and then probes, and the
-probe gets longer as the table fills. That leaves the crossover a long way up.
+each extra member costs about a hundredth of a nanosecond a row. The table costs
+much more than that per row, because it hashes and then probes, and the probe
+gets longer as the table fills. That leaves the crossover a long way up.
 
-To find it, both routes were built at every set size, by moving this constant, and
-run against each other in one session on a million int64 rows. Nanoseconds a row,
-linear against table: nine, 1.30 against 2.99; sixteen, 2.03 against 4.84; thirty
-two, 3.82 against 5.03; sixty four, 7.06 against 5.15. So it turns over between
-thirty two and sixty four, and thirty two is the last size where comparing
-everything still wins with room to spare.
+To find it, both routes were run against each other on a million int64 rows, with
+the table route lifted out of here so it could be run below the threshold as
+well. Nanoseconds a row on the i9-13900K, linear against table: sixteen, 0.30
+against 0.57; twenty four, 0.43 against 0.44; thirty two, 0.53 against 0.63;
+forty eight, 0.80 against 0.32. So it turns over between thirty two and forty
+eight, and thirty two is the last size where comparing everything still wins.
+
+The table numbers do not climb with the set the way the linear ones do, and they
+are not flat either. They are sawtoothed, because the table rounds its bucket
+count up to a power of two and a set just over one of those boundaries sits in a
+half empty table and probes faster than a set just under the next one. Forty
+eight is the low tooth. That is why the crossover is read off the size where the
+two lines cross rather than off any single pair.
 """
 
-comptime LINEAR_BLOCKS = 8
+comptime LINEAR_BLOCKS = 4
 """How many SIMD blocks the linear route keeps live while it walks the set.
 
 One, which is the obvious way to write it, costs three times what this does, and
-the reason is worth writing down because it is not about sets either. With one
-block live the loop over the set is entered once per block, and on a machine
-whose SIMD width is two that is a whole loop, with its counter and its branch and
-its load of the needle out of a list, for every two rows. None of that work is
-about the rows.
+the reason is worth writing down because it is not about sets. With one block
+live the loop over the set is entered once per block, so on a machine whose SIMD
+width is two that is a whole loop, with its counter and its branch and its load
+of the needle out of a list, for every two rows. None of that work is about the
+rows. A group of blocks amortises all of it across the group: the needle is
+splatted once, the loop is entered once, and its body is a compare per block with
+nothing carried between them.
 
-Eight blocks amortise it eight ways. The needle is splatted once for the group,
-the loop over the set is entered once for the group, and the body of that loop is
-eight compares that do not depend on each other. Measured on the ten core M
-series, nanoseconds a row for sets of two, four, eight and thirty two: one block
-0.26, 0.43, 0.85 and 4.11, against 0.10, 0.14, 0.25 and 1.27 for eight. Four
-blocks came within five per cent of eight at every size and two did not, so the
-gain is in leaving the loop rather than in the width of the group.
+Four rather than eight, and the two machines disagree about that by less than
+they agree about the first paragraph. Two vectors are live per block, the values
+and the answers, so four blocks is eight registers and eight blocks is sixteen.
+AVX2 has sixteen, so eight blocks is the whole file and it spills: measured on
+the i9-13900K, nanoseconds a row for sets of four, sixteen and thirty two, four
+blocks ran 0.21, 0.30 and 0.53 against 0.19, 0.36 and 0.63 for eight. NEON has
+thirty two registers and does not spill, so on the ten core M series eight was
+the faster of the two, by five per cent. Losing five per cent on the machine with
+room for both beats losing sixteen on the machine without it.
 
-Eight is also what a register file can hold. Two vectors are live per block, the
-values and the answers, so eight blocks is sixteen registers, which is half of
-NEON and all of AVX2. If the x86 numbers say four, four is the answer there and
-this is the one line that has to change.
+The gain over one block is what this is for, and it is much larger than the
+difference between four and eight. On the M series, one block ran 0.26, 0.43,
+0.85 and 4.11 for sets of two, four, eight and thirty two, against 0.10, 0.14,
+0.25 and 1.27 for eight blocks.
 """
 
 comptime TEXT_LINEAR_MAX = 2
