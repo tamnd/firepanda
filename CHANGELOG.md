@@ -8,7 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Added: benchmark rows that say why a frame in one chunk runs a line slowly
+### Changed: the differential programs are built several at a time
+
+The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
+
+The chain moved into `tools/build_differential.sh`, which hands the eight commands to `xargs -P`. The width is the core count capped at four, because a Mojo compile is itself parallel and holds around a gigabyte while it runs, so the limit is memory rather than cores. On a ten core machine the eight programs build in four minutes and nineteen seconds of wall clock against about twelve minutes in sequence. The step's ceiling went to fifteen minutes at the same time, so the next program added does not repeat the same failure.
 
 A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.
 
