@@ -2139,6 +2139,33 @@ def lookup_frame() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def cut_lookup_frame() raises -> DataFrame:
+    """The same four rows to join against, in chunks of one, two and one.
+
+    A build side arrives in pieces as soon as it is a table read from several
+    row groups or a derived table, and everything this node does indexes it by a
+    single row number, so the pieces have to be stacked before the table is
+    built. The key is split across two chunks and so is the payload, which is
+    what a stack that dropped a piece or put them back in the wrong order would
+    show up as.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([2]))
+    n.append(numbers([4, 6]))
+    n.append(numbers([8]))
+    var tag = ChunkedArray(LogicalType.INT64)
+    tag.append(numbers([20]))
+    tag.append(numbers([40, 60]))
+    tag.append(numbers([80]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(tag^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def key_words() raises -> AnyArray:
     """The six left keys, as text, for the joins on a text key.
 
@@ -2311,6 +2338,44 @@ def test_a_join_over_forty_chunks_matches_the_whole_frame_join() raises:
     assert_equal(len(values), 4, "the four keys the lookup has")
     assert_equal(values[0], Int64(2), "the smallest key that matched")
     assert_equal(values[3], Int64(8), "the largest")
+
+
+def test_a_build_side_in_three_chunks_joins_the_way_one_chunk_does() raises:
+    """Issue #583. `only` is the borrow a column of exactly one chunk has, and a
+    build side that arrived in pieces raised out of the build before a row was
+    probed. It is stacked now, so which side of the join a chunked frame is on
+    stops deciding whether the query runs at all."""
+    var one = Pipeline(cut_frame())
+    one.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    var many = Pipeline(cut_frame())
+    many.add(Node(Join(cut_lookup_frame(), "n", "n", JoinKind.INNER)))
+    var a = joined_rows(one^)
+    var b = joined_rows(many^)
+    assert_equal(len(b), 3, "the three keys that matched")
+    assert_equal(len(a), len(b), "the same height either way")
+    for i in range(len(a)):
+        assert_equal(a[i], b[i], "row " + String(i))
+
+
+def test_a_chunked_build_side_brings_its_own_columns_across() raises:
+    # The keys alone would pass the test above with the payload dropped, since
+    # the answer is read off the probe side's key column. This reads the build
+    # side's other column, whose rows are split across the same three chunks, so
+    # a stack that lost a piece or reordered them shows up here.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(cut_lookup_frame(), "n", "n", JoinKind.INNER)))
+    var out = pipeline^.run()
+    var tags = read_back(out, "tag")
+    for i in range(len(tags)):
+        for j in range(i + 1, len(tags)):
+            if tags[j] < tags[i]:
+                var swap = tags[i]
+                tags[i] = tags[j]
+                tags[j] = swap
+    assert_equal(len(tags), 3, "one tag per matched row")
+    assert_equal(tags[0], Int64(20), "the tag from the first chunk")
+    assert_equal(tags[1], Int64(40), "one from the second")
+    assert_equal(tags[2], Int64(60), "and the other from the second")
 
 
 def test_a_left_join_keeps_a_row_that_matched_nothing() raises:

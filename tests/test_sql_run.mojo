@@ -982,6 +982,32 @@ def test_a_where_about_the_right_table_alone_still_runs() raises:
     same(read_back(out, "rate"), [300, 400], "rate")
 
 
+def test_a_table_of_three_chunks_joins_from_either_side() raises:
+    # Issue #583. `sales` is ten rows in three chunks and `tiers` is four rows
+    # in one, and writing `sales` on the right put a chunked frame on the build
+    # side, which raised out of the operator before a row was probed. Which side
+    # of the word JOIN a table is written on is not supposed to decide whether
+    # the query runs, and both spellings answer the same rows now.
+    var one_way = run(
+        "SELECT qty, rate FROM sales JOIN tiers ON qty = band ORDER BY qty",
+        session(),
+    )
+    var other_way = run(
+        "SELECT qty, rate FROM tiers JOIN sales ON band = qty ORDER BY qty",
+        session(),
+    )
+    same(read_back(one_way, "qty"), [3, 20, 40], "qty")
+    same(read_back(one_way, "rate"), [300, 200, 400], "rate")
+    same(
+        read_back(other_way, "qty"), read_back(one_way, "qty"), "qty either way"
+    )
+    same(
+        read_back(other_way, "rate"),
+        read_back(one_way, "rate"),
+        "rate either way",
+    )
+
+
 def test_the_whole_shape_of_a_query_runs_at_once() raises:
     # A WHERE, a GROUP BY, a HAVING, an ORDER BY and a LIMIT in one statement,
     # which is the clause order the lowering builds bottom up.

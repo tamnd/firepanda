@@ -129,7 +129,11 @@ from firepanda.kernel.chars import (
     text_find,
 )
 from firepanda.kernel.substr import text_byte_length
-from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.concat import (
+    column_ref,
+    concat_refs_any,
+    concat_two_any,
+)
 from firepanda.kernel.edges import text_trim
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import (
@@ -3879,14 +3883,22 @@ struct Join(Movable):
     """Per wanted column, its position in the frame it comes from."""
 
     var _build: List[AnyArray]
-    """One chunk per right column, settled by `bind`.
+    """One array per right column, settled by `bind`.
 
     The right frame's columns are chunked and everything here reads them as one
     array, so this is where the two meet. A column of one chunk lends it, which
-    shares the bytes and copies nothing. A column of no chunks, which is what a
-    build side a filter emptied has, gets an empty array of its own type made
-    here, so that a join against nothing joins against nothing rather than
-    raising on a column shape.
+    shares the bytes and copies nothing, and that is the case worth being fast
+    because a build side is usually something that was read or materialized in
+    one piece. A column of no chunks, which is what a build side a filter
+    emptied has, gets an empty array of its own type made here, so that a join
+    against nothing joins against nothing rather than raising on a column shape.
+
+    A column of several chunks is stacked into one, which is a copy of the build
+    side and is the one case here that costs anything. It is done because the
+    table, the null bitmap and both gathers all index the build side by a single
+    row number, and a row number means nothing against a list of pieces. The
+    pieces are borrowed rather than collected first, so the bytes are copied once
+    and not twice. Issue #583.
     """
 
     def __init__(
@@ -3997,10 +4009,18 @@ struct Join(Movable):
         var rows = self.right.rows
         self._build = List[AnyArray](capacity=len(self.right.columns))
         for j in range(len(self.right.columns)):
-            if self.right.columns[j].num_chunks() == 0:
+            var pieces = self.right.columns[j].num_chunks()
+            if pieces == 0:
                 self._build.append(empty_any(self.right.schema[j].dtype))
-            else:
+            elif pieces == 1:
                 self._build.append(AnyArray(copy=self.right.columns[j].only()))
+            else:
+                var refs = List[Pointer[AnyArray, ImmUntrackedOrigin]](
+                    capacity=pieces
+                )
+                for p in range(pieces):
+                    refs.append(column_ref(self.right.columns[j].chunks[p]))
+                self._build.append(concat_refs_any(refs))
 
         var codes = Array[DType.uint32](overwritten=rows)
         var side = _build_key(self._build[there], codes)
