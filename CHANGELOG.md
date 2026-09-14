@@ -21,6 +21,15 @@ Answers are compared as text, which is the one rendering both engines can be ask
 It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, and until it is fixed the two expressions are on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
 
 It runs on every commit and needs no corpus. It takes a couple of minutes, almost all of it DuckDB answering seventy expressions one query at a time.
+### Added: `str.replace` with a literal pattern
+
+The fifth `str` name about a pattern and the one that narrows nothing. pandas 3 defaults `regex` to False, so the ordinary call is a literal replacement already and a byte search and a rewrite is the whole of it. `regex=True` goes through the same check the other four use: a pattern with none of the twelve metacharacters in it is served and anything else is refused by name.
+
+`n` works at every sign it can have. Negative means every match, which is the default, zero hands the row back without searching it, and a positive number means that many counted from the left. Matches do not overlap, so `replace("aa", "X")` on four a's is `XX`. A missing row stays missing, which makes this the first name in the accessor that agrees with pandas about a missing row rather than having to register a divergence for it.
+
+`pat` may be a mapping, in which case the pairs are applied one after another and each one reads the last one's output, as pandas does. A callable `repl` is refused, since pandas itself refuses one when `regex` is off and needs an engine when it is on. `case=False` and a non zero `flags` are refused rather than ignored, which is a real gap here and not only a missing engine: pandas does honour `case=False` on this method by escaping the pattern and running it case insensitively, and matching that needs a case folding search that does not exist yet.
+
+One answer is worth knowing before it surprises anybody. An empty pattern inserts the replacement before every character and once at the end, so `replace("", "-")` on `"héllo"` gives six dashes, while `count("")` on the same row answers seven because it counts bytes. Both numbers are pandas'. `pyarrow.compute.replace_substring` does not terminate on an empty pattern, so pandas hands that one case to Python, which counts characters, while `count` stays in Arrow, which counts bytes.
 
 ### Added: `contains`, `match`, `fullmatch` and `count`, the first four `str` names about patterns
 

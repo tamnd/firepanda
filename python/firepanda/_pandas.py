@@ -8621,12 +8621,20 @@ class StringMixin:
         start: int | None = None,
         stop: int | None = None,
         step: int = 1,
+        other: str = "",
     ) -> Series:
-        """Runs a method that answers text."""
+        """Runs a method that answers text.
+
+        `other` is last rather than beside `arg` because only `replace` passes
+        it and every other call here would have had to write an empty string
+        into the middle of its arguments.
+        """
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.string_text(kind, arg, start, stop, step))
+            return Series._wrap(
+                self._series._inner.string_text(kind, arg, other, start, stop, step)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -8887,6 +8895,40 @@ class StringMixin:
         """
         self._plain(None, flags, "count")
         return self._number("count", self._literal(pat, True, "count"))
+
+    def _replaced(self, pat: Any, repl: Any, n: Any, case: Any, flags: Any, regex: Any) -> Series:
+        """Every row with a run of characters swapped for another.
+
+        The one name in this group that needs no promise made for it, because
+        `regex` defaults to False in pandas 3 and the default call is therefore a
+        literal replacement. `regex=True` still goes through `_literal`, so a
+        caller who asks for an engine on a pattern that does not need one gets
+        the same answer and a caller who asks for one that does gets the refusal.
+
+        A dict pattern is several replacements applied in order, which is what
+        pandas does with one, and `repl` has to be absent when a dict is given
+        because the dict holds both halves.
+        """
+        if isinstance(pat, dict):
+            if repl is not None:
+                raise InvalidArgumentError(
+                    "firepanda:value: repl cannot be used when pat is a dictionary"
+                )
+            answer = self._series
+            for key, value in pat.items():
+                answer = answer.str._replaced(key, value, n, case, flags, regex)
+            return answer
+        if callable(repl):
+            raise UnsupportedError(
+                "firepanda:unsupported: str.replace with a callable replacement needs a"
+                " regular expression engine and none is written yet"
+            )
+        if not isinstance(repl, str):
+            raise DTypeError("firepanda:dtype: repl must be a string or callable")
+        self._plain(case, flags, "replace")
+        return self._text(
+            "replace", self._literal(pat, bool(regex), "replace"), self._width(n, "n"), other=repl
+        )
 
 
 class GroupByMixin[Answer]:

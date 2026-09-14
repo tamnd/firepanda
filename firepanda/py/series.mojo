@@ -1271,6 +1271,7 @@ struct PySeries(Movable, Writable):
         py_self: PythonObject,
         kind: PythonObject,
         arg: PythonObject,
+        other: PythonObject,
         start: PythonObject,
         stop: PythonObject,
         step: PythonObject,
@@ -1286,6 +1287,8 @@ struct PySeries(Movable, Writable):
             kind: The method, as pandas spells it.
             arg: The prefix, suffix or replacement, and the empty string for the
                 ones that take none.
+            other: The second string, which only `replace` has, and the empty
+                string for every other name here.
             start: The first position, or `None`, and the index for `get`.
             stop: The position to stop before, or `None`.
             step: How far to move between characters.
@@ -1304,6 +1307,7 @@ struct PySeries(Movable, Writable):
                         Self._held(py_self)[].series[],
                         words(kind, "kind"),
                         words(arg, "arg"),
+                        words(other, "other"),
                         maybe_whole(start, "start"),
                         maybe_whole(stop, "stop"),
                         whole(step, "step"),

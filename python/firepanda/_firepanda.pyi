@@ -283,7 +283,7 @@ class Series:
         """Whether the column is sorted, one way or the other."""
         ...
     def string_text(
-        self, kind: str, arg: str, start: int | None, stop: int | None, step: int
+        self, kind: str, arg: str, other: str, start: int | None, stop: int | None, step: int
     ) -> Series:
         """One str accessor method that answers text, as a column."""
         ...

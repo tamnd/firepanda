@@ -1,4 +1,5 @@
-"""Substring search over a text column: contains, starts, ends, equals, count.
+"""Substring search over a text column: contains, starts, ends, equals, count,
+replace.
 
 These are what a `LIKE` pattern turns into once the wildcards are read. `LIKE
 '%green%'` is a contains, `LIKE 'forest%'` is a starts with, `LIKE '%BRASS'` is
@@ -47,12 +48,21 @@ regular expression engine as it does to a byte search, so the Python layer reads
 the pattern, and a literal one comes here while the rest are refused by name.
 That is a smaller promise than pandas makes and it is a true one, which is the
 trade document 07 asks for.
+
+### The fifth, which needs no promise at all
+
+`str.replace` came in after the four and is the one name of the group where
+pandas asks for a literal by default: its `regex` argument defaults to False in
+pandas 3, so the ordinary call is a byte search and a rewrite and there is
+nothing to refuse. It is also the first kernel here whose answer is text, which
+means it is the first that cannot write into a column allocated up front,
+because how long a row comes out is not known until the search has run.
 """
 
 from std.collections.span import Span
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 
@@ -635,6 +645,89 @@ def text_count(
 
     out.data.validity = validity^
     return out^
+
+
+def text_replace(
+    a: StringArray, needle: Span[UInt8, _], repl: Span[UInt8, _], limit: Int
+) raises -> StringArray:
+    """Writes every element out with a run of bytes swapped for another.
+
+    This is the first kernel in the file whose answer is text rather than a
+    number or a flag, and it is the reason it cannot be one: how long a row comes
+    out is not known until the search has run, so the rows are built one at a
+    time into a builder rather than written into a column allocated up front.
+    Nothing else here needed that and nothing else here pays for it.
+
+    Matches do not overlap, which is the rule `text_count` explains and is the
+    same rule for the same reason: the cursor moves by the whole needle after a
+    hit, so replacing `aa` in `aaaa` swaps twice and not three times.
+
+    An empty needle is the one place this counts characters. Python inserts the
+    replacement before every character and once at the end, so replacing nothing
+    in `hello` with a dash gives six dashes, and pandas answers Python here
+    rather than Arrow because Arrow does not terminate on an empty pattern at
+    all. That is `str.count` of an empty pattern counted in bytes and
+    `str.replace` of an empty pattern counted in characters, inside one accessor,
+    and document 66 has both measurements and the reason they differ.
+
+    Args:
+        a: The column.
+        needle: The bytes to look for.
+        repl: The bytes to put in their place.
+        limit: How many matches in each row to replace. Negative means all of
+            them, and zero means none, which copies the row unchanged. pandas
+            spells this `n` and gives it the same three readings.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var m = len(needle)
+    var scratch = List[UInt8]()
+
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if limit == 0:
+            built.append(bytes)
+            continue
+
+        scratch.clear()
+        var left = limit
+        if m == 0:
+            # A character boundary is any byte that is not a UTF-8 continuation
+            # byte, which is the test `starts_character` in chars.mojo makes. It
+            # is written out rather than imported because chars.mojo reads the
+            # search out of this file and the two cannot read each other.
+            for k in range(len(bytes)):
+                if (bytes[k] & 0xC0) != 0x80 and left != 0:
+                    scratch.extend(repl)
+                    if left > 0:
+                        left -= 1
+                scratch.append(bytes[k])
+            if left != 0:
+                scratch.extend(repl)
+        else:
+            var from_ = 0
+            while left != 0 and from_ + m <= len(bytes):
+                var at = find_bytes(bytes, needle, from_)
+                if at < 0:
+                    break
+                scratch.extend(bytes[from_:at])
+                scratch.extend(repl)
+                from_ = at + m
+                if left > 0:
+                    left -= 1
+            scratch.extend(bytes[from_ : len(bytes)])
+        built.append(Span(scratch))
+
+    return built^.finish()
 
 
 def text_ends_with(

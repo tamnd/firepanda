@@ -2352,6 +2352,68 @@ def text_count_scalar(a: StringArray, needle: String) -> Array[DType.int64]:
     return out^
 
 
+def text_replace_scalar(
+    a: StringArray, needle: String, repl: String, limit: Int
+) raises -> StringArray:
+    """Swaps a substring for another in each element, one match at a time.
+
+    Two decisions and nothing else. The cursor moves past the whole needle after
+    a hit, so matches do not overlap, and an empty needle puts the replacement
+    before every character and once at the end, which is Python's rule and is
+    what pandas answers because Arrow does not terminate on an empty pattern.
+
+    Args:
+        a: The column.
+        needle: The substring to look for.
+        repl: What to put in its place.
+        limit: How many matches per row. Negative means all, zero means none.
+
+    Returns:
+        A text column, null where the column is null.
+
+    Raises:
+        Error: Never, but building a column can.
+    """
+    var builder = StringBuilder(capacity=len(a))
+    var m = needle.byte_length()
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            builder.append_null()
+            continue
+        var text = a[i]
+        if limit == 0:
+            builder.append(text.as_bytes())
+            continue
+        var piece = String()
+        var left = limit
+        if m == 0:
+            for k in range(text.byte_length()):
+                var b = text.as_bytes()[k]
+                if (b & 0xC0) != 0x80 and left != 0:
+                    piece += repl
+                    if left > 0:
+                        left -= 1
+                piece += text[byte=k]
+            if left != 0:
+                piece += repl
+        else:
+            var from_ = 0
+            while left != 0:
+                var at = _string_find_scalar(text, needle, from_)
+                if at < 0:
+                    break
+                for k in range(from_, at):
+                    piece += text[byte=k]
+                piece += repl
+                from_ = at + m
+                if left > 0:
+                    left -= 1
+            for k in range(from_, text.byte_length()):
+                piece += text[byte=k]
+        builder.append(piece.as_bytes())
+    return builder^.finish()
+
+
 def text_substring_scalar(
     a: StringArray, offset: Int, length: Int
 ) raises -> StringArray:
