@@ -5248,6 +5248,49 @@ def _phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def _padded_phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
+    """The same column with spaces on both ends of every row.
+
+    The pair to `_phrase_frame` for `Trim`, and it exists because the row above
+    measures the case where nothing comes off. That is the common one and it is
+    the one the walk was slow at, but a change that made the no op cheap by
+    making the real work expensive would look like a win in that row alone.
+    Three spaces a side is enough to enter both walks several times without the
+    padding being most of the element.
+
+    Args:
+        rows: How many rows.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of one text column called `s`.
+
+    Raises:
+        If building or slicing the column raises.
+    """
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        builder.append(
+            String(
+                "   a phrase of about the same length, ", i, "   "
+            ).as_bytes()
+        )
+    var whole = AnyArray(builder^.finish())
+    var chunked = ChunkedArray(LogicalType.STRING)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + chunk_rows
+        if stop > rows:
+            stop = rows
+        chunked.append(whole.slice(begin, stop))
+        begin = stop
+    var columns = List[ChunkedArray]()
+    columns.append(chunked^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _accented_phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
     """The same column with an accented character in every row.
 
@@ -6144,6 +6187,19 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/text_trim", "rows", rows, text_trim)
+
+    # The same trim over text that actually has something to come off, which is
+    # what stops the row above from being gamed. Making the case where nothing
+    # is trimmed cheap by making the case where something is trimmed expensive
+    # would show up here and nowhere else.
+    var padded = _padded_phrase_frame(rows, MORSEL_ROWS)
+
+    def text_trim_padded() raises {imm padded}:
+        keep(padded.rows)
+        var out = _trim_alone(DataFrame(copy=padded))
+        keep(out.rows)
+
+    harness.record("exec/text_trim_padded", "rows", rows, text_trim_padded)
 
     def text_case() raises {imm phrases}:
         keep(phrases.rows)
