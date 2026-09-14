@@ -778,8 +778,14 @@ def filter_rows[
     Returns:
         A column holding the kept rows, in their original order.
     """
+    var uncounted = List[Int]()
     return _filter_core(
-        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, mask, spread
+        col.unsafe_ptr(),
+        col.data.validity,
+        col.null_count() > 0,
+        mask,
+        Span(uncounted),
+        spread,
     )
 
 
@@ -800,6 +806,40 @@ def filter_any(
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    var uncounted = List[Int]()
+    return filter_counted(col, mask, Span(uncounted), spread)
+
+
+def filter_counted(
+    col: AnyArray,
+    mask: Array[DType.bool],
+    offsets: Span[Int, _],
+    spread: Bool = True,
+) raises -> AnyArray:
+    """The same filter, for a caller that has already counted the mask.
+
+    What `Filter` calls when it is copying more than one column. Counting is
+    per mask and not per column, so a filter keeping four columns was walking
+    the same mask four times and getting the same four numbers, and the numbers
+    could not have changed because nothing between the calls writes to a mask.
+
+    The offsets are for a fixed width column, which is the only route that can
+    use them. A text column has to size its payload as well as its rows and that
+    is a different count per column, so it counts its own either way.
+
+    Args:
+        col: The column to filter.
+        mask: The mask. Must be the same length as `col`.
+        offsets: The output positions from `filter_offsets` over this mask, or
+            empty for a filter that should count for itself.
+        spread: Whether this filter may use more than one core.
+
+    Returns:
+        A column holding the kept rows, with the same dtype as the input.
+
+    Raises:
+        If the column's dtype is not one firepanda has a physical layout for.
+    """
     if col.is_string():
         return AnyArray(_filter_strings(col.strings(), mask, spread)).retyped(
             col.type
@@ -813,6 +853,7 @@ def filter_any(
                         col.data.validity,
                         col.null_count() > 0,
                         mask,
+                        offsets,
                         spread,
                     )
                 ).retyped(col.type),
@@ -1001,6 +1042,7 @@ def _filter_core[
     validity: Bitmap,
     has_null: Bool,
     mask: Array[DType.bool],
+    offsets: Span[Int, _],
     spread: Bool = True,
 ) raises -> Array[dt]:
     """The compaction loop, over a pointer and a bitmap rather than a column."""
@@ -1008,14 +1050,19 @@ def _filter_core[
     var mask_values = mask.unsafe_ptr()
 
     if n >= PARALLEL_FILTER_ROWS and spread:
-        return _filter_spread(source, validity, has_null, mask)
+        return _filter_spread(source, validity, has_null, mask, offsets)
 
     var kept = 0
-    for i in range(n):
-        if not mask.data.validity.get(i):
-            continue
-        if Bool(mask_values.unsafe_offset(i).unsafe_load()):
-            kept += 1
+    if len(offsets) > 0:
+        # Counted already, by a caller with more than one column to filter. The
+        # last entry is the whole mask's count whatever route reads it.
+        kept = offsets[len(offsets) - 1]
+    else:
+        for i in range(n):
+            if not mask.data.validity.get(i):
+                continue
+            if Bool(mask_values.unsafe_offset(i).unsafe_load()):
+                kept += 1
 
     # Every one of the kept positions is written below, on both routes, so this
     # does not need the zeroing constructor either. The branchless loop writes
@@ -1075,6 +1122,56 @@ def _filter_core[
     return out^
 
 
+def filter_offsets(mask: Array[DType.bool]) raises -> List[Int]:
+    """Counts what each morsel of a mask keeps, prefix summed.
+
+    The first half of a spread filter, pulled out so that a caller with several
+    columns and one mask pays for it once. What comes back is the output
+    position each morsel begins at, so entry zero is always zero and the last
+    entry is how many rows the whole mask keeps.
+
+    The dense route is `_kept_run`, which adds a register of mask bytes at a
+    time. The route with nulls stays a row at a time, the same split
+    `select_positions` and `mask_kept` make and for the same reason: a bit probe
+    per row does not vectorize and a mask with nulls in it is rare, since a mask
+    is written by whatever compared the column above it.
+
+    Args:
+        mask: The mask. A null in it drops the row.
+
+    Returns:
+        One more than the number of morsels, ascending, starting at zero.
+
+    Raises:
+        Error: If a worker fails.
+    """
+    var n = len(mask)
+    var values = mask.unsafe_ptr()
+    var dense = mask.data.validity.all_valid()
+    var morsels = (n + FILTER_MORSEL_ROWS - 1) // FILTER_MORSEL_ROWS
+    var offsets = List[Int](length=morsels + 1, fill=0)
+
+    def count(w: Int) raises {mut offsets, imm}:
+        var begin = w * FILTER_MORSEL_ROWS
+        var stop = begin + FILTER_MORSEL_ROWS
+        if stop > n:
+            stop = n
+        var seen = 0
+        if dense:
+            seen = _kept_run(values, begin, stop)
+        else:
+            for i in range(begin, stop):
+                var truthy = Bool(values.unsafe_offset(i).unsafe_load())
+                seen += Int(truthy and mask.data.validity.get(i))
+        offsets[w + 1] = seen
+
+    parallel_for(count, morsels)
+
+    for m in range(morsels):
+        offsets[m + 1] += offsets[m]
+    return offsets^
+
+
 def _filter_spread[
     dt: DType, //, origin: ImmOrigin
 ](
@@ -1082,6 +1179,7 @@ def _filter_spread[
     validity: Bitmap,
     has_null: Bool,
     mask: Array[DType.bool],
+    offsets: Span[Int, _],
 ) raises -> Array[dt]:
     """The compaction loop on every core.
 
@@ -1098,6 +1196,13 @@ def _filter_spread[
     for `PARALLEL_FILTER_ROWS`. A mask is a byte a row against eight for a
     double and sixteen for a text view, so the extra pass is a small fraction of
     what the copy moves, and it buys the whole rest of the machine.
+
+    The counting pass is `filter_offsets` and it is a separate function so that
+    a caller filtering several columns by one mask can do it once. A filter
+    keeping four columns used to count the same mask four times and get the same
+    answer every time, because nothing between the calls could have changed it.
+    Passing an empty span here means count it, which is what a caller with one
+    column to filter does.
 
     The copy loop is the serial one unchanged, including the trick of writing
     every row and advancing the cursor by the mask bit rather than branching on
@@ -1117,6 +1222,8 @@ def _filter_spread[
         validity: The values' validity.
         has_null: Whether `validity` has anything in it worth reading.
         mask: The mask. A null in it drops the row.
+        offsets: The output position each morsel begins at, from
+            `filter_offsets` over this mask, or empty to count it here.
 
     Parameters:
         dt: The dtype.
@@ -1132,28 +1239,13 @@ def _filter_spread[
     var mask_values = mask.unsafe_ptr()
     var dense = mask.data.validity.all_valid()
     var morsels = (n + FILTER_MORSEL_ROWS - 1) // FILTER_MORSEL_ROWS
-    var offsets = List[Int](length=morsels + 1, fill=0)
-
-    def count(w: Int) raises {mut offsets, imm}:
-        var begin = w * FILTER_MORSEL_ROWS
-        var stop = begin + FILTER_MORSEL_ROWS
-        if stop > n:
-            stop = n
-        var seen = 0
-        if dense:
-            for i in range(begin, stop):
-                seen += Int(Bool(mask_values.unsafe_offset(i).unsafe_load()))
-        else:
-            for i in range(begin, stop):
-                var truthy = Bool(mask_values.unsafe_offset(i).unsafe_load())
-                seen += Int(truthy and mask.data.validity.get(i))
-        offsets[w + 1] = seen
-
-    parallel_for(count, morsels)
-
-    for m in range(morsels):
-        offsets[m + 1] += offsets[m]
-    var kept = offsets[morsels]
+    var places = List[Int](capacity=morsels + 1)
+    if len(offsets) > 0:
+        for k in range(len(offsets)):
+            places.append(offsets[k])
+    else:
+        places = filter_offsets(mask)
+    var kept = places[morsels]
 
     var out = Array[dt](overwritten=kept)
     var flags = Buffer(overwritten=kept if has_null else 0)
@@ -1161,8 +1253,8 @@ def _filter_spread[
     def compact(w: Int) raises {mut out, mut flags, imm}:
         var target = out.unsafe_mut_ptr()
         var marks = flags.mut_bitcast[DType.uint8]()
-        var limit = offsets[w + 1]
-        var written = offsets[w]
+        var limit = places[w + 1]
+        var written = places[w]
         var i = w * FILTER_MORSEL_ROWS
         while written < limit:
             target.unsafe_offset(written).unsafe_write(
