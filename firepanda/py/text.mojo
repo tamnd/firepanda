@@ -51,6 +51,19 @@ it: the doors are picked by the shape of the answer, and three columns is a
 shape. `translate` beside them is the exception, because what makes it separate
 is the shape of its argument.
 
+### The answer whose width comes out of the data
+
+`get_dummies` splits each row at a separator and answers one column per distinct
+token. Its width is not three and it is not one: it is however many distinct
+tokens the column turned out to hold, which is not knowable from the name or
+from the arguments.
+
+That is still the same rule, because a frame of unknown width is a shape and no
+door carries it. What is different is that it takes two functions rather than
+one. Nothing can be allocated until the column has been read once, so the first
+reads it and answers the labels and the second fills the columns in, and the
+Python layer is what holds the two together and turns them into a frame.
+
 ### The one answer that is narrower than a column
 
 `cat` with no other column to concatenate against folds the whole thing into a
@@ -420,6 +433,60 @@ def partition(
     """
     _text_column(column)
     return column.chars_partition(sep, from_right)
+
+
+def dummy_tokens(column: Series, sep: String) raises -> List[String]:
+    """Works out what columns a dummy frame will have.
+
+    The fourth shape outside the three doors, and the strangest of them.
+    `partition` answers three columns and `cat` answers a scalar, and both of
+    those are widths a reader could work out from the name. This one answers a
+    frame whose width is a property of the data, so the caller cannot allocate
+    anything until the column has been read once.
+
+    That is why this is two functions and not one. This half reads the column
+    and hands back the labels, and the Python layer uses them both to name the
+    columns and to ask for them.
+
+    Args:
+        column: The column to read.
+        sep: The text to split each row at, which the Python layer has already
+            checked is not empty because pandas refuses that.
+
+    Returns:
+        The distinct tokens in the order the columns go in.
+
+    Raises:
+        Error: Tagged `value` if the column is not text.
+    """
+    _text_column(column)
+    return column.chars_dummy_tokens(sep)
+
+
+def dummies(
+    column: Series, sep: String, tokens: List[String]
+) raises -> List[Series]:
+    """Fills in the columns of a dummy frame.
+
+    The other half of `dummy_tokens`, which has to have run first. It is split
+    that way rather than answering both at once because the two halves cross to
+    Python separately: a list of labels is a list of strings and a list of
+    columns is a list of wrapped series, and pairing them up on the Mojo side
+    would mean inventing a shape for the pair.
+
+    Args:
+        column: The column to read.
+        sep: The text to split each row at.
+        tokens: The tokens, as `dummy_tokens` answered them.
+
+    Returns:
+        One int64 column per token, in the same order.
+
+    Raises:
+        Error: Tagged `value` if the column is not text.
+    """
+    _text_column(column)
+    return column.chars_dummies(sep, tokens)
 
 
 def join(

@@ -541,6 +541,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def get_dummies(self, sep: Any = "|", dtype: Any = None) -> DataFrame:
+        """One column per distinct token, flagging the rows that hold it."""
+        try:
+            return self._dummies(sep, dtype)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

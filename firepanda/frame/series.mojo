@@ -103,6 +103,8 @@ from firepanda.kernel.parse_time import (
     parse_timestamps,
 )
 from firepanda.kernel.pattern import (
+    text_dummies,
+    text_dummy_tokens,
     text_contains,
     text_contains_folded,
     text_contains_in_order,
@@ -1826,6 +1828,59 @@ struct Series(Copyable, Movable, Sized, Writable):
         for _ in range(3):
             out.append(
                 self._relabelled(self.name.copy(), AnyArray(parts.pop(0)))
+            )
+        return out^
+
+    def chars_dummy_tokens(self, sep: StringSlice) raises -> List[String]:
+        """Returns every distinct token in the column, in column order.
+
+        The first half of `str.get_dummies`, and it is a method of its own
+        because its answer is the shape of the other half's answer. How many
+        columns the frame has and what they are called comes out of the data,
+        which nothing else on this accessor does.
+
+        Args:
+            sep: The text to split each row at.
+
+        Returns:
+            The distinct tokens in byte order, which is code point order and is
+            the order pandas labels the columns in. Empty for a column with no
+            readable rows, which means a frame with no columns.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return text_dummy_tokens(self.values.strings(), sep.as_bytes())
+
+    def chars_dummies(
+        self, sep: StringSlice, tokens: List[String]
+    ) raises -> List[Self]:
+        """Returns one column per token, flagging the rows that hold it.
+
+        The second half of `str.get_dummies`. It takes the tokens rather than
+        working them out, because the caller needed them to name the columns
+        and splitting the column again per token would be the whole cost of
+        this over again.
+
+        Args:
+            sep: The text to split each row at.
+            tokens: The tokens, as `chars_dummy_tokens` answered them.
+
+        Returns:
+            One int64 series per token, in the same order and each named for
+            its token, every one as tall as this series and with no missing
+            rows in it. A missing row is a row of zeros rather than a row of
+            nulls, which is pandas and is the one place this method does not
+            propagate.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        var flags = text_dummies(self.values.strings(), sep.as_bytes(), tokens)
+        var out = List[Self](capacity=len(tokens))
+        for i in range(len(tokens)):
+            out.append(
+                self._relabelled(tokens[i].copy(), AnyArray(flags.pop(0)))
             )
         return out^
 
