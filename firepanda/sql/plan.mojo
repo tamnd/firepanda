@@ -419,10 +419,18 @@ double would make `1.1 + 2.2` come back `3.3000000000000003` where DuckDB
 answers exactly `3.3`, and a wrong answer with no error attached is the one
 failure this front end is not allowed to have. A refusal is visible and a double
 is not, so the refusal stands until the plan can carry an exact decimal.
+
+Which numbers that covers is DuckDB's rule and worth reading off `_number`
+rather than guessing at. A number written with an exponent is a `DOUBLE` to
+DuckDB whatever its digits say, and so is one written with more than 38 digits,
+so both of those lower and hold exactly what DuckDB holds. An integer past a
+`BIGINT` is a `HUGEINT` and is refused by name for the same reason the decimal
+is.
 """
 
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.io.parse import parse_float, parse_int
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.parse_time import parse_instant
@@ -502,7 +510,7 @@ from .star import (
     empty_select_list,
     not_in_from,
 )
-from .types import engine_type, instant_type, parse_type
+from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 
 
 struct Lowered(Movable):
@@ -581,9 +589,31 @@ def _one_name(ast: Ast, run: UInt32, what: StringSlice) raises -> String:
 def _number(text: String) raises -> Value:
     """Turns the text of a number literal into a constant.
 
-    An integer becomes an `Int64` and anything with a point or an exponent in it
-    is refused, for the reason in the module docstring: the plan has no exact
-    decimal and a double in its place is a wrong answer nobody is told about.
+    Which type a number literal has is DuckDB's rule and not this file's, and
+    the rule is read off how the number was written rather than off what it is
+    worth. `1.1` is a `DECIMAL(2,1)` and `1e3` is a `DOUBLE` even though one
+    thousand is exact, and `00001.5` is a `DECIMAL(6,1)` because the zeros are
+    digits somebody wrote. Every case below was put to DuckDB first.
+
+    Three of the four are lowered.
+
+    An integer that fits a `BIGINT` is one. Past that DuckDB reads a `HUGEINT`
+    and then a `UHUGEINT`, and the plan has neither, so it is refused by name.
+    It used to wrap: `9223372036854775808` came back as
+    `-9223372036854775808`, which is the one kind of failure this front end is
+    not allowed to have.
+
+    A literal with an exponent is a `DOUBLE`, whatever its digits say, so the
+    plan holds exactly what DuckDB holds and there is nothing to refuse.
+
+    A literal with a point and more than 38 digits written is a `DOUBLE` too,
+    because it has run past the widest decimal there is. The count is of digits
+    as written, leading and trailing zeros included, which is why
+    `1.5000000000000000000000000000000000000000` is a double and `1.5` is not.
+
+    The fourth is the decimal literal that does fit, and that one is refused for
+    the reason in the module docstring: the plan has no exact decimal and a
+    double in its place is a wrong answer nobody is told about.
 
     Args:
         text: The literal as it was written, already decoded.
@@ -592,23 +622,56 @@ def _number(text: String) raises -> Value:
         The constant.
 
     Raises:
-        If the number is not an integer.
+        If the number is a decimal the plan cannot hold, or an integer past a
+        `BIGINT`.
     """
+    var digits = 0
+    var point = False
+    var exponent = False
     for i in range(text.byte_length()):
         var c = text[byte=i]
-        if c == "." or c == "e" or c == "E":
-            raise Error(
-                String(
-                    "firepanda does not lower the decimal literal ",
-                    text,
-                    (
-                        " yet, because a plan cannot hold an exact decimal and"
-                        " a double in its place would answer 1.1 + 2.2 with"
-                        " 3.3000000000000003"
-                    ),
-                )
+        if c == "e" or c == "E":
+            exponent = True
+            break
+        if c == ".":
+            point = True
+        else:
+            digits += 1
+
+    if exponent or (point and digits > Int(DECIMAL_MAX_WIDTH)):
+        var read = parse_float[DType.float64](text.as_bytes())
+        if not read.ok:
+            raise Error(String("'", text, "' is not a number"))
+        # An overflow lands on an infinity rather than an error, which is what
+        # DuckDB answers for `1e400` as well.
+        return Value(read.value)
+
+    if point:
+        raise Error(
+            String(
+                "firepanda does not lower the decimal literal ",
+                text,
+                (
+                    " yet, because a plan cannot hold an exact decimal and a"
+                    " double in its place would answer 1.1 + 2.2 with"
+                    " 3.3000000000000003"
+                ),
             )
-    return Value(Int64(atol(text)))
+        )
+
+    var whole = parse_int[DType.int64](text.as_bytes())
+    if not whole.ok:
+        raise Error(
+            String(
+                "firepanda does not lower the integer literal ",
+                text,
+                (
+                    " yet, because it is past a BIGINT and DuckDB reads it as a"
+                    " HUGEINT, which a plan cannot hold"
+                ),
+            )
+        )
+    return Value(whole.value)
 
 
 def _ordinal(ast: Ast, at: UInt32) -> Int:

@@ -20,6 +20,20 @@ Measured on the i9-13900K over four million rows, three rounds alternated, every
 
 Nothing about the answers moves. The set is still read as a set of characters rather than as a prefix, both whitespace tables stay where they are, and the same characters are tested in the same order.
 
+### Fixed: an integer literal past a BIGINT wrapped to a negative number
+
+`SELECT 9223372036854775808` answered `-9223372036854775808`. The lowering read the literal with `atol`, which wraps rather than refusing, so the query came back with a number nobody wrote and no error attached. DuckDB reads a `HUGEINT` there and the plan has no 128 bit integer, so it is refused by name now, the same way the decimal literal is.
+
+### Added: the number literals DuckDB reads as doubles are lowered
+
+Which type a number literal has is DuckDB's rule, and the rule is read off how the number was written rather than off what it is worth. `1.1` is a `DECIMAL(2,1)` and `1e3` is a `DOUBLE` even though one thousand is exact, and `00001.5` is a `DECIMAL(6,1)` because the zeros are digits somebody wrote.
+
+Two of those are doubles and were being refused along with the decimals. A literal with an exponent is one, so `1e3`, `1.5e3` and `1.1e-2` all lower now and the plan holds exactly what DuckDB holds. So is a literal with a point and more than 38 digits written, counting leading and trailing zeros, because it has run past the widest decimal there is: `1.5000000000000000000000000000000000000000` is a double and `1.5` is not.
+
+What is still refused is the decimal literal that fits, for the reason it always was. A double in its place answers `3.3000000000000003` where DuckDB answers `3.3`, and the plan has nowhere to hold the right answer.
+
+Every case was put to DuckDB 1.5 first, and four of them went into the value differential, read back as whole numbers and yes and no because that harness compares three types and a double is not one of them. Adding them found issue #786: a cast of a double to an integer truncates where DuckDB rounds, so `CAST(2.6 AS BIGINT)` is 2 here and 3 there. That is recorded in the harness with the issue against it rather than fixed here, because `astype` has to keep truncating to match pandas and deciding where the two front ends part company is not this entry's work.
+
 ### Added: a SQL type carries a list's element, so a call returning a list has a type
 
 The entry below left nine names whose return type the differential could not compare, because a signature returning `T[]` or `MAP` needs an element type and `SqlType` carried none. Eight of the nine are answered now. Issue #780.

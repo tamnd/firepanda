@@ -26,6 +26,8 @@ The rule stays what section 6 says. Each of these is a gap to close in `firepand
 
 Until the plan carries an exact decimal, `firepanda/sql/plan.mojo` refuses a decimal literal by name rather than lowering it to a double. A refusal is visible in `pixi run sql-support` and in the conformance harness, and a double that answers `3.3000000000000003` is not visible anywhere. Adding `DECIMAL` and `INT128` to `LogicalType` is the work that removes the refusal, and it is engine work rather than SQL work for the same reason as section 1.1.
 
+Which numbers the refusal covers is DuckDB's rule rather than a guess, and it is read off how the number was written and not off what it is worth. A number with an exponent is a `DOUBLE` to DuckDB whatever its digits say, so `1e3` lowers and holds exactly what DuckDB holds. So does one written with more than 38 digits, counting the leading and trailing zeros somebody wrote, because it has run past the widest decimal there is. What is refused is the decimal that fits, and an integer past a `BIGINT`, which DuckDB reads as a `HUGEINT` and the plan cannot hold either.
+
 ## 2. The shape
 
 ```
