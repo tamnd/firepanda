@@ -2677,7 +2677,8 @@ struct Transform(Movable):
             The expression node.
 
         Raises:
-            Error: If the call was given a count of arguments no trim takes.
+            Error: If the keyword form says what to take off on both sides of
+                the `FROM`.
         """
         # Past `TRIM` and past the parentheses, to `TrimDirection? TrimSource?
         # List(Expression)`. The list is always there and is always last, so
@@ -2707,17 +2708,14 @@ struct Transform(Movable):
             if tree.nodes[Int(kids[step])].first_child != NO_NODE:
                 set = self._only(tree, kids[step])
 
-        if len(items) == 0 or len(items) > 2:
-            raise Error(
-                String(
-                    (
-                        "a TRIM reads a column and the characters to take off"
-                        " it, so one or two arguments, and this one was written"
-                        " with "
-                    ),
-                    len(items),
-                )
-            )
+        # How many arguments a trim takes is the binder's to say and not this
+        # function's, so `TRIM('a', 'b', 'c')` is built here and refused there,
+        # where `bind_call` already answers that a trim takes one or two. The
+        # check used to be in both places, and having it here was worse than
+        # redundant: the differential harness runs the parser and this
+        # transformer and not the binder, so a query DuckDB rejects on arity
+        # came back as a transformer that failed rather than as a query nobody
+        # accepts, and one statement in DuckDB's own trim tests is exactly that.
         if set != NO_NODE and len(items) != 1:
             raise Error(
                 "a TRIM that says what to take off before the FROM cannot say"

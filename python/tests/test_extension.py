@@ -49,11 +49,16 @@ needs_a_build = pytest.mark.skipif(
 # Raised from eight mebibytes once, when two branches that add kernels crossed
 # it at 8,511,752 and 8,544,416 bytes. The x86-64 build is the one that sets this
 # number: the same commits were inside eight mebibytes on aarch64, so only one of
-# the two runners has ever been near the line. Nine mebibytes leaves 892,768
-# bytes of headroom above the larger of those two figures, which is what keeps
-# the paragraph above true. A wrongly vendored library still does not fit in the
-# gap, so this is still a guard and not a formality.
-SIZE_BUDGET = 9 * 1024 * 1024
+# the two runners has ever been near the line.
+#
+# Raised again from nine, which the SQL work crossed at 9,498,888 bytes on
+# x86-64. Ten mebibytes leaves 986,872 bytes of headroom above that figure,
+# which is under the megabyte the smallest wrongly vendored library weighs, so
+# the paragraph above is still true and this is still a guard and not a
+# formality. The headroom is thinner than it was and the next raise should come
+# with a look at what is actually in the binary rather than another round
+# number.
+SIZE_BUDGET = 10 * 1024 * 1024
 
 
 def _stripped_environment() -> dict[str, str]:
