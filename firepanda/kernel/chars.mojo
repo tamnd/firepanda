@@ -41,6 +41,13 @@ and it never splits a well formed character, which are the two properties that
 matter, and a column of invalid bytes gets an answer rather than an error because
 every other kernel in the library gives that column an answer too.
 
+The case kernels below cannot do their own walking, and the walk they borrow does
+read past the end of a truncated element, which in a text column means into the
+row after it, since the payload is one buffer with the elements end to end. So
+they ask first: an element that is not well formed is copied through unchanged by
+the two that write text and answers False to the three that ask a question. The
+promise is kept, at the cost of a scan.
+
 ### Why this builds its output one row at a time
 
 `text_substring` sizes every morsel's share of the payload before any bytes move,
@@ -53,6 +60,19 @@ so the sizing pass would have to walk the payload, which is the same work the
 copying pass does. Doing it in parallel is still worth something, and it is worth
 measuring before it is worth writing, so this file uses `StringBuilder` and says
 so rather than copying a shape that no longer earns its complexity.
+
+### Case is the other thing that cannot be done a byte at a time
+
+Changing case and asking about case both live here for the reason the positions
+do. A byte is not a unit of case: the upper case of `ß` is two characters, the
+upper case of one Greek letter with an iota written under it is three, and
+neither answer can come out of a table indexed by byte. So the case kernels hand
+each element to the standard library as a `StringSlice` and let it walk the
+characters, which is the one place in this file where the walk is not ours.
+
+Document 64 measures where that library's answer and Python's differ, and the
+one difference of the hundred odd that reaches a Latin alphabet is corrected
+here rather than left for the reader to find.
 """
 
 from std.collections.span import Span
@@ -64,6 +84,32 @@ from firepanda.exec import parallel_morsels
 from firepanda.kernel.pattern import find_bytes, rfind_bytes
 
 from .mask import repair_range
+
+comptime DOTTED_CAPITAL_I_LEAD = Byte(0xC4)
+"""The first byte of U+0130, the capital I with a dot over it."""
+
+comptime DOTTED_CAPITAL_I_TAIL = Byte(0xB0)
+"""The second byte of U+0130. The pair can be tested anywhere in a run of
+bytes, because 0xC4 is never a continuation byte and so can only begin a
+character."""
+
+comptime SMALL_I = Byte(0x69)
+"""The letter `i`, which is the first half of what U+0130 lowers to."""
+
+comptime DOT_ABOVE_LEAD = Byte(0xCC)
+"""The first byte of U+0307, the combining dot above."""
+
+comptime DOT_ABOVE_TAIL = Byte(0x87)
+"""The second byte of U+0307."""
+
+comptime EVERY_SPACE = 0
+"""Ask `_every_character` whether every character is whitespace."""
+
+comptime EVERY_LOWER = 1
+"""Ask `_every_character` whether the text is lower case."""
+
+comptime EVERY_UPPER = 2
+"""Ask `_every_character` whether the text is upper case."""
 
 
 def starts_character(b: UInt8) -> Bool:
@@ -605,3 +651,218 @@ def _matches_at(hay: Span[UInt8, _], needle: Span[UInt8, _], at: Int) -> Bool:
         if hay[at + k] != needle[k]:
             return False
     return True
+
+
+def _well_formed(bytes: Span[UInt8, _]) -> Bool:
+    """Whether a run of bytes is valid UTF-8.
+
+    Asked before any case work, and only there. The counting kernels above walk
+    the bytes themselves and stop at the end of the element whatever the bytes
+    say, but the standard library's case walk trusts a lead byte: a truncated
+    two byte sequence at the end of an element takes the first byte of the next
+    element with it, because the payload of a text column is one buffer and the
+    elements sit in it end to end. That is the one thing the header of this file
+    promises never happens, so an element that is not well formed never reaches
+    the walk.
+
+    Args:
+        bytes: The element.
+
+    Returns:
+        True if the standard library is willing to read it as text.
+    """
+    try:
+        _ = StringSlice(from_utf8=bytes)
+    except:
+        return False
+    return True
+
+
+def _holds_dotted_capital_i(bytes: Span[UInt8, _]) -> Bool:
+    """Whether a run of bytes holds U+0130 anywhere in it.
+
+    A pair of bytes rather than a character walk, which is sound because the
+    first byte of U+0130 is 0xC4 and no continuation byte is that, so the pair
+    cannot straddle a character boundary or sit inside another character.
+
+    Args:
+        bytes: The element.
+
+    Returns:
+        True if the two bytes are there, one after the other.
+    """
+    for k in range(len(bytes) - 1):
+        if (
+            bytes[k] == DOTTED_CAPITAL_I_LEAD
+            and bytes[k + 1] == DOTTED_CAPITAL_I_TAIL
+        ):
+            return True
+    return False
+
+
+def _spell_the_dot(bytes: Span[UInt8, _], mut into: List[UInt8]):
+    """Writes out every U+0130 as the two characters it lowers to.
+
+    Done before the lowering rather than after, because after it the dot is
+    gone and there is nothing left to put back. Lowering the two characters
+    this leaves is the identity on both of them, so the answer is the same as
+    if the standard library had the rule.
+
+    Args:
+        bytes: The element.
+        into: Where to write, cleared first.
+    """
+    into.clear()
+    var k = 0
+    while k < len(bytes):
+        if (
+            k + 1 < len(bytes)
+            and bytes[k] == DOTTED_CAPITAL_I_LEAD
+            and bytes[k + 1] == DOTTED_CAPITAL_I_TAIL
+        ):
+            into.append(SMALL_I)
+            into.append(DOT_ABOVE_LEAD)
+            into.append(DOT_ABOVE_TAIL)
+            k += 2
+        else:
+            into.append(bytes[k])
+            k += 1
+
+
+def text_case(a: StringArray, upper: Bool) raises -> StringArray:
+    """Rewrites every element in one case or the other.
+
+    An element that is not valid UTF-8 comes back exactly as it went in, which
+    is the only answer available: there is nothing to change the case of, and
+    the alternative of handing the bytes to a walk that will read past them is
+    worse than leaving them alone.
+
+    Args:
+        a: The column.
+        upper: Whether to write it upper case rather than lower case.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var scratch = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if not _well_formed(bytes):
+            built.append(bytes)
+            continue
+        if upper:
+            var raised = StringSlice(unsafe_from_utf8=bytes).upper()
+            built.append(raised.as_bytes())
+            continue
+        if _holds_dotted_capital_i(bytes):
+            _spell_the_dot(bytes, scratch)
+            var spelled = StringSlice(unsafe_from_utf8=Span(scratch)).lower()
+            built.append(spelled.as_bytes())
+            continue
+        var dropped = StringSlice(unsafe_from_utf8=bytes).lower()
+        built.append(dropped.as_bytes())
+    return built^.finish()
+
+
+def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
+    """Asks one question of every character of every element.
+
+    The three questions share everything except the call in the middle, and
+    they share the two rules that come with it. An element answers True only if
+    it has a character in it, so the empty string is False for all three, and an
+    element with no cased character in it is False for the two that are about
+    case, so a row holding a digit is neither lower nor upper. An element that
+    is not valid UTF-8 answers False to all three for the reason `text_case`
+    gives, which is that it is not text to be asked about.
+
+    Args:
+        a: The column.
+        kind: Which question, one of the three `EVERY_` words above.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var bytes = a.unsafe_bytes(i)
+            var text = StringSlice(unsafe_from_utf8=bytes)
+            var answer: Bool
+            if not _well_formed(bytes):
+                answer = False
+            elif kind == EVERY_SPACE:
+                answer = text.isspace()
+            elif kind == EVERY_LOWER:
+                answer = text.islower()
+            else:
+                answer = text.isupper()
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](answer))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_is_space(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every character of each element is whitespace.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element is empty.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _every_character(a, EVERY_SPACE)
+
+
+def text_is_lower(a: StringArray) raises -> Array[DType.bool]:
+    """Whether each element is lower case.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element has no cased character in it.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _every_character(a, EVERY_LOWER)
+
+
+def text_is_upper(a: StringArray) raises -> Array[DType.bool]:
+    """Whether each element is upper case.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element has no cased character in it.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _every_character(a, EVERY_UPPER)

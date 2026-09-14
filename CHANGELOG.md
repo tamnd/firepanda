@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a column of text can be written in one case or asked what case it is in
+
+`s.str.upper()`, `s.str.lower()`, `s.str.isspace()`, `s.str.islower()` and `s.str.isupper()`. The first two answer a column of text and keep a missing row missing, the other three answer a column of bools, and none of them takes an argument. A row with no cased character in it, which includes the empty row and a row of digits, is neither lower case nor upper case, which is Python's rule and the reason the two questions are not opposites.
+
+A case change is not a byte for a byte rewrite and it is not a character for a character rewrite either. `straße` raises to `STRASSE`, which is longer than it started, and `İstanbul` lowers to a small i followed by a separate combining dot, which is more characters than it started with, so the two rewriting kernels build a new column rather than mapping the payload where it lies.
+
+The three questions answer a missing row with a missing value where pandas holding the column in its own string dtype answers False, because the answer there is a numpy array of bools with nowhere to put a third state. Held as object pandas answers None and agrees. That is the registered entry `engine/string-predicate-null`, which already covered `startswith` and `endswith`.
+
+The case data underneath is the Mojo standard library's, which is an older and smaller copy of Unicode than CPython's, so a few rows disagree with pandas. Every ASCII row, every Latin 1 row except the ordinal indicators and every accented Latin letter agree exactly. A Greek sigma at the end of a word lowers to the ordinary letter here and to the final form in pandas, a no break space is not whitespace here and is there, and about a hundred code points map to a different case. Document 64 measures all of it by walking every code point through both sides, and the one difference that reaches a Latin alphabet, the Turkish capital I with a dot, is corrected in the kernel rather than left. The rest is asserted in the test suite so that replacing the data cannot change behaviour quietly.
+
 ### Fixed: a float column is formatted as a column
 
 A float value was rendered from the value, and pandas renders it from the column it is in, so several things that look like formatting bugs in isolation were one bug. `fp.Series([1234567.125, 2.0])` printed `2.0` where pandas prints `2.000`, because the trailing zeros come off the whole column at once and only while every value in it still ends in one. `fp.Series([1e-5])` printed `1e-05` where pandas prints `0.00001`. And a column holding one enormous value now sends every value in it to scientific notation, so `[1e16, 2.0]` prints `1.000000e+16` over `2.000000e+00` the way pandas does.
