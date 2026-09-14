@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `contains`, `match`, `fullmatch` and `count`, the first four `str` names about patterns
+
+The four questions about where a pattern sits in a row: anywhere, at the front, the whole row, and how many times. pandas reads the argument to all four as a regular expression and there is no regular expression engine here yet, so these ship on a smaller promise than pandas makes.
+
+The promise is that a pattern holding none of `.`, `^`, `$`, `*`, `+`, `?`, `{`, `}`, `[`, `]`, `\`, `|`, `(` or `)` means exactly the characters it is written with, to an engine and to a byte search alike. Those patterns are answered exactly. A pattern holding one of those characters is refused with a message naming the character, and `contains` takes `regex=False` for the case where the caller meant the character itself. Searching for a metacharacter literally without saying so would have turned `contains(".")` from a filter that keeps nearly every row into one that keeps nearly none, with nothing anywhere to say it had happened.
+
+`case=False` and a non zero `flags` are refused rather than ignored, for the same reason.
+
+One answer here will read as a bug and is pandas'. `count` with an empty pattern is counted in bytes and not in characters, so `"héllo"` holds seven empty matches and Python's `re` module finds six. Arrow counts a match at every byte offset and once past the end, pandas 3 holds text in Arrow, and this library follows pandas. Matches also do not overlap, so `count("aa")` on four a's is two.
+
 ## [0.8.3] - 2026-09-14
 
 Built against Mojo 1.0.0 (ed45d567).

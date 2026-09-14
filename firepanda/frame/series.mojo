@@ -103,7 +103,9 @@ from firepanda.kernel.parse_time import (
 from firepanda.kernel.pattern import (
     text_contains,
     text_contains_in_order,
+    text_count,
     text_ends_with,
+    text_equals,
     text_starts_with,
 )
 from firepanda.kernel.pick import pick_any
@@ -1559,6 +1561,86 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name.copy(), AnyArray(self.str_ends_with(suffix))
+        )
+
+    def chars_contains(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row holds a substring anywhere in it.
+
+        This is `str.contains` with a literal pattern. pandas reads the argument
+        as a regular expression by default, and a pattern with no metacharacter
+        in it means the same thing either way, so the Python layer decides which
+        patterns may reach here and this takes the ones that are literal.
+
+        Args:
+            pattern: The substring to look for.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(), AnyArray(self.str_contains(pattern))
+        )
+
+    def chars_match(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row begins with a substring.
+
+        `str.match` and `str.startswith` are the same question for a literal
+        pattern, and they are two names here for the same reason they are two in
+        pandas: one of them takes a regular expression and a tuple is meaningful
+        to the other. Neither difference survives to the kernel.
+
+        Args:
+            pattern: The substring to look for at the front.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(), AnyArray(self.str_starts_with(pattern))
+        )
+
+    def chars_full_match(self, pattern: StringSlice) raises -> Self:
+        """Returns whether each row is a substring and nothing else.
+
+        Args:
+            pattern: The text the whole row has to be.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_equals(self.values.strings(), pattern.as_bytes())),
+        )
+
+    def chars_count(self, pattern: StringSlice) raises -> Self:
+        """Returns how many times a substring appears in each row.
+
+        Matches do not overlap, so `aa` appears twice in `aaaa`. An empty
+        pattern is counted in bytes rather than characters, which is Arrow's
+        rule and pandas' answer and is not Python's.
+
+        Args:
+            pattern: The substring to count.
+
+        Returns:
+            An int64 series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_count(self.values.strings(), pattern.as_bytes())),
         )
 
     def cat_is_category(self) -> Bool:
