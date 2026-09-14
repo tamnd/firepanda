@@ -1003,6 +1003,22 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="capitalize",
+            kind="method",
+            signature="",
+            body='self._text("capitalize")',
+            doc="Every row with its first character raised and the rest dropped.",
+            returns="Series",
+        ),
+        Member(
+            name="swapcase",
+            kind="method",
+            signature="",
+            body='self._text("swapcase")',
+            doc="Every row with its upper case and lower case exchanged.",
+            returns="Series",
+        ),
+        Member(
             name="isspace",
             kind="method",
             signature="",

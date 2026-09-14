@@ -21,6 +21,7 @@ from firepanda.kernel.chars import (
     character_at,
     character_count,
     characters_before,
+    text_capitalize,
     text_case,
     text_character_get,
     text_character_length,
@@ -33,6 +34,7 @@ from firepanda.kernel.chars import (
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
+    text_swapcase,
 )
 from firepanda.kernel.pattern import rfind_bytes
 
@@ -413,6 +415,36 @@ def cased(var values: List[String], upper: Bool) raises -> List[String]:
     return rows(text_case(made(values^), upper))
 
 
+def capitalised(var values: List[String]) raises -> List[String]:
+    """Capitalises a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_capitalize(made(values^)))
+
+
+def swapped(var values: List[String]) raises -> List[String]:
+    """Swaps the case of a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_swapcase(made(values^)))
+
+
 def asked(column: Array[DType.bool]) raises -> List[String]:
     """Reads a mask back as words, so that a missing row can be named.
 
@@ -572,6 +604,84 @@ def test_a_case_question_about_bytes_that_are_not_utf8_is_no() raises:
     var col = built^.finish()
     assert_equal(asked(text_is_lower(col))[0], "no")
     assert_equal(asked(text_is_lower(col))[1], "yes")
+
+
+def test_capitalising_raises_the_first_character_and_drops_the_rest() raises:
+    var out = capitalised(["hello world", "HELLO WORLD", "hello WORLD"])
+    assert_equal(out[0], "Hello world")
+    assert_equal(out[1], "Hello world")
+    assert_equal(out[2], "Hello world")
+
+
+def test_capitalising_starts_at_the_first_character_whatever_it_is() raises:
+    # A row starting with something that has no case is not skipped over in
+    # search of something that has one, so the letter after a digit stays
+    # lower even though it is the first letter in the row.
+    assert_equal(capitalised(["1abc def"])[0], "1abc def")
+    assert_equal(capitalised(["  spaced  "])[0], "  spaced  ")
+
+
+def test_capitalising_an_empty_row_and_a_missing_row() raises:
+    var out = capitalised(["", "null", "a"])
+    assert_equal(out[0], "")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "A")
+
+
+def test_capitalising_corrects_the_first_character_and_the_rest() raises:
+    # The sharp s is one of the hundred and forty nine, in the head here and in
+    # the tail in the second row, so both paths through the element go through
+    # the table.
+    assert_equal(capitalised(["ßa"])[0], "ẞa")
+    assert_equal(capitalised(["Aß"])[0], "Aß")
+    assert_equal(capitalised(["ΟΔΟΣ"])[0], "Οδοσ")
+
+
+def test_swapping_case_exchanges_the_two_cases() raises:
+    var out = swapped(["hello WORLD", "MiXeD", "o'neill"])
+    assert_equal(out[0], "HELLO world")
+    assert_equal(out[1], "mIxEd")
+    assert_equal(out[2], "O'NEILL")
+
+
+def test_swapping_case_leaves_a_character_with_no_case_alone() raises:
+    assert_equal(swapped(["1 2 3 !?"])[0], "1 2 3 !?")
+
+
+def test_swapping_case_leaves_a_titlecase_character_alone() raises:
+    # A titlecase character is in neither case, so there is no other case to
+    # write it in, and both of its mappings would move it if the mappings were
+    # all this had to go on.
+    assert_equal(swapped(["ǅungla"])[0], "ǅUNGLA")
+    assert_equal(swapped(["ᾈα"])[0], "ᾈΑ")
+
+
+def test_swapping_case_keeps_a_row_the_same_length_in_characters() raises:
+    var out = swapped(["straße", "İstanbul", "ﬁance"])
+    assert_equal(out[0], "STRAẞE")
+    assert_equal(out[1], "iSTANBUL")
+    assert_equal(out[2], "ﬁANCE")
+
+
+def test_swapping_case_of_an_empty_row_and_a_missing_row() raises:
+    var out = swapped(["", "null", "Ab"])
+    assert_equal(out[0], "")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "aB")
+
+
+def test_the_two_new_names_leave_bytes_that_are_not_utf8_alone() raises:
+    var truncated = List[UInt8]()
+    truncated.append(0x61)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("ab".as_bytes())
+    var col = built^.finish()
+    assert_equal(len(rows(text_swapcase(col))[0].as_bytes()), 2)
+    assert_equal(rows(text_swapcase(col))[1], "AB")
+    assert_equal(len(rows(text_capitalize(col))[0].as_bytes()), 2)
+    assert_equal(rows(text_capitalize(col))[1], "Ab")
 
 
 def main() raises:
