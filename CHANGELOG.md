@@ -154,6 +154,18 @@ The positions come off the plan for the `ORDER BY` and the `DISTINCT ON`, which 
 
 Only a number written on its own is a position. `ORDER BY 1 + 1` is the number two in DuckDB as well, so it sorts every row on the same value and is left as it was.
 
+### Changed: a filter writes down the rows it keeps rather than copying every column
+
+A filter used to write a new column for every column it was keeping, which on a wide chunk is the whole chunk copied in order to keep a tenth of its rows. It writes the row numbers instead, and whatever reads a column next reads it through them. A filter over a chunk that already carries a selection composes the two, so a chain of filters is a chain of four byte position lists and no column data moves until something downstream asks for a column.
+
+Not always, because the trick stops paying when the predicate keeps most of the rows. A gather reads a position as well as a value for every row it moves, while a copy reads the mask and writes the survivors, so there is a share of the rows above which copying is simply less work. `SELECTION_KEEP_LIMIT` is where the two cross and a filter that keeps more than two fifths of its rows still copies. Measured over eight chunks of a hundred and thirty one thousand rows with a comparison, a filter and a projection in a line, selecting is 434 microseconds against 1.06 milliseconds at a tenth of the rows kept, 613 against 813 at a third and 882 against 970 at a half, and over a single chunk of a million rows at a half it is 1.26 milliseconds against 988 microseconds. Two fifths is below every crossing rather than at the nearest one, so a selection is written where it is known to win and not where which route wins depends on the shape.
+
+The share is read off a sample rather than counted. Counting the whole mask cost 8.4 microseconds a chunk against 1.7 for the sample, and it was being spent on both routes including the one that then went and copied, which left the line of operators 14 percent slower than the copying filter it was there to beat. `mask_keeps_more_than` reads a sixty four row block in every eight, which is an eighth of the mask and a couple of microseconds, and blocks rather than single rows because a mask costs a cache line to reach and because a run is what survives a predicate over a sorted column. Being wrong is bounded: near the share the two routes cross at, taking the other one costs nothing, since that is what crossing means. A mask under four thousand rows, or with nulls in it, is counted in full. A filter asked for no columns at all is a row count and answers with `mask_kept`, which reads the mask and writes nothing, where before it filtered the mask by itself and measured the column that came out.
+
+A selection is not allowed out of the parallel part of a run. The sink flattens what it is handed on the thread that called `run`, so a selection reaching it turns a gather every core was sharing into a gather done one chunk at a time in the serial tail, which measured 3.37 milliseconds against 1.60 for the copying filter it was meant to beat. The morsel loop flattens at the end of its prefix instead, on the worker that ran it.
+
+Everything other than the filter still receives a flat chunk. `node_reads_selection` names the operators that handle a selection themselves and the filter is the only one on that list, so every other operator sees what it saw before and no answer moves. Turning the rest on one at a time is the rest of #521.
+
 ## [0.8.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
