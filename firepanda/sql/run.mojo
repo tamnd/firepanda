@@ -144,7 +144,7 @@ def run(sql: StringSlice, catalog: Catalog) raises -> DataFrame:
     var rules = Transform(grammar)
     var ast = Ast()
     var statement = rules.parse_statement(sql, grammar, ast)
-    var built = lower(ast, statement, catalog)
+    var built = lower(ast, statement, catalog, grammar)
 
     # Binding before the optimizer rather than leaving it to the passes, so that
     # a name that resolves against nothing is an error about the query somebody
