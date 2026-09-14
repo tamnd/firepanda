@@ -127,7 +127,7 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the steps below from compiling everything
 # once per step. Each of them depends on this task, and without a cache key pixi
 # would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . tests/differential/regex.mojo -o build/differential/regex && mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch", default-environment = "differential", inputs = [
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . -I tests/differential tests/differential/regex.mojo -o build/differential/regex && mojo build -I . -I tests/differential tests/differential/regex_match.mojo -o build/differential/regex-match && mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
@@ -137,6 +137,7 @@ differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tes
   "build/differential/semantics",
   "build/differential/answers",
   "build/differential/regex",
+  "build/differential/regex-match",
   "build/differential/tpch",
 ] }
 
@@ -179,6 +180,15 @@ differential-sql-generated = { cmd = "./build/differential/generated", default-e
 # decisions against pandas' own predicate. It needs no corpus.
 # See docs/specs/76-two-engines-and-the-parser-that-picks-one.md section 6.
 differential-regex = { cmd = "./build/differential/regex", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The question after that one. Routing agreement is one bit per pattern and says
+# nothing about what the engine then answers, so this runs the same corpus
+# against sixteen pieces of text through firepanda's own matching engine and
+# through pandas' `str.contains`, and compares both the refusals and the
+# answers. RE2 refuses a good deal of what Python reads, so the refusals are
+# half the specification rather than a gap. It needs no corpus.
+# See docs/specs/77-the-machine-that-runs-a-pattern-once.md section 7.
+differential-regex-match = { cmd = "./build/differential/regex-match", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a

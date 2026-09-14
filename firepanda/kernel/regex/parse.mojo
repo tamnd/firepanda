@@ -72,6 +72,13 @@ from firepanda.kernel.regex.tokens import (
     CATEGORY_NOT_WORD,
     CATEGORY_SPACE,
     CATEGORY_WORD,
+    FLAG_ASCII,
+    FLAG_DOTALL,
+    FLAG_IGNORECASE,
+    FLAG_LOCALE,
+    FLAG_MULTILINE,
+    FLAG_UNICODE,
+    FLAG_VERBOSE,
     MAXREPEAT,
     OP_ANY,
     OP_ASSERT,
@@ -159,6 +166,69 @@ struct Parsed(Movable):
     matching engine to refuse on rather than left for somebody to discover as a
     pattern that matches the wrong character in silence."""
 
+    var re2_refuses: Bool
+    """Whether the pattern holds syntax RE2 will not take at all.
+
+    Several things set it, and all of them are Python syntax RE2 has never had,
+    so a caller writing one of them has written a pattern pandas hands to Arrow
+    and Arrow rejects. A comment group, `\\uXXXX`, `\\UXXXXXXXX`, a `\\Z` that
+    is not the last thing in the pattern, which pandas rewrites to RE2's `\\z`
+    only when it is trailing, a backslash in front of a character outside ASCII,
+    and a one digit octal escape inside a class.
+
+    The last two are the ones worth stating, because both look like nothing. A
+    backslash in front of a character Python does not know an escape for is that
+    character to Python, so `\\漢` is a perfectly ordinary way to write one, and
+    RE2 refuses every backslash it does not recognise whatever follows it. A
+    one digit octal escape inside a class is `[\\1]`, which is the character
+    with code one to Python, and RE2 will not read a nonzero octal escape of
+    fewer than two digits because that is how it tells one from a
+    backreference. `[\\01]` and `[\\12]` are the same character to both.
+
+    This is a fact about the text rather than about the tree, which is why it is
+    recorded here: the parser is the only thing that sees a comment, and by the
+    time the tree exists the comment has left nothing behind.
+    """
+
+    var re2_differs: Bool
+    """Whether the pattern holds syntax RE2 reads differently rather than
+    refuses.
+
+    Two things set it, and the pair is worth reading together because they are
+    the reason this flag is not folded into the one above. A count with no lower
+    bound, as in `a{,2}`, is `a{0,2}` to Python and the five literal characters
+    `a{,2}` to RE2. A POSIX class, as in `[[:alpha:]]`, is a set holding a
+    bracket and a colon and four letters to Python and every letter there is to
+    RE2.
+
+    Neither raises anywhere. A pattern setting this flag and answered out of
+    this tree would give a column of booleans that looks exactly like a right
+    one, which is why the compiler refuses instead, and why the refusal is
+    counted as a gap rather than as agreement with an RE2 that refuses nothing.
+    """
+
+    var flags: Int32
+    """The global flags the pattern turned on, as `FLAG_` bits.
+
+    Only the global form reaches here, because only the global form applies to
+    the whole pattern. What the scoped form turned on and off is in `scoped`.
+    """
+
+    var scoped: Int32
+    """Every flag any scoped group mentioned, whether it turned it on or off.
+
+    The scoped form is still parsed and dropped, so the tree says nothing about
+    where the group was or what was inside it. That is enough to refuse on and
+    not enough to run, which is exactly what this field is for: a pattern
+    writing `(?i:b)` means something RE2 acts on, and a compiler that read the
+    tree alone would answer as though the letters were never there.
+
+    Turning a flag off counts the same as turning it on. `(?-i:a)` inside a
+    pattern with no global `(?i)` really is a group that changes nothing, and
+    refusing it is a handful of patterns given up for a rule somebody can state
+    in one sentence.
+    """
+
     def __init__(out self):
         """Starts an empty parse, which is what a caller gets for a pattern that
         failed on its first character."""
@@ -169,6 +239,10 @@ struct Parsed(Movable):
         self.ok = True
         self.problem = String("")
         self.approximate = False
+        self.re2_refuses = False
+        self.re2_differs = False
+        self.flags = 0
+        self.scoped = 0
 
 
 struct _Cursor(Movable):
@@ -252,6 +326,20 @@ struct _Cursor(Movable):
     because the placeholder node is indistinguishable from a caller writing the
     replacement character on purpose."""
 
+    var re2_refuses: Bool
+    """Whether a comment group, a `\\u` escape, a `\\U` escape, a `\\Z` that is
+    not trailing, a backslash before a character outside ASCII or a one digit
+    octal escape in a class has been read. What `Parsed.re2_refuses` ends up
+    holding."""
+
+    var re2_differs: Bool
+    """Whether a count with no lower bound or a POSIX class has been read. What
+    `Parsed.re2_differs` ends up holding."""
+
+    var scoped: Int32
+    """Which flags a scoped group mentioned, on or off. What `Parsed.scoped`
+    ends up holding."""
+
     var flagged: Int32
     """Which global flags the pattern turned on, as a bit per letter.
 
@@ -280,6 +368,9 @@ struct _Cursor(Movable):
         self.problem = String("")
         self.lookbehind = -1
         self.pending = []
+        self.re2_refuses = False
+        self.re2_differs = False
+        self.scoped = 0
         self.flagged = 0
         self.guessed = False
 
@@ -371,7 +462,7 @@ struct _Cursor(Movable):
         self.nodes[Int(parent)].last = child
 
 
-def _decoded(pattern: StringSlice) -> List[UInt32]:
+def decoded(pattern: StringSlice) -> List[UInt32]:
     """Reads a pattern's bytes as code points.
 
     A pattern that is not valid UTF-8 cannot be written in Python source and is
@@ -620,6 +711,12 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
         if point == 0x41:
             return c.add(OP_AT, Int32(Int(AT_BEGINNING_STRING)), 0)
         if point == 0x5A or point == 0x7A:
+            # pandas rewrites a trailing `\\Z` into RE2's `\\z` on the way to
+            # Arrow and leaves one anywhere else alone, and RE2 has no `\\Z`,
+            # so `a\\Zb` is a pattern Python reads and Arrow rejects. `\\z`
+            # is RE2's own spelling and needs no rewriting wherever it sits.
+            if point == 0x5A and not c.done():
+                c.re2_refuses = True
             return c.add(OP_AT, Int32(Int(AT_END_STRING)), 0)
         if point == 0x62:
             return c.add(OP_AT, Int32(Int(AT_BOUNDARY)), 0)
@@ -627,6 +724,9 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
             return c.add(OP_AT, Int32(Int(AT_NON_BOUNDARY)), 0)
 
     if in_class and point == 0x62:
+        # A backspace to Python and an invalid escape to RE2, which reads `\\b`
+        # as a word boundary everywhere and will not have one inside brackets.
+        c.re2_refuses = True
         return c.add(OP_LITERAL, 0x08, 0)
 
     var simple = _simple_escape(point)
@@ -638,13 +738,13 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
         if value < 0:
             return -1
         return c.add(OP_LITERAL, value, 0)
-    if point == 0x75:
-        var value = _fixed_hex(c, 4, String("u"))
-        if value < 0:
-            return -1
-        return c.add(OP_LITERAL, value, 0)
-    if point == 0x55:
-        var value = _fixed_hex(c, 8, String("U"))
+    if point == 0x75 or point == 0x55:
+        # RE2 has `\\x41` and `\\x{41}` and neither of these two, so a
+        # pattern naming a character this way reads here and is refused there.
+        c.re2_refuses = True
+        var width = 4 if point == 0x75 else 8
+        var what = String("u") if point == 0x75 else String("U")
+        var value = _fixed_hex(c, width, what)
         if value < 0:
             return -1
         return c.add(OP_LITERAL, value, 0)
@@ -661,6 +761,14 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
     if _is_ascii_letter(point):
         c.give_up(String("bad escape"))
         return -1
+
+    if point >= 0x80:
+        # Python's rule is that a backslash in front of anything that is not an
+        # ASCII letter or digit is that thing, so `\\漢` is one way to write a
+        # character and `\\-` is the usual way to write one inside a class. RE2
+        # takes the second and refuses the first: a backslash it does not
+        # recognise is an error there, and it recognises nothing outside ASCII.
+        c.re2_refuses = True
 
     return c.add(OP_LITERAL, Int32(Int(point)), 0)
 
@@ -756,12 +864,22 @@ def _digit_escape(mut c: _Cursor, first: UInt32, in_class: Bool) -> Int32:
             c.give_up(String("bad escape"))
             return -1
         var value = digit
+        var taken = 1
         for _ in range(2):
             var more = _octal_value(c.peek())
             if more < 0:
                 break
             value = value * 8 + more
             c.at += 1
+            taken += 1
+        if taken == 1:
+            # `[\\1]` is the character with code one to Python and an error to
+            # RE2, which will not read a nonzero octal escape shorter than two
+            # digits because that is how it tells one from a backreference it
+            # does not have. `[\\01]` and `[\\12]` are the same character to
+            # both, so the refusal is about the number of digits rather than
+            # about the value.
+            c.re2_refuses = True
         if value > 0xFF:
             c.give_up(String("octal escape value outside of range 0-0o377"))
             return -1
@@ -889,6 +1007,11 @@ def _class(mut c: _Cursor) -> Int32:
             c.at += 1
             return node
         first = False
+        if c.peek() == 0x5B and c.ahead(1) == 0x3A:
+            # A POSIX class to RE2 and a bracket, a colon and some letters to
+            # Python, which warns about it and reads it anyway. The two readings
+            # have nothing in common, and neither of them is an error.
+            c.re2_differs = True
 
         var left = _class_item(c)
         if left < 0:
@@ -974,6 +1097,11 @@ def _counted(mut c: _Cursor) -> List[Int32]:
         c.at = mark
         return List[Int32]()
     c.at += 1
+    if not saw_low:
+        # Python has read `{,n}` as `{0,n}` since 3.11 and RE2 reads it as the
+        # characters it is made of, so `a{,2}` matches everything upstream of
+        # here and matches the text `a{,2}` downstream of it.
+        c.re2_differs = True
     var out = List[Int32]()
     out.append(low)
     out.append(high)
@@ -1167,6 +1295,10 @@ def _group(mut c: _Cursor) -> Int32:
         return node
 
     if kind == 0x23:
+        # RE2 has no comment group at all, so a pattern with one in it is
+        # handed to Arrow by pandas and refused there. Recorded now because by
+        # the time the tree exists the comment has left nothing behind.
+        c.re2_refuses = True
         # A backslash hides the character after it, so `(?#\)` is not closed by
         # that bracket and runs off the end. Nothing else in a comment means
         # anything, and this does not because the reader looked at it: Python
@@ -1348,23 +1480,23 @@ def _flag_bit(point: UInt32) -> Int32:
         The bit, or minus one when the letter is not a flag.
     """
     if point == 0x69:
-        return 1
+        return FLAG_IGNORECASE
     if point == 0x4C:
-        return 2
+        return FLAG_LOCALE
     if point == 0x6D:
-        return 4
+        return FLAG_MULTILINE
     if point == 0x73:
-        return 8
+        return FLAG_DOTALL
     if point == 0x78:
-        return 16
+        return FLAG_VERBOSE
     if point == 0x61:
-        return 32
+        return FLAG_ASCII
     if point == 0x75:
-        return 64
+        return FLAG_UNICODE
     return -1
 
 
-comptime TYPE_FLAGS: Int32 = 2 | 32 | 64
+comptime TYPE_FLAGS: Int32 = FLAG_LOCALE | FLAG_ASCII | FLAG_UNICODE
 """The three flags that say which alphabet the pattern is written against.
 
 They are the ones that cannot be combined with each other and cannot be turned
@@ -1516,7 +1648,10 @@ def _flags(mut c: _Cursor) -> Int32:
     # obvious place to hang them and it would also have been a lie, since zero
     # is the whole match and anything walking the tree later would read this as
     # a capture. The flags belong on the node once there is an engine that acts
-    # on them, and until then the honest shape is the one that says nothing.
+    # on them here, and until then the honest shape is the one that says
+    # nothing and the letters are recorded on the parse so that the compiler
+    # can refuse rather than answer as though they were never written.
+    c.scoped |= add | off
     c.depth += 1
     var inner = _branch(c)
     c.depth -= 1
@@ -1685,6 +1820,10 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     var finished = c.done()
     var groups = c.groups
     var guessed = c.guessed
+    var flagged = c.flagged
+    var refuses = c.re2_refuses
+    var differs = c.re2_differs
+    var scoped = c.scoped
     var nodes = c.nodes.copy()
     var names = c.names.copy()
     var problem = c.problem.copy()
@@ -1700,6 +1839,10 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     out.root = root
     out.groups = groups
     out.approximate = guessed
+    out.flags = flagged
+    out.re2_refuses = refuses
+    out.re2_differs = differs
+    out.scoped = scoped
     out.nodes = nodes^
     out.names = names^
     return out^
@@ -1729,7 +1872,7 @@ def _settle(mut c: _Cursor):
         if c.pending[i] > c.groups:
             c.give_up(String("invalid group reference"))
             return
-    if (c.flagged & 32) != 0 and (c.flagged & 64) != 0:
+    if (c.flagged & FLAG_ASCII) != 0 and (c.flagged & FLAG_UNICODE) != 0:
         c.give_up(String("ASCII and UNICODE flags are incompatible"))
 
 
@@ -1744,7 +1887,7 @@ def parse_pattern(pattern: StringSlice) -> Parsed:
         rather than a raise because the caller above is a router deciding which
         engine answers, and a pattern Python cannot read is one RE2 is given.
     """
-    var c = _Cursor(_decoded(pattern))
+    var c = _Cursor(decoded(pattern))
     var root = _branch(c)
     _settle(c)
     return _harvested(c^, root)
