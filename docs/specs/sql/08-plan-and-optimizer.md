@@ -98,6 +98,8 @@ That last step is the whole discipline. A leftover `DependentJoin` means a fallb
 
 The subquery kinds each get a rewrite. Scalar becomes a left join with a single row check, `EXISTS` becomes a semi join, `NOT EXISTS` an anti join, `IN` a mark join, and `NOT IN` a null aware anti join, because of the three valued semantics measured in document 06. A plain anti join for `NOT IN` is the classic wrong answer and it is silent.
 
+The count bug is the second silent one and it comes with the scalar rewrite. A left join pads an outer row whose group has no rows in it with null, which is what a sum, a minimum and an average over nothing answer and is not what a count answers, since a count of nothing is zero. Left alone it is wrong twice: the count comes back null, and null is a row a filter does not keep, so the outer row it was zero for goes missing too. The zero goes back on above the join, where the column is read, because that is the only place that knows the null is the padding rather than an answer. Where the count is not the whole of the subquery's value, as in `count(k) + 1`, the addition has already happened under the join and there is no one constant the padding stands for, so that shape is refused until the general pass can rebuild the value with each fold replaced by what it answers over nothing.
+
 ## 6. The dataframe surface uses this too
 
 The rule from document 02, restated as an obligation on this document: no node may have only a SQL constructor.

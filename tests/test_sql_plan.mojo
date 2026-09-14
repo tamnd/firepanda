@@ -2420,13 +2420,54 @@ def test_a_correlated_one_puts_its_own_condition_under_the_fold() raises:
     )
 
 
-def test_a_correlated_one_that_counts_is_refused_by_name() raises:
+def test_a_correlated_one_that_counts_reads_the_padding_as_a_zero() raises:
     # The count bug. A left join answers null for an outer row whose group has
-    # no rows in it, and a count over nothing is zero rather than null.
-    with assert_raises(contains="a count of nothing is zero"):
-        _ = _plan(
+    # no rows in it, and a count over nothing is zero rather than null, so the
+    # null is read as the zero it stands for where the column is read.
+    assert_equal(
+        _plan(
             "SELECT a FROM t WHERE a > (SELECT count(k) FROM u WHERE u.b = t.b)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a > (if is_null(__sub_0) then 0 else __sub_0)\n"
+            "    JOIN left [b = __by_0]\n"
+            "      SCAN t []\n"
+            "      PROJECT [b as __by_0, __agg_0 as __sub_0]\n"
+            "        AGGREGATE [b] -> [count(k)]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_a_count_inside_a_larger_value_is_still_refused() raises:
+    # The zero can only be put back where the count is the whole of the value.
+    # `count(k) + 1` over an empty group is one, and the addition happens under
+    # the join where the count is not there to be zero yet.
+    with assert_raises(contains="counts inside a larger expression"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT count(k) + 1 FROM u WHERE u.b ="
+            " t.b)"
         )
+
+
+def test_a_correlated_distinct_count_reads_the_padding_as_a_zero() raises:
+    # `count(DISTINCT k)` over nothing is zero for the same reason a plain
+    # count is, so it takes the same reading rather than a second rule.
+    assert_equal(
+        _plan(
+            "SELECT a, (SELECT count(DISTINCT k) FROM u WHERE u.b = t.b) AS n"
+            " FROM t"
+        ),
+        (
+            "PROJECT [a, if is_null(__sub_0) then 0 else __sub_0 as n]\n"
+            "  JOIN left [b = __by_0]\n"
+            "    SCAN t []\n"
+            "    PROJECT [b as __by_0, __agg_0 as __sub_0]\n"
+            "      AGGREGATE [b] -> [nunique(k)]\n"
+            "        SCAN u []\n"
+        ),
+    )
 
 
 def test_a_correlated_one_read_another_way_is_refused_by_name() raises:
