@@ -74,6 +74,26 @@ join invents null rows and a semi join is already a filter, so what is safe
 there is a longer argument than what is safe here, and the pass would rather do
 nothing than do it on a guess.
 
+A cross join is an inner join with nothing asked of the pair, so moving a
+predicate into one of its sides would be sound, and it is still not done. The
+operator behind a cross join pairs a whole frame against a single row, so a
+predicate pushed into that side can leave it holding no row at all, which is a
+shape the lowering refuses. Filtering afterwards is what the query said and it
+runs, so that is what is left in place.
+
+## The cross join gains a condition here
+
+`from a, b where a.x = b.y` is a cross join under a filter and
+`from a join b on a.x = b.y` is one join node, and only the second of the two
+can be run: pairing every row with every row builds the product before the
+filter ever sees it, which is the shape the operator refuses outright rather
+than spends an hour on. So the equality is taken off the predicates being
+carried and put on the join, and after that the two spellings are the same
+plan. `_condition` does it and its docstring says which equalities qualify.
+
+It happens before the transit below rather than after, so a condition that has
+just become a key is a key the copying can read.
+
 ## The join also gains predicates here
 
 Reaching an inner join, the pass calls `transit.derive`, which reads the join's
@@ -126,6 +146,15 @@ from firepanda.plan.transit import derive
 
 comptime RANKS = 4
 """How many classes `_rank` sorts a conjunct into."""
+
+comptime _NEITHER = 0
+"""A key candidate that is not a plain column of exactly one side of a join."""
+
+comptime _LEFT = 1
+"""A key candidate that is a column of the left side and not of the right."""
+
+comptime _RIGHT = 2
+"""A key candidate that is a column of the right side and not of the left."""
 
 
 def push(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
@@ -366,11 +395,17 @@ def _join(
     """
     var left = plan.nodes[old].inputs[0]
     var right = plan.nodes[old].inputs[1]
+    if plan.nodes[old].op == Int(JoinKind.CROSS.code):
+        # An equality over the two sides is the condition this join was written
+        # without, and putting it on the node turns the product into a pairing.
+        _condition(plan, old, bound, carried)
     var inner = plan.nodes[old].op == Int(JoinKind.INNER.code)
     if inner:
         # Transitive predicates. A filter on one side of an equality reaches
         # the other, and it arrives here as though it had been written above
         # the join, so the routing below places it without knowing it is new.
+        # A join that has just become one this way is included, which is the
+        # whole reason the condition is read first.
         derive(plan, old, bound, carried)
 
     var to_left = List[Int]()
@@ -409,6 +444,109 @@ def _join(
     var new_right = _rebuild(plan, right, bound, to_right^, into)
     var at = _emit(plan, old, [new_left, new_right], into)
     return _apply(plan, at, here^, into)
+
+
+def _condition(
+    mut plan: Plan, old: Int, bound: List[Bound], mut carried: List[Int]
+) raises:
+    """Puts the equalities carried over a cross join onto it as keys.
+
+    A cross join with `a.x = b.y` above it is an equi join written the other
+    way round, and the difference between the two is not cosmetic. The product
+    of two ten thousand row frames is a hundred million rows and the operator
+    that would have to hold them refuses to start, so the query that says what
+    it wants in the `where` only runs at all once the condition has moved.
+
+    Which equalities qualify is deliberately narrow. Both sides have to be a
+    plain column, because the operator builds its hash table from a column of
+    the build side and a computed key would have to be computed there too,
+    which is a projection this pass is not placing. One column has to be the
+    left side's and the other the right side's, and a name both sides have
+    counts as neither, which is the same ambiguity the routing below refuses.
+    Anything that does not qualify stays a predicate and is carried on.
+
+    Null needs no exception. An equi join does not pair a null key with
+    anything, and `null = null` answers null in a filter and drops its row, so
+    the rows that come out are the same rows either way.
+
+    Args:
+        plan: The plan, whose join node is rewritten in place.
+        old: The cross join.
+        bound: What every old node produces.
+        carried: The predicates arriving from above, with the ones that became
+            keys taken out of it.
+
+    Raises:
+        If an expression holds an index that is not in the plan.
+    """
+    var left = plan.nodes[old].inputs[0]
+    var right = plan.nodes[old].inputs[1]
+
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    var rest = List[Int]()
+    for i in range(len(carried)):
+        var at = carried[i]
+        if plan.exprs.nodes[at].kind != ExprKind.BINARY or plan.exprs.nodes[
+            at
+        ].op != Int(BinaryOp.EQ.code):
+            rest.append(at)
+            continue
+        var one = plan.exprs.nodes[at].children[0]
+        var other = plan.exprs.nodes[at].children[1]
+        var first = _owner(plan, one, bound, left, right)
+        var second = _owner(plan, other, bound, left, right)
+        if first == _LEFT and second == _RIGHT:
+            left_keys.append(one)
+            right_keys.append(other)
+        elif first == _RIGHT and second == _LEFT:
+            left_keys.append(other)
+            right_keys.append(one)
+        else:
+            rest.append(at)
+
+    if len(left_keys) == 0:
+        return
+
+    # The node is rewritten rather than rebuilt because `_emit` copies it and
+    # `derive` reads it, and both of them happen after this. The old list is
+    # thrown away at the end of the pass either way.
+    var parts = len(left_keys)
+    var exprs = left_keys^
+    for i in range(len(right_keys)):
+        exprs.append(right_keys[i])
+    plan.nodes[old].exprs = exprs^
+    plan.nodes[old].parts = parts
+    plan.nodes[old].op = Int(JoinKind.INNER.code)
+    carried = rest^
+
+
+def _owner(
+    plan: Plan, at: Int, bound: List[Bound], left: Int, right: Int
+) -> Int:
+    """Which side of a join one half of an equality reads.
+
+    Args:
+        plan: The plan.
+        at: The expression.
+        bound: What every old node produces.
+        left: The join's left input.
+        right: The join's right input.
+
+    Returns:
+        `_LEFT` or `_RIGHT`, or `_NEITHER` for anything that is not a plain
+        column of exactly one of the two.
+    """
+    if plan.exprs.nodes[at].kind != ExprKind.COLUMN:
+        return _NEITHER
+    ref name = plan.exprs.nodes[at].name
+    var here = bound[left].schema.has(name)
+    var there = bound[right].schema.has(name)
+    if here and not there:
+        return _LEFT
+    if there and not here:
+        return _RIGHT
+    return _NEITHER
 
 
 def _union(

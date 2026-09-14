@@ -290,6 +290,148 @@ def test_a_filter_below_an_outer_join_is_left_where_it_is() raises:
     assert_equal(_under(plan, at), "JOIN", "the filter stayed on top")
 
 
+def test_an_equality_over_a_cross_join_becomes_the_join_condition() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("p_partkey"),
+            plan.exprs.column("l_partkey"),
+        ),
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # `from part, lineitem where p_partkey = l_partkey` written as a plan, and
+    # the whole point is that it comes out as the join anybody would have
+    # written by hand.
+    assert_true(
+        "JOIN inner [p_partkey = l_partkey]" in explain(plan, at),
+        "the product became a pairing",
+    )
+    assert_equal(_filters(plan, at), 0, "and there is no filter left to run")
+
+
+def test_a_cross_join_keeps_the_predicate_that_is_not_a_key_pair() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var both = List[Int]()
+    both.append(
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("p_partkey"),
+            plan.exprs.column("l_partkey"),
+        )
+    )
+    both.append(_small(plan, "p_size", 15))
+    var root = plan.filter(
+        joined, plan.exprs.call(String("and"), both^, rowwise=True)
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    assert_true(
+        "JOIN inner [p_partkey = l_partkey]" in explain(plan, at),
+        "the equality became the condition",
+    )
+    assert_equal(_filters(plan, at), 1, "and the other half stayed a filter")
+    assert_true(
+        String(plan.nodes[at].kind) == "JOIN", "which is not above the join"
+    )
+
+
+def test_both_equalities_over_a_cross_join_become_keys() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var both = List[Int]()
+    both.append(
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("p_partkey"),
+            plan.exprs.column("l_partkey"),
+        )
+    )
+    both.append(
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("l_shipmode"),
+            plan.exprs.column("p_container"),
+        )
+    )
+    var root = plan.filter(
+        joined, plan.exprs.call(String("and"), both^, rowwise=True)
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # The second one is written right side first, and which side a column is
+    # on is read off the schemas rather than off the order it was typed in.
+    assert_true(
+        (
+            "JOIN inner [p_partkey = l_partkey, p_container = l_shipmode]"
+            in explain(plan, at)
+        ),
+        "both pairs are on the join",
+    )
+    assert_equal(_filters(plan, at), 0, "and nothing is left over")
+
+
+def test_a_comma_join_and_a_written_join_reach_the_same_plan() raises:
+    var typed = Plan()
+    var one = typed.scan("part", List[String](), 0)
+    var two = typed.scan("lineitem", List[String](), 1)
+    var product = typed.join(one, two, List[Int](), List[Int](), JoinKind.CROSS)
+    var above = typed.filter(
+        product,
+        typed.exprs.binary(
+            BinaryOp.EQ,
+            typed.exprs.column("p_partkey"),
+            typed.exprs.column("l_partkey"),
+        ),
+    )
+    var comma = explain(typed, push(typed, above, [_part(), _lineitem()]))
+
+    var spelt = Plan()
+    var three = spelt.scan("part", List[String](), 0)
+    var four = spelt.scan("lineitem", List[String](), 1)
+    var pairing = spelt.join(
+        three,
+        four,
+        [spelt.exprs.column("p_partkey")],
+        [spelt.exprs.column("l_partkey")],
+        JoinKind.INNER,
+    )
+    var written = explain(spelt, push(spelt, pairing, [_part(), _lineitem()]))
+
+    # The claim `firepanda/sql/plan.mojo` makes about a comma in the `FROM`,
+    # written as something that can fail.
+    assert_equal(comma, written, "the same query either way round")
+
+
+def test_a_cross_join_with_nothing_to_pair_on_keeps_its_filter_above() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var root = plan.filter(joined, _small(plan, "p_size", 15))
+    var at = push(plan, root, [_part(), _lineitem()])
+    # Sound to move and still not moved. The operator behind a cross join pairs
+    # a frame against a single row, and a predicate pushed into that side can
+    # leave it holding no row, which is a shape the lowering refuses.
+    assert_true("JOIN cross" in explain(plan, at), "it is still a product")
+    assert_equal(_under(plan, at), "JOIN", "with the filter still on top")
+
+
 def test_a_filter_goes_into_both_arms_of_a_union() raises:
     var plan = Plan()
     var one = plan.scan("lineitem", List[String](), 0)

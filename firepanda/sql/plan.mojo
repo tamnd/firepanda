@@ -98,7 +98,10 @@ row.
 Which side a part reads is answered by the relation a qualified column carries,
 and by the name for one that is not qualified. A comma in the `FROM` is a join
 with no condition, which is why `FROM a, b WHERE a.x = b.y` and the same query
-written with a `JOIN` reach the same plan once the filter is pushed down.
+written with a `JOIN` reach the same plan once the filter is pushed down. What
+does the pushing is `_condition` in `firepanda/plan/push.mojo`, and it is there
+rather than here so that the dataframe API gets the same rewrite out of a cross
+join it built itself.
 
 ### A HAVING is a filter over a column, not over an aggregate
 
