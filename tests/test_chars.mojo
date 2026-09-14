@@ -32,13 +32,21 @@ from firepanda.kernel.chars import (
     text_character_slice,
     text_character_substring,
     text_find,
+    text_is_alnum,
+    text_is_alpha,
+    text_is_ascii,
+    text_is_decimal,
+    text_is_digit,
     text_is_lower,
+    text_is_numeric,
     text_is_space,
+    text_is_title,
     text_is_upper,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
     text_swapcase,
+    text_title,
 )
 from firepanda.kernel.pattern import rfind_bytes
 
@@ -890,6 +898,239 @@ def test_folding_leaves_bytes_that_are_not_utf8_alone() raises:
     var col = built^.finish()
     assert_equal(len(rows(text_casefold(col))[0].as_bytes()), 2)
     assert_equal(rows(text_casefold(col))[1], "ab")
+
+
+def titled(var values: List[String]) raises -> List[String]:
+    """Titles a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_title(made(values^)))
+
+
+def test_titling_raises_the_first_character_of_every_word() raises:
+    var out = titled(["hello world", "ABC DEF", "a b  c"])
+    assert_equal(out[0], "Hello World")
+    assert_equal(out[1], "Abc Def")
+    assert_equal(out[2], "A B  C")
+
+
+def test_a_word_starts_after_anything_that_is_in_no_case() raises:
+    # A word does not end at whitespace, it ends at any character in no case at
+    # all, so an apostrophe and a digit both start a new word and the letter
+    # after them is raised. That is the rule pandas has and it surprises people.
+    var out = titled(["don't", "abc1def", "_ab"])
+    assert_equal(out[0], "Don'T")
+    assert_equal(out[1], "Abc1Def")
+    assert_equal(out[2], "_Ab")
+
+
+def test_titling_raises_a_titlecase_character_all_the_way() raises:
+    # The obvious guess is that a digraph at the start of a word becomes the
+    # titlecase form, and it does not. Arrow's titlecase mapping is its upper
+    # case mapping everywhere, so the whole capital is what comes out, and the
+    # second digraph is inside the word and drops instead.
+    var out = titled(["ǆx", "ǅ", "ǄǄ"])
+    assert_equal(out[0], "Ǆx")
+    assert_equal(out[1], "Ǆ")
+    assert_equal(out[2], "Ǆǆ")
+
+
+def test_titling_corrects_the_same_code_points_the_other_names_do() raises:
+    # A sharp s inside a word stays a sharp s because lowering leaves it alone,
+    # and one at the start becomes the capital the correction table carries
+    # rather than the two letters the standard library would give.
+    var out = titled(["straße", "ßx"])
+    assert_equal(out[0], "Straße")
+    assert_equal(out[1], "ẞx")
+
+
+def test_titling_an_empty_row_and_a_missing_row() raises:
+    var out = titled(["", "null", "çA"])
+    assert_equal(out[0], "")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "Ça")
+
+
+def test_titling_leaves_bytes_that_are_not_utf8_alone() raises:
+    var truncated = List[UInt8]()
+    truncated.append(0x61)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("ab cd".as_bytes())
+    var col = built^.finish()
+    assert_equal(len(rows(text_title(col))[0].as_bytes()), 2)
+    assert_equal(rows(text_title(col))[1], "Ab Cd")
+
+
+def test_the_title_question_is_asked_of_every_word() raises:
+    var out = asked(text_is_title(made(["Hello World", "Hello world", "A "])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+
+
+def test_a_row_with_no_cased_character_is_not_titled() raises:
+    var out = asked(text_is_title(made(["1", "", " ", "Abc Def"])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "no")
+    assert_equal(out[3], "yes")
+
+
+def test_the_title_question_counts_a_digit_as_a_word_break() raises:
+    # `A1b` is not titled, because the digit ends the word and the `b` after it
+    # is the start of a new one and is not raised. `A1B` is titled.
+    var out = asked(text_is_title(made(["A1b", "A1B", "Don'T", "Don't"])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "no")
+
+
+def test_a_titlecase_character_starts_a_word_and_does_not_continue_one() raises:
+    var out = asked(text_is_title(made(["ǅx", "ǅX", "ǅ", "Ǆ"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "yes")
+
+
+def test_the_title_question_keeps_a_missing_row_missing() raises:
+    var out = asked(text_is_title(made(["Ab", "null"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "null")
+
+
+def test_the_ascii_question_reads_bytes_and_not_characters() raises:
+    var out = asked(text_is_ascii(made(["abc", "café", "~", one(0x0080)])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "no")
+
+
+def test_the_ascii_question_is_the_one_that_says_yes_to_an_empty_row() raises:
+    # Every other question about a row wants a character to answer yes. This one
+    # is about what a row does not contain, so a row containing nothing passes.
+    var out = asked(text_is_ascii(made(["", "null", "x"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "yes")
+
+
+def test_a_letter_question_wants_every_character_to_be_a_letter() raises:
+    var out = asked(text_is_alpha(made(["abc", "café", "ab1", "a b", "ǅ"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "no")
+    assert_equal(out[3], "no")
+    assert_equal(out[4], "yes")
+
+
+def test_a_letter_is_not_a_number_and_a_number_is_not_a_letter() raises:
+    # Measured against Arrow over every code point there is by the generator,
+    # which refuses to write a table if the two classes ever overlap. It
+    # matters because a Roman numeral looks like both and Arrow calls it one.
+    var column = made(["三", one(0x2167), one(0x3007)])
+    var letters = asked(text_is_alpha(column))
+    var numbers = asked(text_is_numeric(column))
+    assert_equal(letters[0], "yes")
+    assert_equal(numbers[0], "no")
+    assert_equal(letters[1], "no")
+    assert_equal(numbers[1], "yes")
+    assert_equal(letters[2], "no")
+    assert_equal(numbers[2], "yes")
+
+
+def test_the_three_number_questions_narrow_in_that_order() raises:
+    # An ASCII four is all three. A superscript two and a half sign are digits
+    # and are not decimal. A Roman numeral is neither, because it is a number
+    # and a letter at once, which is the only thing the widest question adds.
+    var column = made(["4", one(0x00B2), one(0x00BD), one(0x2167)])
+    var numeric = asked(text_is_numeric(column))
+    var digit = asked(text_is_digit(column))
+    var decimal = asked(text_is_decimal(column))
+    assert_equal(numeric[0] + digit[0] + decimal[0], "yesyesyes")
+    assert_equal(numeric[1] + digit[1] + decimal[1], "yesyesno")
+    assert_equal(numeric[2] + digit[2] + decimal[2], "yesyesno")
+    assert_equal(numeric[3] + digit[3] + decimal[3], "yesnono")
+
+
+def test_a_half_sign_is_a_digit_here_and_is_not_one_in_python() raises:
+    # The single most surprising answer in this file, and it is pandas' answer
+    # rather than a choice made here. Arrow calls anything written as one
+    # number sign a digit, Python calls it numeric and not a digit, and the two
+    # disagree about 877 code points. pandas reads its text out of Arrow.
+    var out = asked(
+        text_is_digit(made([one(0x00BD), one(0x00BC), one(0x00B3)]))
+    )
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+
+
+def test_a_decimal_digit_need_not_be_an_ascii_one() raises:
+    # Arabic Indic four and Extended Arabic Indic five, both of which are a
+    # place in a base ten number in exactly the way an ASCII four is.
+    var out = asked(text_is_decimal(made([one(0x0664), one(0x06F5), "42"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+
+
+def test_the_alphanumeric_question_is_the_other_two_together() raises:
+    # There is no alphanumeric class anywhere in this library, because a
+    # character is alphanumeric exactly when it is a letter or a number, and
+    # that identity is measured against Arrow rather than assumed.
+    var column = made(["abc", "123", "ab1", one(0x2167) + "x", "a b", "1.5"])
+    var out = asked(text_is_alnum(column))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "yes")
+    assert_equal(out[4], "no")
+    assert_equal(out[5], "no")
+
+
+def test_an_empty_row_answers_no_to_all_five() raises:
+    # The rule is that the row has a character and every character it has is in
+    # the class, and the first half of that is what an empty row fails. Only
+    # `isascii` says yes to a row of nothing, because it asks the other way.
+    var column = made([""])
+    assert_equal(asked(text_is_alpha(column))[0], "no")
+    assert_equal(asked(text_is_numeric(column))[0], "no")
+    assert_equal(asked(text_is_digit(column))[0], "no")
+    assert_equal(asked(text_is_decimal(column))[0], "no")
+    assert_equal(asked(text_is_alnum(column))[0], "no")
+
+
+def test_all_five_keep_a_missing_row_missing() raises:
+    var column = made(["null", "a1"])
+    assert_equal(asked(text_is_alpha(column))[0], "null")
+    assert_equal(asked(text_is_numeric(column))[0], "null")
+    assert_equal(asked(text_is_digit(column))[0], "null")
+    assert_equal(asked(text_is_decimal(column))[0], "null")
+    assert_equal(asked(text_is_alnum(column))[0], "null")
+    assert_equal(asked(text_is_alnum(column))[1], "yes")
+
+
+def test_the_class_questions_stop_at_the_first_character_that_fails() raises:
+    # Not a timing assertion, a correctness one. The loop breaks early and the
+    # characters after the break are never read, so a row whose tail would
+    # answer differently has to come out the same as one whose tail is short.
+    var out = asked(text_is_alpha(made(["1abc", "1", "1" + one(0x2167)])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "no")
 
 
 def main() raises:

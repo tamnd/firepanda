@@ -64,6 +64,7 @@ def _text_name(name: String) raises -> String:
         name == "upper"
         or name == "lower"
         or name == "capitalize"
+        or name == "title"
         or name == "swapcase"
         or name == "casefold"
         or name == "slice"
@@ -105,6 +106,13 @@ def _flag_name(name: String) raises -> String:
         or name == "isspace"
         or name == "islower"
         or name == "isupper"
+        or name == "istitle"
+        or name == "isascii"
+        or name == "isalpha"
+        or name == "isnumeric"
+        or name == "isdigit"
+        or name == "isdecimal"
+        or name == "isalnum"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -242,6 +250,8 @@ def text(
         return column.chars_lower()
     if wanted == "capitalize":
         return column.chars_capitalize()
+    if wanted == "title":
+        return column.chars_title()
     if wanted == "swapcase":
         return column.chars_swapcase()
     if wanted == "casefold":
@@ -297,8 +307,8 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The prefix or the suffix, and the empty string for the three
-            questions about case, which take no argument at all.
+        arg: The prefix or the suffix, and the empty string for every question
+            about what the characters are, which takes no argument at all.
 
     Returns:
         A bool column, as tall as the one it read.
@@ -317,6 +327,20 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         return column.chars_is_lower()
     if wanted == "isupper":
         return column.chars_is_upper()
+    if wanted == "istitle":
+        return column.chars_is_title()
+    if wanted == "isascii":
+        return column.chars_is_ascii()
+    if wanted == "isalpha":
+        return column.chars_is_alpha()
+    if wanted == "isnumeric":
+        return column.chars_is_numeric()
+    if wanted == "isdigit":
+        return column.chars_is_digit()
+    if wanted == "isdecimal":
+        return column.chars_is_decimal()
+    if wanted == "isalnum":
+        return column.chars_is_alnum()
     return column.chars_ends_with(arg)
 
 

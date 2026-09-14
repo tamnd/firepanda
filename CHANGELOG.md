@@ -27,6 +27,36 @@ Two things inside the engine had to be fixed before the rewrite was worth making
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+### Added: `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, the last of the `str` questions about what a character is
+
+The five remaining class questions of the `str` accessor, answered out of four more of Arrow's character classes held the same way the case classes are. `isalnum` needs no class of its own, because a character is alphanumeric exactly when it is alphabetic or numeric and the two have nothing in common, and the generator asserts both of those against Arrow over every code point before it writes a table rather than taking them from the standard.
+
+All five are exact against a live pandas over every code point in Unicode and over every arrangement of three characters drawn from an alphabet chosen to cross the classes. They answer a missing row with a missing value where pandas answers False, which is the registered `engine/string-predicate-null` difference the other string questions already carry.
+
+One answer here will read as a bug and is pandas'. Arrow calls anything written as a single number sign a digit, so `½` and `¼` are digits to it and are not digits to `str.isdigit`, which is 877 code points of difference. pandas 3 answers the name out of Arrow, so this library does too, and the test writes both answers out side by side.
+
+## [0.8.2] - 2026-09-14
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. Two threads run through it, text case and the shape of a filter, and neither changes an answer anybody was relying on.
+
+The case work started as a bug. `isspace`, `islower` and `isupper` were wrong about 1384 code points because they were asking the standard library, which carries an older and smaller Unicode table than Arrow does, and pandas answers those three out of Arrow. The fix carries the corrections, and once the corrections existed the rest of the case group could be built on them: `casefold`, `capitalize` and `swapcase` in the `str` accessor, `upper` and `lower` there and in SQL under all four of DuckDB's names, and then `title`, `istitle` and `isascii`, which needed a word rule rather than another table. `title` was the name the group had been waiting on and it is here, so the four writing methods and the case questions beside them all answer now. Every one of them was checked against a live pandas over all 1112064 code points and over sixty thousand random words.
+
+`STRLEN` was counting characters and DuckDB counts bytes, so `strlen('café')` was 4 and should have been 5. `length` and `len` count characters in both and are unchanged. ClickBench q27 and q28 average `strlen` over a text column, so they were asking for the wrong number and paying thirteen times over for it, since counting characters walks every payload and counting bytes reads a length field.
+
+On the filter side, a comparison against a constant is now one operator rather than two. The filter carries the comparison, does it over the column where it lies and writes the surviving rows straight out, so the mask column is never written and, on every conjunct after the first, the operand is never gathered out of a chunk an earlier conjunct already narrowed. Measured on paired benchmark rows, one condition keeping half the rows is 3 to 11 percent, keeping a tenth is 15 to 17 percent and two conditions in a row is 23 to 25 percent. Most ClickBench predicates are that shape.
+
+The rest is SQL surface. `DATE '2020-01-01'` and the four timestamp spellings parse now, which is how TPC-H writes its date bounds, and `EXPLAIN` prints a temporal constant as the day it names rather than as the count underneath it.
+
+
+### Added: `title`, `istitle` and `isascii`, the three names that needed a rule rather than a table
+
+`str.title` raises the first character of every word and drops the rest, `str.istitle` asks whether a row is already written that way, and `str.isascii` asks whether a row is made of ASCII and nothing else. All three are exact against pandas on every code point in Unicode, and the first two are exact on every arrangement of four characters drawn from the seven the word rule treats differently.
+
+A word does not end at whitespace, it ends at the first character in no case at all, so a digit and an apostrophe both start a new one. `don't` titles to `Don'T` and `abc1def` titles to `Abc1Def`, and `A1b` is not titled while `A1B` is. That is pandas' answer and it catches people out, so it is worth knowing before you reach for the method.
+
+Neither `title` nor `istitle` needed a new table. Whether a character is cased is the three classes in `charclass.mojo` ORed together, and Arrow's titlecase mapping is its upper case mapping for every code point there is, which has the consequence that `ǆ` at the start of a word becomes `Ǆ` rather than the titlecase `ǅ` that exists for exactly that purpose. `isascii` needs no table and no decoding at all, and is the one question in this group that a row of nothing answers yes to. The two questions carry the same `engine/string-predicate-null` divergence the rest of the group does, which is that a missing row answers a missing value here and False in pandas. Document 65 sections 9 and 10.
 
 ### Fixed: `isspace`, `islower` and `isupper` on the 1384 code points they were wrong about
 
@@ -105,6 +135,18 @@ The larger half is the operand. A comparison lowered as a compute has to produce
 Four benchmark rows say what it is worth, and they are pairs inside one run rather than two runs of one binary, so a busy machine moves both halves of a pair together. `exec/pipeline_fused_narrow` against `exec/pipeline_line_narrow` is one condition keeping half the rows and runs 3 to 11 percent faster. The same pair over a predicate keeping a tenth is 15 to 17 percent. `exec/pipeline_two_conditions_fused` against `exec/pipeline_two_conditions` is 23 to 25 percent, and that is the pair that matters: the second condition reads a column of a chunk the first one has already narrowed, which is the gather the fused form does not do.
 
 Text, category and temporal columns, a null constant, and any constant the column would have to be converted to meet all keep the old route: the mask is built and the rows are read off it. The answers are the same and only the cost differs. Nothing in the lowering emits the fused form yet, so no query changes with this entry.
+
+Part of #521.
+
+### Changed: a WHERE that compares against a constant lowers to one operator
+
+`WHERE CounterID = 62` was a compute writing a mask column and a filter reading it. It is now one filter that does the comparison itself. The operator that can do this shipped in the entry above and nothing emitted it; this is the lowering that does.
+
+`_constant_side` asks one question of each conjunct before anything is lowered: is this a comparison with a literal on one side. When it is, only the other side is lowered, and the comparison and its constant are handed to the filter instead of being written into a column. A constant on the left is not rewritten into a constant on the right, because the filter carries which side it was on and mirrors the operator when it runs, so `62 = CounterID` and `CounterID = 62` are the same one operator rather than one of them being a special case somebody has to remember.
+
+The comparison is not remembered in the memo, so two conjuncts holding the same comparison each do it rather than one reading a column the other wrote. That is the right trade here: the column was never the expensive part, and a repeated identical conjunct is not a query anybody writes. What the memo still shares is the operand underneath, so `WHERE a + b > 1 AND a + b < 9` computes the sum once and compares it twice.
+
+Most ClickBench predicates are this shape. q1 and q19 are one integer comparison against a constant and go straight down the fused path. q36 through q42 are five or six constant comparisons anded together, which is the shape the operator entry measured at 23 to 25 percent, because every conjunct after the first used to gather its operand out of a chunk an earlier one had already narrowed. The text and date comparisons in those predicates and in q10 through q14 are one operator now rather than two, but the filter still builds a mask inside itself for them, since the fused kernel covers the fixed width types and hands everything else back. A conjunct that is not a comparison against a constant, `LIKE` among them, lowers the way it always did.
 
 Part of #521.
 
@@ -6959,7 +7001,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
 [0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
 [0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1

@@ -230,7 +230,7 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [x] `lower`, `upper` (M6), which follow the simple case mappings an Arrow backed pandas column answers out of rather than the full mappings Python's own string methods use, so a row never changes length in characters, measured in document 64
 - [x] `capitalize`, `swapcase` (M6), which need no case data past the correction table `lower` and `upper` already carry, because capitalising is the first character raised and the rest dropped and swapping is decidable from the mappings themselves plus the thirty one titlecase characters Arrow leaves alone, both measured against pandas over every code point there is
 - [x] `casefold` (M6), which is the one name of this group pandas answers out of Python rather than Arrow, because pyarrow has no casefold kernel, so it folds `ß` to `ss` and is the only rewrite here that can give back a row longer than the row it was given, measured in document 64
-- [ ] `title` (M6), which waits on knowing whether a character is cased at all, a question the case mappings cannot answer for 1295 code points, tracked as firepanda #748
+- [x] `title` (M6), which needs no mapping table of its own, because Arrow's titlecase mapping is its upper case mapping for every code point there is, and needs instead a rule about where a word starts, which is after any character in no case at all, so `don't` comes out as `Don'T`, measured in document 65
 - [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
 - [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)
@@ -243,7 +243,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `get_dummies` (M6)
 - [ ] `encode`, `decode`, `normalize` (M6)
 - [x] `isspace`, `islower`, `isupper` (M6), answered out of Arrow's own character classes and exact on every code point there is, and answering a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
-- [ ] `isalnum`, `isalpha`, `isdigit`, `istitle`, `isnumeric`, `isdecimal` (M6)
+- [x] `istitle`, `isascii` (M6), the first sharing the word rule `title` uses and the second needing no table at all, and it is the one question in the group a row of nothing answers yes to, both exact on every code point there is and both carrying the same missing row divergence
+- [x] `isalnum`, `isalpha`, `isdigit`, `isnumeric`, `isdecimal` (M6), four more Arrow character classes with `isalnum` needing none of its own because a character is alphanumeric exactly when it is alphabetic or numeric, exact on every code point there is, and note that Arrow's digit is wider than Python's by 877 code points so pandas calls `½` a digit and `str.isdigit` does not
 - [ ] `translate` (M6), and `casefold` is ticked above with the rest of the case group
 
 ## 5. The `.dt` accessor

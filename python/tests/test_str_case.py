@@ -1,10 +1,12 @@
-"""The eight `str` methods that are about case, checked against pandas.
+"""The ten `str` methods that are about case, checked against pandas.
 
-Five of them write a row out in some case or other and three of them ask a
+Six of them write a row out in some case or other and four of them ask a
 question about the case a row is already in. They are one group because they all
 rest on the same piece of data, which is the table that says what the other case
 of a character is, and because the interesting rows are the same rows for all
-seven.
+ten. `isascii` is here too, which is not about case at all and is here because it
+is the eleventh name the accessor gained in the same week and because it is the
+one question in the group that a row of nothing answers yes to.
 
 Which table that is turns out to matter more than anything else here. pandas 3
 holds a text column in Arrow and answers `upper` and `lower` out of an Arrow
@@ -27,10 +29,12 @@ with nothing left over.
 `capitalize` and `swapcase` need nothing beyond the correction table and are
 exact, which was measured rather than hoped for: both were run against pandas
 over every code point in Unicode on its own and over sixty thousand random
-words, with no row differing. `title` is the name of this group that is not
-here, because deciding where a word starts is a question about what comes before
-a character rather than about the character, which is the one thing none of the
-tables answers yet.
+words, with no row differing. `title` and `istitle` are the two names here that
+need something the tables do not hold, which is where a word starts, and that is
+a question about what comes before a character rather than about the character.
+The answer turns out to be that a word starts after any character in no case at
+all, so an apostrophe and a digit both begin a new one, and the rule is checked
+here over the same sweep the rest of the group gets.
 
 `casefold` is the exception to everything the paragraph above says about which
 pandas to follow, and it is pandas' exception rather than this library's. pyarrow
@@ -468,3 +472,133 @@ def test_folding_corrects_the_code_points_the_lower_case_path_corrects(
 def test_casefold_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
     """The same rule as the other seven, asserted again because it is easy to lose."""
     assert made(firepanda, ["A", None]).str.casefold().tolist() == ["a", None]
+
+
+@needs_pandas
+def test_title_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
+    """The same ten rows again, with the Turkish pair the interesting part.
+
+    A capital I with a dot at the start of a row is already the raised form and
+    stays put, and the dotless i beside it raises to a plain capital, which is
+    the pair that makes a case change not a round trip.
+    """
+    assert like(made(firepanda).str.title().tolist(), theirs().str.title().tolist())
+
+
+@needs_pandas
+def test_a_word_starts_after_anything_that_is_in_no_case(firepanda: ModuleType) -> None:
+    """Not at whitespace, which is the thing about this method that surprises people.
+
+    A word ends at the first character that is in no case at all, so a digit and
+    an apostrophe and an underscore each start a new one and the letter after
+    them is raised. `don't` comes out as `Don'T` and that is pandas' answer as
+    much as it is this library's.
+    """
+    rows = ["don't", "abc1def", "_ab", "a b  c"]
+    out = ["Don'T", "Abc1Def", "_Ab", "A B  C"]
+    assert made(firepanda, rows).str.title().tolist() == out
+    assert theirs(rows).str.title().tolist() == out
+
+
+@needs_pandas
+def test_titling_raises_a_digraph_all_the_way_and_not_to_the_titlecase_form(
+    firepanda: ModuleType,
+) -> None:
+    """The guess the name invites, and it is wrong, and it is wrong in pandas too.
+
+    Arrow's titlecase mapping is its upper case mapping for every code point in
+    Unicode, so a Croatian digraph at the start of a word becomes the whole
+    capital rather than the titlecase form that exists for exactly this purpose.
+    The second one in the third row is inside a word and drops instead.
+    """
+    rows = ["ǆx", "ǅ", "ǄǄ"]
+    out = ["Ǆx", "Ǆ", "Ǆǆ"]
+    assert made(firepanda, rows).str.title().tolist() == out
+    assert theirs(rows).str.title().tolist() == out
+
+
+@needs_pandas
+def test_title_and_istitle_agree_on_every_code_point_there_is(
+    firepanda: ModuleType,
+) -> None:
+    """Both of them, one code point to a row, with nothing left over.
+
+    A single character is a whole word, so this sweep is the part of the rule
+    that is about the character rather than about what comes before it. The test
+    after this one is the other half.
+    """
+    rows = [chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
+    mine, them = made(firepanda, rows), theirs(rows)
+    assert mine.str.title().tolist() == them.str.title().tolist()
+    assert mine.str.istitle().tolist() == them.str.istitle().tolist()
+
+
+@needs_pandas
+def test_title_and_istitle_agree_on_words_built_to_break_them(
+    firepanda: ModuleType,
+) -> None:
+    """Where a word starts is the half a sweep of single characters cannot reach.
+
+    The alphabet here is chosen rather than random: both cases of a letter, a
+    titlecase digraph, a letter in no case at all, a digit, an apostrophe and a
+    space, which are the seven characters this rule has anything different to
+    say about. Every arrangement of four of them is 2401 rows.
+    """
+    from itertools import product
+
+    alphabet = ["a", "A", "ǅ", "ª", "1", "'", " "]
+    rows = ["".join(word) for word in product(alphabet, repeat=4)]
+    mine, them = made(firepanda, rows), theirs(rows)
+    assert mine.str.title().tolist() == them.str.title().tolist()
+    assert mine.str.istitle().tolist() == them.str.istitle().tolist()
+
+
+def test_a_row_with_no_cased_character_is_not_titled(firepanda: ModuleType) -> None:
+    """The same rule the other two case questions have, and the empty row falls under it."""
+    column = made(firepanda, ["1", "", " ", "Abc Def"])
+    assert column.str.istitle().tolist() == [False, False, False, True]
+
+
+@needs_pandas
+def test_isascii_reads_bytes_and_not_characters(firepanda: ModuleType) -> None:
+    """The one question in this file that needs no table, and Arrow has no kernel for it.
+
+    pyarrow has no `utf8_is_ascii`, so pandas answers this one somewhere else,
+    and the answer is the same either way because there is nothing to disagree
+    about. A row is ASCII when none of its bytes has the top bit set, which is a
+    pass over the bytes with no decoding at all.
+    """
+    rows = ["abc", "café", "~", "\t"]
+    out = [True, False, True, True]
+    assert made(firepanda, rows).str.isascii().tolist() == out
+    assert theirs(rows).str.isascii().tolist() == out
+
+
+@needs_pandas
+def test_isascii_is_the_one_question_an_empty_row_answers_yes_to(
+    firepanda: ModuleType,
+) -> None:
+    """Every other question here wants a character before it will say yes, and this one does not.
+
+    It is a question about what a row does not contain, so a row containing
+    nothing passes it. pandas answers the same, which is worth pinning because
+    the four questions next to it all answer the other way.
+    """
+    assert made(firepanda, [""]).str.isascii().tolist() == [True]
+    assert theirs([""]).str.isascii().tolist() == [True]
+    for name in ("isspace", "islower", "isupper", "istitle"):
+        assert getattr(made(firepanda, [""]).str, name)().tolist() == [False], name
+
+
+@needs_pandas
+def test_isascii_agrees_on_every_code_point_there_is(firepanda: ModuleType) -> None:
+    """Which is a sweep of one comparison, and cheap enough to run whole anyway."""
+    rows = [chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
+    assert made(firepanda, rows).str.isascii().tolist() == theirs(rows).str.isascii().tolist()
+
+
+def test_the_three_new_names_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
+    """Including `isascii`, which says yes to an empty row and still not to a missing one."""
+    assert made(firepanda, ["a b", None]).str.title().tolist() == ["A B", None]
+    assert made(firepanda, ["Ab", None]).str.istitle().tolist() == [True, None]
+    assert made(firepanda, ["ab", None]).str.isascii().tolist() == [True, None]

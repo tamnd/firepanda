@@ -477,6 +477,77 @@ def test_a_filter_against_a_constant_keeps_the_rows_it_should() raises:
     assert_equal(got[5], 15, "last")
 
 
+def test_a_comparison_against_a_constant_lowers_to_one_filter() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var root = plan.filter(scan, plan.exprs.binary(BinaryOp.GT, qty, ten))
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # One operator, where this was a compare and a filter. The mask the compare
+    # wrote was read by the filter above it and by nobody else, so the filter
+    # carries the comparison instead and the column is never written.
+    assert_equal(len(pipe.operators), 1, "operators")
+
+    var out = pipe^.run()
+    var got = read_back(out, "qty")
+    assert_equal(len(got), 6, "rows kept")
+    assert_equal(got[0], 20, "first")
+    assert_equal(got[5], 15, "last")
+
+
+def test_a_constant_on_the_left_lowers_to_the_mirrored_comparison() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var root = plan.filter(scan, plan.exprs.binary(BinaryOp.LT, ten, qty))
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+    assert_equal(len(pipe.operators), 1, "operators")
+
+    # `10 < qty` is `qty > 10`, so it is the same six rows as the test above and
+    # not the four the unmirrored reading would keep.
+    var out = pipe^.run()
+    var got = read_back(out, "qty")
+    assert_equal(len(got), 6, "rows kept")
+    assert_equal(got[0], 20, "first")
+    assert_equal(got[5], 15, "last")
+
+
+def test_a_comparison_over_an_expression_still_lowers_the_expression() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var product = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var hundred = plan.exprs.literal(Value(Int64(100)))
+    var root = plan.filter(
+        scan, plan.exprs.binary(BinaryOp.GE, product, hundred)
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # The multiply is still an operator, because it is an expression and not a
+    # comparison, and the filter reads the column it wrote and compares that
+    # column itself. Two operators where there were three, and the product is
+    # dropped by the filter as it writes rather than by a projection.
+    assert_equal(len(pipe.operators), 2, "operators")
+
+    var out = pipe^.run()
+    # The products are 50, 40, 21, 40, 60, 72, 75, 100, 120 and 90, so two
+    # reach a hundred.
+    var got = read_back(out, "qty")
+    assert_equal(len(got), 2, "rows kept")
+    assert_equal(got[0], 1, "the row whose product is exactly a hundred")
+    assert_equal(got[1], 30, "the row whose product is a hundred and twenty")
+
+
 def test_the_mask_a_filter_computed_does_not_reach_the_output() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
@@ -542,11 +613,12 @@ def test_a_conjunction_becomes_one_filter_per_part() raises:
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
 
-    # A compare and a filter for each half, and no projection afterwards,
-    # because each filter drops the mask it just spent as it writes. Computing
-    # an and mask would have been four operators too, but both comparisons
-    # would have run on all ten rows.
-    assert_equal(len(pipe.operators), 4, "operators")
+    # One filter for each half and nothing else. Each half is a comparison
+    # against a constant, so the filter does the comparison itself and no mask
+    # column is written, and there is no projection afterwards because there is
+    # nothing left over to drop. Computing an and mask would have been two
+    # operators as well, but both comparisons would have run on all ten rows.
+    assert_equal(len(pipe.operators), 2, "operators")
 
     var out = pipe^.run()
     var got = read_back(out, "qty")
@@ -575,7 +647,7 @@ def test_a_nested_conjunction_flattens_into_the_same_line() raises:
 
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
-    assert_equal(len(pipe.operators), 6, "three compares and three filters")
+    assert_equal(len(pipe.operators), 3, "one filter per part, comparing")
 
     var out = pipe^.run()
     # Of 20, 12, 25 and 15, the prices are 2, 5, 3 and 6, so two survive.
@@ -600,9 +672,9 @@ def test_a_conjunction_the_simplify_pass_flattened_lowers_the_same() raises:
     simplify(plan, root)
     var pipe = lower(plan, root, one_frame())
 
-    # The literal true dropped out in the pass, so what is left is one
-    # comparison and one filter, which puts the schema back itself.
-    assert_equal(len(pipe.operators), 2, "operators")
+    # The literal true dropped out in the pass, so what is left is one filter
+    # doing its own comparison, which puts the schema back itself.
+    assert_equal(len(pipe.operators), 1, "operators")
     var out = pipe^.run()
     assert_equal(len(out), 6, "rows kept")
 

@@ -53,12 +53,20 @@ from firepanda.kernel.chars import (
     text_character_length,
     text_character_slice,
     text_find,
+    text_is_alnum,
+    text_is_alpha,
+    text_is_ascii,
+    text_is_decimal,
+    text_is_digit,
     text_is_lower,
+    text_is_numeric,
     text_is_space,
+    text_is_title,
     text_is_upper,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
+    text_title,
     text_swapcase,
 )
 from firepanda.kernel.concat import concat_two_any
@@ -1311,6 +1319,24 @@ struct Series(Copyable, Movable, Sized, Writable):
             AnyArray(text_swapcase(self.values.strings())),
         )
 
+    def chars_title(self) raises -> Self:
+        """Returns every row with each word's first character raised.
+
+        A word starts at a cased character that does not follow another one, so
+        the digit in `a1b` starts a word and the apostrophe in `o'brien` does
+        too, and both of those are what pandas answers.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_title(self.values.strings())),
+        )
+
     def chars_casefold(self) raises -> Self:
         """Returns every row folded, which is the form two equal rows agree on.
 
@@ -1374,6 +1400,128 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_upper(self.values.strings())),
+        )
+
+    def chars_is_title(self) raises -> Self:
+        """Returns whether each row reads as a title, word by word.
+
+        Every word starting with a capital and continuing in lower case, with
+        at least one cased character in the row somewhere. A word starts after
+        anything that is not cased, so a digit and an apostrophe both end one.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on a row with no cased character in it.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_title(self.values.strings())),
+        )
+
+    def chars_is_ascii(self) raises -> Self:
+        """Returns whether every byte of each row is below 128.
+
+        The one question of this group that answers True on an empty row, since
+        there is no byte in it that is not ASCII.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_ascii(self.values.strings())),
+        )
+
+    def chars_is_alpha(self) raises -> Self:
+        """Returns whether each row is letters and nothing else.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be a letter.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_alpha(self.values.strings())),
+        )
+
+    def chars_is_numeric(self) raises -> Self:
+        """Returns whether each row is numbers and nothing else.
+
+        The widest of the three number questions. A Roman numeral is numeric
+        and is not a digit, because it is a number and a letter at once.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be a number.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_numeric(self.values.strings())),
+        )
+
+    def chars_is_digit(self) raises -> Self:
+        """Returns whether each row is digits and nothing else.
+
+        Narrower than the numeric question by the Roman numerals and the Runic
+        counting marks, which are numbers and letters at once. A half sign is a
+        digit here, which is Arrow's answer and pandas', and not Python's.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be a digit.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_digit(self.values.strings())),
+        )
+
+    def chars_is_decimal(self) raises -> Self:
+        """Returns whether each row is decimal digits and nothing else.
+
+        The narrowest of the three number questions and the only one whose
+        members can all be a place in a base ten number, so a superscript two
+        is a digit and is not a decimal one.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be a digit.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_decimal(self.values.strings())),
+        )
+
+    def chars_is_alnum(self) raises -> Self:
+        """Returns whether each row is letters and numbers and nothing else.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null and
+            False on an empty row, which has no character to be either.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_is_alnum(self.values.strings())),
         )
 
     def chars_starts_with(self, prefix: StringSlice) raises -> Self:

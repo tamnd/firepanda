@@ -487,6 +487,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def title(self) -> Series:
+        """Every row with each word's first character raised and the rest dropped."""
+        try:
+            return self._text("title")
+        except Exception as error:
+            raise translate(error) from None
+
     def swapcase(self) -> Series:
         """Every row with its upper case and lower case exchanged."""
         try:
@@ -519,6 +526,55 @@ class StringAccessor(StringMixin):
         """Whether every row is upper case."""
         try:
             return self._flag("isupper", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def istitle(self) -> Series:
+        """Whether every word in every row starts with a raised character."""
+        try:
+            return self._flag("istitle", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isascii(self) -> Series:
+        """Whether every row is made of ASCII characters only."""
+        try:
+            return self._flag("isascii", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isalpha(self) -> Series:
+        """Whether every row is letters and nothing else."""
+        try:
+            return self._flag("isalpha", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isnumeric(self) -> Series:
+        """Whether every row is numbers and nothing else."""
+        try:
+            return self._flag("isnumeric", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isdigit(self) -> Series:
+        """Whether every row is digits and nothing else."""
+        try:
+            return self._flag("isdigit", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isdecimal(self) -> Series:
+        """Whether every row is decimal digits and nothing else."""
+        try:
+            return self._flag("isdecimal", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isalnum(self) -> Series:
+        """Whether every row is letters and numbers and nothing else."""
+        try:
+            return self._flag("isalnum", "")
         except Exception as error:
             raise translate(error) from None
 

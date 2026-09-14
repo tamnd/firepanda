@@ -54,8 +54,34 @@ Nothing moves, and that is the point worth writing down. The three questions wer
 
 The one divergence these three carry is unchanged and is `engine/string-predicate-null`, which is that a missing row answers a missing value here and False in pandas, because the answer in pandas is a numpy array of bools with nowhere to put a third state.
 
-## 9. What is left
+What does move the board is the three names section 9 is about, since `strings/title`, `strings/istitle` and `strings/isascii` were declared arms with nothing behind them and are now scored. The two questions of the three carry the same missing row divergence the others do, for the same reason.
 
-The classes here are the four the three existing questions need. The other class questions in the accessor need four more of the same kind, which are the alphabetic characters, the numeric ones, the digits and the decimal digits, and those are 684, 146, 136 and 72 runs respectively. `isalnum` needs no table at all, since a character is alphanumeric exactly when it is alphabetic or numeric, which was measured rather than assumed. `isascii` has no Arrow kernel, which is worth knowing before anybody writes it.
+The five names section 10 is about move it again, and they arrive with the same corpus problem section 8 opened with. The corpus holds no row that tells a decimal digit from a digit from a numeric one, so a driver arm that answered any of the three with the same table would pass every run. Rows that tell them apart went in with the arms.
 
-`istitle` and `title` need one thing these four classes do not give, which is whether a character is cased at all, and that is the union of the lower class and the titlecase class and needs no fifth table either. What they do need is a rule about what comes before a character rather than about the character, which is the first question in this part of the library that is not answerable one code point at a time.
+## 9. A word is a thing no table can tell you about
+
+`title` and `istitle` came next and they are the first two names in this part of the library whose answer is not decidable one code point at a time. Everything before them reads a character, looks it up and writes something down. These two need to know whether the character before the one in hand was cased, because that is what decides whether this character starts a word.
+
+The rule is not the one the name suggests. A word does not end at whitespace, it ends at the first character that is in no case at all, which is the union of the three case classes read the other way round. So a digit ends a word and an apostrophe ends a word and `don't` titles to `Don'T` and `abc1def` titles to `Abc1Def`, and `A1b` is not titled while `A1B` is. That is pandas' answer and it surprises people, and it is worth writing down here rather than leaving it to be discovered in a bug report.
+
+Neither name needed a table. The cased question is the three classes already here ORed together, and the mapping question turned out to need nothing at all: `pc.utf8_title(c)` equals `pc.utf8_upper(c)` for every code point in Unicode, and is never longer than one character, so a word's first character is raised with the mapping `upper` already uses and the rest are dropped with the mapping `lower` already uses. The consequence a reader should see coming and will not is that `ǆ` at the start of a word becomes `Ǆ`, the whole capital, and not `ǅ`, the titlecase form that exists for exactly this purpose. Arrow does not use it and so neither does this.
+
+`isascii` landed alongside them and is the odd one out twice. pyarrow has no `utf8_is_ascii` kernel, so pandas answers it somewhere other than Arrow, and there is nothing for the two to disagree about because the question is whether any byte has its top bit set. It needs no table, no decoding and no pass past the first byte that fails. It is also the only question in this group that a row of nothing answers yes to, since it asks what a row does not contain.
+
+## 10. The four classes that are not about case
+
+The other five class questions in the accessor are `isalpha`, `isnumeric`, `isdigit`, `isdecimal` and `isalnum`, and they landed next on four more classes of exactly the kind section 4 describes. The alphabetic characters are 145672 code points in 684 runs, the numeric are 1924 in 146, the digits are 1685 in 136 and the decimal digits are 770 in 72. All eight classes together are 4764 numbers and sixteen words, which is under twenty kilobytes of the binary, and the largest class by a factor of sixty is not the largest by runs, because alphabets arrive in blocks and fractions do not.
+
+`isalnum` needs no table. A character is alphanumeric exactly when it is alphabetic or numeric, and the two classes have nothing in common, and both of those are asserted against Arrow over every code point by the generator before it writes anything rather than taken from the standard and hoped for. The same generator asserts that decimal is inside digit is inside numeric. The three are stored separately anyway, because the whole of the three is under three kilobytes and a search that answers directly beats a search that answers a question you then have to ask again.
+
+The rule these five share is the simple one the case questions are not. The row has a character in it and every character it has is in the class, so the loop stops at the first character that fails, an empty row is False for all five, and nothing in a row can rule the row out by being in a second class the way an upper case letter rules out `islower`. That rule was measured against Arrow too, over every code point and sixty thousand words, before any of it was written in Mojo.
+
+## 11. Arrow's digit is not Python's
+
+This is the one answer in the group a caller will read as a bug. Arrow calls anything written as a single number sign a digit, so `½` and `¼` and `²` are all digits to it. Python calls `½` numeric and not a digit. That is 877 code points of disagreement on `isdigit` alone, and since pandas 3 answers the name out of Arrow, pandas says `True` where `str.isdigit` says `False` on the same character. This library follows pandas, and `python/tests/test_str_class.py` writes both answers out side by side so that the choice is visible and so that the day pandas changes its mind the test says which way.
+
+The same measurement found 8946 letters Arrow knows about and Python's copy of the Unicode data does not, which is the version gap rather than a rule difference, and 91 code points Python calls numeric and Arrow does not. The three number classes differ from each other in two clean places: numeric is wider than digit by the 239 characters that are a number and a letter at once, which is the Roman numerals and the Runic counting marks, and digit is wider than decimal by the 915 written as one sign rather than as a place, which is the fractions and the superscripts and the circled forms.
+
+## 12. What is left
+
+Nothing in this shape. Every question in the `str` accessor that is about what a character is now has a class behind it, and the remaining 25 `str` names are about patterns, splitting and joining, and most of them want a regex engine rather than a table.
