@@ -17,19 +17,20 @@ against the default dtype, which is what a caller gets without asking, and the
 test at the end of the file writes both pandas answers out side by side so that
 the choice is visible rather than implied.
 
-The last test asserts three differences rather than working around them. The
-standard library underneath this carries an older copy of the Unicode data than
-Arrow does, and document 64 measures exactly how much older. The three names
-that ask a question still answer out of that copy, so they differ on characters
-neither table here corrects.
+The three that ask a question used to have a test asserting three differences
+rather than working around them, because they answered out of the standard
+library's older copy of the Unicode data and differed from Arrow on 1384 code
+points. They do not any more. `charclass.mojo` carries Arrow's classes and the
+test that named those three rows is now a sweep of every code point there is
+with nothing left over.
 
-`capitalize` and `swapcase` need nothing beyond that same correction table and
-are exact, which was measured rather than hoped for: both were run against
-pandas over every code point in Unicode on its own and over sixty thousand
-random words, with no row differing. `title` is the name of this group that is
-not here, because deciding where a word starts means knowing whether a character
-is cased at all, and that is the thousand and more the questions are still wrong
-about.
+`capitalize` and `swapcase` need nothing beyond the correction table and are
+exact, which was measured rather than hoped for: both were run against pandas
+over every code point in Unicode on its own and over sixty thousand random
+words, with no row differing. `title` is the name of this group that is not
+here, because deciding where a word starts is a question about what comes before
+a character rather than about the character, which is the one thing none of the
+tables answers yet.
 
 `casefold` is the exception to everything the paragraph above says about which
 pandas to follow, and it is pandas' exception rather than this library's. pyarrow
@@ -214,25 +215,90 @@ def test_the_accessor_refuses_a_column_that_is_not_text(firepanda: ModuleType) -
 
 
 @needs_pandas
-def test_three_measured_differences_in_the_case_questions(firepanda: ModuleType) -> None:
-    """The gaps the three questions still have, written down on purpose.
+def test_the_three_questions_agree_on_every_code_point_there_is(
+    firepanda: ModuleType,
+) -> None:
+    """The measurement that used to be a list of differences, run as a test.
 
-    The two that rewrite a row are corrected against Arrow's table for all
-    hundred and forty nine code points where the standard library underneath
-    disagrees with it, so they match pandas everywhere. The three that ask a
-    question are not corrected, because the same measurement counts more than a
-    thousand code points that Arrow calls cased and the library here does not,
-    which is a table rather than a list. Document 64 has the counts. These three
-    rows are the ones a caller is most likely to meet, and they are here so that
-    the day the library's data is replaced a test fails and somebody comes and
-    reads the document.
+    These three were answered out of the Mojo standard library's character data
+    until the classes in `charclass.mojo` replaced it, and that data disagreed
+    with Arrow about 1384 code points across the three. The rows that
+    disagreement was most likely to be met on had their own test here, written
+    to fail the day the data was replaced. It was, so the test is this one
+    instead: every code point in Unicode, one to a row, through both sides.
+
+    A million rows through either library is a fraction of a second, so there is
+    no reason to assert a sample of something that can be asserted whole.
     """
-    assert made(firepanda, ["\u00a0"]).str.isspace().tolist() == [False]
+    rows = [chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
+    mine, them = made(firepanda, rows), theirs(rows)
+    for name in ("isspace", "islower", "isupper"):
+        assert getattr(mine.str, name)().tolist() == getattr(them.str, name)().tolist(), name
+
+
+@needs_pandas
+def test_the_three_rows_that_used_to_be_the_measured_differences(
+    firepanda: ModuleType,
+) -> None:
+    """The non breaking space, the kra and the double struck capital C.
+
+    One row for each question, kept from the test that came before because they
+    are the rows a caller is most likely to meet and because a sweep that fails
+    names a code point rather than a reason.
+    """
+    assert made(firepanda, ["\u00a0"]).str.isspace().tolist() == [True]
     assert theirs(["\u00a0"]).str.isspace().tolist() == [True]
-    assert made(firepanda, ["ĸ"]).str.islower().tolist() == [False]
-    assert theirs(["ĸ"]).str.islower().tolist() == [True]
-    assert made(firepanda, ["\u2102"]).str.isupper().tolist() == [False]
+    assert made(firepanda, ["\u0138"]).str.islower().tolist() == [True]
+    assert theirs(["\u0138"]).str.islower().tolist() == [True]
+    assert made(firepanda, ["\u2102"]).str.isupper().tolist() == [True]
     assert theirs(["\u2102"]).str.isupper().tolist() == [True]
+
+
+@needs_pandas
+def test_a_titlecase_character_is_neither_lower_nor_upper(
+    firepanda: ModuleType,
+) -> None:
+    """The third case, which is why the two questions are not opposites twice over.
+
+    A row of digits is neither because it has no cased character in it at all. A
+    row holding one of these is neither for a different reason, which is that
+    the character is cased and is in a case that is neither of the two being
+    asked about, and it carries that answer to any row it sits in.
+    """
+    rows = ["\u01c5", "\u01c5a", "a\u01c5"]
+    assert made(firepanda, rows).str.islower().tolist() == [False, False, False]
+    assert made(firepanda, rows).str.isupper().tolist() == [False, False, False]
+    assert theirs(rows).str.islower().tolist() == [False, False, False]
+    assert theirs(rows).str.isupper().tolist() == [False, False, False]
+
+
+@needs_pandas
+def test_a_letter_that_looks_lower_case_and_is_in_no_case_at_all(
+    firepanda: ModuleType,
+) -> None:
+    """The feminine ordinal and a modifier letter, which are letters and are not cased.
+
+    They behave in a row exactly as a digit does, which is to answer no on their
+    own and to leave the row around them free to answer yes.
+    """
+    rows = ["\u00aa", "\u1d43", "\u00aaa"]
+    assert made(firepanda, rows).str.islower().tolist() == [False, False, True]
+    assert theirs(rows).str.islower().tolist() == [False, False, True]
+
+
+@needs_pandas
+def test_the_spaces_nobody_lists_are_spaces_too(firepanda: ModuleType) -> None:
+    """Four separators and the non breaking space, none of them the six obvious ones.
+
+    Arrow counts 29 code points as spaces and so does Python, exactly the same
+    29, which is worth knowing because it means the disagreement this class
+    table was built to settle was never between those two. It was the Mojo
+    standard library that had the shorter list, and the four ASCII separators at
+    U+001C to U+001F were nowhere on it.
+    """
+    rows = ["\u001c", "\u001d", "\u001e", "\u001f", "\u00a0"]
+    assert made(firepanda, rows).str.isspace().tolist() == [True] * 5
+    assert theirs(rows).str.isspace().tolist() == [True] * 5
 
 
 @needs_pandas
