@@ -8,6 +8,21 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-14
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. Two threads run through it, text case and the shape of a filter, and neither changes an answer anybody was relying on.
+
+The case work started as a bug. `isspace`, `islower` and `isupper` were wrong about 1384 code points because they were asking the standard library, which carries an older and smaller Unicode table than Arrow does, and pandas answers those three out of Arrow. The fix carries the corrections, and once the corrections existed the rest of the case group could be built on them: `casefold`, `capitalize` and `swapcase` in the `str` accessor, `upper` and `lower` there and in SQL under all four of DuckDB's names, and then `title`, `istitle` and `isascii`, which needed a word rule rather than another table. `title` was the name the group had been waiting on and it is here, so the four writing methods and the case questions beside them all answer now. Every one of them was checked against a live pandas over all 1112064 code points and over sixty thousand random words.
+
+`STRLEN` was counting characters and DuckDB counts bytes, so `strlen('café')` was 4 and should have been 5. `length` and `len` count characters in both and are unchanged. ClickBench q27 and q28 average `strlen` over a text column, so they were asking for the wrong number and paying thirteen times over for it, since counting characters walks every payload and counting bytes reads a length field.
+
+On the filter side, a comparison against a constant is now one operator rather than two. The filter carries the comparison, does it over the column where it lies and writes the surviving rows straight out, so the mask column is never written and, on every conjunct after the first, the operand is never gathered out of a chunk an earlier conjunct already narrowed. Measured on paired benchmark rows, one condition keeping half the rows is 3 to 11 percent, keeping a tenth is 15 to 17 percent and two conditions in a row is 23 to 25 percent. Most ClickBench predicates are that shape.
+
+The rest is SQL surface. `DATE '2020-01-01'` and the four timestamp spellings parse now, which is how TPC-H writes its date bounds, and `EXPLAIN` prints a temporal constant as the day it names rather than as the count underneath it.
+
+
 ### Added: `title`, `istitle` and `isascii`, the three names that needed a rule rather than a table
 
 `str.title` raises the first character of every word and drops the rest, `str.istitle` asks whether a row is already written that way, and `str.isascii` asks whether a row is made of ASCII and nothing else. All three are exact against pandas on every code point in Unicode, and the first two are exact on every arrangement of four characters drawn from the seven the word rule treats differently.
@@ -6959,7 +6974,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
 [0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
 [0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1
