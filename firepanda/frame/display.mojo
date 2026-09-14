@@ -39,11 +39,13 @@ bitmap and `NaN` is a float value that a column can genuinely hold, so the two
 have to look different. A float column with a null in row 3 and a `NaN` in row 4
 prints `<NA>` and `NaN`, and they are not the same thing.
 
-**Floats print to six significant decimals and drop trailing zeros.** Mojo prints
-a `Float64` at the shortest representation that round trips, which for one third
-is seventeen characters and makes a table unreadable. Six decimals is the pandas
-default. Anything at or above 1e15, or below 1e-4 without being zero, falls back
-to Mojo's own formatting, which switches to an exponent, again as pandas does.
+**Floats print to six decimals and drop trailing zeros.** Mojo prints a `Float64`
+at the shortest representation that round trips, which for one third is
+seventeen characters and makes a table unreadable. Six decimals is the pandas
+default. The rest of what a float column looks like is not ours either: the
+format is picked for the column rather than for the value, so a column goes to
+scientific notation as a whole and the zeros come off it as a whole, and
+`float_column` is where that happens.
 
 **The shape line is always printed.** pandas prints it only when it truncated
 something, so the absence of it means one thing when the frame is small and
@@ -75,6 +77,18 @@ comptime ELLIPSIS = "..."
 
 comptime SHORT_ELLIPSIS = ".."
 """What stands in for them in a column too narrow to hold three dots."""
+
+comptime MINUS = Byte(ord("-"))
+"""The one byte that can begin a rendered number besides a digit."""
+
+comptime POINT = Byte(ord("."))
+"""The decimal point, which is what makes a rendering strippable."""
+
+comptime ZERO = Byte(ord("0"))
+"""The low end of a digit."""
+
+comptime NINE = Byte(ord("9"))
+"""The high end of one."""
 
 
 struct DisplayOptions(Copyable, Movable):
@@ -287,13 +301,328 @@ struct IndexCells(Copyable, Movable):
         self.cells = cells^
 
 
-def format_float(value: Float64, precision: Int) -> String:
-    """Formats a float the way a table wants it rather than the way it is stored.
+def not_a_number(value: Float64) -> Bool:
+    """Whether a float is a NaN.
 
-    The special values are read out of the bit pattern rather than compared
-    against, because a NaN compares equal to nothing including itself and an
-    infinity has no literal to compare against that does not itself need
-    constructing.
+    Read out of the bit pattern rather than compared against, because a NaN
+    compares equal to nothing including itself.
+
+    Args:
+        value: The number.
+
+    Returns:
+        True for a NaN of either sign.
+    """
+    return (
+        value.to_bits[DType.uint64]() & 0x7FFF_FFFF_FFFF_FFFF
+    ) > 0x7FF0_0000_0000_0000
+
+
+def infinite(value: Float64) -> Bool:
+    """Whether a float is an infinity.
+
+    Read out of the bit pattern for the same reason, since an infinity has no
+    literal to compare against that does not itself need constructing.
+
+    Args:
+        value: The number.
+
+    Returns:
+        True for an infinity of either sign.
+    """
+    return (
+        value.to_bits[DType.uint64]() & 0x7FFF_FFFF_FFFF_FFFF
+    ) == 0x7FF0_0000_0000_0000
+
+
+def negative(value: Float64) -> Bool:
+    """Whether a float carries a minus.
+
+    The sign bit rather than a comparison against zero, so a negative zero is
+    negative here and prints as `-0.0`, which is what pandas prints.
+
+    Args:
+        value: The number.
+
+    Returns:
+        True when the sign bit is set.
+    """
+    return (value.to_bits[DType.uint64]() >> 63) != 0
+
+
+def fixed_text(value: Float64, precision: Int) -> String:
+    """One value in fixed notation, at exactly the precision asked for.
+
+    Nothing is taken off the end in here, because whether a place comes off is
+    a decision about the column rather than about the value. `strip_places` is
+    where that happens.
+
+    The rounding is to nearest and ties go to the even digit, which is what C's
+    own formatting does and therefore what pandas prints. It shows up on the
+    values whose halves are exact, so `0.0078125` at six places is `0.007812`
+    and not `0.007813`, and `2.5` at none is `2` and not `3`.
+
+    Args:
+        value: The number.
+        precision: Decimal places to write. None writes no point either, which
+            is what `%.0f` does.
+
+    Returns:
+        The formatted number.
+    """
+    if not_a_number(value):
+        return String("NaN")
+    if infinite(value):
+        return String("-inf") if negative(value) else String("inf")
+    var sign = String("-") if negative(value) else String("")
+    var magnitude = -value if negative(value) else value
+    var whole = Int(magnitude)
+    if precision < 1:
+        var carry = magnitude - Float64(whole)
+        if carry > 0.5 or (carry == 0.5 and whole % 2 == 1):
+            whole += 1
+        return String(sign, whole)
+
+    var scale = 1
+    for _ in range(precision):
+        scale *= 10
+    var rest = (magnitude - Float64(whole)) * Float64(scale)
+    var scaled = Int(rest)
+    var carry = rest - Float64(scaled)
+    if carry > 0.5 or (carry == 0.5 and scaled % 2 == 1):
+        scaled += 1
+    if scaled >= scale:
+        whole += 1
+        scaled -= scale
+
+    var digits = String(scaled)
+    while digits.byte_length() < precision:
+        digits = String("0", digits)
+    return String(sign, whole, ".", digits)
+
+
+def scientific_text(value: Float64, precision: Int) -> String:
+    """One value in scientific notation, at exactly the precision asked for.
+
+    The mantissa is brought into the range it prints in by dividing or
+    multiplying a power of ten at a time rather than by one factor worked out
+    in advance, because a single factor of 1e310 is not a number and because
+    each step on its own is exact. The powers halve, so nine of them cover
+    every exponent a float has.
+
+    Args:
+        value: The number.
+        precision: Decimal places in the mantissa.
+
+    Returns:
+        The formatted number, with the exponent signed and at least two digits
+        wide, which is the width C prints and pandas inherits.
+    """
+    if not_a_number(value):
+        return String("NaN")
+    if infinite(value):
+        return String("-inf") if negative(value) else String("inf")
+    var sign = String("-") if negative(value) else String("")
+    var magnitude = -value if negative(value) else value
+    var exponent = 0
+    if magnitude > 0.0:
+        var scales = [
+            1.0e256,
+            1.0e128,
+            1.0e64,
+            1.0e32,
+            1.0e16,
+            1.0e8,
+            1.0e4,
+            1.0e2,
+            1.0e1,
+        ]
+        var steps = [256, 128, 64, 32, 16, 8, 4, 2, 1]
+        for k in range(len(scales)):
+            if magnitude >= scales[k]:
+                magnitude /= scales[k]
+                exponent += steps[k]
+        for k in range(len(scales)):
+            if magnitude * scales[k] < 10.0:
+                magnitude *= scales[k]
+                exponent -= steps[k]
+        # A subnormal loses digits on the way up and the steps above can land
+        # a hair outside the range on either side, so the last place is walked.
+        while magnitude >= 10.0:
+            magnitude /= 10.0
+            exponent += 1
+        while magnitude < 1.0:
+            magnitude *= 10.0
+            exponent -= 1
+
+    var digits = fixed_text(magnitude, precision)
+    # The rounding can carry past ten, where 9.9999999 becomes 10.000000 and
+    # the exponent takes the extra place instead.
+    if digits.startswith("10"):
+        exponent += 1
+        digits = fixed_text(magnitude / 10.0, precision)
+
+    var mark = String("e+") if exponent >= 0 else String("e-")
+    var size = -exponent if exponent < 0 else exponent
+    var power = String(size)
+    if power.byte_length() < 2:
+        power = String("0", power)
+    return String(sign, digits, mark, power)
+
+
+def plain_number(text: String) -> Bool:
+    """Whether a rendering is a number with a decimal point in it.
+
+    Which is what decides whether a place comes off the end of it when the
+    column is stripped. A null, a NaN and an infinity are not numbers by this
+    test and neither is anything in scientific notation, which is why a
+    scientific column keeps all six of its places where a fixed one does not.
+
+    Args:
+        text: A rendered value.
+
+    Returns:
+        True for an optional minus, digits, a point, and digits or nothing.
+    """
+    var bytes = text.as_bytes()
+    var at = 0
+    if at < len(bytes) and bytes[at] == MINUS:
+        at += 1
+    var seen = 0
+    while at < len(bytes) and bytes[at] >= ZERO and bytes[at] <= NINE:
+        at += 1
+        seen += 1
+    if seen == 0 or at >= len(bytes) or bytes[at] != POINT:
+        return False
+    at += 1
+    while at < len(bytes) and bytes[at] >= ZERO and bytes[at] <= NINE:
+        at += 1
+    return at == len(bytes)
+
+
+def strip_places(mut cells: List[String]):
+    """Takes the trailing zeros off a whole column at once.
+
+    A place comes off every number in the column or off none of them, which is
+    why a column of `1234567.125` and `2.0` prints the second as `2.000`. Doing
+    it per value would line the two up on nothing and is not what pandas does.
+    One place always survives, so an integral value prints as `2.0` rather than
+    `2.` or `2`, which is what keeps a float column visibly a float column.
+
+    Args:
+        cells: The column, rewritten in place.
+    """
+    while True:
+        var numbers = 0
+        var kept = False
+        for i in range(len(cells)):
+            if plain_number(cells[i]):
+                numbers += 1
+                if not cells[i].endswith("0"):
+                    kept = True
+        if numbers == 0 or kept:
+            break
+        for i in range(len(cells)):
+            if plain_number(cells[i]):
+                var shorter = String(
+                    StringSlice(
+                        unsafe_from_utf8=cells[i].as_bytes()[
+                            : cells[i].byte_length() - 1
+                        ]
+                    )
+                )
+                cells[i] = shorter^
+    for i in range(len(cells)):
+        if cells[i].endswith(".") and plain_number(cells[i]):
+            cells[i] += "0"
+
+
+def float_column(
+    values: List[Float64],
+    present: List[Bool],
+    precision: Int,
+    null_text: String,
+) -> List[String]:
+    """Renders a float column, which is the only way pandas renders one.
+
+    The format is picked for the column rather than for the value. Everything
+    is written fixed first, the zeros come off the column as a whole, and then
+    the column is measured: if the longest of them is more than six characters
+    past the precision and anything in it is larger than 1e6, or if anything in
+    it is smaller than the last place being printed, the whole column is
+    written again in scientific notation and nothing comes off it.
+
+    The length that gets measured counts the place kept in front of the value,
+    so a negative and a positive of the same width count the same.
+
+    A magnitude at or above 1e15 takes the scientific branch without being
+    written fixed first. That is not a rule of its own: a number that large has
+    sixteen digits in front of the point, which is past the length that sends a
+    column scientific anyway, and it is also past where an `Int` can hold the
+    digits to write it with.
+
+    Args:
+        values: The numbers, one per printed row.
+        present: Whether each of them is a value rather than a null.
+        precision: Decimal places.
+        null_text: What a null prints as.
+
+    Returns:
+        One rendering per value.
+    """
+    var scale = 1.0
+    for _ in range(precision):
+        scale *= 10.0
+    var smallest = 1.0 / scale
+
+    var scientific = False
+    var large = False
+    for i in range(len(values)):
+        if not present[i] or not_a_number(values[i]) or infinite(values[i]):
+            continue
+        var magnitude = -values[i] if negative(values[i]) else values[i]
+        if magnitude > 1.0e6:
+            large = True
+        if magnitude >= 1.0e15 or (magnitude > 0.0 and magnitude < smallest):
+            scientific = True
+
+    var cells = List[String](capacity=len(values))
+    if not scientific:
+        for i in range(len(values)):
+            cells.append(
+                fixed_text(values[i], precision) if present[
+                    i
+                ] else null_text.copy()
+            )
+        strip_places(cells)
+        var longest = 0
+        for i in range(len(cells)):
+            var width = cells[i].byte_length()
+            if not cells[i].startswith("-"):
+                width += 1
+            if width > longest:
+                longest = width
+        if longest > precision + 6 and large:
+            scientific = True
+        if not scientific:
+            return cells^
+
+    cells = List[String](capacity=len(values))
+    for i in range(len(values)):
+        cells.append(
+            scientific_text(values[i], precision) if present[
+                i
+            ] else null_text.copy()
+        )
+    return cells^
+
+
+def format_float(value: Float64, precision: Int) -> String:
+    """Formats one float the way a column holding only it would be formatted.
+
+    Which is the honest way to write this: the rule belongs to the column, and
+    a lone value is a column of one. It is what the places that really do have
+    one value call, and everything that has a column calls `float_column`.
 
     Args:
         value: The number.
@@ -303,51 +632,7 @@ def format_float(value: Float64, precision: Int) -> String:
     Returns:
         The formatted number.
     """
-    var bits = value.to_bits[DType.uint64]()
-    var negative = (bits >> 63) != 0
-    var rest = bits & 0x7FFF_FFFF_FFFF_FFFF
-    if rest > 0x7FF0_0000_0000_0000:
-        return String("NaN")
-    if rest == 0x7FF0_0000_0000_0000:
-        return String("-inf") if negative else String("inf")
-
-    var magnitude = -value if negative else value
-    # Outside this range a fixed point rendering is either wrong or useless: the
-    # integer part stops fitting in an Int on one side, and on the other the
-    # first significant digit is past the last place being printed. Mojo's own
-    # formatting switches to an exponent, which is what pandas does here too.
-    if magnitude >= 1.0e15 or (magnitude > 0.0 and magnitude < 1.0e-4):
-        return String(value)
-    if precision < 1:
-        return String("-", Int(magnitude + 0.5)) if negative else String(
-            Int(magnitude + 0.5)
-        )
-
-    var scale = 1
-    for _ in range(precision):
-        scale *= 10
-
-    var whole = Int(magnitude)
-    var scaled = Int((magnitude - Float64(whole)) * Float64(scale) + 0.5)
-    if scaled >= scale:
-        whole += 1
-        scaled -= scale
-
-    # Strip trailing zeros by dividing them out, which also tells us how many
-    # digits are left to pad to. One place always survives, so an integral value
-    # prints as `2.0` rather than `2.` or `2`, which is what keeps a float column
-    # visibly a float column.
-    var places = precision
-    while places > 1 and scaled % 10 == 0:
-        scaled //= 10
-        places -= 1
-
-    var digits = String(scaled)
-    while digits.byte_length() < places:
-        digits = String("0", digits)
-
-    var sign = String("-") if negative else String("")
-    return String(sign, whole, ".", digits)
+    return float_column([value], [True], precision, String(""))[0]
 
 
 def render_value(col: AnyArray, i: Int, options: DisplayOptions) -> String:
@@ -394,6 +679,80 @@ def render_value(col: AnyArray, i: Int, options: DisplayOptions) -> String:
                 )
             return String(value)
     return String("?")
+
+
+def float_at(col: AnyArray, i: Int) -> Float64:
+    """The value in a float column, widened to the widest float there is.
+
+    Args:
+        col: The column. Nothing else in here asks whether it holds floats, so
+            a caller that passes something else gets a zero.
+        i: The row. Must be less than the column's length.
+
+    Returns:
+        The value.
+    """
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            comptime if candidate.is_floating_point():
+                return (
+                    col.unsafe_ptr[candidate]()
+                    .unsafe_offset(i)
+                    .unsafe_load()
+                    .cast[DType.float64]()
+                )
+    return 0.0
+
+
+def render_values(
+    col: AnyArray, rows: List[Int], options: DisplayOptions
+) -> List[String]:
+    """Renders the cells of one column, which is the unit a float is decided in.
+
+    Every other type is rendered a value at a time and this is a loop over
+    `render_value`. A float column is not: which format it takes is a fact
+    about the column, and it is a fact about the part of the column that will
+    be printed, so a value in the elided middle cannot push the values around
+    it into scientific notation. That is pandas' order too, which elides first
+    and formats second.
+
+    Args:
+        col: The column.
+        rows: The rows about to be printed, with -1 standing for the elision.
+        options: How to spell a null and how to round a float.
+
+    Returns:
+        One cell per row, with an empty string where the elision goes.
+    """
+    var cells = List[String](capacity=len(rows))
+    if not col.dtype().is_floating_point():
+        for i in range(len(rows)):
+            if rows[i] < 0:
+                cells.append(String(""))
+            else:
+                cells.append(render_value(col, rows[i], options))
+        return cells^
+
+    var values = List[Float64]()
+    var present = List[Bool]()
+    for i in range(len(rows)):
+        if rows[i] < 0:
+            continue
+        var valid = col.is_valid(rows[i])
+        values.append(float_at(col, rows[i]) if valid else 0.0)
+        present.append(valid)
+
+    var made = float_column(
+        values, present, options.float_precision, options.null_text
+    )
+    var at = 0
+    for i in range(len(rows)):
+        if rows[i] < 0:
+            cells.append(String(""))
+            continue
+        cells.append(made[at].copy())
+        at += 1
+    return cells^
 
 
 def visible(n: Int, limit: Int) -> List[Int]:
@@ -503,11 +862,12 @@ def render_table[
         )
         if named:
             cells.append(String(""))
+        var made = render_values(columns[at][], shown_rows, options)
         for i in range(len(shown_rows)):
             if shown_rows[i] < 0:
                 cells.append(String(""))
                 continue
-            var value = render_value(columns[at][], shown_rows[i], options)
+            var value = made[i].copy()
             if not indented or (signed and value.startswith("-")):
                 cells.append(value^)
             else:
@@ -580,6 +940,7 @@ def render_column(
     var dots_at = -1
     var labels = List[String]()
     var cells = List[String]()
+    var made = render_values(col, shown, options)
     for i in range(len(shown)):
         if shown[i] < 0:
             # The label on an elided row is blank on a column, where a frame
@@ -589,7 +950,7 @@ def render_column(
             cells.append(String(""))
             continue
         labels.append(index.cells[i] if labelled else String(shown[i]))
-        var value = render_value(col, shown[i], options)
+        var value = made[i].copy()
         if not indented or (signed and value.startswith("-")):
             cells.append(value^)
         else:

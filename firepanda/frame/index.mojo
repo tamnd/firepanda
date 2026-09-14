@@ -140,6 +140,7 @@ from firepanda.frame.display import (
     DisplayOptions,
     IndexCells,
     render_value,
+    render_values,
     visible,
 )
 from firepanda.hash.function import key_bits
@@ -728,14 +729,19 @@ struct Index(Copyable, Movable, Sized, Writable):
             The name and one cell per printed row.
         """
         var shown = visible(self.length, options.max_rows)
+        if self.labels:
+            # The labels are a column and are formatted like one, so a float
+            # level goes to scientific notation as a whole or not at all, the
+            # same way a float column of values does.
+            var cells = render_values(self.labels.value(), shown, options)
+            for i in range(len(shown)):
+                if shown[i] < 0:
+                    cells[i] = String(ELLIPSIS)
+            return IndexCells(Optional[String](copy=self.name), cells^)
         var cells = List[String](capacity=len(shown))
         for i in range(len(shown)):
             if shown[i] < 0:
                 cells.append(String(ELLIPSIS))
-            elif self.labels:
-                cells.append(
-                    render_value(self.labels.value(), shown[i], options)
-                )
             else:
                 cells.append(String(self.start + shown[i]))
         return IndexCells(Optional[String](copy=self.name), cells^)
