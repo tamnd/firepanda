@@ -590,6 +590,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def normalize(self, form: Any) -> Series:
+        """Every row in one of the four Unicode normalization forms."""
+        try:
+            return self._normalized(form)
+        except Exception as error:
+            raise translate(error) from None
+
     def isspace(self) -> Series:
         """Whether every row is whitespace and nothing else."""
         try:

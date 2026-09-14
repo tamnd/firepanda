@@ -70,6 +70,18 @@ That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equa
 
 Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
 
+### Added: `str.normalize`, the one name on the accessor that Arrow does not answer
+
+`s.str.normalize("NFC")` rewrites every row in one of the four Unicode normalization forms, so that two rows a reader would call the same string come out as the same bytes. All four forms are here, and they are the two independent choices they are made of rather than four names: NFKD is the compatibility relation without composing, NFC is the canonical one with it.
+
+The interesting part is where the answers come from. Most of this accessor is Arrow, because pandas holds text in Arrow and answers out of an Arrow kernel, and where Arrow and Python's standard library disagree Arrow is what gets copied here. This name is the other way round. pandas defines it once as `unicodedata.normalize` applied a row at a time, nothing overrides it, and Arrow has no normalization kernel for anything to override it with, so on every backend pandas has this is CPython's answer. The rule is not that Arrow is the authority for this accessor, it is that the authority for a name is whichever library pandas actually calls, and that has to be read rather than assumed.
+
+The tables are generated from CPython by `tools/gen_normalize.py`, which checks the whole algorithm against `unicodedata` over every code point and a hundred thousand sequences built to be awkward before it writes anything. Both decomposition tables are fully expanded at generation time, so a lookup gives the final sequence and the kernel has no recursion in it and no depth to bound. The composition table is derived by handing every candidate pair to CPython and keeping the ones it puts back together, which applies the composition exclusions and the singleton and non starter rules without this code knowing what any of the three are: 941 pairs out of 1026 candidates survive, and the 85 that do not are those rules.
+
+Two things cost no table. Hangul is arithmetic in both directions, so 11172 syllables that would be the largest thing in the generated file are a formula instead. An element that is entirely ASCII is already in all four forms and is copied straight through, which is checked in the generator rather than assumed.
+
+Both of pandas' refusals are reproduced in kind. A form that is not one of the four is a `ValueError`, including the lower case spelling, which is not an alias. A form that is not a string at all is a `TypeError`.
+
 ### Added: `str.get_dummies`, an answer whose width is in the data
 
 `s.str.get_dummies()` splits every row at a separator and answers a frame with one column per distinct piece, labelled with the piece and holding a 1 where the row held it. It is the third answer shape on the `str` accessor after a column and a scalar, and the first whose width nobody can work out before the column has been read, since both how many columns there are and what they are called are properties of the data.
