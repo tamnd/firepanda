@@ -532,6 +532,15 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def cat(
+        self, others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = "left"
+    ) -> str:
+        """The whole column folded into one string."""
+        try:
+            return self._joined(others, sep, na_rep, join)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

@@ -9058,6 +9058,55 @@ class StringMixin:
 
         return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
 
+    def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> str:
+        """The whole column folded into one string.
+
+        `str.cat` is two operations wearing one name. With `others` it lines a
+        second column up against this one and concatenates row by row, and the
+        answer is a column. With no `others` it folds this column into a single
+        string, and the answer is a scalar. Only the second is written here.
+
+        The first is refused rather than approximated because of what pandas
+        does before it concatenates anything: it aligns the two columns on their
+        labels, so a row of `others` meets the row of this column with the same
+        label and not the one in the same position. Alignment is not written in
+        this library yet, and doing it by position instead would answer a
+        different question quietly, which is the worst of the three options.
+
+        `na_rep` decides both what a missing row becomes and whether it survives
+        at all, and pandas reads that off whether the argument was given. It
+        crosses to Mojo as two arguments because the empty string is a real
+        stand in: `na_rep=""` keeps the row and its separator and drops only its
+        text, which is not the same answer as leaving the argument out.
+
+        Neither `sep` nor `na_rep` is checked by pandas, which lets both fall
+        into `str.join` and come back out as a sentence about `join` or about
+        sequence items. Those name an implementation and not the mistake, so
+        both are refused here with a message that says which argument was wrong.
+
+        `join` is dropped unread. It says how to line `others` up against this
+        column and there is no `others` to line up, so it has nothing to do.
+        pandas does not check it either, and takes `join="bogus"` without a
+        word even when there is an `others` for it to have applied to.
+        """
+        if others is not None:
+            raise UnsupportedError(
+                "firepanda:unsupported: str.cat with others aligns the two columns on"
+                " their labels before it concatenates, and alignment is not written"
+                " yet, so only the form that folds one column into a string is"
+            )
+        del join
+        if sep is None:
+            sep = ""
+        if not isinstance(sep, str):
+            raise DTypeError(f"firepanda:dtype: sep must be str, not {type(sep).__name__}")
+        if na_rep is not None and not isinstance(na_rep, str):
+            raise DTypeError(f"firepanda:dtype: na_rep must be str, not {type(na_rep).__name__}")
+        try:
+            return self._series._inner.string_join(sep, na_rep or "", na_rep is None)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.

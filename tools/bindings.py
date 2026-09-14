@@ -1057,6 +1057,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="DataFrame",
         ),
         Member(
+            name="cat",
+            kind="method",
+            signature="others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = \"left\"",
+            body="self._joined(others, sep, na_rep, join)",
+            doc="The whole column folded into one string.",
+            returns="str",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",
@@ -3042,6 +3050,17 @@ SERIES = Exposed(
             doc="Every row cut at a separator, as three columns.",
             params=(("sep", "str"), ("from_right", "bool")),
             returns="list[Series]",
+        ),
+        Binding(
+            mojo="PySeries.string_join",
+            name="string_join",
+            doc="The whole column folded into one string.",
+            params=(
+                ("sep", "str"),
+                ("na_rep", "str"),
+                ("skip_missing", "bool"),
+            ),
+            returns="str",
         ),
         Binding(
             mojo="PySeries.window_agg",

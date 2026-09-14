@@ -19,6 +19,15 @@ It runs before the transitive copying rather than after, so a filter on one side
 That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equalities in the `WHERE`. It runs now, and its ten order keys and their revenues agree with DuckDB 1.5 at scale factor 0.01. The claim in `firepanda/sql/plan.mojo` that a comma in the `FROM` and a written `JOIN` reach the same plan was there before any of this was, and it was not true. It is a test now.
 
 Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
+### Added: `str.cat`, the first answer narrower than a column
+
+`s.str.cat()` folds a whole text column into one string, with `sep` between neighbouring rows and none at either end. It is the first name on the `str` accessor whose answer is a scalar rather than a column, and it gets a function of its own in the accessor layer for the same reason `partition` does: the doors there are picked by the shape of the answer, and a string is not a column.
+
+A missing row is dropped and dropped takes its separator with it, so `["a", None, "b"]` joined by `-` is `a-b` and not `a--b`. An empty row is readable and keeps its separator, so `["a", "", "b"]` joined by `-` is `a--b`. Given `na_rep` the missing row is not missing any more and behaves like the empty one, which makes `na_rep=""` a different request from leaving the argument out rather than a way of spelling the default.
+
+`sep` and `na_rep` are checked before anything is read. pandas checks neither and lets both fall into `str.join`, which answers with a sentence about `join` having no attribute or about a sequence item at some row index, and neither of those names the argument that was wrong.
+
+`str.cat(others=...)` is refused with `UnsupportedError`. pandas aligns the two columns on their labels before it concatenates anything, alignment is not written yet, and concatenating by position instead would answer a different question without saying so.
 
 ### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
 
