@@ -3011,7 +3011,7 @@ def test_the_declared_type_is_the_type_the_kernel_produces() raises:
     """
     var kinds = all_kinds()
     for k in range(len(kinds)):
-        var declared = agg_type(kinds[k], LogicalType.INT32)
+        var declared = agg_type(kinds[k], LogicalType.INT32, whole_column=False)
         assert_true(
             declared.physical == kinds[k].result_dtype(DType.int32),
             String(kinds[k], " declares ", declared, " over an int32 column"),
@@ -3023,10 +3023,12 @@ def test_a_distinct_count_is_a_number_and_not_a_value_of_the_column() raises:
     the column's own type here until this test, which meant a plan that counted
     the distinct values of a text column declared a text column."""
     assert_true(
-        agg_type(AggKind.NUNIQUE, LogicalType.STRING) == LogicalType.INT64
+        agg_type(AggKind.NUNIQUE, LogicalType.STRING, whole_column=False)
+        == LogicalType.INT64
     )
     assert_true(
-        agg_type(AggKind.NUNIQUE, LogicalType.INT32) == LogicalType.INT64
+        agg_type(AggKind.NUNIQUE, LogicalType.INT32, whole_column=False)
+        == LogicalType.INT64
     )
 
 
@@ -3045,7 +3047,8 @@ def test_a_spread_is_a_float_whatever_it_measured() raises:
     kinds.append(AggKind.COV)
     for k in range(len(kinds)):
         assert_true(
-            agg_type(kinds[k], LogicalType.INT32) == LogicalType.FLOAT64,
+            agg_type(kinds[k], LogicalType.INT32, whole_column=False)
+            == LogicalType.FLOAT64,
             String(kinds[k], " over an int32 column"),
         )
 
@@ -3061,11 +3064,13 @@ def test_the_four_that_report_an_element_keep_the_column_type() raises:
     kinds.append(AggKind.LAST)
     for k in range(len(kinds)):
         assert_true(
-            agg_type(kinds[k], LogicalType.INT32) == LogicalType.INT32,
+            agg_type(kinds[k], LogicalType.INT32, whole_column=False)
+            == LogicalType.INT32,
             String(kinds[k], " over an int32 column"),
         )
         assert_true(
-            agg_type(kinds[k], LogicalType.STRING) == LogicalType.STRING,
+            agg_type(kinds[k], LogicalType.STRING, whole_column=False)
+            == LogicalType.STRING,
             String(kinds[k], " over a text column"),
         )
 
