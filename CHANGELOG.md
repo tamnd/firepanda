@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: STRLEN counts bytes, which is what DuckDB counts
+
+`strlen` was answering the number of characters and DuckDB answers the number of bytes. `strlen('café')` is 5 there and was 4 here. `length` and `len` count characters in both, so what was wrong was folding all three names into one call when DuckDB documents two different questions under them.
+
+Both kernels were already written and the byte counting one was already described as SQL's `STRLEN` in its own docstring, so the fix is that `strlen` stays its own call and the operator carries a flag saying which kernel to run. The two are a long way apart in cost as well as in meaning: counting characters walks the payload of every element, and counting bytes reads the length field out of each view and follows no pointer, which is thirteen times cheaper on a column of thirty two byte elements.
+
+ClickBench q27 and q28 average `strlen` over `URL` and `Referer`, so they were asking the expensive kernel for the wrong number.
+
 ### Added: UPPER and LOWER in SQL
 
 `upper(s)` and `lower(s)`, and `ucase` and `lcase`, which are DuckDB's other names for the same two. The kernel behind them is the one the `str` accessor got a release ago, so this is the wiring and not the work: a `Case` operator that appends the rewritten column, one branch in the binder saying it reads text and answers text, and the two aliases folded to the two names DuckDB's catalog documents.

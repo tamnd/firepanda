@@ -2859,25 +2859,41 @@ def test_a_substring_of_a_number_is_refused_while_it_binds() raises:
 
 def test_a_character_count_is_the_one_call_whatever_it_was_written_as() raises:
     assert_equal(
-        _plan("SELECT strlen(g) FROM t"),
+        _plan("SELECT length(g) FROM t"),
         "PROJECT [length(g) as __expr_0]\n  SCAN t []\n",
     )
 
 
-def test_the_three_names_for_a_character_count_build_the_same_plan() raises:
-    var want = _plan("SELECT strlen(g) FROM t")
-    assert_equal(_plan("SELECT length(g) FROM t"), want)
+def test_the_two_names_for_a_character_count_build_the_same_plan() raises:
+    var want = _plan("SELECT length(g) FROM t")
     assert_equal(_plan("SELECT len(g) FROM t"), want)
-    assert_equal(_plan("SELECT STRLEN(g) FROM t"), want)
+    assert_equal(_plan("SELECT LENGTH(g) FROM t"), want)
 
 
-def test_a_character_count_of_a_number_is_refused_while_it_binds() raises:
-    with assert_raises(contains="'length' counts the characters of text"):
+def test_a_byte_count_is_a_call_of_its_own_and_not_a_character_count() raises:
+    # DuckDB has `strlen` count bytes and `length` count characters, so the two
+    # are different questions and the plan keeps them apart rather than folding
+    # one into the other.
+    assert_equal(
+        _plan("SELECT strlen(g) FROM t"),
+        "PROJECT [strlen(g) as __expr_0]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT STRLEN(g) FROM t"), _plan("SELECT strlen(g) FROM t")
+    )
+
+
+def test_a_length_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'length' measures text"):
+        _ = _plan("SELECT length(a) FROM t")
+    with assert_raises(contains="'strlen' measures text"):
         _ = _plan("SELECT strlen(a) FROM t")
 
 
-def test_a_character_count_of_two_things_is_refused_while_it_binds() raises:
+def test_a_length_of_two_things_is_refused_while_it_binds() raises:
     with assert_raises(contains="'length' takes 1 argument and was given 2"):
+        _ = _plan("SELECT length(g, g) FROM t")
+    with assert_raises(contains="'strlen' takes 1 argument and was given 2"):
         _ = _plan("SELECT strlen(g, g) FROM t")
 
 
