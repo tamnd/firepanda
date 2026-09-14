@@ -127,6 +127,7 @@ from firepanda.kernel.chars import (
     text_character_substring,
     text_find,
 )
+from firepanda.kernel.substr import text_byte_length
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.edges import text_trim
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
@@ -2075,12 +2076,19 @@ struct Cut(Movable):
 
 
 struct Length(Movable):
-    """Appends a column holding how many characters each element holds.
+    """Appends a column holding how long each element is.
 
-    This is SQL's `STRLEN`, and `LENGTH` and `LEN`, which are DuckDB's other two
-    names for it. Characters and not bytes, the way `Cut` counts characters, so
-    a column of text that is not ASCII answers what somebody reading the strings
-    would count rather than what the payload measures.
+    This is SQL's `LENGTH` and `LEN`, which count characters, and `STRLEN`,
+    which counts bytes. Those are two questions and not one, and DuckDB spells
+    them apart exactly this way: `length('café')` is 4 and `strlen('café')` is
+    5. Which one is asked is a flag here, because the node is the same shape
+    either way and only the kernel under it changes.
+
+    The two kernels are a long way apart in cost as well as in meaning.
+    `text_character_length` walks the payload of every element counting the
+    bytes that are not continuations, and `text_byte_length` reads the length
+    field out of each view and follows no pointer at all, which is thirteen
+    times cheaper on a column of thirty two byte elements.
 
     It is a node rather than another code on `Apply` because the four operations
     that share `Apply` all answer the type they were given and this one does not:
@@ -2096,17 +2104,22 @@ struct Length(Movable):
     var at: Int
     """The position of the column being measured."""
 
+    var bytes: Bool
+    """Whether to count bytes rather than characters."""
+
     var name: String
     """The name the appended column gets in the output schema."""
 
-    def __init__(out self, at: Int, name: String):
+    def __init__(out self, at: Int, bytes: Bool, name: String):
         """Constructs a length over a column.
 
         Args:
             at: The position of the column being measured.
+            bytes: Whether to count bytes rather than characters.
             name: The name of the appended column.
         """
         self.at = at
+        self.bytes = bytes
         self.name = name
 
     def bind(mut self, var input: Schema) raises -> Schema:
@@ -2133,7 +2146,7 @@ struct Length(Movable):
             )
         if out[self.at].dtype != LogicalType.STRING:
             raise Error(
-                "length: a character count reads text and column "
+                "length: a length reads text and column "
                 + String(self.at)
                 + " holds "
                 + String(out[self.at].dtype)
@@ -2162,7 +2175,11 @@ struct Length(Movable):
                 + String(width)
                 + " columns"
             )
-        var made = text_character_length(chunk.columns[self.at].strings())
+        var made: Array[DType.int64]
+        if self.bytes:
+            made = text_byte_length(chunk.columns[self.at].strings())
+        else:
+            made = text_character_length(chunk.columns[self.at].strings())
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))

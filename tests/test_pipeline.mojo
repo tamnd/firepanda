@@ -973,7 +973,7 @@ def test_a_cut_over_a_column_that_is_not_text_is_caught_at_plan_time() raises:
 
 def test_a_length_counts_the_characters_of_every_row() raises:
     var pipeline = Pipeline(word_frame())
-    pipeline.add(Node(Length(1, "wide")))
+    pipeline.add(Node(Length(1, False, "wide")))
     var out = pipeline^.run()
     assert_equal(out.width(), 4, "the answer was appended")
     assert_true(out.schema[3].dtype == LogicalType.INT64, "a number out")
@@ -986,21 +986,33 @@ def test_a_length_counts_the_characters_of_every_row() raises:
 
 def test_a_length_keeps_the_column_it_read_where_it_was() raises:
     var pipeline = Pipeline(word_frame())
-    pipeline.add(Node(Length(1, "wide")))
+    pipeline.add(Node(Length(1, False, "wide")))
     var out = pipeline^.run()
     assert_equal(out.column("status").as_strings()[1], "fail", "as it was")
+
+
+def test_a_length_counts_the_bytes_when_it_is_asked_to() raises:
+    # The other half of the flag. `word_frame` is all ASCII, so this pair says
+    # the flag reaches the kernel and `test_sql_run` says the two kernels
+    # answer different things on a row that is not.
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Length(1, True, "wide")))
+    var out = pipeline^.run()
+    var got = read_back(out, "wide")
+    assert_equal(got[0], 2, "two bytes and two characters")
+    assert_equal(got[1], 4, "and four of each here")
 
 
 def test_a_length_over_a_missing_column_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="is outside a schema of 3 columns"):
-        pipeline.add(Node(Length(9, "nope")))
+        pipeline.add(Node(Length(9, False, "nope")))
 
 
 def test_a_length_over_a_column_that_holds_no_text_is_refused() raises:
     var pipeline = Pipeline(word_frame())
-    with assert_raises(contains="a character count reads text"):
-        pipeline.add(Node(Length(0, "nope")))
+    with assert_raises(contains="a length reads text"):
+        pipeline.add(Node(Length(0, False, "nope")))
 
 
 def test_a_case_change_rewrites_every_row() raises:
