@@ -63,6 +63,8 @@ def _text_name(name: String) raises -> String:
     if (
         name == "upper"
         or name == "lower"
+        or name == "capitalize"
+        or name == "swapcase"
         or name == "slice"
         or name == "slice_replace"
         or name == "get"
@@ -237,6 +239,10 @@ def text(
         return column.chars_upper()
     if wanted == "lower":
         return column.chars_lower()
+    if wanted == "capitalize":
+        return column.chars_capitalize()
+    if wanted == "swapcase":
+        return column.chars_swapcase()
     if wanted == "slice":
         # The kernel refuses this as well, since it has to and since it is
         # reachable from the Mojo API too. It is refused again here so that the

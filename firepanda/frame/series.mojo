@@ -46,6 +46,7 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
+    text_capitalize,
     text_case,
     text_character_get,
     text_character_length,
@@ -57,6 +58,7 @@ from firepanda.kernel.chars import (
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
+    text_swapcase,
 )
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
@@ -1242,9 +1244,11 @@ struct Series(Copyable, Movable, Sized, Writable):
     def chars_upper(self) raises -> Self:
         """Returns every row written in upper case.
 
-        Not a character for a character. `ß` raises to two letters and some
-        rows come back longer than they went in, which is why this builds a new
-        column rather than rewriting the bytes where they lie.
+        A character for a character, since pandas answers this out of Arrow and
+        Arrow uses the simple mappings, so a row is as many characters long
+        coming out as it was going in. It is not a byte for a byte, because the
+        two cases of a character are not always the same number of bytes, which
+        is why this builds a new column rather than rewriting where it lies.
 
         Returns:
             A text series of the same height, null wherever this one is null.
@@ -1269,6 +1273,41 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_case(self.values.strings(), False)),
+        )
+
+    def chars_capitalize(self) raises -> Self:
+        """Returns every row with its first character raised and the rest dropped.
+
+        The rest being dropped is the part that surprises people, since a row
+        that arrived in capitals comes back with one. It is what pandas does.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_capitalize(self.values.strings())),
+        )
+
+    def chars_swapcase(self) raises -> Self:
+        """Returns every row with its upper case and lower case exchanged.
+
+        A character in neither case is left alone rather than guessed at, which
+        covers punctuation and digits and also the thirty one titlecase
+        characters, which look like capitals and are not.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_swapcase(self.values.strings())),
         )
 
     def chars_is_space(self) raises -> Self:

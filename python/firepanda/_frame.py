@@ -480,6 +480,20 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def capitalize(self) -> Series:
+        """Every row with its first character raised and the rest dropped."""
+        try:
+            return self._text("capitalize")
+        except Exception as error:
+            raise translate(error) from None
+
+    def swapcase(self) -> Series:
+        """Every row with its upper case and lower case exchanged."""
+        try:
+            return self._text("swapcase")
+        except Exception as error:
+            raise translate(error) from None
+
     def isspace(self) -> Series:
         """Whether every row is whitespace and nothing else."""
         try:

@@ -15,6 +15,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 Both kernels were already written and the byte counting one was already described as SQL's `STRLEN` in its own docstring, so the fix is that `strlen` stays its own call and the operator carries a flag saying which kernel to run. The two are a long way apart in cost as well as in meaning: counting characters walks the payload of every element, and counting bytes reads the length field out of each view and follows no pointer, which is thirteen times cheaper on a column of thirty two byte elements.
 
 ClickBench q27 and q28 average `strlen` over `URL` and `Referer`, so they were asking the expensive kernel for the wrong number.
+### Added: capitalize and swapcase, built out of the table the case fix already carries
+
+`s.str.capitalize()` and `s.str.swapcase()`. Neither is a name the Mojo standard library has, so both are walked a character at a time here, and the point of the release is that neither needed any case data past the 149 corrections `upper` and `lower` got a release ago.
+
+Capitalising is the first character raised and every other character dropped, which is pandas' rule and is not what the name suggests: a row of several words comes back with one capital in it, a row that arrived in capitals comes back lower case after the first letter, and a row that starts with a digit comes back unchanged because it starts at the first character rather than the first letter.
+
+Swapping case has to know which case a character is already in, and the interesting part is that it does not ask. `islower` and `isupper` are the two names this library is still wrong about for more than a thousand code points, so a kernel built on them would have inherited all of it. The mappings answer the same question and are corrected: a character that lowers to something else was upper, one that raises to something else was lower, one that neither raises nor lowers has no case. The only characters the mappings cannot classify are the thirty one titlecase ones, which are in neither case and which Arrow leaves alone even though both of their mappings would move them, so `casefix.mojo` carries them as a fourth table and the generator derives that table from Arrow rather than from a list somebody typed. An ASCII row skips all of it and flips one bit per letter.
+
+Both rules are now asserted by `tools/gen_casefix.py`, which refuses to write a table if either stops holding, and both names were checked against a live pandas over all 1112064 code points on their own and over sixty thousand random words with no row differing. `title` is the name of this shape that is not here: its word boundary needs to know whether a character is cased at all, which is the category question rather than the mapping question, and it is wrong for 1295 code points. It waits on carrying our own Unicode tables. Document 64 has all of it.
 
 ### Added: UPPER and LOWER in SQL
 
