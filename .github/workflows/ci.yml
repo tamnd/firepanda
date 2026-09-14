@@ -479,6 +479,16 @@ jobs:
         run: pixi run differential-answers
         timeout-minutes: 15
 
+      # Every step above asks about one expression. A join that drops a row, a
+      # group that keys on the wrong column and a sort that is not stable all go
+      # through them untouched, and this is the one that asks whole queries.
+      # Scale 0.01 here, which is three megabytes and a few seconds; the S4 exit
+      # criterion is scale 1 and is run by hand.
+      # docs/specs/sql/11-conformance.md section 7.
+      - name: TPC-H answers, through both engines
+        run: pixi run tpch
+        timeout-minutes: 10
+
   required:
     name: CI
     if: always()
