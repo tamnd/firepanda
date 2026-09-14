@@ -2289,6 +2289,69 @@ def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
     return out^
 
 
+def text_equals_scalar(a: StringArray, other: String) -> Array[DType.bool]:
+    """Whether each element is a string and nothing else, one at a time.
+
+    Args:
+        a: The column.
+        other: The string.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        var same = text.byte_length() == other.byte_length()
+        if same:
+            for k in range(other.byte_length()):
+                if text[byte=k] != other[byte=k]:
+                    same = False
+                    break
+        out.set_valid(i, same)
+    return out^
+
+
+def text_count_scalar(a: StringArray, needle: String) -> Array[DType.int64]:
+    """How many times a substring appears in each element, one at a time.
+
+    The cursor moves past the whole needle after a hit, which is the rule that
+    makes `aa` appear twice in `aaaa` and not three times, and it is the only
+    decision in the function. An empty needle matches at every byte offset and
+    once past the end, which is Arrow's rule rather than Python's.
+
+    Args:
+        a: The column.
+        needle: The substring.
+
+    Returns:
+        An int64 column, null where the column is null.
+    """
+    var out = Array[DType.int64](len(a))
+    var m = needle.byte_length()
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        if m == 0:
+            out.set_valid(i, Int64(text.byte_length() + 1))
+            continue
+        var seen = 0
+        var from_ = 0
+        while True:
+            var at = _string_find_scalar(text, needle, from_)
+            if at < 0:
+                break
+            seen += 1
+            from_ = at + m
+        out.set_valid(i, Int64(seen))
+    return out^
+
+
 def text_substring_scalar(
     a: StringArray, offset: Int, length: Int
 ) raises -> StringArray:

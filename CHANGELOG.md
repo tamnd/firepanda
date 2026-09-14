@@ -17,6 +17,15 @@ One pass answers an ASCII element now. The letters are found by two compares and
 Measured on the i9-13900K over four million rows of forty byte ASCII, alternated twice: 1.674 seconds and 1.525 seconds without the fast path, 26.5 milliseconds with it both times. That is 6.6 nanoseconds a row against four hundred, which is sixty times, and it is the difference between a case change being the most expensive thing in a query and being cheaper than the substring beside it.
 
 An element with a byte at or above 0x80 is refused and takes exactly the path it took before, so none of the Unicode answers move and the hundred and forty nine corrections keep their table. A refusal is not free, because whether an element is ASCII is only known once every byte has been looked at, so it is one wasted pass over bytes that get walked again. The same four million rows with an accent in every one of them ran 1.692 and 1.665 seconds before and 1.702 and 1.688 after, which is under one and a half per cent, and there is a benchmark row holding it there.
+### Added: `contains`, `match`, `fullmatch` and `count`, the first four `str` names about patterns
+
+The four questions about where a pattern sits in a row: anywhere, at the front, the whole row, and how many times. pandas reads the argument to all four as a regular expression and there is no regular expression engine here yet, so these ship on a smaller promise than pandas makes.
+
+The promise is that a pattern holding none of `.`, `^`, `$`, `*`, `+`, `?`, `{`, `}`, `[`, `]`, `\`, `|`, `(` or `)` means exactly the characters it is written with, to an engine and to a byte search alike. Those patterns are answered exactly. A pattern holding one of those characters is refused with a message naming the character, and `contains` takes `regex=False` for the case where the caller meant the character itself. Searching for a metacharacter literally without saying so would have turned `contains(".")` from a filter that keeps nearly every row into one that keeps nearly none, with nothing anywhere to say it had happened.
+
+`case=False` and a non zero `flags` are refused rather than ignored, for the same reason.
+
+One answer here will read as a bug and is pandas'. `count` with an empty pattern is counted in bytes and not in characters, so `"héllo"` holds seven empty matches and Python's `re` module finds six. Arrow counts a match at every byte offset and once past the end, pandas 3 holds text in Arrow, and this library follows pandas. Matches also do not overlap, so `count("aa")` on four a's is two.
 
 ## [0.8.3] - 2026-09-14
 

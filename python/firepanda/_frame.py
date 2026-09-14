@@ -466,6 +466,36 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def contains(
+        self, pat: Any, case: Any = True, flags: Any = 0, na: Any = None, regex: Any = True
+    ) -> Series:
+        """Whether every row holds a literal pattern anywhere in it."""
+        try:
+            return self._searched("contains", pat, case, flags, na, bool(regex))
+        except Exception as error:
+            raise translate(error) from None
+
+    def match(self, pat: Any, case: Any = True, flags: Any = 0, na: Any = None) -> Series:
+        """Whether every row begins with a literal pattern."""
+        try:
+            return self._searched("match", pat, case, flags, na, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def fullmatch(self, pat: Any, case: Any = True, flags: Any = 0, na: Any = None) -> Series:
+        """Whether every row is a literal pattern and nothing else."""
+        try:
+            return self._searched("fullmatch", pat, case, flags, na, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, pat: Any, flags: Any = 0) -> Series:
+        """How many times a literal pattern appears in every row."""
+        try:
+            return self._counted(pat, flags)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

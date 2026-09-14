@@ -8,11 +8,11 @@ layer is where each word has a name a caller was invited to type.
 ### Why there are three doors and not one
 
 The rule `transform.mojo` set is that the shape of the answer picks the door. On
-this accessor there are three shapes: `startswith` and the questions about case
-answer a mask, `len` and `find` answer a number, and everything else answers
-text. A name sent through the wrong door is refused rather than being quietly
-served, which is what makes these worth being three functions instead of one
-with a branch at the end.
+this accessor there are three shapes: `startswith`, the questions about case and
+the questions about a pattern answer a mask, `len`, `find` and `count` answer a
+number, and everything else answers text. A name sent through the wrong door is
+refused rather than being quietly served, which is what makes these worth being
+three functions instead of one with a branch at the end.
 
 Argument shape does not pick a door and deliberately does not, because it varies
 almost per method and grouping by it would give a door per method. So the widest
@@ -113,6 +113,9 @@ def _flag_name(name: String) raises -> String:
         or name == "isdigit"
         or name == "isdecimal"
         or name == "isalnum"
+        or name == "contains"
+        or name == "match"
+        or name == "fullmatch"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -130,7 +133,7 @@ def _number_name(name: String) raises -> String:
     Raises:
         Error: Tagged `value` if it is not one of them.
     """
-    if name == "len" or name == "find" or name == "rfind":
+    if name == "len" or name == "find" or name == "rfind" or name == "count":
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a number"))
 
@@ -307,8 +310,9 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The prefix or the suffix, and the empty string for every question
-            about what the characters are, which takes no argument at all.
+        arg: The prefix, the suffix or the pattern, and the empty string for
+            every question about what the characters are, which takes no
+            argument at all.
 
     Returns:
         A bool column, as tall as the one it read.
@@ -341,6 +345,16 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         return column.chars_is_decimal()
     if wanted == "isalnum":
         return column.chars_is_alnum()
+    # The three pattern questions take a literal and pandas takes a regular
+    # expression. Which patterns are allowed to arrive here is decided in the
+    # Python layer, because that is where the pattern is still a Python string
+    # and where a refusal can name the metacharacter that caused it.
+    if wanted == "contains":
+        return column.chars_contains(arg)
+    if wanted == "match":
+        return column.chars_match(arg)
+    if wanted == "fullmatch":
+        return column.chars_full_match(arg)
     return column.chars_ends_with(arg)
 
 
@@ -356,7 +370,8 @@ def number(
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The substring to look for, and the empty string for `len`.
+        arg: The substring to look for or to count, and the empty string for
+            `len`.
         start: The first position a match may start at, where the method takes
             one.
         stop: The position to stop searching before, where the method takes one.
@@ -372,4 +387,6 @@ def number(
     var wanted = _number_name(kind)
     if wanted == "len":
         return column.chars_length()
+    if wanted == "count":
+        return column.chars_count(arg)
     return column.chars_find(arg, start, stop, wanted == "rfind")
