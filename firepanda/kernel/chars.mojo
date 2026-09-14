@@ -64,18 +64,24 @@ so rather than copying a shape that no longer earns its complexity.
 ### Case is the other thing that cannot be done a byte at a time
 
 Changing case and asking about case both live here for the reason the positions
-do. A byte is not a unit of case: the upper case of `ß` is two characters, the
-upper case of one Greek letter with an iota written under it is three, and
-neither answer can come out of a table indexed by byte. So the case kernels hand
-each element to the standard library as a `StringSlice` and let it walk the
-characters, which is the one place in this file where the walk is not ours.
+do. A byte is not a unit of case, since the character a byte belongs to is what
+has a case and the two cases of a character are not always the same length. So
+the case kernels hand each element to the standard library as a `StringSlice`
+and let it walk the characters, which is the one place in this file where the
+walk is not ours.
 
-Document 64 measures where that library's answer and Python's differ, and the
-one difference of the hundred odd that reaches a Latin alphabet is corrected
-here rather than left for the reader to find.
+That library's case data is not the case data pandas answers out of. pandas
+holds text in Arrow and its case methods are Arrow kernels, which use the simple
+mappings and never make a row longer, while the library here uses the full
+mappings for thirty nine code points and has never heard of a hundred and ten
+others. `casefix.mojo` is the list of all hundred and forty nine with Arrow's
+answer for each, an element is tested for holding one before it is handed over,
+and one that does is written out a code point at a time instead. Document 64
+measures the difference and says why the list is carried here.
 """
 
 from std.collections.span import Span
+from std.collections.string import Codepoint
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
@@ -83,24 +89,13 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 from firepanda.kernel.pattern import find_bytes, rfind_bytes
 
+from .casefix import (
+    CORRECTED_DOWN,
+    CORRECTED_FROM,
+    CORRECTED_UP,
+    LOWEST_CORRECTED_LEAD,
+)
 from .mask import repair_range
-
-comptime DOTTED_CAPITAL_I_LEAD = Byte(0xC4)
-"""The first byte of U+0130, the capital I with a dot over it."""
-
-comptime DOTTED_CAPITAL_I_TAIL = Byte(0xB0)
-"""The second byte of U+0130. The pair can be tested anywhere in a run of
-bytes, because 0xC4 is never a continuation byte and so can only begin a
-character."""
-
-comptime SMALL_I = Byte(0x69)
-"""The letter `i`, which is the first half of what U+0130 lowers to."""
-
-comptime DOT_ABOVE_LEAD = Byte(0xCC)
-"""The first byte of U+0307, the combining dot above."""
-
-comptime DOT_ABOVE_TAIL = Byte(0x87)
-"""The second byte of U+0307."""
 
 comptime EVERY_SPACE = 0
 """Ask `_every_character` whether every character is whitespace."""
@@ -678,59 +673,62 @@ def _well_formed(bytes: Span[UInt8, _]) -> Bool:
     return True
 
 
-def _holds_dotted_capital_i(bytes: Span[UInt8, _]) -> Bool:
-    """Whether a run of bytes holds U+0130 anywhere in it.
+def _corrected_at(keys: Span[UInt32, _], point: UInt32) -> Int:
+    """Where a code point sits in the correction table, or minus one.
 
-    A pair of bytes rather than a character walk, which is sound because the
-    first byte of U+0130 is 0xC4 and no continuation byte is that, so the pair
-    cannot straddle a character boundary or sit inside another character.
+    A binary search over a hundred and fifty entries, so eight comparisons at
+    worst, and it is only ever asked about a code point that survived the byte
+    test below.
+
+    Args:
+        keys: `CORRECTED_FROM`, which is in order.
+        point: The code point being asked about.
+
+    Returns:
+        The index, or minus one when the table does not have it.
+    """
+    var lo = 0
+    var hi = len(keys)
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if keys[mid] < point:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo < len(keys) and keys[lo] == point:
+        return lo
+    return -1
+
+
+def _may_need_correcting(bytes: Span[UInt8, _]) -> Bool:
+    """Whether an element could hold a code point the table knows about.
+
+    One pass over the bytes with no decoding in it. The lowest code point in
+    the table is U+00DF, so a code point in the table has a lead byte of at
+    least 0xC3, and an element with no such byte cannot hold one. Every ASCII
+    element leaves here, which is the point.
 
     Args:
         bytes: The element.
 
     Returns:
-        True if the two bytes are there, one after the other.
+        True if the element has to be walked a code point at a time.
     """
-    for k in range(len(bytes) - 1):
-        if (
-            bytes[k] == DOTTED_CAPITAL_I_LEAD
-            and bytes[k + 1] == DOTTED_CAPITAL_I_TAIL
-        ):
+    for k in range(len(bytes)):
+        if bytes[k] >= LOWEST_CORRECTED_LEAD:
             return True
     return False
 
 
-def _spell_the_dot(bytes: Span[UInt8, _], mut into: List[UInt8]):
-    """Writes out every U+0130 as the two characters it lowers to.
-
-    Done before the lowering rather than after, because after it the dot is
-    gone and there is nothing left to put back. Lowering the two characters
-    this leaves is the identity on both of them, so the answer is the same as
-    if the standard library had the rule.
-
-    Args:
-        bytes: The element.
-        into: Where to write, cleared first.
-    """
-    into.clear()
-    var k = 0
-    while k < len(bytes):
-        if (
-            k + 1 < len(bytes)
-            and bytes[k] == DOTTED_CAPITAL_I_LEAD
-            and bytes[k + 1] == DOTTED_CAPITAL_I_TAIL
-        ):
-            into.append(SMALL_I)
-            into.append(DOT_ABOVE_LEAD)
-            into.append(DOT_ABOVE_TAIL)
-            k += 2
-        else:
-            into.append(bytes[k])
-            k += 1
-
-
 def text_case(a: StringArray, upper: Bool) raises -> StringArray:
     """Rewrites every element in one case or the other.
+
+    pandas holds text in Arrow and answers this out of an Arrow kernel, which
+    uses the simple case mappings. The standard library here uses the full ones
+    for thirty nine code points and does not know a hundred and ten others, so
+    an element carrying any of the hundred and forty nine is written out a code
+    point at a time with the table in `casefix.mojo` consulted first. Document
+    64 measures the difference and says why it is corrected rather than left.
 
     An element that is not valid UTF-8 comes back exactly as it went in, which
     is the only answer available: there is nothing to change the case of, and
@@ -749,7 +747,10 @@ def text_case(a: StringArray, upper: Bool) raises -> StringArray:
     """
     var n = len(a)
     var built = StringBuilder(capacity=n)
-    var scratch = List[UInt8]()
+    var keys = materialize[CORRECTED_FROM]()
+    var raised = materialize[CORRECTED_UP]()
+    var dropped = materialize[CORRECTED_DOWN]()
+    var scratch = String()
     for i in range(n):
         if not a.is_valid(i):
             built.append_null()
@@ -758,18 +759,85 @@ def text_case(a: StringArray, upper: Bool) raises -> StringArray:
         if not _well_formed(bytes):
             built.append(bytes)
             continue
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        if _may_need_correcting(bytes) and _holds_a_correction(
+            text, Span(keys)
+        ):
+            _one_at_a_time(
+                text, Span(keys), Span(raised), Span(dropped), upper, scratch
+            )
+            built.append(scratch.as_bytes())
+            continue
         if upper:
-            var raised = StringSlice(unsafe_from_utf8=bytes).upper()
-            built.append(raised.as_bytes())
-            continue
-        if _holds_dotted_capital_i(bytes):
-            _spell_the_dot(bytes, scratch)
-            var spelled = StringSlice(unsafe_from_utf8=Span(scratch)).lower()
-            built.append(spelled.as_bytes())
-            continue
-        var dropped = StringSlice(unsafe_from_utf8=bytes).lower()
-        built.append(dropped.as_bytes())
+            var one = text.upper()
+            built.append(one.as_bytes())
+        else:
+            var one = text.lower()
+            built.append(one.as_bytes())
     return built^.finish()
+
+
+def _holds_a_correction(text: StringSlice, keys: Span[UInt32, _]) -> Bool:
+    """Whether an element really holds one of the code points in the table.
+
+    The byte test above says an element could, because it has a byte large
+    enough somewhere in it, and most elements that pass it are ordinary
+    accented text with nothing in the table at all. This is the second test,
+    which decodes and searches, and it is what keeps those elements on the one
+    call per element path.
+
+    Args:
+        text: The element.
+        keys: `CORRECTED_FROM`.
+
+    Returns:
+        True if a code point of the element is in the table.
+    """
+    for point in text.codepoints():
+        if _corrected_at(keys, point.to_u32()) >= 0:
+            return True
+    return False
+
+
+def _one_at_a_time(
+    text: StringSlice,
+    keys: Span[UInt32, _],
+    raised: Span[UInt32, _],
+    dropped: Span[UInt32, _],
+    upper: Bool,
+    mut into: String,
+) raises:
+    """Writes an element out a code point at a time, correcting as it goes.
+
+    The slow path, and the only place in this file that builds a string per
+    character rather than per element. A code point the table knows about is
+    written as the table says, and every other one is handed to the standard
+    library on its own, which gives the same answer it would have given inside
+    a longer walk because it has no rule that looks at a neighbour.
+
+    Args:
+        text: The element, already known to be valid UTF-8.
+        keys: `CORRECTED_FROM`.
+        raised: `CORRECTED_UP`.
+        dropped: `CORRECTED_DOWN`.
+        upper: Which way this is going.
+        into: Where to write, cleared first.
+
+    Raises:
+        Error: If a string cannot be allocated.
+    """
+    into = String()
+    for point in text.codepoints():
+        var at = _corrected_at(keys, point.to_u32())
+        if at >= 0:
+            var answer = raised[at] if upper else dropped[at]
+            into += String(Codepoint(unsafe_unchecked_codepoint=answer))
+            continue
+        var one = String(point)
+        if upper:
+            into += one.upper()
+        else:
+            into += one.lower()
 
 
 def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
