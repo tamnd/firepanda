@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release in two halves. One is the `str` accessor learning about patterns, which is five new names and a sixth search inside LIKE, and the other is the second and last of the text kernels that were doing far more work than the answer needs.
+
+The pattern half starts from a gap being admitted rather than papered over. There is no regular expression engine here, so `contains`, `match`, `fullmatch`, `count` and `replace` answer a pattern holding none of the fourteen metacharacters exactly and refuse anything else by name. Searching for a `.` literally without saying so would turn a filter that keeps nearly every row into one that keeps nearly none and say nothing about it. The four names that look for a pattern then learned `case=False`, which needed a second fold table of 1457 entries beside the one `casefold` uses, because a fold a person reads can make a row longer and a search cannot afford that. On the SQL side a LIKE pattern can now hold an underscore and a run at each end, added as a sixth search below the five fast ones so that nothing which was a prefix test became a walk.
+
+The kernel half finishes what the last release flagged. `upper` over ASCII was paying four walks and a heap allocation for an answer that needs one pass, and it is sixty times faster now, 6.6 nanoseconds a row against four hundred. `trim` was counting in character ordinals, and every ordinal is found by scanning from the front of the element, so a row with nothing to trim was walked about five times end to end. Walking the two ends in byte offsets instead is two times on that row and 4.8 times on a row with spaces on both ends. Both changes ship with a benchmark row for the case they cannot help, so neither claim can quietly become a trade.
+
+One wrong answer is fixed and it is worth reading. `SELECT -7 // 3` came back `-3` and `SELECT -7 % 3` came back `2`, because the SQL front end was lowering onto the dataframe kernels and those follow Python's rule where SQL follows C's. The two agree on every pair of positive numbers, which is why thousands of checked queries had never shown it. What found it is the other addition here, a value differential that runs the same expressions over the same eight rows through this engine and through DuckDB and compares what comes back. Three harnesses already asked whether a statement parses and what type it comes out as, and all three agreed about `strlen` while it returned the wrong number, because none of them ever looked at a result.
+
 ### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
 
 The other half of what the last release flagged. `trim` ran at 13.5 nanoseconds a row over forty byte text against `substring` at 4.3 on the same column, and both build a text column and read every element, so three times the cost had to come from somewhere.
@@ -7172,7 +7184,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
 [0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
