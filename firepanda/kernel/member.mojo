@@ -75,7 +75,7 @@ eight is the low tooth. That is why the crossover is read off the size where the
 two lines cross rather than off any single pair.
 """
 
-comptime LINEAR_BLOCKS = 4
+comptime LINEAR_BLOCKS = 8
 """How many SIMD blocks the linear route keeps live while it walks the set.
 
 One, which is the obvious way to write it, costs three times what this does, and
@@ -87,20 +87,26 @@ rows. A group of blocks amortises all of it across the group: the needle is
 splatted once, the loop is entered once, and its body is a compare per block with
 nothing carried between them.
 
-Four rather than eight, and the two machines disagree about that by less than
-they agree about the first paragraph. Two vectors are live per block, the values
-and the answers, so four blocks is eight registers and eight blocks is sixteen.
-AVX2 has sixteen, so eight blocks is the whole file and it spills: measured on
-the i9-13900K, nanoseconds a row for sets of four, sixteen and thirty two, four
-blocks ran 0.21, 0.30 and 0.53 against 0.19, 0.36 and 0.63 for eight. NEON has
-thirty two registers and does not spill, so on the ten core M series eight was
-the faster of the two, by five per cent. Losing five per cent on the machine with
-room for both beats losing sixteen on the machine without it.
+Eight rather than four, and getting that the right way round took two
+measurements that disagreed. Two vectors are live per block, the values and the
+answers, so eight blocks is sixteen registers, which is all of AVX2 and half of
+NEON. Run on a whole column of a million rows, that shows: on the i9-13900K four
+blocks ran 0.21, 0.30 and 0.53 nanoseconds a row for sets of four, sixteen and
+thirty two against 0.19, 0.36 and 0.63 for eight, so eight was spilling and
+losing sixteen per cent at the larger sets.
 
-The gain over one block is what this is for, and it is much larger than the
-difference between four and eight. On the M series, one block ran 0.26, 0.43,
-0.85 and 4.11 for sets of two, four, eight and thirty two, against 0.10, 0.14,
-0.25 and 1.27 for eight blocks.
+Run the way the kernel is actually called it does not. A chunk at a time on every
+thread, four million rows, the two settings alternated twice: sets of four, eight
+and thirty two came out the same to within the repeat noise, and a set of two ran
+215 and 202 microseconds on eight against 231 and 232 on four. So eight is ten
+per cent ahead where it differs at all. The whole column run has eight morsels to
+give thirty two threads and measures a core that has its ports to itself, which
+is not the machine a query runs on, and a spill that costs something there costs
+nothing when the other thread on the core has work to do.
+
+The gain over one block is what this is for, and it dwarfs both of those. On the
+M series, one block ran 0.26, 0.43, 0.85 and 4.11 for sets of two, four, eight
+and thirty two, against 0.10, 0.14, 0.25 and 1.27 for eight blocks.
 """
 
 comptime TEXT_LINEAR_MAX = 2

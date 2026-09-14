@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `IN` against a list of constants runs as one set lookup
+
+`x IN (a, b, c)` was written out as an equality per member joined by `or`, which is a node per member plus a disjunction over all of them, and every one of those nodes writes a boolean column that only the disjunction ever reads. Lowering now reads that shape back and builds a single set lookup instead. Measured on the i9-13900K over four million rows, a set of two ran 408 microseconds as a chain and 215 as a lookup, a set of four 630 against 248, a set of eight 1.149 milliseconds against 340, and a set of thirty two 5.935 milliseconds against 986 microseconds. That is 1.9x at the smallest set anybody writes and 6.0x at the largest the kernel answers by comparing.
+
+Two things inside the engine had to be fixed before the rewrite was worth making, and the first one is general rather than being about sets. The new node said it did not need the cores, on the grounds that its kernel spreads itself over them already, and that made it four times slower than the chain it replaced. The reason is that a morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. `Locate` and `Length` say the same thing for the same reason and are worth a second look.
+
+The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
+
+A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+
 ### Fixed: a float column is formatted as a column
 
 A float value was rendered from the value, and pandas renders it from the column it is in, so several things that look like formatting bugs in isolation were one bug. `fp.Series([1234567.125, 2.0])` printed `2.0` where pandas prints `2.000`, because the trailing zeros come off the whole column at once and only while every value in it still ends in one. `fp.Series([1e-5])` printed `1e-05` where pandas prints `0.00001`. And a column holding one enormous value now sends every value in it to scientific notation, so `[1e16, 2.0]` prints `1.000000e+16` over `2.000000e+00` the way pandas does.
