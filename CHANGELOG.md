@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-14
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release, so nothing here changes the meaning of anything that already worked. Most of it is the Python surface catching up with what the core has held all along. A frame and a column can now be printed the way pandas prints them, walked, asked how big they are, asked what they hold, asked how much memory they are using and asked whether a value is one of a set, and `info()` reports all of it in pandas' own layout. Four of those members used to raise `AttributeError`, which reads to a library handed one of our frames as this not being a dataframe at all.
+
+The printing work is three fixes that turned out to be one. A float was rendered from the value and pandas renders it from the column, a negative number was written one place to the right of where pandas writes it, and a column with labels printed its positions instead, which is issue 719. The tests compare whole renderings against a running pandas rather than against a literal, which is the assertion that would have caught 719 on its own.
+
+On the SQL side, `POSITION`, `STRPOS`, `INSTR`, `TRIM`, `LTRIM` and `RTRIM` run now, in both the keyword and the call spellings. And `ORDER BY 1` sorts on the first column rather than on the number one, which it had been doing silently: every row sorted on the same value and the sort was a node that did no work, so a query whose rows happened to arrive in order looked correct. Two tests in this repo were written that way and passed for that reason.
+
+Below the frame, a grouped `prod`, `any` and `all` complete the eighteen reductions `AggKind` carries, and a conjunction in a plan is one operator rather than a chain of them. That last one is measured at 1.80x on twelve operands and 1.88x when the columns carry nulls, and it is slower than the chain below five operands, which the entry explains rather than hides.
+
 ### Fixed: a float column is formatted as a column
 
 A float value was rendered from the value, and pandas renders it from the column it is in, so several things that look like formatting bugs in isolation were one bug. `fp.Series([1234567.125, 2.0])` printed `2.0` where pandas prints `2.000`, because the trailing zeros come off the whole column at once and only while every value in it still ends in one. `fp.Series([1e-5])` printed `1e-05` where pandas prints `0.00001`. And a column holding one enormous value now sends every value in it to scientific notation, so `[1e16, 2.0]` prints `1.000000e+16` over `2.000000e+00` the way pandas does.
@@ -6801,7 +6813,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/tamnd/firepanda/releases/tag/v0.8.1
 [0.8.0]: https://github.com/tamnd/firepanda/releases/tag/v0.8.0
 [0.7.1]: https://github.com/tamnd/firepanda/releases/tag/v0.7.1
 [0.7.0]: https://github.com/tamnd/firepanda/releases/tag/v0.7.0
