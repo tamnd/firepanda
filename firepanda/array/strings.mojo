@@ -35,6 +35,7 @@ would make every column's lifetime depend on every column it was ever cut from.
 from std.bit import byte_swap
 from std.collections.span import Span
 from std.memory import unsafe_memcpy
+from std.sys.info import simd_width_of
 
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
@@ -682,6 +683,48 @@ struct StringBuilder(Movable, Sized):
             self._payload_size = offset + written
         self._nulls.append(False)
 
+    def append_ascii_cased(
+        mut self, bytes: Span[UInt8, _], upper: Bool
+    ) -> Bool:
+        """Appends one present element case changed, if it is all ASCII.
+
+        The same shape as `append_escaped`: the answer is written straight into
+        the payload rather than into a `String` the caller then appends. Case
+        changing never changes an ASCII element's length, so the payload is
+        reserved for the length that is about to be written and the view is
+        built from what was written.
+
+        The pass that writes is also the pass that decides. Every byte is
+        compared against the letters and against 0x80 in the same registers, so
+        an element that turns out to have a byte the fast path cannot answer for
+        costs one wasted walk over bytes that were going to be walked anyway.
+        Nothing is committed in that case: the payload size does not move, no
+        view and no null flag are appended, and the caller appends the element
+        by whatever slower route it has.
+
+        Args:
+            bytes: The element's bytes.
+            upper: Whether to write it upper case rather than lower case.
+
+        Returns:
+            True if the element was all ASCII and has been appended. False if it
+            was not and nothing has been appended.
+        """
+        var count = len(bytes)
+        var offset = self._payload_size
+        self._reserve(offset + count)
+        var dest = self._payload.unsafe_mut_ptr().unsafe_offset(offset)
+        if not case_ascii_into(dest, bytes, upper):
+            return False
+
+        if count <= INLINE_CAPACITY:
+            self._views.append(make_inline_at(dest, count))
+        else:
+            self._views.append(make_long_at(dest, count, 0, offset))
+            self._payload_size = offset + count
+        self._nulls.append(False)
+        return True
+
     def _reserve(mut self, needed: Int):
         """Makes room for at least `needed` payload bytes.
 
@@ -799,6 +842,66 @@ def collapse_into[
         )
         written += count - run
     return written
+
+
+def case_ascii_into[
+    origin: MutOrigin
+](dest: Pointer[UInt8, origin], bytes: Span[UInt8, _], upper: Bool) -> Bool:
+    """Writes an element's bytes somewhere case changed, if they are all ASCII.
+
+    This sits beside `collapse_into` for the same reason that one does: it is
+    the transform half of a builder method that writes into the payload, and
+    keeping it out of the method keeps the method to the bookkeeping. The case
+    rule it knows is the whole of the ASCII rule and none of the rest, which is
+    the flip of one bit on twenty six letters. Everything a table is needed for
+    lives in `chars.mojo` and is reached by this returning False.
+
+    One pass answers both questions. The letters are found by two compares and
+    flipped by an exclusive or, and whether any byte is at or above 0x80 is
+    accumulated in the same registers and asked once at the end rather than
+    branched on per byte. A non ASCII element is written over before that is
+    known, which is why the caller must not have committed anything yet.
+
+    Args:
+        dest: Where to write. Must have room for `len(bytes)`.
+        bytes: The element's bytes.
+        upper: Whether to write it upper case rather than lower case.
+
+    Returns:
+        True if every byte was ASCII and the case changed bytes have been
+        written. False if not, in which case what was written is garbage.
+
+    Parameters:
+        origin: Where the destination lives.
+    """
+    comptime width = simd_width_of[DType.uint8]()
+    # 'a' to 'z' going up, 'A' to 'Z' coming down.
+    var low = UInt8(97) if upper else UInt8(65)
+    var high = UInt8(122) if upper else UInt8(90)
+
+    var count = len(bytes)
+    var src = bytes.unsafe_ptr()
+    var lows = SIMD[DType.uint8, width](low)
+    var highs = SIMD[DType.uint8, width](high)
+    var seen = SIMD[DType.uint8, width](0)
+    var at = 0
+    while at + width <= count:
+        var chunk = src.unsafe_offset(at).unsafe_load[width=width]()
+        seen |= chunk
+        var letter = chunk.ge(lows) & chunk.le(highs)
+        dest.unsafe_offset(at).unsafe_store(letter.select(chunk ^ 0x20, chunk))
+        at += width
+
+    var tail = seen.reduce_or()
+    while at < count:
+        var one = src.unsafe_offset(at).unsafe_load()
+        tail |= one
+        if one >= low and one <= high:
+            dest.unsafe_offset(at).unsafe_store(one ^ 0x20)
+        else:
+            dest.unsafe_offset(at).unsafe_store(one)
+        at += 1
+    return tail < 0x80
 
 
 def strings_from_list(values: List[String]) -> StringArray:

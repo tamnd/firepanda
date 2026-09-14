@@ -5225,6 +5225,51 @@ def _phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def _accented_phrase_frame(rows: Int, chunk_rows: Int) raises -> DataFrame:
+    """The same column with an accented character in every row.
+
+    The pair to `_phrase_frame`, and the only reason it exists is `Case`. The
+    fast path in `text_case` answers an element that is all ASCII and refuses
+    one that is not, and a refusal costs a pass over bytes that then get walked
+    again by the path that was there before. That is meant to be cheap next to
+    what the slow path does anyway, and this is the row that says whether it is.
+
+    One accent per phrase is the expensive shape rather than a fair average.
+    The refusal cannot end early, because whether an element is ASCII is only
+    known once every byte has been looked at, so where the accent sits makes no
+    difference and having one at all is what costs.
+
+    Args:
+        rows: How many rows.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of one text column called `s`.
+
+    Raises:
+        If building or slicing the column raises.
+    """
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        builder.append(
+            String("a phrase of about the same length, é", i).as_bytes()
+        )
+    var whole = AnyArray(builder^.finish())
+    var chunked = ChunkedArray(LogicalType.STRING)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + chunk_rows
+        if stop > rows:
+            stop = rows
+        chunked.append(whole.slice(begin, stop))
+        begin = stop
+    var columns = List[ChunkedArray]()
+    columns.append(chunked^)
+    var fields = List[Field]()
+    fields.append(Field("s", LogicalType.STRING))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _length_alone(var frame: DataFrame) raises -> DataFrame:
     """A length with nothing after it that computes per row.
 
@@ -6083,6 +6128,20 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/text_case", "rows", rows, text_case)
+
+    # The same case change over text the fast path has to refuse, which is what
+    # says whether refusing is cheap. A refused element is walked once to find
+    # out and then walked again by the path that was always there, so the gap
+    # between this row and the one above it is the whole of what the fast path
+    # costs somebody it cannot help.
+    var accented = _accented_phrase_frame(rows, MORSEL_ROWS)
+
+    def text_case_accented() raises {imm accented}:
+        keep(accented.rows)
+        var out = _case_alone(DataFrame(copy=accented))
+        keep(out.rows)
+
+    harness.record("exec/text_case_accented", "rows", rows, text_case_accented)
 
     # `ORDER BY c0 LIMIT 10` written both ways, at two widths. The bounded row
     # is what the plan's limit pass asks for now that the operator reads the

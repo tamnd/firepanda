@@ -771,7 +771,10 @@ def _matches_at(hay: Span[UInt8, _], needle: Span[UInt8, _], at: Int) -> Bool:
 def _well_formed(bytes: Span[UInt8, _]) -> Bool:
     """Whether a run of bytes is valid UTF-8.
 
-    Asked before any case work, and only there. The counting kernels above walk
+    Asked before any case work that a table or the standard library does, and
+    only there. An ASCII element never reaches this, because the fast path in
+    `text_case` has already answered it and every ASCII element is well formed
+    by construction. The counting kernels above walk
     the bytes themselves and stop at the end of the element whatever the bytes
     say, but the standard library's case walk trusts a lead byte: a truncated
     two byte sequence at the end of an element takes the first byte of the next
@@ -897,6 +900,27 @@ def text_case(a: StringArray, upper: Bool) raises -> StringArray:
     the alternative of handing the bytes to a walk that will read past them is
     worse than leaving them alone.
 
+    An ASCII element is answered before any of that, by one SIMD pass that flips
+    the letters and checks for a byte at or above 0x80 at the same time, writing
+    into the builder's payload. That is worth having because the general path
+    costs four walks and a heap allocation for an element that needs none of
+    them: a validity pass, a pass looking for a lead byte the table could know
+    about, the standard library's walk into a fresh `String`, and then a copy of
+    that `String` into the builder before it is dropped. Measured on the
+    i9-13900K over four million rows of forty byte ASCII, with the work already
+    spread over the cores, the four walks came to four hundred nanoseconds a row
+    and the one pass comes to 6.6, which is sixty times. Issue 756 has the rest
+    of the numbers.
+
+    Nothing about the Unicode answers changes. An element with any byte at or
+    above 0x80 is one the fast path refuses, and it goes to exactly the path it
+    went to before, so the thirty nine full mappings and the hundred and ten
+    the standard library does not know keep the walk and the table. A refusal
+    costs one wasted pass, because whether an element is ASCII is only known
+    once every byte has been looked at. The same four million rows with an
+    accent in every one of them ran 1.69 seconds either way, which is the
+    `exec/text_case_accented` benchmark row and the reason it exists.
+
     Args:
         a: The column.
         upper: Whether to write it upper case rather than lower case.
@@ -918,6 +942,8 @@ def text_case(a: StringArray, upper: Bool) raises -> StringArray:
             built.append_null()
             continue
         var bytes = a.unsafe_bytes(i)
+        if built.append_ascii_cased(bytes, upper):
+            continue
         if not _well_formed(bytes):
             built.append(bytes)
             continue
