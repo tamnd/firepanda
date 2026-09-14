@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the binder derives the return type of a call the catalog writes a rule for
+
+The entry below counted 932 expressions the type differential was not comparing the type of, across 29 function names. 820 of them are compared now and agree with DuckDB, and the names left are nine rather than 29. Issue #780.
+
+DuckDB's catalog says what a function returns and for most of them that is a type, `length(VARCHAR) -> BIGINT` being every one of them. For the rest it is a rule, written as a word that is not a type, and the rule has to be read off the signature because the word is the same either way.
+
+`firepanda/sql/result.mojo` is where they are read now. A template letter or `ANY` means the type of the argument it stands for, so `first` over a `UUID` column is a `UUID` and `arg_max(ANY, ANY)` is its first argument rather than its second, which the second one being the thing you order by explains. In the trailing slot of a variadic it means the type all the arguments agree on instead, because that is a common type DuckDB works out and casts to: `greatest(DECIMAL(5,2), INTEGER, TINYINT)` is a `DECIMAL(12,2)` and is none of the three.
+
+A bare `DECIMAL` is a promise about the family and not the width. As a parameter it is a cast target, so the result is what the arguments were cast to and `mod(DECIMAL(5,2), INTEGER)` is a `DECIMAL(12,2)`. Six names then do something else with that. `sum` widens to 38 digits and keeps the scale. `avg` gives a `DOUBLE` despite declaring a `DECIMAL`, which is DuckDB's bind function disagreeing with DuckDB's own catalog. `ceil`, `ceiling`, `floor` and `round` keep the width and drop the scale.
+
+`median` is its own rule and a nice one. It is declared to return whatever it was given, and over an even number of rows it is the midpoint of the middle two, so for a type whose midpoint is not a value of that type it widens: ten integer types give a `DOUBLE`, a `DATE` gives a `TIMESTAMP`, and a `FLOAT` stays a `FLOAT` because the midpoint of two floats is one. `concat` is the other odd one, declared over `ANY` returning `ANY` and being a `VARCHAR`.
+
+Every rule was measured against DuckDB 1.5 rather than reasoned out, which is how `median` was found at all: the first run of the harness with the rest of this in place reported six disagreements and all six were `median`.
+
+What is left is the containers, `T[]` and `MAP` and the rest, which is 112 expressions across nine names. Those need an element type and `SqlType` carries none, so there is no way to write `DECIMAL(5,2)[]` down even where the answer is obvious. They stay counted apart and unclaimed.
+
 ### Changed: the type differential now says how much of its agreement is not a type comparison
 
 The harness reported agreement over 15,001 expressions and zero disagreements, and 932 of those expressions never had their type compared. It prints both numbers now. Issue #780.
