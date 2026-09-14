@@ -496,6 +496,21 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def replace(
+        self,
+        pat: Any,
+        repl: Any = None,
+        n: Any = -1,
+        case: Any = None,
+        flags: Any = 0,
+        regex: Any = False,
+    ) -> Series:
+        """Every row with a literal pattern swapped for another string."""
+        try:
+            return self._replaced(pat, repl, n, case, flags, regex)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

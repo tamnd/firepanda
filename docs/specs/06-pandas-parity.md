@@ -238,7 +238,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `join` (M6)
 - [x] `contains`, `startswith`, `endswith`, `match`, `fullmatch` (M6), the last three exact for any pattern holding none of the twelve regular expression characters and refusing by name for any pattern that does, since a pattern with no metacharacter in it means the same thing to an engine as it does to a byte search and there is no engine here yet
 - [x] `find`, `rfind`, `index`, `rindex`, `count` (M6), `count` counting matches that do not overlap and counting an empty pattern in bytes rather than characters, which is Arrow's rule and pandas' answer and is one more than Python's on every non ASCII character in the row
-- [ ] `replace` with regex and literal, `removeprefix`, `removesuffix` (M6)
+- [x] `replace` with a literal, `removeprefix`, `removesuffix` (M6), `replace` reading its pattern literally because `regex` defaults to False in pandas 3 so the ordinary call needs no engine and narrows nothing, honouring `n` at every sign it can have, refusing `case` and `flags` rather than ignoring them, and inserting between characters for an empty pattern where `count` counts bytes for the same argument, which is pandas' own split and comes from a pyarrow kernel that does not terminate
+- [ ] `replace` with a regular expression, which needs the engine and a backreference syntax with it (M6)
 - [ ] `extract`, `extractall`, `findall` (M6)
 - [ ] `get_dummies` (M6)
 - [ ] `encode`, `decode`, `normalize` (M6)

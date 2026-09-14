@@ -1022,6 +1022,17 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="replace",
+            kind="method",
+            signature=(
+                "pat: Any, repl: Any = None, n: Any = -1, case: Any = None,"
+                " flags: Any = 0, regex: Any = False"
+            ),
+            body="self._replaced(pat, repl, n, case, flags, regex)",
+            doc="Every row with a literal pattern swapped for another string.",
+            returns="Series",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",
@@ -2987,6 +2998,7 @@ SERIES = Exposed(
             params=(
                 ("kind", "str"),
                 ("arg", "str"),
+                ("other", "str"),
                 ("start", "int | None"),
                 ("stop", "int | None"),
                 ("step", "int"),

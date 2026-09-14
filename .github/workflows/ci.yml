@@ -468,6 +468,17 @@ jobs:
         run: pixi run differential-semantics
         timeout-minutes: 5
 
+      # And the question after that one. A type comparison cannot see a kernel
+      # that counts the right thing wrongly, which is how `strlen` shipped
+      # counting characters where DuckDB counts bytes with every test above it
+      # agreeing. docs/specs/sql/11-conformance.md section 6.
+      # Fifteen rather than the five the steps above take. Almost all of it is
+      # DuckDB, which is asked one query per expression, and the run has been
+      # seen to take eleven minutes on a loaded machine and three on a quiet one.
+      - name: Expression values, through both engines
+        run: pixi run differential-answers
+        timeout-minutes: 15
+
   required:
     name: CI
     if: always()

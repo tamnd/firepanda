@@ -17,6 +17,28 @@ One pass answers an ASCII element now. The letters are found by two compares and
 Measured on the i9-13900K over four million rows of forty byte ASCII, alternated twice: 1.674 seconds and 1.525 seconds without the fast path, 26.5 milliseconds with it both times. That is 6.6 nanoseconds a row against four hundred, which is sixty times, and it is the difference between a case change being the most expensive thing in a query and being cheaper than the substring beside it.
 
 An element with a byte at or above 0x80 is refused and takes exactly the path it took before, so none of the Unicode answers move and the hundred and forty nine corrections keep their table. A refusal is not free, because whether an element is ASCII is only known once every byte has been looked at, so it is one wasted pass over bytes that get walked again. The same four million rows with an accent in every one of them ran 1.692 and 1.665 seconds before and 1.702 and 1.688 after, which is under one and a half per cent, and there is a benchmark row holding it there.
+### Added: a value differential, which is what would have caught the STRLEN bug
+
+`pixi run differential-answers` runs the same expressions over the same eight rows through firepanda and through DuckDB and compares the values that come back.
+
+Nothing here did that before. Two harnesses ask whether a statement parses and a third asks what type an expression comes out as, and all three agreed about `strlen` while it returned the wrong number, because the type was `BIGINT` on both sides and no harness ever looked at a result. A kernel that answers the right type and the wrong value was invisible to the whole suite.
+
+The probe table is described once as SQL literal text and built twice from that description, so the two sides cannot drift the way two fixtures maintained separately do. The rows are chosen to sit on the edges a kernel gets wrong: text that is not ASCII, text whose character count and byte count differ, an empty string, spaces on both ends, a null in every column, a negative number, a zero, a date before the epoch and a leap day.
+
+Answers are compared as text, which is the one rendering both engines can be asked for without either having an opinion about formatting. That covers whole numbers, text and booleans. Floating point renders differently on the two sides, so nothing in the list answers one yet, and the decimals and the timestamps come with the renderings being settled rather than being papered over now.
+
+It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, and until it is fixed the two expressions are on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
+
+It runs on every commit and needs no corpus. It takes a couple of minutes, almost all of it DuckDB answering seventy expressions one query at a time.
+### Added: `str.replace` with a literal pattern
+
+The fifth `str` name about a pattern and the one that narrows nothing. pandas 3 defaults `regex` to False, so the ordinary call is a literal replacement already and a byte search and a rewrite is the whole of it. `regex=True` goes through the same check the other four use: a pattern with none of the twelve metacharacters in it is served and anything else is refused by name.
+
+`n` works at every sign it can have. Negative means every match, which is the default, zero hands the row back without searching it, and a positive number means that many counted from the left. Matches do not overlap, so `replace("aa", "X")` on four a's is `XX`. A missing row stays missing, which makes this the first name in the accessor that agrees with pandas about a missing row rather than having to register a divergence for it.
+
+`pat` may be a mapping, in which case the pairs are applied one after another and each one reads the last one's output, as pandas does. A callable `repl` is refused, since pandas itself refuses one when `regex` is off and needs an engine when it is on. `case=False` and a non zero `flags` are refused rather than ignored, which is a real gap here and not only a missing engine: pandas does honour `case=False` on this method by escaping the pattern and running it case insensitively, and matching that needs a case folding search that does not exist yet.
+
+One answer is worth knowing before it surprises anybody. An empty pattern inserts the replacement before every character and once at the end, so `replace("", "-")` on `"héllo"` gives six dashes, while `count("")` on the same row answers seven because it counts bytes. Both numbers are pandas'. `pyarrow.compute.replace_substring` does not terminate on an empty pattern, so pandas hands that one case to Python, which counts characters, while `count` stays in Arrow, which counts bytes.
 
 ### Added: `contains`, `match`, `fullmatch` and `count`, the first four `str` names about patterns
 

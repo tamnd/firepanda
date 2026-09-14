@@ -106,6 +106,7 @@ from firepanda.kernel.pattern import (
     text_count,
     text_ends_with,
     text_equals,
+    text_replace,
     text_starts_with,
 )
 from firepanda.kernel.pick import pick_any
@@ -1641,6 +1642,40 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count(self.values.strings(), pattern.as_bytes())),
+        )
+
+    def chars_replace(
+        self, pattern: StringSlice, repl: StringSlice, limit: Int
+    ) raises -> Self:
+        """Returns each row with a substring swapped for another.
+
+        Matches do not overlap, so replacing `aa` in `aaaa` swaps twice. An
+        empty pattern puts the replacement before every character and once at
+        the end, which is counted in characters and is the opposite of what
+        `chars_count` does with the same argument.
+
+        Args:
+            pattern: The substring to look for.
+            repl: What to put in its place.
+            limit: How many matches per row. Negative means all of them and zero
+                means none, which is what pandas' `n` means.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_replace(
+                    self.values.strings(),
+                    pattern.as_bytes(),
+                    repl.as_bytes(),
+                    limit,
+                )
+            ),
         )
 
     def cat_is_category(self) -> Bool:
