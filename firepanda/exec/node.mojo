@@ -165,6 +165,7 @@ from firepanda.kernel.select import (
     take_any,
 )
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.topn import top_rows
 from firepanda.kernel.temporal import (
     TRUNC_CODES,
     TemporalField,
@@ -1035,11 +1036,25 @@ struct Sort(Movable):
     pipeline does not turn ten million rows into one chunk for whatever is above
     it. The rows in each are of course not the rows that arrived in it.
 
-    This does not honour a limit above it. A sort that only has to get the first
-    n rows right is a different operator with a heap in it rather than a
-    permutation, and the plan writes the bound down on the node for one to read
-    later. Ignoring it is slow rather than wrong, because the limit is still
-    sitting above the sort and still doing the cutting.
+    A limit above it is honoured, when the plan wrote the bound down. A sort
+    that only has to get the first n rows right never builds a permutation of
+    everything: `top_rows` keeps the best n it has seen as it scans, and then
+    every column is gathered at n rows rather than at all of them. On the shape
+    this is for, a million rows ordered to answer with ten, that is the whole
+    query. The limit above stays where it is and goes on doing the cutting, so a
+    bound is an opportunity and never a requirement, which is why the plan could
+    write it down a release before anything read it.
+
+    The bound is the offset plus the length, because the rows the limit skips
+    still have to be found before the ones it keeps. `top_rows` falls back to
+    one ordinary sort when the bound covers the input, so a bound that bounds
+    nothing costs nothing.
+
+    A bounded sort still holds every row that arrives. What the bound saves is
+    the permutation and the gathers, not the memory, and holding a heap per
+    chunk instead would be a third operator rather than a flag on this one. The
+    gathers are where a wide sort spends its time, so that is the half worth
+    having first.
     """
 
     var keys: List[Int]
@@ -1050,6 +1065,13 @@ struct Sort(Movable):
 
     var nulls_first: List[Bool]
     """One flag per key."""
+
+    var bound: Int
+    """How many rows from the top are needed, or -1 when all of them are.
+
+    The offset plus the length of the limit above, which is what the plan's
+    limit pass leaves on the sort node.
+    """
 
     var input: Schema
     """The schema of the chunks coming in, filled in by `Pipeline.add`."""
@@ -1074,6 +1096,7 @@ struct Sort(Movable):
         var keys: List[Int],
         var descending: List[Bool],
         var nulls_first: List[Bool],
+        bound: Int = -1,
     ) raises:
         """Constructs a sort.
 
@@ -1083,13 +1106,19 @@ struct Sort(Movable):
             descending: Whether each key orders downwards. Consumed.
             nulls_first: Whether each key's missing values go at the front.
                 Consumed.
+            bound: How many rows from the top the operator above needs, which is
+                a limit's offset plus its length. The default is every row.
 
         Raises:
-            If there are no keys, or if the flag lists are a different length
-            from the keys.
+            If there are no keys, if the flag lists are a different length from
+            the keys, or if the bound is negative and is not the default.
         """
         if len(keys) == 0:
             raise Error("sort: a sort with no key does not order anything")
+        if bound < -1:
+            raise Error(
+                String("sort: ", bound, " is not a number of rows to keep")
+            )
         if len(descending) != len(keys) or len(nulls_first) != len(keys):
             raise Error(
                 String(
@@ -1105,6 +1134,7 @@ struct Sort(Movable):
         self.keys = keys^
         self.descending = descending^
         self.nulls_first = nulls_first^
+        self.bound = bound
         self.input = Schema()
         self.held = List[ChunkedArray]()
         self.sizes = List[Int]()
@@ -1214,6 +1244,10 @@ struct Sort(Movable):
         column. Then the permutation is cut at the boundaries the input had and
         each piece gathers its own chunk, so the flattening is the one copy.
 
+        A bounded sort asks `top_rows` for the rows it needs instead of building
+        the permutation, and the rest of the work is the same: the same gather
+        per column, over fewer rows.
+
         Raises:
             If a key column's dtype is not one firepanda can sort.
         """
@@ -1226,24 +1260,50 @@ struct Sort(Movable):
         if self.width == 0:
             return
 
-        var order = identity_permutation(len(flat[0]))
-        for i in range(len(self.keys) - 1, -1, -1):
-            argsort_any_into(
-                flat[self.keys[i]],
-                order,
-                self.descending[i],
-                self.nulls_first[i],
+        var height = len(flat[0])
+        var rows: List[Int]
+        if self.bound >= 0 and self.bound < height:
+            var best = top_rows(
+                borrow_columns(flat),
+                self.keys,
+                height,
+                self.descending,
+                self.nulls_first,
+                self.bound,
             )
-        var rows = List[Int](capacity=len(order))
-        for i in range(len(order)):
-            rows.append(Int(order[i]))
+            rows = List[Int](capacity=len(best))
+            for i in range(len(best)):
+                rows.append(Int(best[i]))
+        else:
+            var order = identity_permutation(height)
+            for i in range(len(self.keys) - 1, -1, -1):
+                argsort_any_into(
+                    flat[self.keys[i]],
+                    order,
+                    self.descending[i],
+                    self.nulls_first[i],
+                )
+            rows = List[Int](capacity=len(order))
+            for i in range(len(order)):
+                rows.append(Int(order[i]))
+
+        # The input's chunk sizes, cut short where the bound ran out before they
+        # did. An unbounded sort uses all of them and hands back the shape it was
+        # given.
+        var cuts = List[Int](capacity=len(self.sizes))
+        var counted = 0
+        for c in range(len(self.sizes)):
+            if counted >= len(rows):
+                break
+            cuts.append(min(self.sizes[c], len(rows) - counted))
+            counted += cuts[len(cuts) - 1]
 
         # Backwards, and columns backwards inside a chunk, because `finish`
         # takes what it hands over off the end of this list.
-        var at = len(rows)
-        for c in range(len(self.sizes) - 1, -1, -1):
-            var start = at - self.sizes[c]
-            var piece = List[Int](capacity=self.sizes[c])
+        var at = counted
+        for c in range(len(cuts) - 1, -1, -1):
+            var start = at - cuts[c]
+            var piece = List[Int](capacity=cuts[c])
             for i in range(start, at):
                 piece.append(rows[i])
             for i in range(self.width - 1, -1, -1):

@@ -2265,10 +2265,12 @@ def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     a sort key owns no name, it is read and not emitted, so there is nothing to
     stop the second from being the first.
 
-    The bound the plan may have put on the node is not read. A sort that only
-    has to get the first n rows right is a different operator, and the limit
-    that wrote the bound down is still above the sort and still doing the
-    cutting, so ignoring it is slow rather than wrong.
+    The bound the plan's limit pass put on the node is handed to the operator,
+    which is what turns `ORDER BY t LIMIT 10` over a million rows into a scan
+    that keeps the best ten rather than a permutation of a million and a gather
+    of every column at every row. The limit above stays where it is and goes on
+    doing the cutting, so this is an opportunity and never a requirement, and a
+    plan that never ran the limit pass lowers to a sort of everything.
 
     Args:
         plan: The plan.
@@ -2298,7 +2300,11 @@ def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         descending.append(plan.nodes[at].flags[i])
         nulls_first.append(not plan.nodes[at].flags[len(held) + i])
 
-    pipe.add(Node(Sort(keys^, descending^, nulls_first^)))
+    # `NO_LIMIT` and the operator's own default for no bound are both -1, so an
+    # unbounded sort is handed its own default and nothing has to translate.
+    pipe.add(
+        Node(Sort(keys^, descending^, nulls_first^, plan.nodes[at].length))
+    )
     _trim(pipe, base)
 
 
