@@ -800,6 +800,13 @@ struct Limit(Movable):
     def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
         """Drops rows until the offset is passed, then passes them through.
 
+        A chunk under a selection is cut by cutting the selection, which is four
+        bytes a row and is the whole of it for a column that is read through the
+        positions. A column that is already at the chunk's rows is sliced like
+        any other. That is the difference between `LIMIT 10` after a filter
+        gathering a hundred and twenty eight thousand rows and then keeping ten
+        of them, and gathering the ten.
+
         Args:
             chunk: The chunk. Consumed.
 
@@ -825,6 +832,18 @@ struct Limit(Movable):
             take = self.n - self.emitted
         self.emitted += take
         if start == 0 and take == rows:
+            return chunk^
+        if chunk.selected():
+            var kept = List[UInt32](unsafe_uninit_length=take)
+            var target = kept.unsafe_ptr()
+            for j in range(take):
+                target.unsafe_offset(j).unsafe_write(chunk.picks[start + j])
+            for i in range(chunk.width()):
+                if chunk.dense[i]:
+                    var piece = chunk.columns[i].slice(start, start + take)
+                    chunk.columns[i] = piece^
+            chunk.picks = kept^
+            chunk.rows = take
             return chunk^
         var cut = List[AnyArray](capacity=chunk.width())
         for i in range(chunk.width()):
@@ -6195,6 +6214,8 @@ def node_reads_selection(node: Node) -> Bool:
     so passing the positions along costs nothing and flattening would gather the
     columns it is about to drop. `Compute` and `Cast` read one because an
     expression names one or two columns and flattening gathers all of them.
+    `Limit` reads one because cutting a chunk down to ten rows is cutting the
+    positions, and flattening first would gather every row it is about to drop.
     Everything else is still flattened.
 
     Args:
@@ -6208,6 +6229,7 @@ def node_reads_selection(node: Node) -> Bool:
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Cast]()
+        or node.isa[Limit]()
     )
 
 

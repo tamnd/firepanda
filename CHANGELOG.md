@@ -246,6 +246,12 @@ A cast could convert the array where it lies, because a cast reads a row and wri
 
 The computed column is at the chunk's rows, which is what makes it dense, and that is why a filter reading a mask computed above it finds the mask dense and composes rather than gathering.
 
+### Changed: a limit cuts the selection rather than the rows under it
+
+`LIMIT 10` after a filter used to gather every row the filter kept so that it could throw all but ten of them away. A chunk under a selection is now cut by cutting the positions, which is four bytes a row, and a column that is already at the chunk's rows is sliced the way it always was. What gets gathered afterwards is ten rows.
+
+The offset counts rows of the chunk and not positions in the arrays underneath, which is the one thing here that would be wrong if the two were confused.
+
 ## [0.8.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
