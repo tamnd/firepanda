@@ -5567,6 +5567,26 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record("exec/pipeline_line_one_chunk", "rows", rows, line_whole)
 
+    # The same one chunk frame, cut into morsels inside the timing and then run.
+    # A frame that arrives in one chunk is what every reader produces, and the
+    # row above says what that costs against the row before it. This row asks
+    # whether a scan could pay its way out: the cut is a copy of both columns
+    # today, since a slice allocates, so this is the whole cost of re-chunking
+    # plus the cheaper run, against the dearer run on its own.
+    def line_whole_split() raises {imm whole}:
+        keep(whole.rows)
+        var cut = _in_chunks(DataFrame(copy=whole), MORSEL_ROWS, 0, 1)
+        var pipeline = Pipeline(cut^)
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_line_one_chunk_split", "rows", rows, line_whole_split
+    )
+
     # The same line as lowering emits it: the filter is told which columns it
     # owes, so the mask it read is never written out and the projection after it
     # is not needed. This is where writing a selection rather than copying pays,
