@@ -347,5 +347,95 @@ def test_append_escaped_interleaves_with_the_other_appends() raises:
     assert_equal(column[5], "tail", "row 5")
 
 
+def test_append_ascii_cased_matches_the_byte_at_a_time_answer() raises:
+    # Every length from zero to a hundred, so the SIMD body and the scalar tail
+    # are both exercised whatever the register width is, and both sides of the
+    # inline boundary are crossed. The reference is the flip of one bit on the
+    # twenty six letters, done a byte at a time.
+    var upper = StringBuilder()
+    var lower = StringBuilder()
+    var cases = List[String]()
+    for length in range(101):
+        var one = String("")
+        for k in range(length):
+            # Letters of both cases, digits and punctuation, so there is
+            # something in every block that must not be touched.
+            one += String(chr(32 + (k * 7) % 95))
+        cases.append(one)
+        assert_true(
+            upper.append_ascii_cased(cases[length].as_bytes(), True),
+            "length " + String(length) + " is ascii going up",
+        )
+        assert_true(
+            lower.append_ascii_cased(cases[length].as_bytes(), False),
+            "length " + String(length) + " is ascii coming down",
+        )
+
+    var raised = upper^.finish()
+    var dropped = lower^.finish()
+    for c in range(len(cases)):
+        var bytes = cases[c].as_bytes()
+        var wanted_up = String("")
+        var wanted_down = String("")
+        for k in range(len(bytes)):
+            var byte = Int(bytes[k])
+            var up = byte - 32 if byte >= ord("a") and byte <= ord("z") else byte
+            var down = byte + 32 if byte >= ord("A") and byte <= ord(
+                "Z"
+            ) else byte
+            wanted_up += String(chr(up))
+            wanted_down += String(chr(down))
+        assert_equal(raised[c], wanted_up, "length " + String(c) + " up")
+        assert_equal(dropped[c], wanted_down, "length " + String(c) + " down")
+
+
+def test_append_ascii_cased_refuses_a_byte_above_ascii() raises:
+    # A refusal has to leave the builder exactly as it found it, including the
+    # payload offset, because the caller is about to append the same element by
+    # a slower route and a long element after it must not be overwritten.
+    var cases = List[String]()
+    cases.append(String("é"))
+    cases.append(String("straße"))
+    cases.append(String("a long enough element with é in the middle of it"))
+    cases.append(String("ascii for a while and then a lead byte at the end é"))
+
+    var builder = StringBuilder()
+    builder.append(String("a long plain element here").as_bytes())
+    for c in range(len(cases)):
+        assert_false(
+            builder.append_ascii_cased(cases[c].as_bytes(), True),
+            "case " + String(c) + " is refused",
+        )
+        assert_equal(len(builder), 1, "case " + String(c) + " appended nothing")
+    builder.append(String("another long plain element").as_bytes())
+    var column = builder^.finish()
+
+    assert_equal(len(column), 2, "only the two plain elements are there")
+    assert_equal(column[0], "a long plain element here", "row 0 survived")
+    assert_equal(column[1], "another long plain element", "row 1")
+
+
+def test_append_ascii_cased_interleaves_with_the_other_appends() raises:
+    # Same worry as the escaped case: an element short enough to live in its own
+    # view must not move the payload offset.
+    var builder = StringBuilder()
+    builder.append(String("a long plain element here").as_bytes())
+    _ = builder.append_ascii_cased(String("short").as_bytes(), True)
+    builder.append(String("another long plain element").as_bytes())
+    _ = builder.append_ascii_cased(
+        String("a long element to raise here").as_bytes(), True
+    )
+    builder.append_null()
+    _ = builder.append_ascii_cased(String("TAIL").as_bytes(), False)
+    var column = builder^.finish()
+
+    assert_equal(column[0], "a long plain element here", "row 0")
+    assert_equal(column[1], "SHORT", "row 1")
+    assert_equal(column[2], "another long plain element", "row 2")
+    assert_equal(column[3], "A LONG ELEMENT TO RAISE HERE", "row 3")
+    assert_false(column.is_valid(4), "row 4 is null")
+    assert_equal(column[5], "tail", "row 5")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
