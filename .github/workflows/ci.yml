@@ -96,6 +96,22 @@ jobs:
           fi
           exit $rc
 
+      # `CHANGELOG.md` is merged with the union driver, which is what keeps two
+      # branches from conflicting on every entry. The price is that when both
+      # sides append at the same place, the blank line that used to separate the
+      # last entry from the next heading belongs to one side's hunk and comes out
+      # the other side of the merge attached to neither. The result renders as one
+      # run-on paragraph with a hash in the middle of it. Nothing about that is
+      # visible in a diff of the merge, which is why it kept landing.
+      - name: The changelog has a blank line before every heading
+        run: |
+          bad=$(awk 'NR>1 && /^#/ && prev != "" { print NR ": " $0 } { prev = $0 }' CHANGELOG.md)
+          if [ -n "$bad" ]; then
+            echo "::error::CHANGELOG.md heading with no blank line before it, which is the union merge eating one:"
+            echo "$bad"
+            exit 1
+          fi
+
       - name: Internal document cross-references resolve
         run: |
           rc=0

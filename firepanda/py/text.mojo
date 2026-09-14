@@ -65,6 +65,7 @@ def _text_name(name: String) raises -> String:
         or name == "lower"
         or name == "capitalize"
         or name == "swapcase"
+        or name == "casefold"
         or name == "slice"
         or name == "slice_replace"
         or name == "get"
@@ -243,6 +244,8 @@ def text(
         return column.chars_capitalize()
     if wanted == "swapcase":
         return column.chars_swapcase()
+    if wanted == "casefold":
+        return column.chars_casefold()
     if wanted == "slice":
         # The kernel refuses this as well, since it has to and since it is
         # reachable from the Mojo API too. It is refused again here so that the

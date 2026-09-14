@@ -23,6 +23,7 @@ from firepanda.kernel.chars import (
     characters_before,
     text_capitalize,
     text_case,
+    text_casefold,
     text_character_get,
     text_character_length,
     text_character_slice,
@@ -430,6 +431,21 @@ def capitalised(var values: List[String]) raises -> List[String]:
     return rows(text_capitalize(made(values^)))
 
 
+def folded(var values: List[String]) raises -> List[String]:
+    """Folds a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_casefold(made(values^)))
+
+
 def swapped(var values: List[String]) raises -> List[String]:
     """Swaps the case of a column built from a list and reads it back.
 
@@ -682,6 +698,79 @@ def test_the_two_new_names_leave_bytes_that_are_not_utf8_alone() raises:
     assert_equal(rows(text_swapcase(col))[1], "AB")
     assert_equal(len(rows(text_capitalize(col))[0].as_bytes()), 2)
     assert_equal(rows(text_capitalize(col))[1], "Ab")
+
+
+def test_folding_is_lowering_for_anything_ordinary() raises:
+    var out = folded(["ABC", "Ab", "café", "CAFÉ", "123", "ΑΒΓ"])
+    assert_equal(out[0], "abc")
+    assert_equal(out[1], "ab")
+    assert_equal(out[2], "café")
+    assert_equal(out[3], "café")
+    assert_equal(out[4], "123")
+    assert_equal(out[5], "αβγ")
+
+
+def test_folding_makes_a_row_longer_where_lowering_never_does() raises:
+    # The one rewrite in this file that can add characters. Lowering a sharp s
+    # leaves it alone and folding it writes two letters, which is the whole
+    # reason folding is a separate name rather than a spelling of lower.
+    var out = folded(["ß", "Straße", "ﬁ"])
+    assert_equal(out[0], "ss")
+    assert_equal(out[1], "strasse")
+    assert_equal(out[2], "fi")
+
+
+def test_folding_brings_two_rows_a_reader_calls_equal_together() raises:
+    # The point of the name. Neither of these lowers to the other and both of
+    # them fold to the same thing, which is what folding is for.
+    var out = folded(["Straße", "STRASSE"])
+    assert_equal(out[0], out[1])
+
+
+def test_folding_is_not_lowering_for_the_micro_sign() raises:
+    # The lowest code point in the table, and the reason there is no byte test
+    # on this path: its lead byte is the lowest a non ASCII character can have.
+    var out = folded(["µ", "ſ", "İ"])
+    assert_equal(out[0], "μ")
+    assert_equal(out[1], "s")
+    assert_equal(len(out[2].as_bytes()), 3)
+
+
+def test_folding_corrects_the_same_code_points_the_other_names_do() raises:
+    # A code point the standard library lowers wrongly still has to be lowered
+    # rightly here, since the fold table only holds the ones that fold to
+    # something other than their lower case and everything else falls through.
+    var out = folded(["ẞ", "ϴ"])
+    assert_equal(out[0], "ss")
+    assert_equal(out[1], "θ")
+
+
+def test_folding_a_titlecase_character_takes_it_all_the_way_down() raises:
+    # `swapcase` leaves these alone because they are in neither case. Folding
+    # does not care what case anything is in, so all three of a titlecase
+    # character, the capital beside it and the small one fold to the same thing.
+    var out = folded(["ǅ", "Ǆ", "ǆ"])
+    assert_equal(out[0], out[2])
+    assert_equal(out[1], out[2])
+
+
+def test_folding_an_empty_row_and_a_missing_row() raises:
+    var out = folded(["", "null", "AB"])
+    assert_equal(out[0], "")
+    assert_equal(out[1], "null")
+    assert_equal(out[2], "ab")
+
+
+def test_folding_leaves_bytes_that_are_not_utf8_alone() raises:
+    var truncated = List[UInt8]()
+    truncated.append(0x41)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("AB".as_bytes())
+    var col = built^.finish()
+    assert_equal(len(rows(text_casefold(col))[0].as_bytes()), 2)
+    assert_equal(rows(text_casefold(col))[1], "ab")
 
 
 def main() raises:

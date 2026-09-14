@@ -48,6 +48,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
     text_capitalize,
     text_case,
+    text_casefold,
     text_character_get,
     text_character_length,
     text_character_slice,
@@ -1308,6 +1309,26 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_swapcase(self.values.strings())),
+        )
+
+    def chars_casefold(self) raises -> Self:
+        """Returns every row folded, which is the form two equal rows agree on.
+
+        Not a case anybody reads. Folding exists so that two rows a reader would
+        call the same come out as the same bytes, which is why a German sharp s
+        folds to two letters and why this is the one rewrite here that can make a
+        row longer in characters than it was. pandas answers it out of Python
+        rather than out of Arrow, because pyarrow has no kernel for it.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_casefold(self.values.strings())),
         )
 
     def chars_is_space(self) raises -> Self:

@@ -494,6 +494,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def casefold(self) -> Series:
+        """Every row folded, which is the form two equal rows agree on."""
+        try:
+            return self._text("casefold")
+        except Exception as error:
+            raise translate(error) from None
+
     def isspace(self) -> Series:
         """Whether every row is whitespace and nothing else."""
         try:

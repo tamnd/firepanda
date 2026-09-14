@@ -5315,6 +5315,13 @@ def bench_pipeline(mut harness: Harness) raises:
     of what a filter costs is the rows it keeps and how much is the rows it
     reads to find them.
 
+    The `fused` rows are those same predicates with the comparison inside the
+    filter instead of under it, and `pipeline_two_conditions` against
+    `pipeline_two_conditions_fused` is the shape where that is worth more than
+    the mask it saves: the second condition reads a column of a chunk the first
+    one has already narrowed, which a compute has to gather and a filter does
+    not.
+
     The last four rows are about the reduction node rather than the driver.
     `pipeline_reduce` against `pipeline_reduce_two_steps` is the same query
     written both ways, fused and not, and the gap is a round trip to memory of
@@ -5442,6 +5449,62 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record(
         "exec/pipeline_line_narrow_tenth", "rows", rows, line_narrow_tenth
+    )
+
+    # The same predicate again with the comparison inside the filter rather
+    # than under it. The pair is the measurement: same rows in, same rows out,
+    # one mask column written and read on one side and none on the other. Both
+    # halves of a pair run in the same process on the same data, so what they
+    # say about each other does not depend on what else the machine is doing.
+    def fused_narrow() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Filter(1, Value(Int64(500)), BinaryOp.LT, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_fused_narrow", "rows", rows, fused_narrow)
+
+    def fused_narrow_tenth() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Filter(1, Value(Int64(100)), BinaryOp.LT, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_fused_narrow_tenth", "rows", rows, fused_narrow_tenth
+    )
+
+    # Two conditions, which is where the fused form has the larger half of its
+    # argument. The second condition reads a column of a chunk the first one has
+    # already narrowed: written as a compute it has to gather that column to
+    # write a mask at the chunk's rows, and written inside the filter it reads
+    # the rows where they lie and writes nothing. The two columns hold the same
+    # draw, so the second condition keeps about half of what the first left,
+    # which is a second condition doing real work rather than a formality.
+    def two_conditions() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(100)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2, [0, 1])))
+        pipeline.add(Node(Compute(0, Value(Int64(50)), BinaryOp.LT, "also")))
+        pipeline.add(Node(Filter(2, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_two_conditions", "rows", rows, two_conditions)
+
+    def two_conditions_fused() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Filter(1, Value(Int64(100)), BinaryOp.LT, [0, 1])))
+        pipeline.add(Node(Filter(0, Value(Int64(50)), BinaryOp.LT, [0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_two_conditions_fused", "rows", rows, two_conditions_fused
     )
 
     def line_narrow_third() raises {imm streamed}:

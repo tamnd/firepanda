@@ -2840,10 +2840,10 @@ def test_giving_up_the_columns_flattens_first() raises:
 
 
 def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
-    """The safety property the whole step rests on. A limit has not been taught
-    to read a selection, so a limit handed a selected chunk sees it flattened and
-    gives the answer it would have given anyway."""
-    var node = Node(Limit(5))
+    """The safety property the whole step rests on. A constant column has not
+    been taught to read a selection, so a node that appends one sees its input
+    flattened and gives the answer it would have given anyway."""
+    var node = Node(Constant(Value(Int64(9)), LogicalType.INT64, "nine"))
     var out = node_process(node, selected_chunk())
     assert_true(out.__bool__(), "a chunk came back")
     var got = out.take()
@@ -3345,6 +3345,258 @@ def test_materializing_a_column_leaves_it_where_it_can_be_found() raises:
     chunk.materialize(1)
     assert_false(chunk.selected(), "and with both gathered the selection goes")
     assert_equal(len(chunk), 3, "three rows, which is what it said")
+
+
+def test_a_limit_cuts_the_selection_rather_than_the_columns() raises:
+    """`LIMIT 2` after a filter used to gather every row the filter kept in
+    order to throw all but two of them away. The positions are cut instead and
+    the columns are left where they are, so what gets gathered later is two
+    rows."""
+    var node = Node(Limit(2))
+    var out = node_process(node, two_under_a_selection())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 2, "two rows of the three")
+    assert_equal(len(got.columns[0]), 6, "over columns that still hold six")
+    assert_equal(len(got.columns[1]), 6, "both of them")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 2, "the row at position 1")
+    assert_equal(values[1], 4, "and the row at position 3")
+
+
+def test_a_limit_that_skips_under_a_selection_skips_rows() raises:
+    """The offset counts rows of the chunk and not positions in the arrays
+    underneath, which is the thing that would be wrong if the two were
+    confused."""
+    var node = Node(Limit(1, 1))
+    var out = node_process(node, two_under_a_selection())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 1, "one row")
+    var values = ints_of(got.column(0), 1)
+    assert_equal(values[0], 4, "the second row, not the second value")
+
+
+def test_a_limit_slices_a_dense_column_with_the_positions() raises:
+    """A column already at the chunk's rows has to be cut where the selection
+    is cut, since its element i is row i and the rows are what a limit takes."""
+    var node = Node(Limit(2))
+    var out = node_process(node, selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 2, "two rows")
+    assert_equal(len(got.columns[0]), 6, "the values were left where they were")
+    assert_equal(len(got.columns[1]), 2, "and the dense mask was sliced")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 2, "the row at position 1")
+    assert_equal(values[1], 4, "and the row at position 3")
+    var mask = truths_of(got.column(1), 2)
+    assert_true(mask[0], "the first row of the mask")
+    assert_false(mask[1], "and the second")
+
+
+def test_a_limit_under_a_selection_agrees_with_one_over_a_flat_chunk() raises:
+    """The equivalence again, for the operator this one was added to."""
+    var node = Node(Limit(2, 1))
+    var under = node_process(node, two_under_a_selection())
+    assert_true(under.__bool__(), "a chunk came back")
+    var carried = under.take()
+    var through = ints_of(carried.column(0), len(carried))
+
+    var flat = two_under_a_selection()
+    flat.flatten()
+    var again = Node(Limit(2, 1))
+    var over = node_process(again, flat^)
+    assert_true(over.__bool__(), "and one the other way")
+    var plain = over.take()
+    var moved = ints_of(plain.column(0), len(plain))
+
+    assert_equal(len(through), 2, "two rows either way")
+    assert_equal(len(moved), 2, "two the other way too")
+    for i in range(2):
+        assert_equal(through[i], moved[i], "the same row in the same place")
+    assert_equal(through[0], 4, "the row after the one that was skipped")
+
+
+def six_rows() raises -> Chunk:
+    """Two columns of six rows, flat, with nothing missing."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([10, 20, 30, 40, 50, 60]))
+    return Chunk(columns^)
+
+
+def test_a_filter_can_do_its_own_comparison() raises:
+    """The mask a filter reads was written by the compute underneath it and
+    read by nobody else, so the filter may do the comparison itself and write no
+    column at all. The rows it keeps are the rows the pair kept."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(3)), BinaryOp.GT)), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(got.width(), 2, "no mask column was added")
+    assert_equal(len(got), 3, "three rows above three")
+    var kept = ints_of(got.column(0), 3)
+    assert_equal(kept[0], 4, "the first row over the constant")
+    assert_equal(kept[2], 6, "and the last")
+
+
+def test_a_comparing_filter_takes_the_constant_on_either_side() raises:
+    """`3 > x` is `x < 3` and the filter mirrors the comparison rather than
+    having a second loop for it."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(3)), BinaryOp.GT, value_on_left=True)),
+        six_rows(),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 2, "the two rows under the constant")
+    var kept = ints_of(got.column(0), 2)
+    assert_equal(kept[0], 1, "the first")
+    assert_equal(kept[1], 2, "and the second")
+
+
+def test_a_comparing_filter_reads_its_operand_where_it_lies() raises:
+    """The half that pays. A compute has to produce a column at the chunk's
+    rows and so gathers its operand first, and a comparison that only wants to
+    know which rows it keeps reads them through the positions and gathers
+    nothing."""
+    var out = node_apply(
+        Node(Filter(1, Value(Int64(30)), BinaryOp.GT)), two_under_a_selection()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got.columns[0]), 6, "the first column was not gathered")
+    assert_equal(len(got.columns[1]), 6, "nor was the one it compared")
+    assert_equal(len(got), 2, "two of the three rows are over thirty")
+    var kept = ints_of(got.column(1), 2)
+    assert_equal(kept[0], 40, "the value at position 3")
+    assert_equal(kept[1], 60, "and the one at position 5")
+
+
+def test_a_comparing_filter_agrees_with_a_compute_and_a_filter() raises:
+    """The equivalence this rests on. The same predicate written the long way,
+    as a comparison into a column and a filter over that column, has to keep the
+    same rows in the same order."""
+    var fused = node_apply(
+        Node(Filter(1, Value(Int64(30)), BinaryOp.GT)), two_under_a_selection()
+    )
+    assert_true(fused.__bool__(), "a chunk came back")
+    var short = fused.take()
+    var one = ints_of(short.column(0), len(short))
+
+    var made = node_apply(
+        Node(Compute(1, Value(Int64(30)), BinaryOp.GT, "hit")),
+        two_under_a_selection(),
+    )
+    assert_true(made.__bool__(), "the mask was written")
+    var long = node_apply(Node(Filter(2, [0, 1])), made.take())
+    assert_true(long.__bool__(), "and the filter read it")
+    var other = long.take()
+    var two = ints_of(other.column(0), len(other))
+
+    assert_equal(len(one), len(two), "the same number of rows")
+    for i in range(len(one)):
+        assert_equal(one[i], two[i], "the same row in the same place")
+    assert_equal(one[0], 4, "the row at position 3")
+
+
+def test_a_comparing_filter_drops_the_rows_with_nothing_in_them() raises:
+    """A comparison against a null is null and a filter drops a row its mask is
+    null on, so a row with nothing in it is not a row this keeps. The two routes
+    have to agree about that or a predicate would mean one thing fused and
+    another one not."""
+    var column = Array[DType.int64](4)
+    column.set_valid(0, Int64(9))
+    column.set_null(1)
+    column.set_valid(2, Int64(1))
+    column.set_valid(3, Int64(9))
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(column^))
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(5)), BinaryOp.GT)), Chunk(columns^)
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 2, "the missing row is not over five either")
+    var kept = ints_of(got.column(0), 2)
+    assert_equal(kept[0], 9, "the first row")
+    assert_equal(kept[1], 9, "and the last")
+
+
+def test_a_comparing_filter_that_keeps_nothing_emits_nothing() raises:
+    """A chunk of no rows is work for everything downstream and no
+    information, which is as true of a comparison that is never true as it is of
+    a mask that is never set."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(600)), BinaryOp.GT)), six_rows()
+    )
+    assert_false(out.__bool__(), "nothing came back")
+
+
+def test_a_comparing_filter_asked_for_no_columns_counts() raises:
+    """A filter that writes no columns is a row count, and a comparison has
+    counted the rows it kept by the time it has found them."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(2)), BinaryOp.GT, List[Int]())), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(got.width(), 0, "no columns")
+    assert_equal(len(got), 4, "four rows over two")
+
+
+def test_a_comparing_filter_writes_only_the_columns_it_is_asked_for() raises:
+    """It is a filter and a projection in one pass whichever way it got its
+    rows, and the column it compared is as droppable as a spent mask."""
+    var out = node_apply(
+        Node(Filter(1, Value(Int64(20)), BinaryOp.GT, [0])), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(got.width(), 1, "the compared column was not asked for")
+    assert_equal(len(got), 4, "four rows over twenty")
+    var kept = ints_of(got.column(0), 4)
+    assert_equal(kept[0], 3, "the row beside the first value over twenty")
+
+
+def test_a_comparing_filter_falls_back_for_a_pair_it_has_no_loop_for() raises:
+    """Text, category and temporal columns compare perfectly well the ordinary
+    way, and none of them is the shape the fused loops were written for. The
+    filter builds the mask for those and reads the rows off it, so the answer is
+    the same and only the cost differs."""
+    var columns = List[AnyArray]()
+    columns.append(
+        AnyArray(strings_from_list(["ok", "fail", "ok", "ok", "fail", "ok"]))
+    )
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    var out = node_apply(
+        Node(Filter(0, Value(String("ok")), BinaryOp.EQ, [1])),
+        Chunk(columns^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 4, "four rows say ok")
+    var kept = ints_of(got.column(0), 4)
+    assert_equal(kept[0], 1, "the first of them")
+    assert_equal(kept[3], 6, "and the last")
+
+
+def test_a_comparing_filter_runs_in_a_pipeline() raises:
+    """The same node with a scan under it and a frame on top, which is where it
+    has to work rather than in a call by hand."""
+    var pipeline = Pipeline(sample_frame())
+    pipeline.add(Node(Filter(0, Value(Int64(2)), BinaryOp.GT)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 4, "four rows over two")
+    assert_equal(got[0], 3, "the first of them")
+    assert_equal(got[3], 6, "and the last")
 
 
 def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:
