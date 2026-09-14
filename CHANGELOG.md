@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a scan cuts a tall chunk into morsels without copying it
+
+The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
+
+What makes them free is a window, which is what a slice would be if it did not allocate. A `Buffer` carries an offset into its allocation now, so a window is the same allocation seen from further in, with its own length and its own capacity. `Bitmap`, `ColumnData`, `StringArray` and `AnyArray` each gained the same thing on top of it, and a column of text shares its payload whole, since a long view carries an absolute block and offset and stays valid wherever the views are cut.
+
+The one rule a window has to keep is about padding. An allocated buffer is rounded up to 64 bytes and the bytes between its length and that boundary are zero, which is what lets a kernel read a whole register past the end of a column and mask the answer. A window that stops before its parent does has the next window's rows sitting there instead of zeroes, so the rule is that a window never has a tail to mask: it starts and ends on a 64 byte boundary, or it runs to the end of the column and inherits the column's own padding. A morsel of a hundred and twenty eight thousand rows keeps that for every fixed width dtype, for a sixteen byte string view and for validity bits, so a scan cutting on whole morsels is always inside it. Writing through a window takes a private copy of that window and leaves the column it came from alone, the same way a copied buffer already did.
+
+A nested column is the one shape a window cannot be taken of, so a chunk that holds one is left whole and runs the way it ran before.
+
 ### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
 A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.

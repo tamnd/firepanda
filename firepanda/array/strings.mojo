@@ -526,6 +526,42 @@ struct StringArray(Copyable, Movable, Sized):
                 builder.append_null()
         return builder^.finish()
 
+    def window(self, at: Int, length: Int) -> Self:
+        """Shares a run of elements, copying nothing.
+
+        `slice` rebuilds a run element by element, because the payload bytes a
+        run refers to are scattered through the block and a copy of the run
+        wants them gathered. This does not gather them. It takes a window onto
+        the views, keeps the whole payload as it is, and every long element in
+        the window still names the block and offset it always named.
+
+        So the payload is not cut at all and the window holds the whole of it
+        alive. That is what a scan wants, since the pieces of a column it hands
+        out are alive together anyway and the alternative is copying the
+        payload once per piece.
+
+        A view is sixteen bytes, so a window of a hundred and twenty eight
+        thousand elements is a multiple of 64 bytes and meets the promise the
+        buffer asks for.
+
+        Args:
+            at: The first element.
+            length: The number of elements.
+
+        Returns:
+            A column of `length` elements over the same bytes.
+        """
+        return Self(
+            Buffer(
+                window_of=self.views,
+                at=at * VIEW_SIZE,
+                size=length * VIEW_SIZE,
+            ),
+            Buffer(copy=self.payload),
+            Bitmap(window_of=self.validity, at=at, length=length),
+            length,
+        )
+
     def take(self, indices: List[Int]) raises -> Self:
         """Returns the elements at the given positions, in that order.
 

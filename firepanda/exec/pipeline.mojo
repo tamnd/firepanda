@@ -59,7 +59,7 @@ from firepanda.dtype.schema import Schema
 from firepanda.frame.frame import DataFrame
 
 from .chunk import Chunk
-from .morsel import parallel_morsels
+from .morsel import MORSEL_ROWS, parallel_morsels
 from .node import Node, NodeStatus, Reduce, node_apply, node_bind
 from .node import node_computes_per_row, node_ends_early, node_finish
 from .node import node_is_breaker, node_is_row_local, node_process
@@ -92,6 +92,24 @@ struct Scan(Movable):
     tree produces, because a chunk is a horizontal slice and there is no such
     slice if column A breaks at row 100 and column B breaks at row 150. A frame
     that does not satisfy that is rejected here rather than half way through.
+
+    A chunk taller than a morsel is cut into morsels on the way past. Every
+    reader hands back a frame in one chunk, because that is what an eager caller
+    wants, and a line over such a frame used to run about 1.65 times slower than
+    the same rows in chunks: with one chunk there is nothing for `_parallel_lead`
+    to hand out, so the whole line runs on the calling thread and every operator
+    forks and joins its own workers instead of the prefix forking once. Measured
+    on the i9-13900K at four million rows, one chunk was 3.46 milliseconds and
+    two chunks was 2.42, and the whole of the difference is that one step. See
+    #800.
+
+    The cut costs nothing because the pieces are windows rather than copies.
+    They share the chunk's buffers and go private only if something writes to
+    them, and cutting on whole morsels is what keeps every kernel's right to
+    read a register past the end of a column, which `AnyArray.window` sets out.
+    Cutting with `slice` instead was measured too and it is far worse than
+    leaving the frame alone, 11.9 milliseconds against 3.46, because a copy of
+    the source costs more than the query.
     """
 
     var columns: List[List[AnyArray]]
@@ -115,7 +133,21 @@ struct Scan(Movable):
             var chunks = owned.pop().into_chunks()
             var backwards = List[AnyArray](capacity=len(chunks))
             while len(chunks) > 0:
-                backwards.append(chunks.pop())
+                var chunk = chunks.pop()
+                var rows = len(chunk)
+                if rows <= MORSEL_ROWS or chunk.is_nested():
+                    backwards.append(chunk^)
+                    continue
+                # Descending, because this list is in reverse and `next` takes
+                # from the back of it. A nested column is left whole, since it
+                # is the one shape a window cannot be taken of.
+                var pieces = (rows + MORSEL_ROWS - 1) // MORSEL_ROWS
+                for p in range(pieces - 1, -1, -1):
+                    var at = p * MORSEL_ROWS
+                    var take = rows - at
+                    if take > MORSEL_ROWS:
+                        take = MORSEL_ROWS
+                    backwards.append(chunk.window(at, take))
             flipped.append(backwards^)
         var columns = List[List[AnyArray]](capacity=len(flipped))
         while len(flipped) > 0:

@@ -17,7 +17,7 @@ See docs/specs/02-architecture.md.
 from std.bit import pop_count
 from std.memory import unsafe_memcpy
 
-from firepanda.buffer.buffer import Buffer, round_up
+from firepanda.buffer.buffer import ALIGNMENT, Buffer, round_up
 
 
 def bytes_for(length: Int) -> Int:
@@ -77,6 +77,58 @@ struct Bitmap(Copyable, Movable, Sized):
         """
         self._buffer = Buffer(copy=copy._buffer)
         self._length = copy._length
+
+    def __init__(out self, *, window_of: Self, at: Int, length: Int):
+        """Shares part of a bitmap, copying nothing.
+
+        `slice` copies, and says why: an Arrow style slice carries a bit offset
+        that every read would have to shift by. This one carries no bit offset
+        because it is not allowed to start anywhere that would need one. The
+        start is a multiple of 512 bits, which is the 64 byte alignment the
+        buffer underneath insists on, so the window begins on a byte and on a
+        word and every kernel reads it exactly as it reads a whole bitmap.
+
+        The length is a multiple of 512 too, or the window runs to the end of
+        the parent. That is the same promise `Buffer(window_of=)` takes and it
+        is there for the same reason: `count_ones` reads whole words and counts
+        on the bits past the length being clear, and a window that stopped part
+        way through a word would be counting the next window's rows.
+
+        A morsel is a hundred and twenty eight thousand rows, which is two
+        hundred and fifty six of those 512 bit units, so cutting on morsels
+        satisfies both.
+
+        Args:
+            window_of: The bitmap to share part of.
+            at: The first bit. A multiple of 512.
+            length: The number of bits. A multiple of 512, unless the window
+                reaches the end of the bitmap it is cut from.
+        """
+        debug_assert(
+            at % (ALIGNMENT * 8) == 0,
+            "bitmap window starts at bit ",
+            at,
+            " which is not a multiple of ",
+            ALIGNMENT * 8,
+        )
+        debug_assert(
+            length % (ALIGNMENT * 8) == 0 or at + length == window_of._length,
+            "bitmap window of ",
+            length,
+            " bits at ",
+            at,
+            " neither lands on ",
+            ALIGNMENT * 8,
+            " nor reaches the end of the ",
+            window_of._length,
+            " it is cut from",
+        )
+        self._buffer = Buffer(
+            window_of=window_of._buffer,
+            at=at >> 3,
+            size=bytes_for(at + length) - (at >> 3),
+        )
+        self._length = length
 
     def __len__(self) -> Int:
         """Returns the number of bits.

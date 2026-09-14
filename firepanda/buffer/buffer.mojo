@@ -68,6 +68,18 @@ struct Buffer(Copyable, Movable, Sized):
     var _mem: ArcPointer[ManagedAllocation[UInt8]]
     var _capacity: Int
     var _size: Int
+    var _offset: Int
+    """Bytes from the allocation's first byte to this buffer's first byte.
+
+    Zero for a buffer that was allocated, and a multiple of 64 for one that is a
+    window onto part of another. `_capacity` is measured from here rather than
+    from the allocation, so every pointer this hands out and every length it
+    reports are about the window and a caller cannot tell the difference.
+
+    A window's padding is the next window's rows rather than zeroes, which is
+    the one thing that is not the same. `Buffer(window_of=)` says what a caller
+    has to promise so that nothing reads it.
+    """
 
     def __init__(out self, size: Int):
         """Allocates a zeroed buffer.
@@ -88,6 +100,7 @@ struct Buffer(Copyable, Movable, Sized):
         self._mem = ArcPointer(allocation^.into_managed())
         self._capacity = capacity
         self._size = size
+        self._offset = 0
 
     def __init__(out self, *, overwritten: Int):
         """Allocates a buffer whose bytes the caller promises to write.
@@ -122,6 +135,7 @@ struct Buffer(Copyable, Movable, Sized):
         self._mem = ArcPointer(allocation^.into_managed())
         self._capacity = capacity
         self._size = overwritten
+        self._offset = 0
 
     def __init__(out self, *, copy: Self):
         """Shares a buffer's bytes rather than copying them.
@@ -142,6 +156,77 @@ struct Buffer(Copyable, Movable, Sized):
         self._mem = copy._mem
         self._capacity = copy._capacity
         self._size = copy._size
+        self._offset = copy._offset
+
+    def __init__(out self, *, window_of: Self, at: Int, size: Int):
+        """Shares part of a buffer, copying nothing at all.
+
+        What `Buffer(copy=)` is to a whole column this is to a range of one.
+        Both share the allocation and both go private on the first write, and
+        the difference is that this one starts partway in and stops early, so a
+        column can be cut into pieces for nothing rather than for a memcpy per
+        piece.
+
+        The caller owes one promise and it is about the padding. An allocated
+        buffer is rounded up to 64 bytes and the bytes between the logical size
+        and that boundary are zero, which is what lets a kernel read a whole
+        register past the end of a column and mask the answer. A window that
+        stops before its parent does has the next window's rows there instead of
+        zeroes, so the promise is that the window never has a tail to mask:
+        `at` and `size` are both multiples of 64, or the window runs to the end
+        of the parent and inherits the parent's own padding.
+
+        A row count that is a multiple of 64 satisfies that for every fixed
+        width dtype we have, so in practice the promise is that a caller cuts on
+        whole morsels. `Scan` is the caller that does.
+
+        The window's capacity is its size rather than its parent's, so nothing
+        downstream can read past it by asking how much room there is. Writing
+        through it takes a private copy of the window and not of the parent, so
+        a worker that edits one piece of a column does not pay for the rest.
+
+        Args:
+            window_of: The buffer to share part of.
+            at: The first byte, counted from that buffer's own first byte. A
+                multiple of 64.
+            size: The number of bytes. A multiple of 64, unless `at + size` is
+                that buffer's whole size.
+        """
+        debug_assert(
+            at % ALIGNMENT == 0,
+            "buffer window starts at ",
+            at,
+            " which is not a multiple of ",
+            ALIGNMENT,
+        )
+        debug_assert(
+            size % ALIGNMENT == 0 or at + size == window_of._size,
+            "buffer window of ",
+            size,
+            " bytes at ",
+            at,
+            " neither lands on ",
+            ALIGNMENT,
+            " nor reaches the end of the ",
+            window_of._size,
+            " it is cut from",
+        )
+        debug_assert(
+            at + size <= window_of._size,
+            "buffer window of ",
+            size,
+            " bytes at ",
+            at,
+            " runs past the ",
+            window_of._size,
+            " it is cut from",
+        )
+        self._mem = window_of._mem
+        self._size = size
+        self._offset = window_of._offset + at
+        var room = window_of._capacity - at
+        var wanted = round_up(size, ALIGNMENT)
+        self._capacity = wanted if wanted < room else room
 
     def _unshare(mut self):
         """Gives this buffer an allocation nobody else is holding.
@@ -155,18 +240,30 @@ struct Buffer(Copyable, Movable, Sized):
         pad up to the 64-byte boundary is guaranteed to be zero and a kernel is
         allowed to read a full register past the end. Copying only the size
         would leave that pad holding whatever the allocator last put there.
+
+        A window copies its own bytes rather than its parent's, which is the
+        point of having one: a worker that writes one morsel of a column pays
+        for that morsel. What it gets back is an ordinary buffer starting at
+        zero, so the padding it inherits is zero the way an allocated buffer's
+        is, and it stops being a window at the moment it stops sharing.
         """
-        if self._mem.count() == 1:
+        if self._mem.count() == 1 and self._offset == 0:
             return
         var allocation = alloc(
             Layout[UInt8](count=self._capacity, alignment=ALIGNMENT)
         )
         unsafe_memcpy(
             dest=allocation.unsafe_ptr(),
-            src=self._mem[].unsafe_ptr(),
-            count=self._capacity,
+            src=self._mem[].unsafe_ptr().unsafe_offset(self._offset),
+            count=self._size,
         )
+        var pad = self._capacity - self._size
+        if pad > 0:
+            unsafe_memset_zero(
+                allocation.unsafe_ptr().unsafe_offset(self._size), pad
+            )
         self._mem = ArcPointer(allocation^.into_managed())
+        self._offset = 0
 
     def make_private(mut self):
         """Takes this buffer's own copy of the bytes now rather than on a write.
@@ -253,6 +350,7 @@ struct Buffer(Copyable, Movable, Sized):
         return (
             self._mem[]
             .unsafe_ptr()
+            .unsafe_offset(self._offset)
             .as_imm()
             .unsafe_origin_cast[origin_of(self)]()
         )
@@ -267,7 +365,12 @@ struct Buffer(Copyable, Movable, Sized):
             A pointer valid for `capacity()` bytes.
         """
         self._unshare()
-        return self._mem[].unsafe_ptr().unsafe_origin_cast[origin_of(self)]()
+        return (
+            self._mem[]
+            .unsafe_ptr()
+            .unsafe_offset(self._offset)
+            .unsafe_origin_cast[origin_of(self)]()
+        )
 
     def bitcast[dt: DType](self) -> Pointer[Scalar[dt], origin_of(self)]:
         """Reinterprets the bytes as elements of a dtype, for reading.
@@ -281,6 +384,7 @@ struct Buffer(Copyable, Movable, Sized):
         return (
             self._mem[]
             .unsafe_ptr()
+            .unsafe_offset(self._offset)
             .as_imm()
             .unsafe_origin_cast[origin_of(self)]()
             .unsafe_bitcast[Scalar[dt]]()
@@ -304,6 +408,7 @@ struct Buffer(Copyable, Movable, Sized):
         return (
             self._mem[]
             .unsafe_ptr()
+            .unsafe_offset(self._offset)
             .unsafe_origin_cast[origin_of(self)]()
             .unsafe_bitcast[Scalar[dt]]()
         )
@@ -314,9 +419,15 @@ struct Buffer(Copyable, Movable, Sized):
         Returns:
             True if the base address is a multiple of 64.
         """
-        return Int(self._mem[].unsafe_ptr()) % ALIGNMENT == 0
+        return (
+            Int(self._mem[].unsafe_ptr().unsafe_offset(self._offset))
+            % ALIGNMENT
+            == 0
+        )
 
     def zero(mut self):
         """Sets every allocated byte, including the padding, to zero."""
         self._unshare()
-        unsafe_memset_zero(self._mem[].unsafe_ptr(), self._capacity)
+        unsafe_memset_zero(
+            self._mem[].unsafe_ptr().unsafe_offset(self._offset), self._capacity
+        )

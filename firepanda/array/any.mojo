@@ -866,6 +866,70 @@ struct AnyArray(Copyable, Movable, Sized):
             out.dict_values = StringArray(copy=self.dict_values.value())
         return out^
 
+    def window(self, at: Int, length: Int) raises -> Self:
+        """Shares a run of rows, copying nothing.
+
+        What `slice` is for a caller that wants the rows to itself, this is for
+        a caller that wants to look at them in place. A slice allocates and
+        memcpies, and on a four million row frame that costs more than the whole
+        query does, which is why a scan that cut a tall chunk into morsels with
+        `slice` was slower than not cutting it at all. See #800.
+
+        The promise a window takes is about the padding kernels read past the
+        end of a column into, and it comes out as: cut on whole morsels. A
+        hundred and twenty eight thousand rows is a multiple of 64 bytes for
+        every fixed width dtype and for a sixteen byte string view, and a
+        hundred and twenty eight thousand bits is a multiple of 64 bytes of
+        validity. The last piece of a column may be short because it ends where
+        the column ends and inherits the column's own padding.
+
+        Args:
+            at: The first row. A multiple of the morsel height.
+            length: The number of rows. A multiple of the morsel height, unless
+                this is the last piece of the column.
+
+        Returns:
+            A column of `length` rows over the same bytes.
+
+        Raises:
+            If the range is outside the column, or the column is nested, which
+            has the same answer here as it has in `slice` and for the same
+            reason.
+        """
+        if at < 0 or length < 0 or at + length > self.data.length:
+            raise Error(
+                String(
+                    "window [",
+                    at,
+                    ", ",
+                    at + length,
+                    ") is outside a column of ",
+                    self.data.length,
+                )
+            )
+        if self.is_nested():
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and windowing a nested column is not implemented yet"
+            )
+        if self.is_string():
+            return Self(self.strings().window(at, length)).retyped(self.type)
+        var out = Self(
+            ColumnData(
+                window_of=self.data,
+                at=at,
+                length=length,
+                width=dtype_size(self.type.physical),
+            ),
+            self.type,
+        )
+        # Same reasoning as `slice`. A row moving does not change what a code
+        # means, so the categories come across whole.
+        if self.dict_values:
+            out.dict_values = StringArray(copy=self.dict_values.value())
+        return out^
+
     def unsafe_ptr[dt: DType](self) -> Pointer[Scalar[dt], origin_of(self)]:
         """Returns a typed pointer to the values, for reading, dtype unchecked.
 
