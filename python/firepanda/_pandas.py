@@ -8856,22 +8856,26 @@ class StringMixin:
         return pat
 
     @staticmethod
-    def _plain(case: Any, flags: Any, name: str) -> None:
-        """Refuses the two arguments that would change what the pattern means.
+    def _fold_word(case: Any, flags: Any, name: str) -> str:
+        """Picks which of the two searches the pattern runs through.
 
-        Both have a default that means leave it alone, and both are one line to
-        accept and a case folding pass or an engine to honour, so both say no
-        here rather than being ignored. An ignored argument is the one failure
-        mode a compatibility layer must not have.
+        `case=False` used to be refused here beside `flags` and is now served,
+        which leaves one refusal rather than two. `flags` still says no because
+        every one of them is a statement about a regular expression and there is
+        no engine, and an ignored argument is the one failure mode a
+        compatibility layer must not have.
+
+        The fold a search compares through is not the one `casefold` does. It
+        maps one character to one character, so `STRASSE` does not hold `straße`
+        even though the two casefold to the same word, and document 69 says
+        where that rule was measured from. The word carries the choice because
+        the kernel has a second entry point rather than a flag.
         """
-        if case is not None and not case:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{name} with case=False is not written yet"
-            )
         if flags:
             raise UnsupportedError(
                 f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
             )
+        return "" if case is None or case else "_folded"
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
         """Whether a literal pattern is in every row, at the front, or the whole row.
@@ -8880,8 +8884,8 @@ class StringMixin:
         `na` filling, which is the same list walk `_begins` does and is here for
         the same reason: a column has no `fillna` yet.
         """
-        self._plain(case, flags, kind)
-        answer = self._flag(kind, self._literal(pat, regex, kind))
+        fold = self._fold_word(case, flags, kind)
+        answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
@@ -8893,7 +8897,7 @@ class StringMixin:
         about their own signature, so it passes `None` and the check falls
         through.
         """
-        self._plain(None, flags, "count")
+        self._fold_word(None, flags, "count")
         return self._number("count", self._literal(pat, True, "count"))
 
     def _replaced(self, pat: Any, repl: Any, n: Any, case: Any, flags: Any, regex: Any) -> Series:
@@ -8925,9 +8929,24 @@ class StringMixin:
             )
         if not isinstance(repl, str):
             raise DTypeError("firepanda:dtype: repl must be a string or callable")
-        self._plain(case, flags, "replace")
+        fold = self._fold_word(case, flags, "replace")
+        limit = self._width(n, "n")
+        if fold and limit == 0:
+            # `n=0` means no replacements to pandas and all of them to pandas,
+            # depending on `case`, on the same column in the same call. The
+            # Arrow path takes the number at its word and the fallback path
+            # hands it to `re.sub`, where a count of zero has meant unlimited
+            # since long before pandas existed, so turning the search insensitive
+            # silently turns a request for nothing into a request for everything.
+            # It is measured, it is pandas, and matching it is the job, so the
+            # zero is widened here rather than in the kernel, where the number
+            # still means what it says.
+            limit = -1
         return self._text(
-            "replace", self._literal(pat, bool(regex), "replace"), self._width(n, "n"), other=repl
+            f"replace{fold}",
+            self._literal(pat, bool(regex), "replace"),
+            limit,
+            other=repl,
         )
 
     def _translated(self, table: Any) -> Series:

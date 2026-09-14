@@ -26,6 +26,8 @@ from .arith import OP_ADD, OP_MUL, OP_SUB
 from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
+from .pattern import fold_point
+from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
 
 
@@ -2943,3 +2945,217 @@ def text_pick_scalar(
         else:
             builder.append_null()
     return builder^.finish()
+
+
+def _bytes_find_scalar(hay: Span[UInt8, _], needle: Span[UInt8, _]) -> Int:
+    """Where a run of bytes first appears in another, or minus one.
+
+    The twin above this one searches strings rather than bytes and asks a
+    `String` for a byte at a position, which is only legal when the position is
+    a character boundary and so is only legal on ASCII. Everything in the
+    folded half of this file is about text that is not ASCII, so it searches
+    bytes and leaves the boundaries to the caller, which already knows where
+    they are because it walked them.
+
+    Args:
+        hay: The bytes being searched.
+        needle: The bytes being looked for.
+
+    Returns:
+        The offset of the match, or minus one.
+    """
+    var m = len(needle)
+    if m == 0:
+        return 0
+    for at in range(len(hay) - m + 1):
+        var same = True
+        for k in range(m):
+            if hay[at + k] != needle[k]:
+                same = False
+                break
+        if same:
+            return at
+    return -1
+
+
+def _folded_copy_scalar(text: String) -> String:
+    """Folds a whole string into a new one, a character at a time.
+
+    This is the thing the kernel refuses to do. `pattern.mojo` folds the pattern
+    once and folds the row a character at a time as the search walks it, so
+    nothing the size of a column is ever copied. The twin does the opposite on
+    purpose: it builds the folded copy, then searches it with a plain substring
+    search that knows nothing about case. If the two ever disagree, the bug is
+    in the walk and not in the fold, which is the only thing a twin is for.
+
+    Args:
+        text: The string.
+
+    Returns:
+        The folded string, which has the same number of characters and may have
+        a different number of bytes.
+    """
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var out = String()
+    for point in text.codepoints():
+        var folded = fold_point(point.to_u32(), Span(keys), Span(answers))
+        out += String(Codepoint(unsafe_unchecked_codepoint=folded))
+    return out^
+
+
+def text_contains_folded_scalar(
+    a: StringArray, needle: String
+) -> Array[DType.bool]:
+    """Whether each element holds a pattern with case ignored, one at a time.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(needle)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = _folded_copy_scalar(a[i])
+        out.set_valid(
+            i, _bytes_find_scalar(text.as_bytes(), wanted.as_bytes()) >= 0
+        )
+    return out^
+
+
+def text_starts_with_folded_scalar(
+    a: StringArray, prefix: String
+) -> Array[DType.bool]:
+    """Whether each element begins with a pattern, case ignored, one at a time.
+
+    Args:
+        a: The column.
+        prefix: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(prefix)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = _folded_copy_scalar(a[i])
+        out.set_valid(
+            i, _bytes_find_scalar(text.as_bytes(), wanted.as_bytes()) == 0
+        )
+    return out^
+
+
+def text_equals_folded_scalar(
+    a: StringArray, other: String
+) -> Array[DType.bool]:
+    """Whether each element is a pattern and nothing else, case ignored.
+
+    Args:
+        a: The column.
+        other: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(other)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _folded_copy_scalar(a[i]) == wanted)
+    return out^
+
+
+def text_replace_folded_scalar(
+    a: StringArray, needle: String, repl: String, limit: Int
+) raises -> StringArray:
+    """Replaces a pattern with case ignored, one element at a time.
+
+    The twin cannot search a folded copy and splice into the original, because
+    an offset into the folded copy is not an offset into the row: `ſ` is two
+    bytes and folds to one. So it walks character boundaries and asks at each
+    one whether the folded pattern starts there, which is the same question the
+    kernel asks and a different way of asking it, since this one folds the whole
+    remainder of the row every time and the kernel folds one character.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+        repl: The replacement.
+        limit: How many matches per row, negative for all and zero for none.
+
+    Returns:
+        A text column of the same height.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var wanted = _folded_copy_scalar(needle)
+    var built = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var text = a[i]
+        if limit == 0 or wanted.byte_length() == 0:
+            built.append(text.as_bytes())
+            continue
+
+        var out = String()
+        var left = limit
+        var at = 0
+        var bytes = text.as_bytes()
+        while at < len(bytes):
+            var width = 1
+            for point in StringSlice(
+                unsafe_from_utf8=bytes[at : len(bytes)]
+            ).codepoints():
+                width = point.utf8_byte_length()
+                break
+            var matched = -1
+            if left != 0:
+                var here = at
+                var folded = String()
+                while (
+                    here < len(bytes)
+                    and folded.byte_length() < wanted.byte_length()
+                ):
+                    var step = 1
+                    for point in StringSlice(
+                        unsafe_from_utf8=bytes[here : len(bytes)]
+                    ).codepoints():
+                        step = point.utf8_byte_length()
+                        break
+                    folded += _folded_copy_scalar(
+                        String(
+                            StringSlice(
+                                unsafe_from_utf8=bytes[here : here + step]
+                            )
+                        )
+                    )
+                    here += step
+                if folded == wanted:
+                    matched = here
+            if matched >= 0:
+                out += repl
+                at = matched
+                if left > 0:
+                    left -= 1
+            else:
+                out += String(
+                    StringSlice(unsafe_from_utf8=bytes[at : at + width])
+                )
+                at += width
+        built.append(out.as_bytes())
+
+    return built^.finish()

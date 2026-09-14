@@ -54,18 +54,26 @@ from firepanda.kernel.pattern import (
     text_count,
     text_ends_with,
     text_equals,
+    text_contains_folded,
+    text_equals_folded,
     text_like,
     text_replace,
+    text_replace_folded,
     text_starts_with,
+    text_starts_with_folded,
 )
 from firepanda.kernel.scalar import (
     text_contains_in_order_scalar,
     text_contains_scalar,
     text_count_scalar,
     text_ends_with_scalar,
+    text_contains_folded_scalar,
+    text_equals_folded_scalar,
     text_equals_scalar,
     text_like_scalar,
+    text_replace_folded_scalar,
     text_replace_scalar,
+    text_starts_with_folded_scalar,
     text_starts_with_scalar,
 )
 
@@ -737,6 +745,261 @@ def test_the_matcher_agrees_with_the_twin_over_a_column_of_rows() raises:
             text_like_scalar(col, pattern),
             "like " + pattern,
         )
+
+
+# ---------------------------------------------------------------------------
+# The case insensitive half
+#
+# Every test below runs the kernel and the twin against each other first, and
+# the two do not share an idea. The kernel folds the pattern once and folds the
+# row one character at a time as the search walks it, so it never holds a copy
+# of anything the size of a column. The twin builds the folded copy of the whole
+# row and then runs a plain substring search over it that knows nothing about
+# case. A defect in the walk shows up as a disagreement; a defect in the table
+# would have to be in both, which is why the table is checked against pyarrow by
+# its generator and against pandas by the Python tests.
+# ---------------------------------------------------------------------------
+
+
+def folded_sample() -> StringArray:
+    """Builds the column the case insensitive tests read.
+
+    The rows are the ones a search fold gets wrong if it is the wrong fold. The
+    sharp s and the ligature are the pair that separates the search fold from
+    `str.casefold`, because folding for a reader sends them to two characters
+    and a search sends them to themselves. The long s and the Kelvin sign are
+    the pair that separates it from lower case, because Arrow lowers neither and
+    folds both. The final sigma is the third such pair and the Turkish dotless i
+    is the one that folds to nothing at all.
+
+    Returns:
+        The column, with two nulls in it.
+    """
+    var rows = List[String]()
+    rows.append("Green")
+    rows.append("GREEN")
+    rows.append("ignored")
+    rows.append("green")
+    rows.append("ignored")
+    rows.append("STRASSE")
+    rows.append("straße")
+    rows.append("Straße")
+    rows.append("ſtraße")
+    rows.append("ﬁance")
+    rows.append("FIANCE")
+    rows.append("KELVIN")
+    rows.append("Kelvin")
+    rows.append("ΣΟΦΟΣ")
+    rows.append("σοφος")
+    rows.append("İstanbul")
+    rows.append("ıstanbul")
+    rows.append("")
+
+    var builder = StringBuilder(capacity=len(rows))
+    for i in range(len(rows)):
+        if i == 2 or i == 4:
+            builder.append_null()
+        else:
+            builder.append(rows[i].as_bytes())
+    return builder^.finish()
+
+
+def check_folded(col: StringArray, needle: String) raises:
+    """Runs the three folded flag kernels and their twins and compares.
+
+    Args:
+        col: The column.
+        needle: The pattern.
+
+    Raises:
+        AssertionError: On the first row any of the three disagrees on.
+    """
+    agrees(
+        text_contains_folded(col, needle.as_bytes()),
+        text_contains_folded_scalar(col, needle),
+        "contains folded " + needle,
+    )
+    agrees(
+        text_starts_with_folded(col, needle.as_bytes()),
+        text_starts_with_folded_scalar(col, needle),
+        "starts with folded " + needle,
+    )
+    agrees(
+        text_equals_folded(col, needle.as_bytes()),
+        text_equals_folded_scalar(col, needle),
+        "equals folded " + needle,
+    )
+
+
+def read(col: StringArray, i: Int) -> String:
+    """One row of a text column as a string.
+
+    Args:
+        col: The column.
+        i: The row.
+
+    Returns:
+        The row.
+    """
+    return col[i]
+
+
+def test_the_folded_kernels_agree_with_the_twin() raises:
+    """On every pattern that matters, which is the whole point of the twin."""
+    var col = folded_sample()
+    var patterns: List[String] = [
+        "green",
+        "GREEN",
+        "Green",
+        "straße",
+        "strasse",
+        "ss",
+        "SS",
+        "ß",
+        "ſ",
+        "s",
+        "S",
+        "k",
+        "K",
+        "σ",
+        "ς",
+        "Σ",
+        "fi",
+        "ﬁ",
+        "i",
+        "I",
+        "ı",
+        "İ",
+        "e",
+    ]
+    for j in range(len(patterns)):
+        check_folded(col, patterns[j])
+
+
+def test_a_search_folds_one_character_to_one_character() raises:
+    """Which is the whole difference between this fold and `str.casefold`.
+
+    Folding a row for a reader sends the sharp s to two letters, so `Straße`
+    and `STRASSE` fold to the same thing and a reader would call them the same
+    word. A search does not get to do that, and pandas does not do it either:
+    Arrow's `ignore_case` folds one code point to one code point, so these two
+    rows are different rows to a case insensitive search.
+    """
+    var rows: List[String] = ["STRASSE", "straße", "Straße"]
+    var col = strings_from_list(rows)
+    var got = text_contains_folded(col, "straße".as_bytes())
+    assert_false(got[0], "STRASSE does not hold the sharp s spelling")
+    assert_true(got[1], "and the sharp s spelling holds itself")
+    assert_true(got[2], "in either case")
+    var other = text_contains_folded(col, "strasse".as_bytes())
+    assert_true(other[0], "the double s spelling holds itself")
+    assert_false(other[1], "and is not found in the sharp s spelling")
+
+
+def test_the_search_fold_is_not_the_lower_case_either() raises:
+    """Three pairs Arrow folds together and lowering leaves apart.
+
+    The long s, the Kelvin sign and the micro sign all lower to themselves and
+    all fold to an ordinary letter, so a case insensitive search finds them and
+    a search over two lowered copies does not.
+    """
+    var rows: List[String] = ["ſ", "K", "µ"]
+    var col = strings_from_list(rows)
+    assert_true(text_equals_folded(col, "s".as_bytes())[0], "long s is an s")
+    assert_true(text_equals_folded(col, "k".as_bytes())[1], "kelvin is a k")
+    assert_true(text_equals_folded(col, "μ".as_bytes())[2], "micro is a mu")
+
+
+def test_a_folded_match_can_cover_a_different_number_of_bytes() raises:
+    """Which is why the search reports where a match ends and not how long it is.
+
+    The long s is two bytes and the letter it folds to is one, so a pattern of
+    one byte matches two bytes of the row, and a replace that assumed otherwise
+    would cut the row in the middle of a character.
+    """
+    var rows: List[String] = ["ſtraße", "Straße"]
+    var col = strings_from_list(rows)
+    var got = text_replace_folded(col, "s".as_bytes(), "X".as_bytes(), -1)
+    assert_equal(read(got, 0), "Xtraße", "the two byte s is replaced whole")
+    assert_equal(read(got, 1), "Xtraße", "and so is the one byte one")
+
+
+def test_folded_replace_keeps_the_case_of_what_it_did_not_touch() raises:
+    """Because replacing a pattern is not folding a column."""
+    var rows: List[String] = ["ABCdefABC", "abcDEFabc"]
+    var col = strings_from_list(rows)
+    var got = text_replace_folded(col, "abc".as_bytes(), "-".as_bytes(), -1)
+    assert_equal(read(got, 0), "-def-", "the rest of the row is untouched")
+    assert_equal(read(got, 1), "-DEF-", "in whatever case it was written in")
+
+
+def test_folded_replace_obeys_the_count() raises:
+    """At every sign it can have, as the exact one does."""
+    var rows: List[String] = ["aAaA"]
+    var col = strings_from_list(rows)
+    assert_equal(
+        read(text_replace_folded(col, "a".as_bytes(), "X".as_bytes(), 1), 0),
+        "XAaA",
+        "one from the left",
+    )
+    assert_equal(
+        read(text_replace_folded(col, "a".as_bytes(), "X".as_bytes(), 3), 0),
+        "XXXA",
+        "three from the left",
+    )
+    assert_equal(
+        read(text_replace_folded(col, "a".as_bytes(), "X".as_bytes(), -1), 0),
+        "XXXX",
+        "all of them",
+    )
+    assert_equal(
+        read(text_replace_folded(col, "a".as_bytes(), "X".as_bytes(), 0), 0),
+        "aAaA",
+        "and none at all",
+    )
+
+
+def test_folded_replace_agrees_with_the_twin() raises:
+    """On the rows where a match is a different width from the pattern."""
+    var col = folded_sample()
+    var patterns: List[String] = ["s", "ss", "ß", "e", "i", "σ", "green"]
+    for j in range(len(patterns)):
+        var got = text_replace_folded(
+            col, patterns[j].as_bytes(), "-".as_bytes(), -1
+        )
+        var want = text_replace_folded_scalar(col, patterns[j], "-", -1)
+        assert_equal(len(got), len(want), "lengths differ")
+        for i in range(len(got)):
+            assert_equal(got.is_valid(i), want.is_valid(i), "validity")
+            if got.is_valid(i):
+                assert_equal(
+                    read(got, i),
+                    read(want, i),
+                    "row " + String(i) + " of " + patterns[j],
+                )
+
+
+def test_an_empty_pattern_has_nothing_to_do_with_case() raises:
+    """So it goes to the exact kernel, which already has the rule for it."""
+    var rows: List[String] = ["héllo", ""]
+    var col = strings_from_list(rows)
+    var got = text_replace_folded(col, "".as_bytes(), "-".as_bytes(), -1)
+    assert_equal(read(got, 0), "-h-é-l-l-o-", "counted in characters")
+    assert_equal(read(got, 1), "-", "and once in an empty row")
+    assert_true(
+        text_contains_folded(col, "".as_bytes())[0],
+        "and every row holds nothing",
+    )
+
+
+def test_a_folded_search_keeps_a_missing_row_missing() raises:
+    """As every other kernel in this file does."""
+    var col = folded_sample()
+    var got = text_contains_folded(col, "green".as_bytes())
+    assert_false(got.is_valid(2), "a missing row is missing")
+    assert_false(got.is_valid(4), "and so is the other one")
+    var written = text_replace_folded(col, "e".as_bytes(), "-".as_bytes(), -1)
+    assert_false(written.is_valid(2), "a missing row has nothing to replace")
 
 
 def main() raises:
