@@ -319,6 +319,40 @@ def text(
     return column.chars_repeat(_whole(start, "repeats"))
 
 
+def translate(column: Series, keys: Series, values: Series) raises -> Series:
+    """Swaps single characters one for one, out of a table.
+
+    The one name in this accessor that does not come through `text`, and the
+    reason is not the shape of its answer, which is text like twenty two others.
+    It is that its argument is not a scalar. A table has as many entries as it
+    has, the same way `isin`'s set does, and the three doors carry two strings
+    and two positions between them because that is what a scalar argument looks
+    like. There is no way to fold a table into a string: a replacement can hold
+    any character, so no character is available to separate one entry from the
+    next, and an encoding that got around that would be a format nobody asked
+    for in a place nobody would look for it.
+
+    So the rule the three doors follow is unchanged and this is outside it
+    rather than an exception to it. A fourth door for a fourth argument shape
+    would have been the thing document 07 warns about; a door for the one
+    argument in the namespace that is column sized is a different claim.
+
+    Args:
+        column: The column to read.
+        keys: The characters to replace, one character per row.
+        values: What to put in their place, in the same order.
+
+    Returns:
+        A new column, as tall as the one it read.
+
+    Raises:
+        Error: Tagged `value` if the column is not text, and whatever the
+            kernel raises about the table otherwise.
+    """
+    _text_column(column)
+    return column.chars_translate(keys, values)
+
+
 def flag(column: Series, kind: String, arg: String) raises -> Series:
     """Runs one of the methods that answers a mask, and hands back a column.
 

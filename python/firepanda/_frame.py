@@ -511,6 +511,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def translate(self, table: Any) -> Series:
+        """Every row with single characters swapped one for one."""
+        try:
+            return self._translated(table)
+        except Exception as error:
+            raise translate(error) from None
+
     def upper(self) -> Series:
         """Every row written in upper case."""
         try:

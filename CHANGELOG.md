@@ -29,6 +29,15 @@ Both answers are right where they are asked, so this is two operators now rather
 Two more differences came out of measuring the dialect rather than assuming it. On a float `//` is not a floor division at all in DuckDB, so `-7.5 // 3` is `-2.5` and not `-3.0`, because the name there is the division that is integral only when its operands are. And a zero divisor is a null whatever the dtype, so `7.0 // 0.0` is `NULL` while `7.0 / 0.0` next to it is an infinity, which looks like a gap in DuckDB's own overload set and is what it answers today either way. Two bools are refused rather than widened to an int8 zero, which is the pandas answer and not one DuckDB has.
 
 The value differential added below found this on its first run, which is what that harness is for, and the two expressions come off its recorded list with this change. Both operators are pinned at all four sign combinations on both surfaces, both kernels have a scalar twin the fuzzer compares them against over a million cases, and three end to end tests run the queries and read the rows.
+### Added: `str.translate`, which is not a small `replace`
+
+A table of single characters swapped one for one. Two things separate it from the name before it and both of them matter. A key is always exactly one character, so nothing is searched for and no match can overlap another. And every key is applied in the same pass, so a table that sends `a` to `b` and `b` to `a` really swaps them, where the same pair handed to `replace` turns both into `a`.
+
+The rule here is Python's rule with no Arrow in it, because pandas hands the table straight to Python's own `str.translate`. A key is a code point ordinal. A value may be an ordinal, a string of any length, or `None`, and `None` and the empty string are the same request. What a key maps to is never looked at again, so `{ord("a"): "aa"}` on `ab` is `aab`. A key that is not an integer, or is negative, or is at or above `0x110000`, never matches anything and is dropped rather than refused, which is what pandas does with it. A value out of range and a value of the wrong type are refused with pandas' own two sentences.
+
+The table has to be a mapping. pandas takes anything subscriptable, since it only ever indexes the thing, but serving that means a Python call for every character of every row, which is the one thing crossing into a kernel is for avoiding. `str.maketrans` builds a mapping in all four of its forms, so the refused shapes are the unusual ones.
+
+The lookup keeps two seats, a direct array for the first 128 code points and an ordered list with a binary search above that, the same split the character classes already use, with a byte loop for the case where both the table and the row are ASCII.
 
 ### Added: a value differential, which is what would have caught the STRLEN bug
 

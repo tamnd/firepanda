@@ -68,6 +68,7 @@ from firepanda.kernel.chars import (
     text_slice_replace,
     text_title,
     text_swapcase,
+    text_translate,
 )
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
@@ -1674,6 +1675,46 @@ struct Series(Copyable, Movable, Sized, Writable):
                     pattern.as_bytes(),
                     repl.as_bytes(),
                     limit,
+                )
+            ),
+        )
+
+    def chars_translate(self, keys: Self, values: Self) raises -> Self:
+        """Returns each row with single characters swapped one for one.
+
+        The table arrives as two columns rather than as a pair of lists, for
+        the reason `is_in` gives about a set: the kernel wants something typed
+        and the side holding the caller's table is the side that knows how to
+        make it. It is two columns and not one of pairs because a key and a
+        replacement are different shapes, a key being always one character and
+        a replacement being any row at all including an empty one.
+
+        Every key is applied in the same pass, so a table that swaps two
+        characters for each other swaps them rather than collapsing them, which
+        is the difference between this and calling `chars_replace` twice.
+
+        Args:
+            keys: The characters to replace, one character per row, in
+                ascending order of code point and with no repeats.
+            values: What to put in their place, in the same order and the same
+                number of rows. An empty row deletes the character.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If any of the three series is not text, if the two tables
+                are different heights, if either holds a missing value, if a
+                key is not exactly one character, or if the keys are out of
+                order.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_translate(
+                    self.values.strings(),
+                    keys.values.strings(),
+                    values.values.strings(),
                 )
             ),
         )

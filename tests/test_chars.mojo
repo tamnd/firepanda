@@ -47,8 +47,10 @@ from firepanda.kernel.chars import (
     text_slice_replace,
     text_swapcase,
     text_title,
+    text_translate,
 )
 from firepanda.kernel.pattern import rfind_bytes
+from firepanda.kernel.scalar import text_translate_scalar
 
 
 def made(var values: List[String]) raises -> StringArray:
@@ -1131,6 +1133,132 @@ def test_the_class_questions_stop_at_the_first_character_that_fails() raises:
     assert_equal(out[0], "no")
     assert_equal(out[1], "no")
     assert_equal(out[2], "no")
+
+
+def swapped(
+    var values: List[String], var keys: List[String], var repls: List[String]
+) raises -> List[String]:
+    """Translates a column and reads it back, checking the twin agrees.
+
+    Every assertion below goes through here, so the walk that knows about the
+    direct table for the first 128 code points and the walk that knows nothing
+    at all are compared on every row of every case rather than in one test of
+    their own.
+
+    Args:
+        values: The rows.
+        keys: The characters to replace, one character each and in order.
+        repls: What to put in their place, empty to delete.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the kernel refuses the table, or if the two disagree.
+    """
+    var column = made(values^)
+    var key_column = made(keys^)
+    var repl_column = made(repls^)
+    var fast = rows(text_translate(column, key_column, repl_column))
+    var slow = rows(text_translate_scalar(column, key_column, repl_column))
+    assert_equal(String(", ").join(fast), String(", ").join(slow))
+    return fast^
+
+
+def test_translate_swaps_one_character_for_one() raises:
+    var out = swapped(["abcabc", "ab", "", "ABC"], ["a"], ["X"])
+    assert_equal(out[0], "XbcXbc")
+    assert_equal(out[1], "Xb")
+    assert_equal(out[2], "")
+    assert_equal(out[3], "ABC")
+
+
+def test_translate_can_put_several_characters_in_one_place() raises:
+    var out = swapped(["abc"], ["a"], ["XY"])
+    assert_equal(out[0], "XYbc")
+
+
+def test_an_empty_replacement_deletes_the_character() raises:
+    var out = swapped(["abcabc", "aaa"], ["a"], [""])
+    assert_equal(out[0], "bcbc")
+    assert_equal(out[1], "")
+
+
+def test_every_key_is_applied_in_the_same_pass() raises:
+    # The difference between this and two replaces. Done one after another, the
+    # first would turn every a into a b and the second would turn all of them
+    # back, so the row would come out all a's or all b's rather than swapped.
+    var out = swapped(["ab", "abab", "ba"], ["a", "b"], ["b", "a"])
+    assert_equal(out[0], "ba")
+    assert_equal(out[1], "baba")
+    assert_equal(out[2], "ab")
+
+
+def test_what_a_key_maps_to_is_never_looked_at_again() raises:
+    var out = swapped(["ab"], ["a"], ["aa"])
+    assert_equal(out[0], "aab")
+
+
+def test_an_empty_table_hands_every_row_back() raises:
+    var out = swapped(["abc", "", "null"], [], [])
+    assert_equal(out[0], "abc")
+    assert_equal(out[1], "")
+    assert_equal(out[2], "null")
+
+
+def test_translate_reaches_past_the_first_128_code_points() raises:
+    # The two seat lookup means a key below 128 and a key above it take
+    # different roads to the same answer, so a table holding both is the one
+    # that can tell the direct table from the search.
+    var out = swapped(
+        ["héllo", "日本語", "aé"],
+        ["a", "é", "日"],
+        ["A", "E", ""],
+    )
+    assert_equal(out[0], "hEllo")
+    assert_equal(out[1], "本語")
+    assert_equal(out[2], "AE")
+
+
+def test_translate_keeps_a_missing_row_missing() raises:
+    var out = swapped(["null", "abc"], ["a"], ["X"])
+    assert_equal(out[0], "null")
+    assert_equal(out[1], "Xbc")
+
+
+def test_a_key_the_table_does_not_hold_is_left_alone() raises:
+    var out = swapped(["abc", "zzz"], ["q"], ["X"])
+    assert_equal(out[0], "abc")
+    assert_equal(out[1], "zzz")
+
+
+def test_the_two_tables_have_to_be_the_same_height() raises:
+    var refused = False
+    try:
+        var keys = made(["a", "b"])
+        var repls = made(["X"])
+        _ = text_translate(made(["abc"]), keys, repls)
+    except:
+        refused = True
+    assert_true(refused, "two keys and one replacement is not a table")
+
+
+def test_a_key_has_to_be_one_character() raises:
+    var refused = False
+    try:
+        _ = text_translate(made(["abc"]), made(["ab"]), made(["X"]))
+    except:
+        refused = True
+    assert_true(refused, "a key of two characters could never have matched")
+
+
+def test_the_keys_have_to_be_in_order() raises:
+    var refused = False
+    try:
+        _ = text_translate(made(["abc"]), made(["b", "a"]), made(["X", "Y"]))
+    except:
+        refused = True
+    assert_true(refused, "the search needs them sorted and says so")
 
 
 def main() raises:
