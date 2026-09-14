@@ -911,6 +911,32 @@ def test_a_join_pairs_the_rows_that_match() raises:
     same(read_back(out, "rate"), [300, 200, 400], "rate")
 
 
+def test_a_comma_in_the_from_pairs_the_same_rows_a_join_does() raises:
+    # Two tables and the condition in the `WHERE`, which lowers to a cross join
+    # under a filter and is turned back into the pairing by the optimizer. The
+    # answer is the one the test above gets, which is the point of it.
+    var out = run(
+        "SELECT qty, rate FROM sales, tiers WHERE qty = band ORDER BY qty",
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 20, 40], "qty")
+    same(read_back(out, "rate"), [300, 200, 400], "rate")
+
+
+def test_a_comma_join_with_more_than_the_condition_in_the_where() raises:
+    # The equality becomes the join's and what is left of the `WHERE` is still
+    # a filter, pushed onto the side that can answer it.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales, tiers WHERE qty = band AND rate > 250"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 40], "qty")
+    same(read_back(out, "rate"), [300, 400], "rate")
+
+
 def test_a_condition_that_reads_both_sides_runs_above_the_join() raises:
     # A condition on one side is pushed below the join by the optimizer and a
     # condition on both cannot be, so this one is the residual filter that stays
@@ -2207,6 +2233,49 @@ def test_a_cast_in_a_where_runs_before_the_rows_are_kept() raises:
         [40, 25, 30],
         "qty",
     )
+
+
+def test_a_cast_of_a_double_to_an_integer_rounds_the_way_duckdb_does() raises:
+    # Halving the quantities gives five values that land on a half and five
+    # that do not, and DuckDB 1.5.1 answers this query 2, 10, 2, 20, 6, 4, 12,
+    # 0, 15, 8. Truncating would say 1 where it says 2 and 7 where it says 8.
+    # The ties go to the even number, so 2.5 is 2 and 7.5 is 8, which is why
+    # this is rounding and not adding a half first.
+    same(
+        answer(
+            "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS BIGINT) AS half FROM sales",
+            "half",
+        ),
+        [2, 10, 2, 20, 6, 4, 12, 0, 15, 8],
+        "half",
+    )
+
+
+def test_a_cast_of_a_double_rounds_whatever_integer_it_is_asked_for() raises:
+    # The flag is set from the target type, so every integer width gets it and
+    # not just the one the first test happened to name.
+    var out = run(
+        "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS SMALLINT) AS half FROM sales",
+        session(),
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.INT16, "int16")
+    var col = out.column("half").as_typed[DType.int16]()
+    assert_equal(col[2], 2, "1.5 rounded up")
+    assert_equal(col[9], 8, "and 7.5 did too")
+
+
+def test_a_cast_of_a_double_to_a_double_keeps_the_fraction() raises:
+    # Nothing rounds on the way to a type that can hold what it is given, and
+    # the flag the SQL side sets for an integer target is not set here at all.
+    var out = run(
+        "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS DOUBLE) AS half FROM sales",
+        session(),
+    )
+
+    var col = out.column("half").as_typed[DType.float64]()
+    assert_equal(col[0], 2.5, "the first is still a half")
+    assert_equal(col[9], 7.5, "and so is the last")
 
 
 def test_a_cast_to_a_type_the_engine_has_no_column_for_says_so() raises:
@@ -4042,6 +4111,57 @@ def test_a_timestamp_literal_against_a_date_column_is_refused() raises:
             ),
             session(),
         )
+
+
+def test_a_number_literal_with_an_exponent_is_a_double() raises:
+    # DuckDB reads the type off how the number was written and not off what it
+    # is worth, so `1e3` is a DOUBLE even though one thousand is exact. The
+    # plan holds a double, so there is nothing lost and nothing to refuse.
+    var out = run("SELECT 1e3 AS a, 1.5e3 AS b, 1.1e-2 AS c", session())
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "a double")
+    assert_equal(out.column("a").as_typed[DType.float64]()[0], 1000.0, "1e3")
+    assert_equal(out.column("b").as_typed[DType.float64]()[0], 1500.0, "1.5e3")
+    assert_equal(out.column("c").as_typed[DType.float64]()[0], 0.011, "1.1e-2")
+
+
+def test_a_decimal_literal_past_the_widest_decimal_is_a_double() raises:
+    # The count is of digits as written, so the trailing zeros are what pushes
+    # this one over 38 and makes DuckDB read a DOUBLE. Written as `1.5` it is a
+    # DECIMAL(2,1) and is refused by the test below.
+    var out = run(
+        "SELECT 1.5000000000000000000000000000000000000000 AS a", session()
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "a double")
+    assert_equal(out.column("a").as_typed[DType.float64]()[0], 1.5, "1.5")
+
+
+def test_a_decimal_literal_that_fits_a_decimal_is_refused() raises:
+    # The refusal that stands. A double in its place answers 3.3000000000000003
+    # where DuckDB answers 3.3, and the plan has no exact decimal to hold the
+    # right answer in.
+    with assert_raises(contains="does not lower the decimal literal"):
+        _ = run("SELECT 1.1 AS a", session())
+    with assert_raises(contains="does not lower the decimal literal"):
+        _ = run(
+            "SELECT 1234567890123456789012345678901234567.8 AS a", session()
+        )
+
+
+def test_an_integer_literal_past_a_bigint_is_refused_rather_than_wrapped() raises:
+    # DuckDB reads a HUGEINT here and the plan has no 128 bit integer. It used
+    # to wrap and answer -9223372036854775808, which is the one kind of failure
+    # this front end is not allowed to have.
+    assert_equal(
+        run("SELECT 9223372036854775807 AS a", session())
+        .column("a")
+        .as_typed[DType.int64]()[0],
+        9223372036854775807,
+        "the largest one that fits",
+    )
+    with assert_raises(contains="does not lower the integer literal"):
+        _ = run("SELECT 9223372036854775808 AS a", session())
 
 
 def test_an_extract_reads_the_field_off_every_row() raises:

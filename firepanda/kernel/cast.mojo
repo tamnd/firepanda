@@ -30,6 +30,20 @@ where it has somewhere else to go. The reverse direction needs nothing, because
 a text null read as a number is a cleared bit and the layer above puts the NaN
 back.
 
+## The one conversion with two right answers
+
+A float converted to an integer has a fractional part to lose and two front ends
+that disagree about how to lose it. `astype` is pandas and NumPy, which truncate
+towards zero, so `7.9` is 7 and `-7.9` is -7. A SQL cast is DuckDB, which rounds
+to the nearest whole number with a tie going to the even one, so `7.5` and `8.5`
+are both 8 and `-7.5` is -8. Both are right for the caller that asks, so
+`cast_any` takes a `nearest` flag and the caller says which it is. Issue #786.
+
+The flag does nothing anywhere else. Rounding only has something to lose when
+the source is a float and the target is an integer, so the conversion loop tests
+that at compile time and every other pair compiles to what it compiled to
+before.
+
 `cast_any` is the erased entry point a `DataFrame` calls, and it is the most
 expensive function in the package to compile: it dispatches on both ends, so it
 instantiates the loop once per ordered pair of the twelve physical dtypes, which
@@ -322,7 +336,9 @@ def cast_to_strings[src: DType](col: Array[src]) raises -> StringArray:
     return builder^.finish()
 
 
-def cast_any(col: AnyArray, to: DType, strict: Bool = True) raises -> AnyArray:
+def cast_any(
+    col: AnyArray, to: DType, strict: Bool = True, nearest: Bool = False
+) raises -> AnyArray:
     """Converts a column whose dtype is a runtime value to another runtime dtype.
 
     A cast to the dtype the column already has still copies. Returning the input
@@ -335,6 +351,9 @@ def cast_any(col: AnyArray, to: DType, strict: Bool = True) raises -> AnyArray:
         strict: Whether a text value that is not a number raises rather than
             becoming a null. Ignored when the column is not text, because a
             number always converts to some number.
+        nearest: Whether a float converted to an integer rounds to the nearest
+            whole number rather than truncating towards zero. Ignored for every
+            other pair of dtypes, which have no fraction to lose.
 
     Returns:
         A column of dtype `to`, null in the same places as the input.
@@ -349,7 +368,7 @@ def cast_any(col: AnyArray, to: DType, strict: Bool = True) raises -> AnyArray:
     # A caller asking for int64 wants the values, and the codes are integers that
     # look like an answer.
     if col.is_dictionary():
-        return cast_any(AnyArray(decode_dictionary(col)), to, strict)
+        return cast_any(AnyArray(decode_dictionary(col)), to, strict, nearest)
     # A string column must not fall through to the number path: its physical
     # dtype is uint8, so `_cast_erased` would find the uint8 source arm and
     # convert the first byte of every 16 byte view.
@@ -360,12 +379,12 @@ def cast_any(col: AnyArray, to: DType, strict: Bool = True) raises -> AnyArray:
         raise Error("cast: unsupported target dtype")
     comptime for target in ALL:
         if to == target:
-            return AnyArray(_cast_erased[target](col))
+            return AnyArray(_cast_erased[target](col, nearest))
     raise Error("cast: unsupported target dtype")
 
 
 def cast_any(
-    col: AnyArray, to: LogicalType, strict: Bool = True
+    col: AnyArray, to: LogicalType, strict: Bool = True, nearest: Bool = False
 ) raises -> AnyArray:
     """Converts a column to a logical type, which text is one of.
 
@@ -382,6 +401,8 @@ def cast_any(
         to: The target type.
         strict: Whether a text value that is not a number raises rather than
             becoming a null.
+        nearest: Whether a float converted to an integer rounds to the nearest
+            whole number rather than truncating towards zero.
 
     Returns:
         A column of type `to`, null where the input was null.
@@ -398,7 +419,7 @@ def cast_any(
     # right answer with no case analysis: whatever the target is, the values are
     # what the codes stand for and not the codes.
     if col.is_dictionary():
-        return cast_any(AnyArray(decode_dictionary(col)), to, strict)
+        return cast_any(AnyArray(decode_dictionary(col)), to, strict, nearest)
     if to.kind == TypeKind.STRING or to.kind == TypeKind.BINARY:
         if col.is_string():
             return AnyArray(StringArray(copy=col.strings()))
@@ -409,7 +430,7 @@ def cast_any(
         raise Error("cast: unsupported source dtype")
     if to.kind == TypeKind.NULL:
         raise Error("cast: nothing converts to the null type")
-    return cast_any(col, to.physical, strict)
+    return cast_any(col, to.physical, strict, nearest)
 
 
 def _cast_to_dictionary(col: AnyArray, to: LogicalType) raises -> AnyArray:
@@ -455,7 +476,7 @@ def _cast_to_dictionary(col: AnyArray, to: LogicalType) raises -> AnyArray:
     )
 
 
-def _cast_erased[dst: DType](col: AnyArray) raises -> Array[dst]:
+def _cast_erased[dst: DType](col: AnyArray, nearest: Bool) raises -> Array[dst]:
     """Resolves the source dtype, the target having already been resolved."""
     comptime for source in ALL:
         if col.dtype() == source:
@@ -470,11 +491,15 @@ def _cast_erased[dst: DType](col: AnyArray) raises -> Array[dst]:
                 var target = out.unsafe_mut_ptr()
                 var i = start
                 while i < stop:
-                    target.unsafe_offset(i).unsafe_store(
-                        values.unsafe_offset(i)
-                        .unsafe_load[width=width]()
-                        .cast[dst]()
-                    )
+                    var read = values.unsafe_offset(i).unsafe_load[
+                        width=width
+                    ]()
+                    # The only pair with a fraction to lose. Every other one
+                    # compiles the flag away and keeps the loop it had.
+                    comptime if source.is_floating_point() and dst.is_integral():
+                        if nearest:
+                            read = round(read)
+                    target.unsafe_offset(i).unsafe_store(read.cast[dst]())
                     i += width
 
             parallel_morsels(convert, n)

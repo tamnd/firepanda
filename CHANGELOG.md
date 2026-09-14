@@ -17,6 +17,39 @@ The counting pass is its own function now and the filter calls it once, before t
 The dense half of the count also stopped being a byte at a time. It adds a register of mask bytes and takes one horizontal add at the end, which is what `mask_kept` next to it already did and what this one should have been doing all along.
 
 Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
+### Fixed: a SQL cast of a double to an integer rounds where it used to truncate
+
+`SELECT CAST(2.6 AS BIGINT)` answered 2 and DuckDB answers 3. The conversion loses a fraction and there are two ways to lose it: truncate towards zero, which is what the machine instruction does and what pandas and NumPy mean by `astype`, or round to the nearest whole number with a tie going to the even one, which is what a SQL cast means. firepanda did the first for both front ends and only one of them was asking for it. Issue #786.
+
+So the fix is not the kernel changing its mind. `astype` still truncates, because a dataframe library that disagreed with pandas here would be wrong at the surface it is a copy of, and `df["x"].astype("int64")` on 7.9 is still 7. The cast kernel takes a flag instead and the caller says which conversion this is.
+
+The flag is set on the plan's cast expression, which is the one place that knows which front end asked. The SQL lowering sets it whenever the cast names an integer type and the dataframe path never sets it. It rides in the `op` field, which every other kind of expression uses for an operator code and a cast has never used at all, so no expression anywhere got wider to carry it. A plan prints it as `a::int64 nearest` and writes it into JSON only when it is on, so a plan that truncates reads and serializes exactly the way it always did.
+
+Nothing else moves. Rounding only has something to lose when the source is a float and the target is an integer, so the conversion loop decides that at compile time and every other one of the 144 type pairs compiles to the loop it compiled to before. A cast of a string to an integer parses and is not affected either.
+
+`CAST(2.6 AS BIGINT)` came off the value differential's recorded list, which is now empty, and all 79 expressions agree with DuckDB 1.5 with nothing written down beside them.
+
+### Fixed: a join written as a comma and a `WHERE` would not run
+
+`SELECT count(*) FROM orders, customer WHERE c_custkey = o_custkey` refused to run, and the same query written with a `JOIN` and an `ON` answered 15000. They are the same query. The first one lowers to a cross join with the equality in a filter above it, and pairing 15,000 rows against 1,500 is 22 million pairs built before the filter ever sees one, so the operator behind a cross join declines to start rather than spend the memory.
+
+Predicate pushdown puts the equality back on the join now. A conjunct carried over a cross join whose two halves are a plain column of one side and a plain column of the other becomes a key pair, the join becomes an inner join, and whatever is left of the `WHERE` routes the way it always did. Both halves have to be plain columns because the operator builds its hash table from a column and a computed key would have to be computed on the build side too. A name both sides have counts as neither, which is the ambiguity the rest of the pass already refuses.
+
+It runs before the transitive copying rather than after, so a filter on one side of a condition that has only just become a key still reaches the other side in the same sweep.
+
+That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equalities in the `WHERE`. It runs now, and its ten order keys and their revenues agree with DuckDB 1.5 at scale factor 0.01. The claim in `firepanda/sql/plan.mojo` that a comma in the `FROM` and a written `JOIN` reach the same plan was there before any of this was, and it was not true. It is a test now.
+
+Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
+
+### Added: `str.cat`, the first answer narrower than a column
+
+`s.str.cat()` folds a whole text column into one string, with `sep` between neighbouring rows and none at either end. It is the first name on the `str` accessor whose answer is a scalar rather than a column, and it gets a function of its own in the accessor layer for the same reason `partition` does: the doors there are picked by the shape of the answer, and a string is not a column.
+
+A missing row is dropped and dropped takes its separator with it, so `["a", None, "b"]` joined by `-` is `a-b` and not `a--b`. An empty row is readable and keeps its separator, so `["a", "", "b"]` joined by `-` is `a--b`. Given `na_rep` the missing row is not missing any more and behaves like the empty one, which makes `na_rep=""` a different request from leaving the argument out rather than a way of spelling the default.
+
+`sep` and `na_rep` are checked before anything is read. pandas checks neither and lets both fall into `str.join`, which answers with a sentence about `join` having no attribute or about a sequence item at some row index, and neither of those names the argument that was wrong.
+
+`str.cat(others=...)` is refused with `UnsupportedError`. pandas aligns the two columns on their labels before it concatenates anything, alignment is not written yet, and concatenating by position instead would answer a different question without saying so.
 
 ### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
 
@@ -29,6 +62,20 @@ None of that was needed. Going left, the next character starts at the next byte 
 Measured on the i9-13900K over four million rows, three rounds alternated, every measurement within one per cent of its neighbours. Rows with nothing to trim went from 53.9 milliseconds to 26.4, which is two times. Rows with three spaces on each end went from 135.1 to 28.0, which is 4.8 times, and that row is new because a change that made the common case cheap by making the real work expensive would look like a win without it.
 
 Nothing about the answers moves. The set is still read as a set of characters rather than as a prefix, both whitespace tables stay where they are, and the same characters are tested in the same order.
+
+### Fixed: an integer literal past a BIGINT wrapped to a negative number
+
+`SELECT 9223372036854775808` answered `-9223372036854775808`. The lowering read the literal with `atol`, which wraps rather than refusing, so the query came back with a number nobody wrote and no error attached. DuckDB reads a `HUGEINT` there and the plan has no 128 bit integer, so it is refused by name now, the same way the decimal literal is.
+
+### Added: the number literals DuckDB reads as doubles are lowered
+
+Which type a number literal has is DuckDB's rule, and the rule is read off how the number was written rather than off what it is worth. `1.1` is a `DECIMAL(2,1)` and `1e3` is a `DOUBLE` even though one thousand is exact, and `00001.5` is a `DECIMAL(6,1)` because the zeros are digits somebody wrote.
+
+Two of those are doubles and were being refused along with the decimals. A literal with an exponent is one, so `1e3`, `1.5e3` and `1.1e-2` all lower now and the plan holds exactly what DuckDB holds. So is a literal with a point and more than 38 digits written, counting leading and trailing zeros, because it has run past the widest decimal there is: `1.5000000000000000000000000000000000000000` is a double and `1.5` is not.
+
+What is still refused is the decimal literal that fits, for the reason it always was. A double in its place answers `3.3000000000000003` where DuckDB answers `3.3`, and the plan has nowhere to hold the right answer.
+
+Every case was put to DuckDB 1.5 first, and four of them went into the value differential, read back as whole numbers and yes and no because that harness compares three types and a double is not one of them. Adding them found issue #786: a cast of a double to an integer truncated where DuckDB rounds, so `CAST(2.6 AS BIGINT)` was 2 here and 3 there. That was recorded in the harness with the issue against it rather than fixed here, because deciding where the two front ends part company was not this entry's work. The entry above is where that was decided, and the two ship together.
 
 ### Added: a SQL type carries a list's element, so a call returning a list has a type
 
@@ -83,6 +130,20 @@ The underscore stands for one character and not for one byte, which is the thing
 One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
 
 The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+
+### Added: `str.partition` and `str.rpartition`, the first answers wider than a column
+
+Every `str` name written so far hands back one column. These two hand back three: what came before the separator, the separator, and what came after. That makes them the first on this accessor whose answer is a frame, which is why they were picked next out of the fourteen names still missing. Everything else about them is a substring search the library already had, so nothing else confounds the question.
+
+The difference between the two names is not only the one the names suggest. `partition` cutting at the first occurrence and `rpartition` at the last is half of it. The other half is a row the separator is not in at all: the row survives whole, and `partition` puts it in the first column while `rpartition` puts it in the third. That is Python's rule, and an implementation written from the name alone puts it first both times and passes everything else anyone would think to check.
+
+There is no argument here about which backend pandas reads its answer out of, and that is the finding. `pyarrow.compute` has no partition kernel, so both pandas backends loop in Python and call CPython's own `str.partition` on every row. The oracle for this slice is Python, which is the opposite of the last five.
+
+The kernel searches once per row and fills three builders from the one offset, rather than answering one column at a time and running the search three times for a third of the answer each. It gets a door of its own in the accessor layer, and that is the answer shape rule working rather than an exception to it, since three columns is a shape and no existing door carried it.
+
+Two things do not match pandas and both come from pandas doing this a row at a time. The columns are labelled `"0"`, `"1"` and `"2"` where pandas uses the integers 0, 1 and 2, because a frame here holds text labels, and that is registered as a divergence because what closes it is a column label type rather than a different string written in this method. And pandas decides both of its refusals and the width of its answer from the rows: `pd.Series([], dtype="str").str.partition("")` raises nothing and answers a frame with no columns at all, and a column of only missing rows answers one. This library checks the separator once before it starts and always answers three columns, which is what the documentation for the name describes.
+
+`sep=""` and a separator that is not a string are refused with CPython's own two sentences. `expand=False` is refused by name, because it wants one column of three element tuples and there is no column type for one, which is the same wall `split`, `rsplit`, `findall`, `join` and `extractall` are behind.
 
 ### Added: `case=False` on `contains`, `match`, `fullmatch` and `replace`
 

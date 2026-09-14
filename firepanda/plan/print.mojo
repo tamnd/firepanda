@@ -44,7 +44,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.temporal import civil_from_days
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -210,7 +210,14 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
         return String(left, " ", BinaryOp(UInt8(node.op)), " ", right)
 
     if node.kind == ExprKind.CAST:
-        return String(render_expr(tree, node.children[0]), "::", node.type)
+        # The rounding form says so, because a plan that reads the same either
+        # way would hide the one thing about a cast a reader might be surprised
+        # by. Nothing is written for the truncating form, which is the older
+        # spelling and the one every existing plan prints.
+        var rounds = " nearest" if node.op == NEAREST else ""
+        return String(
+            render_expr(tree, node.children[0]), "::", node.type, rounds
+        )
 
     if node.kind == ExprKind.AGGREGATE:
         return String(

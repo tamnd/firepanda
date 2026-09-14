@@ -152,6 +152,21 @@ The three are held as three separate classes rather than one with two range
 tests inside it, because the whole of the three is under three kilobytes and a
 search that answers directly beats a search that answers a question you then
 have to ask again.
+
+### The one that folds instead of mapping
+
+`text_join` is the only thing here that does not answer a column. Every other
+kernel in this file reads a row and writes a row, and this one reads the whole
+column and writes one string, which is what `str.cat` is when it has nothing to
+concatenate against. It sits here rather than in `reduce.mojo` because what it
+does to the bytes is the text work and the folding is the easy half, and a
+reader looking for what happens to a missing row will look for it beside the
+other text kernels.
+
+It is also the only one with two different answers for a missing row, and the
+difference is not confined to the row. A dropped row takes its separator with
+it and a replaced row keeps it, so the two answers differ in length by more than
+the row does.
 """
 
 from std.collections.span import Span
@@ -1963,3 +1978,77 @@ def text_is_alnum(a: StringArray) raises -> Array[DType.bool]:
         Error: Only what the morsel runtime raises.
     """
     return _all_in_class(a, ALL_ALNUM)
+
+
+def text_join(
+    a: StringArray,
+    sep: Span[UInt8, _],
+    na_rep: Span[UInt8, _],
+    skip_missing: Bool,
+) raises -> String:
+    """Folds a whole column into one string, with a separator between rows.
+
+    The first kernel in this file whose answer is not a column. `str.cat` with
+    nothing to concatenate against is a reduction: every readable row in order,
+    with the separator between neighbours and not at either end.
+
+    What a missing row does is the argument, and pandas has both answers behind
+    one name. With no `na_rep` a missing row is dropped, and dropped means it
+    takes its separator with it, so a column of three rows with the middle one
+    missing joins to two rows and one separator rather than to two separators
+    with nothing between them. With an `na_rep` the row is not missing any more
+    and the text stands in for it, separators and all. That is `skip_missing`
+    here, and the two answers differ by more than the row.
+
+    The size is counted before anything is written. A join is the one text
+    operation whose answer length is known exactly from the input, so one pass
+    adds up the bytes and the second pass writes into a buffer that never grows.
+    The alternative reallocates on the way through and copies everything written
+    so far each time, which is the whole cost of the operation for a tall column.
+
+    Args:
+        a: The column.
+        sep: The bytes to put between neighbouring rows.
+        na_rep: The bytes to stand in for a missing row, read only when
+            `skip_missing` is False.
+        skip_missing: Whether a missing row is dropped rather than replaced.
+
+    Returns:
+        One string. Empty for a column with no rows in it, and empty for a
+        column of nothing but missing rows when they are being dropped.
+
+    Raises:
+        Error: If the buffer cannot allocate.
+    """
+    var n = len(a)
+    var total = 0
+    var written = 0
+
+    for i in range(n):
+        var valid = a.is_valid(i)
+        if not valid and skip_missing:
+            continue
+        if written > 0:
+            total += len(sep)
+        if valid:
+            total += len(a.unsafe_bytes(i))
+        else:
+            total += len(na_rep)
+        written += 1
+
+    var bytes = List[UInt8](capacity=total)
+    written = 0
+
+    for i in range(n):
+        var valid = a.is_valid(i)
+        if not valid and skip_missing:
+            continue
+        if written > 0:
+            bytes.extend(sep)
+        if valid:
+            bytes.extend(a.unsafe_bytes(i))
+        else:
+            bytes.extend(na_rep)
+        written += 1
+
+    return String(StringSlice(unsafe_from_utf8=Span(bytes)))

@@ -1156,9 +1156,16 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
 
 
 def test_a_cast_reads_its_type_name_against_the_dialect_type_set() raises:
+    # `nearest` is on because the target is an integer and the query is SQL, so
+    # the fraction rounds rather than being truncated away. The same cast built
+    # through the dataframe surface prints without it.
     assert_equal(
         _plan("SELECT CAST(a AS BIGINT) AS wide FROM t"),
-        "PROJECT [a::int64 as wide]\n  SCAN t []\n",
+        "PROJECT [a::int64 nearest as wide]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT CAST(a AS DOUBLE) AS wide FROM t"),
+        "PROJECT [a::float64 as wide]\n  SCAN t []\n",
     )
 
 
@@ -1167,11 +1174,11 @@ def test_a_spelling_is_not_a_type_here_either() raises:
     # narrow the column if the spelling table were read the other way round.
     assert_equal(
         _plan("SELECT CAST(a AS int8) AS wide FROM t"),
-        "PROJECT [a::int64 as wide]\n  SCAN t []\n",
+        "PROJECT [a::int64 nearest as wide]\n  SCAN t []\n",
     )
     assert_equal(
         _plan("SELECT CAST(a AS int1) AS narrow FROM t"),
-        "PROJECT [a::int8 as narrow]\n  SCAN t []\n",
+        "PROJECT [a::int8 nearest as narrow]\n  SCAN t []\n",
     )
 
 

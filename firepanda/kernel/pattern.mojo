@@ -62,6 +62,22 @@ pandas 3, so the ordinary call is a byte search and a rewrite and there is
 nothing to refuse. It is also the first kernel here whose answer is text, which
 means it is the first that cannot write into a column allocated up front,
 because how long a row comes out is not known until the search has run.
+
+### The sixth, which answers three columns
+
+`str.partition` and `str.rpartition` cut each row at one occurrence of a
+separator and hand back the part before it, the separator itself, and the part
+after. They are the first kernel here whose answer is more than one column, and
+they are written as one kernel rather than three because the search is the work
+and running it three times to return one third of the answer each time would
+triple it for nothing.
+
+The two names differ in one place and it is not the obvious one. Searching from
+the right instead of the left is the expected half. The other half is what
+happens when the separator is not there at all: `partition` puts the whole row
+in the first column and `rpartition` puts it in the third, which is Python's
+rule and is the one thing an implementation written from the name alone gets
+wrong.
 """
 
 from std.collections.span import Span
@@ -750,6 +766,91 @@ def text_replace(
         built.append(Span(scratch))
 
     return built^.finish()
+
+
+def text_partition(
+    a: StringArray, sep: Span[UInt8, _], from_right: Bool
+) raises -> List[StringArray]:
+    """Cuts every element at one occurrence of a separator into three columns.
+
+    The first kernel here whose answer is wider than one column, and the three
+    are built in one pass because the search is the expensive part of this and
+    returning a third of the answer at a time would run it three times.
+
+    Where the separator is found, the three columns are what came before it, the
+    separator itself, and what came after. The separator is copied out of the
+    row rather than out of the argument, which costs the same and means the
+    column is a slice of the input for every row, matching or not.
+
+    Where the separator is not found, the whole row goes into one column and the
+    other two are empty, and which column it goes into is the difference between
+    the two names that a reader would not guess. `partition` puts it first and
+    `rpartition` puts it last, so a row with no separator in it reads as all
+    head to one and all tail to the other. That is Python's rule, pandas hands
+    this name to Python, and it is the one thing worth testing twice.
+
+    An empty separator is not refused here. The Python layer refuses it with the
+    sentence pandas uses, because pandas refuses it, and a kernel that has to be
+    told twice is a kernel with two places to change.
+
+    Args:
+        a: The column.
+        sep: The bytes to cut at.
+        from_right: Whether to cut at the last occurrence rather than the first.
+
+    Returns:
+        Three text columns of the same height, each null wherever the input is
+        null, in the order pandas labels 0, 1 and 2. A list rather than a tuple
+        because every caller of this moves the three out one at a time on the
+        way to somewhere else, and taking a tuple apart in Mojo copies it.
+
+    Raises:
+        Error: If a builder cannot allocate.
+    """
+    var n = len(a)
+    var heads = StringBuilder(capacity=n)
+    var middles = StringBuilder(capacity=n)
+    var tails = StringBuilder(capacity=n)
+    var m = len(sep)
+    var nothing = List[UInt8]()
+
+    for i in range(n):
+        if not a.is_valid(i):
+            # A missing row is missing in all three, which is pandas' answer and
+            # is the only reading available: there is nothing to cut, so there
+            # is no part before the cut either.
+            heads.append_null()
+            middles.append_null()
+            tails.append_null()
+            continue
+
+        var bytes = a.unsafe_bytes(i)
+        var at: Int
+        if from_right:
+            at = rfind_bytes(bytes, sep, 0, len(bytes))
+        else:
+            at = find_bytes(bytes, sep, 0)
+
+        if at < 0:
+            if from_right:
+                heads.append(Span(nothing))
+                middles.append(Span(nothing))
+                tails.append(bytes)
+            else:
+                heads.append(bytes)
+                middles.append(Span(nothing))
+                tails.append(Span(nothing))
+            continue
+
+        heads.append(bytes[0:at])
+        middles.append(bytes[at : at + m])
+        tails.append(bytes[at + m : len(bytes)])
+
+    var out = List[StringArray](capacity=3)
+    out.append(heads^.finish())
+    out.append(middles^.finish())
+    out.append(tails^.finish())
+    return out^
 
 
 def _character_width(bytes: Span[UInt8, _], at: Int) -> Int:

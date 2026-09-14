@@ -57,6 +57,7 @@ from firepanda.kernel.pattern import (
     text_contains_folded,
     text_equals_folded,
     text_like,
+    text_partition,
     text_replace,
     text_replace_folded,
     text_starts_with,
@@ -71,6 +72,7 @@ from firepanda.kernel.scalar import (
     text_equals_folded_scalar,
     text_equals_scalar,
     text_like_scalar,
+    text_partition_scalar,
     text_replace_folded_scalar,
     text_replace_scalar,
     text_starts_with_folded_scalar,
@@ -1000,6 +1002,173 @@ def test_a_folded_search_keeps_a_missing_row_missing() raises:
     assert_false(got.is_valid(4), "and so is the other one")
     var written = text_replace_folded(col, "e".as_bytes(), "-".as_bytes(), -1)
     assert_false(written.is_valid(2), "a missing row has nothing to replace")
+
+
+def cut_sample() -> StringArray:
+    """Builds the column the partition tests read.
+
+    Every row is here for something a cut can get wrong. The first holds the
+    separator twice so the two names choose different occurrences. The second
+    does not hold it at all, which is the row that tells the two apart in the
+    way a reader would not guess. The third is empty, the fourth is the
+    separator and nothing else, and the two after it have the separator at an
+    end so that one of the three columns comes out empty while the other two do
+    not. The last two hold characters wider than a byte on both sides of the
+    cut, because an offset here is a byte offset and a row that is all ASCII
+    cannot notice a kernel that thought it was a character offset.
+
+    Returns:
+        The column, with one null in it.
+    """
+    var rows = List[String]()
+    rows.append("a b c")
+    rows.append("abc")
+    rows.append("ignored")
+    rows.append("")
+    rows.append(" ")
+    rows.append("  x")
+    rows.append("x  ")
+    rows.append("héllo wörld")
+    rows.append("日本 語")
+    rows.append("a--b--c")
+
+    var builder = StringBuilder(capacity=len(rows))
+    for i in range(len(rows)):
+        if i == 2:
+            builder.append_null()
+        else:
+            builder.append(rows[i].as_bytes())
+    return builder^.finish()
+
+
+def check_cut(col: StringArray, sep: String, from_right: Bool) raises:
+    """Runs the cut and its twin and asserts all three columns agree.
+
+    Args:
+        col: The column.
+        sep: The separator.
+        from_right: Whether to cut at the last occurrence.
+
+    Raises:
+        AssertionError: On the first row the two disagree about.
+    """
+    var side = "rpartition " if from_right else "partition "
+    var mine = text_partition(col, sep.as_bytes(), from_right)
+    var twin = text_partition_scalar(col, sep, from_right)
+    for i in range(len(col)):
+        assert_equal(
+            mine[0].is_valid(i),
+            twin[0].is_valid(i),
+            side + sep + " validity at " + String(i),
+        )
+        if not mine[0].is_valid(i):
+            continue
+        assert_equal(read(mine[0], i), read(twin[0], i), side + sep + " head")
+        assert_equal(read(mine[1], i), read(twin[1], i), side + sep + " sep")
+        assert_equal(read(mine[2], i), read(twin[2], i), side + sep + " tail")
+
+
+def cut_reads(
+    col: StringArray, sep: String, from_right: Bool, i: Int
+) raises -> String:
+    """One row of a cut, written out as three parts with a bar between them.
+
+    A cut answers three columns and an assertion per column would be three
+    assertions saying the same thing about the same row. Written as one string
+    the failure names the row and shows what the other two parts were, which is
+    what a reader needs to tell a wrong separator from a wrong side.
+
+    Args:
+        col: The column.
+        sep: The separator.
+        from_right: Whether to cut at the last occurrence.
+        i: The row.
+
+    Returns:
+        The three parts joined by a bar.
+
+    Raises:
+        Error: If the kernel does.
+    """
+    var got = text_partition(col, sep.as_bytes(), from_right)
+    return read(got[0], i) + "|" + read(got[1], i) + "|" + read(got[2], i)
+
+
+def test_a_cut_agrees_with_its_twin() raises:
+    """On separators that are there, are not there, and are there twice."""
+    var col = cut_sample()
+    var seps: List[String] = [" ", "--", "-", "b", "x", "ö", "日", "語", "z"]
+    for j in range(len(seps)):
+        check_cut(col, seps[j], False)
+        check_cut(col, seps[j], True)
+
+
+def test_the_two_names_choose_different_occurrences() raises:
+    """Which is the half of the difference a reader would guess."""
+    var col = cut_sample()
+    assert_equal(cut_reads(col, " ", False, 0), "a| |b c")
+    assert_equal(cut_reads(col, " ", True, 0), "a b| |c")
+    assert_equal(cut_reads(col, "--", False, 9), "a|--|b--c")
+    assert_equal(cut_reads(col, "--", True, 9), "a--b|--|c")
+
+
+def test_a_row_without_the_separator_goes_to_opposite_ends() raises:
+    """Which is the half a reader would not guess and is Python's rule.
+
+    A row with nothing to cut is not an error and is not three empty strings.
+    The whole row survives, and `partition` calls it all head while
+    `rpartition` calls it all tail. An implementation that wrote the row into
+    the first column both times would pass every test above this one.
+    """
+    var col = cut_sample()
+    assert_equal(cut_reads(col, " ", False, 1), "abc||")
+    assert_equal(cut_reads(col, " ", True, 1), "||abc")
+    assert_equal(cut_reads(col, "z", False, 7), "héllo wörld||")
+    assert_equal(cut_reads(col, "z", True, 7), "||héllo wörld")
+
+
+def test_a_separator_at_an_end_leaves_one_part_empty() raises:
+    """And the part it leaves empty is not the same for the two names."""
+    var col = cut_sample()
+    assert_equal(cut_reads(col, " ", False, 4), "| |")
+    assert_equal(cut_reads(col, " ", True, 4), "| |")
+    assert_equal(cut_reads(col, " ", False, 5), "| | x")
+    assert_equal(cut_reads(col, " ", True, 5), " | |x")
+    assert_equal(cut_reads(col, " ", False, 6), "x| | ")
+    assert_equal(cut_reads(col, " ", True, 6), "x | |")
+
+
+def test_a_cut_counts_bytes_and_the_parts_still_read_back() raises:
+    """A row wider than a byte on both sides of the separator.
+
+    The offsets here are byte offsets and nothing in the kernel decodes, which
+    is safe only because a separator is matched whole: a match cannot start or
+    end in the middle of a character unless the separator did.
+    """
+    var col = cut_sample()
+    assert_equal(cut_reads(col, " ", False, 7), "héllo| |wörld")
+    assert_equal(cut_reads(col, " ", True, 8), "日本| |語")
+    assert_equal(cut_reads(col, "ö", False, 7), "héllo w|ö|rld")
+    assert_equal(cut_reads(col, "本", False, 8), "日|本| 語")
+
+
+def test_an_empty_row_cuts_into_three_empty_parts() raises:
+    """Both ways, which is the one row the two names agree about completely."""
+    var col = cut_sample()
+    assert_equal(cut_reads(col, " ", False, 3), "||")
+    assert_equal(cut_reads(col, " ", True, 3), "||")
+
+
+def test_a_cut_keeps_a_missing_row_missing_in_all_three() raises:
+    """There is nothing to cut, so there is no part before the cut either."""
+    var col = cut_sample()
+    var got = text_partition(col, " ".as_bytes(), False)
+    assert_false(got[0].is_valid(2), "the head of a missing row is missing")
+    assert_false(got[1].is_valid(2), "and so is the separator")
+    assert_false(got[2].is_valid(2), "and so is the tail")
+    var back = text_partition(col, " ".as_bytes(), True)
+    assert_false(back[2].is_valid(2), "the other way round as well")
+    assert_true(got[0].is_valid(0), "and a row that is there is still there")
 
 
 def main() raises:

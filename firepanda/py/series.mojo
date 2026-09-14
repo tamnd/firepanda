@@ -50,6 +50,8 @@ from firepanda.py.reduce import reduction
 from firepanda.py.text import flag as text_flag
 from firepanda.py.text import number as text_number
 from firepanda.py.text import text as text_text
+from firepanda.py.text import join as text_join
+from firepanda.py.text import partition as text_partition
 from firepanda.py.text import translate as text_translate
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
@@ -1352,6 +1354,81 @@ struct PySeries(Movable, Writable):
                         Self._other(values, "values")[],
                     )
                 )
+            )
+        )
+
+    @staticmethod
+    def string_partition(
+        py_self: PythonObject, sep: PythonObject, from_right: PythonObject
+    ) raises -> PythonObject:
+        """Cuts every row at a separator and hands back three columns.
+
+        The one `str` method whose answer is wider than a column. It comes back
+        as a list of three series rather than as a frame because a frame here
+        would have to invent the labels, and the labels pandas puts on them are
+        integers, which this library's frames do not hold. The Python layer is
+        where that is decided and where it is written down.
+
+        Args:
+            py_self: The series.
+            sep: The separator, which the Python layer has already checked is a
+                string and is not empty.
+            from_right: Whether to cut at the last occurrence, which is
+                `rpartition` rather than `partition`.
+
+        Returns:
+            A list of three new series, in the order pandas labels 0, 1 and 2.
+
+        Raises:
+            Error: Tagged `value` if the column is not text.
+        """
+        var parts = text_partition(
+            Self._held(py_self)[].series[],
+            words(sep, "sep"),
+            flag(from_right, "from_right"),
+        )
+        var out = Python.list()
+        for _ in range(3):
+            out.append(PythonObject(alloc=Self(ArcPointer(parts.pop(0)))))
+        return out
+
+    @staticmethod
+    def string_join(
+        py_self: PythonObject,
+        sep: PythonObject,
+        na_rep: PythonObject,
+        skip_missing: PythonObject,
+    ) raises -> PythonObject:
+        """Folds the whole column into one string.
+
+        The only `str` method whose answer is narrower than a column. It is
+        `str.cat` with nothing to concatenate against, which pandas spells as
+        the same name as the row by row one and which is a different operation.
+
+        Whether a missing row is dropped or replaced crosses as a flag rather
+        than being read back out of `na_rep`, because the empty string is a
+        real stand in and is not the same request as no stand in at all. The
+        Python layer is where pandas' `na_rep=None` is turned into the flag.
+
+        Args:
+            py_self: The series.
+            sep: The text to put between neighbouring rows.
+            na_rep: The text to stand in for a missing row.
+            skip_missing: Whether a missing row is dropped rather than
+                replaced.
+
+        Returns:
+            One Python string.
+
+        Raises:
+            Error: Tagged `value` if the column is not text.
+        """
+        return PythonObject(
+            text_join(
+                Self._held(py_self)[].series[],
+                words(sep, "sep"),
+                words(na_rep, "na_rep"),
+                flag(skip_missing, "skip_missing"),
             )
         )
 

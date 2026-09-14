@@ -117,11 +117,12 @@ def recorded(expression: StringSlice) -> String:
     Returns:
         The reason, or an empty string if this disagreement is a new one.
     """
-    # Empty, and that is the state the harness is meant to be in. The two
-    # entries it was written with are both gone: the integer division under
-    # issue #770 and the LIKE pattern under issue #776, each one found here and
-    # fixed rather than written down and left. Anything that disagrees now is a
-    # new disagreement and the run says so.
+    # Empty, and it has been empty three times over now. The integer division
+    # under issue #770, the LIKE pattern under issue #776 and the cast of a
+    # double to an integer under issue #786 were each found here and then fixed
+    # rather than written down and left. The list is worth keeping for the next
+    # one whose fix is a decision rather than a patch.
+    _ = expression
     return ""
 
 
@@ -358,6 +359,16 @@ def expressions() -> List[String]:
     out.append("d = DATE '2020-01-01'")
     out.append("d > DATE '2013-01-01'")
     out.append("d IS NULL")
+
+    # The number literals that are doubles to DuckDB, over a column so that
+    # neither engine folds the expression before it is run. Read back as a
+    # whole number or a yes and no, because this compares three types and a
+    # double is not one of them. The decimal literal that fits a decimal is not
+    # here, because firepanda refuses it.
+    out.append("CAST(n * 1e3 AS BIGINT)")
+    out.append("CAST(n + 1.5e3 AS BIGINT)")
+    out.append("n * 1.1e-2 < 1")
+    out.append("CAST(n * 1.5000000000000000000000000000000000000000 AS BIGINT)")
 
     # Nested, because a kernel that is right on a column can still be wrong on
     # what another kernel just built.

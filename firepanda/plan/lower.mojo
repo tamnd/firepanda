@@ -295,7 +295,7 @@ from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
 from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -535,10 +535,27 @@ def _lower_expr(
             # a cast of one lands in a column of its own, the way every other
             # expression does. A cast of a column this expression just built
             # converts in place, because that column is what the cast is for.
-            pipe.add(Node(Cast(at, exprs.nodes[root].type, name)))
+            pipe.add(
+                Node(
+                    Cast(
+                        at,
+                        exprs.nodes[root].type,
+                        name,
+                        nearest=exprs.nodes[root].op == NEAREST,
+                    )
+                )
+            )
             memo.remember(root, len(pipe.schema) - 1)
             return len(pipe.schema) - 1
-        pipe.add(Node(Cast(at, exprs.nodes[root].type)))
+        pipe.add(
+            Node(
+                Cast(
+                    at,
+                    exprs.nodes[root].type,
+                    nearest=exprs.nodes[root].op == NEAREST,
+                )
+            )
+        )
         # The position holds the converted column now, so whatever the memo
         # says is there is no longer there, and the cast itself is not recorded
         # because a second cast of it would convert it twice.

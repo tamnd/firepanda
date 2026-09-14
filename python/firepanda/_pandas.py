@@ -9014,6 +9014,99 @@ class StringMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _cut(self, sep: Any, expand: Any, from_right: bool, name: str) -> DataFrame:
+        """Every row cut at one occurrence of a separator, as three columns.
+
+        The one name on this accessor whose answer is a frame, and the only one
+        of its arguments that needed a decision is `expand`. pandas defaults it
+        to True and answers a frame, and `expand=False` answers one column of
+        three element tuples. There is no column type here that holds a tuple,
+        so the second is refused rather than approximated, and the refusal says
+        which of the two shapes is missing rather than saying the method is.
+
+        The separator is checked here because pandas checks it here, and both
+        refusals are pandas' own sentences. An empty separator is a `ValueError`
+        reading `empty separator`, which is Python's message for the same
+        mistake, and anything that is not a string is `must be str, not` and the
+        type's name. Neither reaches the kernel: the kernel would have an answer
+        for an empty separator, and answering something pandas refuses is the
+        same kind of wrong as refusing something pandas answers.
+
+        The labels are the one place this cannot match. pandas labels the three
+        columns with the integers 0, 1 and 2, and a frame here holds text
+        labels, so they come back as `"0"`, `"1"` and `"2"`. That is registered
+        as a divergence rather than worked around, because the fix is a column
+        label type and not a string this method could write differently.
+        """
+        from ._frame import DataFrame
+
+        if not isinstance(sep, str):
+            raise DTypeError(f"firepanda:dtype: must be str, not {type(sep).__name__}")
+        if sep == "":
+            raise InvalidArgumentError("firepanda:value: empty separator")
+        if not expand:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{name} with expand=False answers a column of"
+                " tuples and there is no column type for one yet, so only expand=True is"
+                " written"
+            )
+        try:
+            parts = self._series._inner.string_partition(sep, from_right)
+        except Exception as error:
+            raise translate(error) from None
+        from ._frame import Series
+
+        return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
+
+    def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> str:
+        """The whole column folded into one string.
+
+        `str.cat` is two operations wearing one name. With `others` it lines a
+        second column up against this one and concatenates row by row, and the
+        answer is a column. With no `others` it folds this column into a single
+        string, and the answer is a scalar. Only the second is written here.
+
+        The first is refused rather than approximated because of what pandas
+        does before it concatenates anything: it aligns the two columns on their
+        labels, so a row of `others` meets the row of this column with the same
+        label and not the one in the same position. Alignment is not written in
+        this library yet, and doing it by position instead would answer a
+        different question quietly, which is the worst of the three options.
+
+        `na_rep` decides both what a missing row becomes and whether it survives
+        at all, and pandas reads that off whether the argument was given. It
+        crosses to Mojo as two arguments because the empty string is a real
+        stand in: `na_rep=""` keeps the row and its separator and drops only its
+        text, which is not the same answer as leaving the argument out.
+
+        Neither `sep` nor `na_rep` is checked by pandas, which lets both fall
+        into `str.join` and come back out as a sentence about `join` or about
+        sequence items. Those name an implementation and not the mistake, so
+        both are refused here with a message that says which argument was wrong.
+
+        `join` is dropped unread. It says how to line `others` up against this
+        column and there is no `others` to line up, so it has nothing to do.
+        pandas does not check it either, and takes `join="bogus"` without a
+        word even when there is an `others` for it to have applied to.
+        """
+        if others is not None:
+            raise UnsupportedError(
+                "firepanda:unsupported: str.cat with others aligns the two columns on"
+                " their labels before it concatenates, and alignment is not written"
+                " yet, so only the form that folds one column into a string is"
+            )
+        del join
+        if sep is None:
+            sep = ""
+        if not isinstance(sep, str):
+            raise DTypeError(f"firepanda:dtype: sep must be str, not {type(sep).__name__}")
+        if na_rep is not None and not isinstance(na_rep, str):
+            raise DTypeError(f"firepanda:dtype: na_rep must be str, not {type(na_rep).__name__}")
+        try:
+            return self._series._inner.string_join(sep, na_rep or "", na_rep is None)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
