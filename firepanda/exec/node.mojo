@@ -117,6 +117,7 @@ from firepanda.kernel.binary import (
     binary_any,
     binary_type,
     binary_value_any,
+    compare_value_positions,
     filled_block,
     resolve_constant,
 )
@@ -303,10 +304,45 @@ struct Filter(Movable):
     wants. `Filter(on, keep)` keeps those positions and writes nothing else,
     which is what lowering asks for, and it is why a predicate of four
     conditions over a wide chunk no longer leaves four dead masks behind it.
+
+    ## Doing its own comparison
+
+    A mask that is read once, by the filter directly above the comparison that
+    wrote it, did not need to be a column. `Filter(on, test, op)` is the filter
+    that compares the column itself, and it writes no mask: the comparison hands
+    it the rows and it gets on with them.
+
+    Two things are saved and the second is the larger. There is no byte a row
+    written and read back, and there is no operand gathered, because a
+    comparison that reads a column through the chunk's selection reads it where
+    it lies and a compute that has to produce a column at the chunk's rows
+    cannot. On a chunk that an earlier condition has already narrowed, that is
+    the difference between touching the rows still standing and touching all of
+    them.
+
+    It stays a shape of `Filter` rather than becoming an operator of its own
+    because everything after the rows are known is the same work, and that work
+    is most of the operator: choosing between a selection and a copy, composing
+    with the selection the chunk came in with, and writing only the columns
+    somebody downstream still wants.
     """
 
     var on: Int
-    """The position of the boolean column to filter by."""
+    """The position of the column to filter by.
+
+    A boolean column, read as the mask, unless `test` is set, in which case it
+    is the column the comparison reads.
+    """
+
+    var test: Optional[Value]
+    """The constant to compare against, or None for a filter that reads a
+    mask."""
+
+    var op: BinaryOp
+    """The comparison, when `test` is set. Meaningless otherwise."""
+
+    var value_on_left: Bool
+    """True for `5 < x` rather than `x < 5`, when `test` is set."""
 
     var keep: List[Int]
     """The input positions to write, in output order. Empty when narrows is
@@ -329,6 +365,9 @@ struct Filter(Movable):
         self.on = on
         self.keep = List[Int]()
         self.narrows = False
+        self.test = None
+        self.op = BinaryOp.EQ
+        self.value_on_left = False
 
     def __init__(out self, on: Int, var keep: List[Int]):
         """Constructs a filter that writes only some columns.
@@ -341,15 +380,105 @@ struct Filter(Movable):
         self.on = on
         self.keep = keep^
         self.narrows = True
+        self.test = None
+        self.op = BinaryOp.EQ
+        self.value_on_left = False
+
+    def __init__(
+        out self,
+        on: Int,
+        var test: Value,
+        op: BinaryOp,
+        value_on_left: Bool = False,
+    ):
+        """Constructs a filter that does its own comparison.
+
+        Args:
+            on: The position of the column to compare.
+            test: The constant to compare against. Consumed.
+            op: The comparison.
+            value_on_left: True for `5 < x` rather than `x < 5`.
+        """
+        self.on = on
+        self.keep = List[Int]()
+        self.narrows = False
+        self.test = Optional[Value](test^)
+        self.op = op
+        self.value_on_left = value_on_left
+
+    def __init__(
+        out self,
+        on: Int,
+        var test: Value,
+        op: BinaryOp,
+        var keep: List[Int],
+        value_on_left: Bool = False,
+    ):
+        """Constructs a filter that does its own comparison and narrows.
+
+        Args:
+            on: The position of the column to compare.
+            test: The constant to compare against. Consumed.
+            op: The comparison.
+            keep: The input positions to write, in output order.
+            value_on_left: True for `5 < x` rather than `x < 5`.
+        """
+        self.on = on
+        self.keep = keep^
+        self.narrows = True
+        self.test = Optional[Value](test^)
+        self.op = op
+        self.value_on_left = value_on_left
+
+    def _positions(self, ref chunk: Chunk, spread: Bool) raises -> List[UInt32]:
+        """Runs the comparison and returns the rows of the chunk it keeps.
+
+        Only called when there is one. The rows come back numbered the way a
+        mask over the chunk would have numbered them, so everything after this
+        is the same whether the rows came from a comparison or from a column.
+
+        Args:
+            chunk: The chunk, read and not changed.
+            spread: Whether a gather may use more than one core.
+
+        Returns:
+            The rows the comparison is true on, ascending.
+
+        Raises:
+            If the comparison is not one the column and the constant can have.
+        """
+        var through = chunk.selected() and not chunk.dense[self.on]
+        var straight = compare_value_positions(
+            chunk.columns[self.on],
+            self.test.value(),
+            self.op,
+            self.value_on_left,
+            chunk.picks,
+            through,
+        )
+        if straight:
+            return straight.take()
+
+        # The pairs the fused loops do not cover: text, category and temporal
+        # columns, a null constant, and a constant the column would have to be
+        # converted to meet. The mask is built and then read for its positions,
+        # which is what this node did for every comparison before there was a
+        # fused form, so the answer is the same and only the cost differs.
+        var at_rows = chunk.column(self.on, spread)
+        var made = binary_value_any(
+            at_rows, self.test.value(), self.op, self.value_on_left
+        )
+        ref mask = made.as_typed_view[DType.bool]()
+        return select_positions(mask)
 
     def process(
         self, var chunk: Chunk, spread: Bool = True
     ) raises -> Optional[Chunk]:
-        """Keeps the rows the mask is true on.
+        """Keeps the rows the mask is true on, or the comparison is true on.
 
-        Writes a selection rather than copying unless the mask keeps nearly
-        everything, and composes with the selection the chunk arrived under if
-        it had one. `SELECTION_KEEP_LIMIT` is where the two routes cross and why.
+        Writes a selection rather than copying unless nearly everything is kept,
+        and composes with the selection the chunk arrived under if it had one.
+        `SELECTION_KEEP_LIMIT` is where the two routes cross and why.
 
         Args:
             chunk: The chunk. Consumed.
@@ -362,7 +491,8 @@ struct Filter(Movable):
             rows is work for everything downstream and no information.
 
         Raises:
-            If a position is out of range or the mask column is not boolean.
+            If a position is out of range, or the column is not boolean and
+            there is no comparison to read it with.
         """
         var width = chunk.width()
         if self.on < 0 or self.on >= width:
@@ -388,7 +518,32 @@ struct Filter(Movable):
 
         var kept_rows: Int
         var sel: List[UInt32]
-        if not composing or chunk.dense[self.on]:
+        if self.test:
+            sel = self._positions(chunk, spread)
+            var found = len(sel)
+            if found == 0:
+                return None
+            if count == 0:
+                # A filter asked for no columns at all is a row count, and the
+                # comparison has already counted: the rows it kept are the
+                # answer and there is nothing to move.
+                return Chunk(List[AnyArray](), found)
+            if not composing and found > Int(
+                SELECTION_KEEP_LIMIT * Float64(chunk.rows)
+            ):
+                # The same threshold the mask route uses, asked of the rows
+                # rather than of the mask, since the rows are what there is.
+                # Past it a selection costs the operators downstream more than
+                # the copy costs here. A gather through an ascending selection
+                # is what a filtered copy is, so the copy route is this gather
+                # and there is no second kernel for it, and it spreads for the
+                # reason the other copy route gives below.
+                var copied = List[AnyArray](capacity=count)
+                for i in range(count):
+                    var at = self.keep[i] if self.narrows else i
+                    copied.append(gather_any(chunk.columns[at], sel, True))
+                return Chunk(copied^, found)
+        elif not composing or chunk.dense[self.on]:
             ref mask = chunk.columns[self.on].as_typed_view[DType.bool]()
             if count == 0:
                 # A filter asked for no columns at all is a row count, and it

@@ -110,6 +110,8 @@ from .compare import (
     CMP_LT,
     CMP_NE,
     compare_const,
+    compare_const_positions,
+    compare_const_positions_through,
     equal,
     greater,
     greater_equal,
@@ -1245,6 +1247,117 @@ def binary_value_any(
     )
     var flip = value_on_left and not op.is_comparison()
     return _binary_const_erased(column, scalar, applied, common.physical, flip)
+
+
+def compare_value_positions(
+    a: AnyArray,
+    b: Value,
+    op: BinaryOp,
+    value_on_left: Bool,
+    picks: List[UInt32],
+    through: Bool,
+) raises -> Optional[List[UInt32]]:
+    """Compares a column against one constant and returns the rows it keeps.
+
+    The erased form of `compare_const_positions`, and the whole of what a filter
+    over a comparison needs: the rows, with no mask column written to carry them
+    from one operator to the next.
+
+    None comes back when the pair is one this has no loop for, and then the
+    caller wants `binary_value_any` and `select_positions` instead. That covers
+    text, category and temporal columns, a null constant, and any pair whose
+    common type is not the column's own, since converting the column to meet the
+    constant is a column written and this exists to write none. Those all
+    compare perfectly well the ordinary way, and none of them is the shape that
+    made #521 worth doing.
+
+    Args:
+        a: The column.
+        b: The constant.
+        op: The comparison. Anything else answers None.
+        value_on_left: True for `5 < x` rather than `x < 5`, which is the
+            mirrored comparison and not a loop of its own.
+        picks: The selection to read `a` through, ignored when `through` is
+            False.
+        through: Whether the rows are `a` at `picks` rather than `a` itself.
+            What comes back is positions into `picks` when it is true and
+            positions into `a` when it is not, which is what the rows are
+            numbered by either way.
+
+    Returns:
+        The rows the comparison is true on, or None if this pair has no loop
+        here.
+
+    Raises:
+        If the constant cannot be read at the column's dtype.
+    """
+    if not op.is_comparison() or a.is_dictionary():
+        return None
+    var scalar = resolve_constant(a.type, b, op)
+    if scalar.is_null() or a.type.is_temporal() or scalar.type.is_temporal():
+        return None
+    var common = promote(a.type, scalar.type)
+    if common.is_variable_width() or common.physical != a.type.physical:
+        return None
+    var applied = op.mirrored() if value_on_left else op
+    comptime for target in ALL:
+        if a.type.physical == target:
+            ref x = a.as_typed_view[target]()
+            var y = scalar.as_scalar[target]()
+            return _positions_erased[target](x, y, applied, picks, through)
+    return None
+
+
+def _positions_erased[
+    dt: DType
+](
+    a: Array[dt],
+    b: Scalar[dt],
+    op: BinaryOp,
+    picks: List[UInt32],
+    through: Bool,
+) raises -> List[UInt32]:
+    """Resolves the comparison to a parameter and calls the typed loop.
+
+    Args:
+        a: The column.
+        b: The constant, at the column's dtype.
+        op: The comparison, already mirrored if the constant was on the left.
+        picks: The selection, read only when `through`.
+        through: Whether the rows are `a` at `picks`.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The rows the comparison is true on.
+
+    Raises:
+        Never. The signature carries it because the loops do.
+    """
+    if through:
+        if op == BinaryOp.EQ:
+            return compare_const_positions_through[dt, CMP_EQ](a, b, picks)
+        if op == BinaryOp.NE:
+            return compare_const_positions_through[dt, CMP_NE](a, b, picks)
+        if op == BinaryOp.LT:
+            return compare_const_positions_through[dt, CMP_LT](a, b, picks)
+        if op == BinaryOp.LE:
+            return compare_const_positions_through[dt, CMP_LE](a, b, picks)
+        if op == BinaryOp.GT:
+            return compare_const_positions_through[dt, CMP_GT](a, b, picks)
+        return compare_const_positions_through[dt, CMP_GE](a, b, picks)
+    if op == BinaryOp.EQ:
+        return compare_const_positions[dt, CMP_EQ](a, b)
+    if op == BinaryOp.NE:
+        return compare_const_positions[dt, CMP_NE](a, b)
+    if op == BinaryOp.LT:
+        return compare_const_positions[dt, CMP_LT](a, b)
+    if op == BinaryOp.LE:
+        return compare_const_positions[dt, CMP_LE](a, b)
+    if op == BinaryOp.GT:
+        return compare_const_positions[dt, CMP_GT](a, b)
+    return compare_const_positions[dt, CMP_GE](a, b)
 
 
 def all_null(type: LogicalType, rows: Int) raises -> AnyArray:

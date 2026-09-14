@@ -65,10 +65,24 @@ from .arith import (
     power_const,
     subtract,
 )
-from .binary import BinaryOp, binary_any, binary_type, binary_value_any
+from .binary import (
+    BinaryOp,
+    binary_any,
+    binary_type,
+    binary_value_any,
+    compare_value_positions,
+)
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import (
+    CMP_EQ,
+    CMP_GE,
+    CMP_GT,
+    CMP_LE,
+    CMP_LT,
+    CMP_NE,
     compare_const,
+    compare_const_positions,
+    compare_const_positions_through,
     equal,
     greater,
     greater_equal,
