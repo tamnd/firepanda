@@ -15,6 +15,7 @@ from firepanda.sql.result import result_type
 from firepanda.sql.types import (
     INVALID,
     SqlType,
+    TYPE_BIGINT,
     TYPE_BOOLEAN,
     TYPE_DATE,
     TYPE_INTEGER,
@@ -225,7 +226,11 @@ def test_a_median_widens_where_the_midpoint_is_not_one_of_the_rows() raises:
 
 
 def test_concat_is_a_varchar_whatever_its_signature_says() raises:
-    """It is declared over `ANY` and returns `ANY` and is not either."""
+    """It is declared over `ANY` and returns `ANY` and is not either.
+
+    Over lists it joins them instead of writing them out, so it comes back as
+    a list over what their elements agree on.
+    """
     var registry = Registry()
     var casts = Casts()
     assert_equal(
@@ -241,24 +246,40 @@ def test_concat_is_a_varchar_whatever_its_signature_says() raises:
         ),
         String("VARCHAR"),
     )
+    assert_equal(
+        _typed(
+            registry,
+            casts,
+            "concat",
+            [
+                SqlType.list_of(SqlType(TYPE_INTEGER)),
+                SqlType.list_of(SqlType(TYPE_BIGINT)),
+            ],
+        ),
+        String("BIGINT[]"),
+    )
 
 
-def test_a_container_return_is_left_unsaid() raises:
-    """`list(T) -> T[]` needs an element type `SqlType` does not carry.
+def test_a_list_return_is_a_list_of_the_element_it_was_given() raises:
+    """`list(T) -> T[]` is a list over whatever `T` bound to.
 
-    The call resolves, so the refusal here is about the type and not about the
-    binding, which is the whole of what issue #780 is left with.
+    `max(ANY, BIGINT) -> ANY[]` is the n largest rather than the largest, and
+    its element is the first argument rather than the count. A `VARCHAR[]` says
+    its element outright and needs no argument read at all.
     """
     var registry = Registry()
     var casts = Casts()
-    var at = registry.find("list")
-    var arguments = List[SqlType]()
-    arguments.append(SqlType(TYPE_INTEGER))
-    assert_true(resolve(registry, casts, at, arguments).matched())
-    assert_equal(_typed(registry, casts, "list", arguments), String())
     assert_equal(
-        _typed(registry, casts, "histogram", [SqlType(TYPE_INTEGER)]),
-        String(),
+        _typed(registry, casts, "list", [decimal(5, 2)]),
+        String("DECIMAL(5,2)[]"),
+    )
+    assert_equal(
+        _typed(registry, casts, "array_agg", [SqlType(TYPE_INTEGER)]),
+        String("INTEGER[]"),
+    )
+    assert_equal(
+        _typed(registry, casts, "max", [decimal(5, 2), SqlType(TYPE_INTEGER)]),
+        String("DECIMAL(5,2)[]"),
     )
     assert_equal(
         _typed(
@@ -267,8 +288,24 @@ def test_a_container_return_is_left_unsaid() raises:
             "str_split",
             [SqlType(TYPE_VARCHAR), SqlType(TYPE_VARCHAR)],
         ),
-        String(),
+        String("VARCHAR[]"),
     )
+
+
+def test_a_map_return_is_left_unsaid() raises:
+    """`histogram` returns a `MAP` and a map needs two element types.
+
+    `SqlType` carries one, so the key has somewhere to go and the value has
+    not. The call resolves, so what is refused here is the type and not the
+    binding, and that is the whole of what issue #780 is left with.
+    """
+    var registry = Registry()
+    var casts = Casts()
+    var at = registry.find("histogram")
+    var arguments = List[SqlType]()
+    arguments.append(SqlType(TYPE_INTEGER))
+    assert_true(resolve(registry, casts, at, arguments).matched())
+    assert_equal(_typed(registry, casts, "histogram", arguments), String())
 
 
 def main() raises:

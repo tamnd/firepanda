@@ -29,12 +29,14 @@ already the cheapest a cast can be and going under it would put a template
 level with an exact match.
 
 The second is the containers. `ANY[]`, `T[]` and `MAP(K, V)` are shapes rather
-than types, and firepanda's `SqlType` carries no element type yet, so a list
-argument against a list parameter is as far as this can look. It matches on the
-shape and charges `ANY_COST`, which is right for the case where the elements
-already agree and optimistic for the case where they do not. Nothing in tier 1
-has two list overloads to choose between, so the optimism costs nothing today,
-and the day `SqlType` grows an element type is the day this gets to be exact.
+than types, and a list argument against a list parameter is as far as this
+looks. It matches on the shape and charges `ANY_COST`, which is right for the
+case where the elements already agree and optimistic for the case where they do
+not. `SqlType` does carry a list's element now, so charging the elements against
+each other is there to be written, but nothing in tier 1 has two list overloads
+to choose between and the harness has no list column to measure the answer
+against. The rest of this file was measured rather than reasoned out and this
+would be the one part that was not, so it waits for a case that can be.
 
 A macro resolves on its argument count alone. It declares parameters and no
 types for them, so there is nothing to charge, and DuckDB's own refusal for a

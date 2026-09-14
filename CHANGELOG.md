@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a SQL type carries a list's element, so a call returning a list has a type
+
+The entry below left nine names whose return type the differential could not compare, because a signature returning `T[]` or `MAP` needs an element type and `SqlType` carried none. Eight of the nine are answered now. Issue #780.
+
+`SqlType` grew an element beside the outer identifier, width and scale it already had. It is flat, one identifier and a width and a scale, which means a list of scalars and nothing deeper. `INTEGER[][]` has nowhere to put the inner list and comes back as a bare `LIST`, which says it does not know rather than saying something wrong, and `STRUCT` and `MAP` are out of reach for the same reason from the other direction: a struct needs a list of members and a map needs two element types.
+
+Flat is the size the binder needs and not a step towards anything. `firepanda/dtype/logical.mojo` carries no element at all and is right not to, because a logical type describes a column and the column's children are columns. A `SqlType` describes a type before a column exists, which is why it has to say the element itself.
+
+What that buys is the return side. `list(T) -> T[]` over a `DECIMAL(5,2)` column is a `DECIMAL(5,2)[]`, `array_agg` the same, `max(ANY, BIGINT) -> ANY[]` is a list over its first argument rather than its count, and `str_split(VARCHAR, VARCHAR) -> VARCHAR[]` says its element in the catalog and needs no argument read at all. `concat` joins lists rather than writing them out where it is given them, so two `INTEGER[]` give an `INTEGER[]` and an `INTEGER[]` beside a `BIGINT[]` gives a `BIGINT[]`.
+
+`parse_type` reads one trailing `[]`, so `INTEGER[]` and `DECIMAL(5,2)[]` are types you can write down, and `SqlType` prints them back the same way.
+
+The type differential now compares 14,630 of its 15,001 expressions on the type and 12 on the overload alone, where it was 14,530 and 112. The 12 are all `histogram`, which returns a `MAP`. Every type asserted was put to DuckDB 1.5 first.
+
 ### Added: the binder derives the return type of a call the catalog writes a rule for
 
 The entry below counted 932 expressions the type differential was not comparing the type of, across 29 function names. 820 of them are compared now and agree with DuckDB, and the names left are nine rather than 29. Issue #780.
@@ -47,6 +61,7 @@ The underscore stands for one character and not for one byte, which is the thing
 One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
 
 The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+
 ### Added: `case=False` on `contains`, `match`, `fullmatch` and `replace`
 
 The four names that look for a pattern stop refusing the argument that turns the search insensitive. They had refused it for five documents, on the grounds that ignoring an argument which changes the answer is worse than saying no to it, and `casefold` looked like the missing half. It is not.

@@ -8,13 +8,19 @@ has neither. A front end that reused the engine's types would have to answer
 exactly `3.3`, and that is a wrong answer rather than a missing feature. See
 docs/specs/sql/06-types-and-semantics.md.
 
-What a type is here is an identifier and, for a decimal, a width and a scale.
-That is all a scalar type needs, and every type in tier one is scalar. `LIST`,
-`ARRAY`, `STRUCT` and `MAP` have identifiers so a query mentioning one is not a parse
-failure, but a nested type also needs its element types, which needs an arena
-the way the AST has one, and that arrives with the nested work rather than being
-guessed at now. `type_name` gives the bare word for those instead of inventing an
-element type to go with it.
+What a type is here is an identifier and, for a decimal, a width and a scale,
+plus one element type for a list. A scalar needs the first part and every type
+in tier one is scalar, but a list of them is not: eight tier 1 names return one,
+`list`, `array_agg` and the split family among them, and a `VARCHAR[]` that
+cannot say `VARCHAR` is a type the binder cannot compare against DuckDB's.
+
+The element is stored flat, as an identifier and a width and a scale beside the
+outer ones, which means a list of scalars and nothing deeper. `INTEGER[][]` has
+nowhere to go and neither does `STRUCT` or `MAP`, both of which need a list of
+members rather than one element, and those want the arena the AST has. `ARRAY`,
+`STRUCT` and `MAP` keep their identifiers so a query mentioning one is not a
+parse failure, and `type_name` gives the bare word rather than inventing an
+element to go with it.
 
 Two measured things drive most of the code below.
 
@@ -175,7 +181,8 @@ daylight saving boundary.
 
 
 comptime TYPE_LIST: UInt8 = 28
-"""`LIST`. The element type is not carried yet."""
+"""`LIST`. The element is carried beside it where it is a scalar, and is left
+invalid where it is not known or is itself a list."""
 
 
 comptime TYPE_ARRAY: UInt8 = 29
@@ -245,7 +252,8 @@ comptime DECIMAL_DEFAULT_SCALE: UInt8 = 3
 
 @fieldwise_init
 struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
-    """One SQL type: an identifier, and a width and scale for a decimal."""
+    """One SQL type: an identifier, a width and scale for a decimal, and an
+    element for a list."""
 
     var id: UInt8
     """One of the `TYPE_` constants."""
@@ -256,6 +264,16 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     var scale: UInt8
     """A decimal's digits after the point. Zero for everything else."""
 
+    var element: UInt8
+    """A list's element identifier, and `TYPE_INVALID` for everything else,
+    which includes a list whose element is not known."""
+
+    var element_width: UInt8
+    """The element's total digits, where the element is a decimal."""
+
+    var element_scale: UInt8
+    """The element's digits after the point, where the element is a decimal."""
+
     def __init__(out self, id: UInt8):
         """A type with nothing else to carry.
 
@@ -265,13 +283,65 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self.id = id
         self.width = 0
         self.scale = 0
+        self.element = TYPE_INVALID
+        self.element_width = 0
+        self.element_scale = 0
+
+    def __init__(out self, id: UInt8, width: UInt8, scale: UInt8):
+        """A decimal, or a type with a width and scale of nothing.
+
+        Args:
+            id: One of the `TYPE_` constants.
+            width: A decimal's total digits, zero otherwise.
+            scale: A decimal's digits after the point, zero otherwise.
+        """
+        self.id = id
+        self.width = width
+        self.scale = scale
+        self.element = TYPE_INVALID
+        self.element_width = 0
+        self.element_scale = 0
+
+    @staticmethod
+    def list_of(element: SqlType) -> Self:
+        """A list over one element type.
+
+        The element is flattened into this one rather than pointed at, so a
+        list of lists is not expressible and comes back as a list of nothing.
+        That is the honest answer for it and not a silent one: `name` writes
+        the bare `LIST` and the type compares unequal to any list that does
+        know its element.
+
+        Args:
+            element: What the list holds.
+
+        Returns:
+            The list type.
+        """
+        var out = Self(TYPE_LIST)
+        if element.id == TYPE_LIST or element.id == TYPE_INVALID:
+            return out
+        out.element = element.id
+        out.element_width = element.width
+        out.element_scale = element.scale
+        return out
+
+    def element_type(self) -> Self:
+        """What a list holds.
+
+        Returns:
+            The element type, or an invalid type where this is not a list or is
+            a list whose element is not known.
+        """
+        return Self(self.element, self.element_width, self.element_scale)
 
     def __eq__(self, other: Self) -> Bool:
         """Whether two types are the same type.
 
         A decimal is the same as another decimal only at the same width and
         scale, since `DECIMAL(4,2)` and `DECIMAL(5,2)` hold different values and
-        the corpus can see the difference through `typeof()`.
+        the corpus can see the difference through `typeof()`. A list is the same
+        as another list only over the same element, for the same reason.
 
         Args:
             other: The other type.
@@ -283,6 +353,9 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             self.id == other.id
             and self.width == other.width
             and self.scale == other.scale
+            and self.element == other.element
+            and self.element_width == other.element_width
+            and self.element_scale == other.element_scale
         )
 
     def __ne__(self, other: Self) -> Bool:
@@ -315,6 +388,8 @@ struct SqlType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         if self.id == TYPE_DECIMAL:
             return String("DECIMAL(", self.width, ",", self.scale, ")")
+        if self.id == TYPE_LIST and self.element != TYPE_INVALID:
+            return String(self.element_type().name(), "[]")
         return String(type_name(self.id))
 
     def is_integer(self) -> Bool:
@@ -733,6 +808,10 @@ def parse_type(text: StringSlice) raises -> SqlType:
     length away, because the length carries no semantics in DuckDB and a
     helpful truncation would be a wrong answer.
 
+    A trailing `[]` reads as a list over the rest, once. `INTEGER[][]` parses
+    and comes back as a list with no element, because a flat element type
+    cannot hold another list and the bare `LIST` is what there is to say.
+
     Args:
         text: The type as written.
 
@@ -744,6 +823,10 @@ def parse_type(text: StringSlice) raises -> SqlType:
             of range.
     """
     var trimmed = text.strip()
+    if trimmed.endswith("[]"):
+        return SqlType.list_of(
+            parse_type(trimmed[byte = 0 : trimmed.byte_length() - 2])
+        )
     var open = trimmed.find("(")
     if open == NOT_A_PAREN:
         var id = type_for(trimmed)

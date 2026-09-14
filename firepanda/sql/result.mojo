@@ -34,11 +34,13 @@ says `DECIMAL`, which is the bind function disagreeing with the signature and
 is DuckDB's to explain, not this file's. `ceil`, `ceiling` and `floor` keep the
 width and drop the scale to nothing.
 
-The third is the containers, `T[]` and `MAP` and the rest, and they are not
-answered here at all. `SqlType` carries no element type, so there is no way to
-say `DECIMAL(5,2)[]` even where it is obvious what the answer is. Those return
-an invalid type, which is this saying it does not know rather than saying
-anything wrong, and issue #780 carries the rest.
+The third is the containers, and of those it is the lists that are answered.
+The element is read off the return the same way the whole return is, either
+said outright as in `str_split(VARCHAR, VARCHAR) -> VARCHAR[]` or as a letter
+standing for an argument as in `list(T) -> T[]`. `MAP` is the one left, and it
+is left because a map needs two element types and `SqlType` carries one. That
+returns an invalid type, which is this saying it does not know rather than
+saying anything wrong.
 
 The name is a parameter because DuckDB's own catalog is not enough to answer
 this. A bind function per name is how DuckDB does it and `sum` and `avg` really
@@ -52,6 +54,7 @@ from .registry import (
     NO_SLOT,
     ROLE_ANY,
     ROLE_EXACT,
+    ROLE_LIST,
     ROLE_TEMPLATE,
     Overload,
     Registry,
@@ -91,8 +94,8 @@ def result_type(
 
     Returns:
         The type, or an invalid type where it cannot be said. That is a macro,
-        whose body is not in the catalog, and a container, which needs an
-        element type `SqlType` does not carry yet.
+        whose body is not in the catalog, and a `MAP`, which needs two element
+        types where `SqlType` carries one.
 
     Raises:
         Error: Never, but the decimal it builds checks its own width.
@@ -112,6 +115,9 @@ def result_type(
         if name == "median":
             return _interpolated(carried)
         return carried
+
+    if role == ROLE_LIST:
+        return _listed(registry, overload, arguments, slot)
 
     if role != ROLE_EXACT:
         return INVALID
@@ -217,6 +223,46 @@ def _unified(
     return out
 
 
+def _listed(
+    registry: Registry,
+    overload: Overload,
+    arguments: List[SqlType],
+    slot: Int,
+) -> SqlType:
+    """What a signature returning a list comes out as.
+
+    The element is read the same way the whole return is read anywhere else.
+    `VARCHAR[]` says its element outright, and `T[]` and `ANY[]` mean the type
+    of the argument the letter stands for, which for `list(T) -> T[]` is the
+    only argument there is and for `max(ANY, BIGINT) -> ANY[]` is the first of
+    the two.
+
+    Args:
+        registry: The catalog.
+        overload: The signature that won.
+        arguments: The argument types.
+        slot: The return's slot.
+
+    Returns:
+        The list type, or an invalid type where the element cannot be said.
+    """
+    var element = registry.elements[slot]
+    if element == ROLE_EXACT:
+        return SqlType.list_of(registry.element_types[slot])
+    if element != ROLE_ANY and element != ROLE_TEMPLATE:
+        return INVALID
+    ref spelling = registry.spellings[slot]
+    var carried = _carried(
+        registry,
+        overload,
+        arguments,
+        spelling[byte = 0 : spelling.byte_length() - 2],
+    )
+    if carried == INVALID:
+        return INVALID
+    return SqlType.list_of(carried)
+
+
 def _interpolated(type: SqlType) -> SqlType:
     """What `median` comes out as over one argument type.
 
@@ -244,17 +290,37 @@ def _interpolated(type: SqlType) -> SqlType:
 def _concatenated(arguments: List[SqlType]) -> SqlType:
     """What `concat` comes out as, which its signature does not say.
 
-    It is declared over `ANY` and returns `ANY`, and over anything that is not
-    a list it is a `VARCHAR`. Over lists it concatenates them and comes out as
-    a list, which is the container case and not answered.
+    It is declared over `ANY` and returns `ANY` and is neither. Over anything
+    that is not a list it is a `VARCHAR`, which is the whole of what everyday
+    use of it means. Over lists it joins them end to end instead and comes out
+    as a list over what their elements agree on, so two `INTEGER[]` give an
+    `INTEGER[]` and an `INTEGER[]` beside a `BIGINT[]` gives a `BIGINT[]`.
+    Mixing a list with something that is not one is an error DuckDB refuses
+    outright rather than a type, so there is nothing to answer for it here.
 
     Args:
         arguments: The argument types.
 
     Returns:
-        `VARCHAR`, or an invalid type where any argument is a list.
+        `VARCHAR`, or the list, or an invalid type where an element is not
+        known.
     """
+    var lists = 0
     for type in arguments:
         if type.id == TYPE_LIST or type.id == TYPE_ARRAY:
+            lists += 1
+    if lists == 0:
+        return SqlType(TYPE_VARCHAR)
+    if lists != len(arguments):
+        return INVALID
+
+    var element = INVALID
+    for type in arguments:
+        var one = type.element_type()
+        if one == INVALID:
             return INVALID
-    return SqlType(TYPE_VARCHAR)
+        if element == INVALID:
+            element = one
+        else:
+            element = common_type(element, one)
+    return SqlType.list_of(element)
