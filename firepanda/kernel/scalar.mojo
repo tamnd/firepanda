@@ -2467,6 +2467,106 @@ def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
     return out^
 
 
+def _boundaries_scalar(text: String) -> List[Int]:
+    """Every byte offset in a string where a character starts, and the end.
+
+    Args:
+        text: The string.
+
+    Returns:
+        The offsets, ascending, with the byte length last. A string of three
+        characters gives four numbers, so that the count of characters is one
+        less than the length of the list however wide they are.
+    """
+    var bytes = text.as_bytes()
+    var out = List[Int]()
+    for at in range(len(bytes)):
+        if (bytes[at] & 0xC0) != 0x80:
+            out.append(at)
+    out.append(len(bytes))
+    return out^
+
+
+def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
+    """Whether a string matches a `LIKE` pattern, by trying every division.
+
+    A different algorithm from the kernel's and not a slower copy of it, which
+    is the only kind of twin worth having here. The kernel walks both strings
+    once and remembers a single `%` to go back to, and the argument for why one
+    is enough is a real argument that could be wrong. This decides the question
+    by filling a table instead: `fits[j]` says whether the first `j` characters
+    of the string can be matched by the pattern read so far, and each piece of
+    the pattern rewrites the whole row. A `%` lets a true entry spread to the
+    right, a `_` shifts every entry along by one, and a literal character shifts
+    the entries that agree with it. Nothing is remembered and nothing is
+    reconsidered, so there is no claim about backtracking left to be wrong.
+
+    Characters and not bytes, the same as the kernel, which is why the
+    boundaries are taken first.
+
+    Args:
+        text: The string being matched.
+        pattern: The pattern, wildcards and all.
+
+    Returns:
+        True if the whole string matches the whole pattern.
+    """
+    var subject = text.as_bytes()
+    var glob = pattern.as_bytes()
+    var rows = _boundaries_scalar(text)
+    var cols = _boundaries_scalar(pattern)
+    var n = len(rows) - 1
+    var m = len(cols) - 1
+
+    var fits = List[Bool](length=n + 1, fill=False)
+    fits[0] = True
+
+    for k in range(m):
+        var width = cols[k + 1] - cols[k]
+        var lead = glob[cols[k]]
+        var next = List[Bool](length=n + 1, fill=False)
+        if width == 1 and lead == UInt8(ord("%")):
+            var seen = False
+            for j in range(n + 1):
+                seen = seen or fits[j]
+                next[j] = seen
+        elif width == 1 and lead == UInt8(ord("_")):
+            for j in range(n):
+                next[j + 1] = fits[j]
+        else:
+            for j in range(n):
+                if not fits[j] or rows[j + 1] - rows[j] != width:
+                    continue
+                var same = True
+                for b in range(width):
+                    if subject[rows[j] + b] != glob[cols[k] + b]:
+                        same = False
+                        break
+                next[j + 1] = same
+        fits = next^
+
+    return fits[n]
+
+
+def text_like_scalar(a: StringArray, pattern: String) -> Array[DType.bool]:
+    """Whether each element matches a `LIKE` pattern, one element at a time.
+
+    Args:
+        a: The column.
+        pattern: The pattern, wildcards and all.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _matches_pattern_scalar(a[i], pattern))
+    return out^
+
+
 def text_equals_scalar(a: StringArray, other: String) -> Array[DType.bool]:
     """Whether each element is a string and nothing else, one at a time.
 

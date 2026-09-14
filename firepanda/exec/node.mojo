@@ -146,6 +146,7 @@ from firepanda.kernel.pattern import (
     text_contains,
     text_contains_in_order,
     text_ends_with,
+    text_like,
     text_starts_with,
 )
 from firepanda.kernel.pick import pick_any
@@ -2081,8 +2082,9 @@ struct Match(Movable):
 
     A node of its own rather than a `Compute` with another operation on it,
     because the right side is not an operand. It is a pattern read once at plan
-    time into one of the four searches in `pattern.mojo`, and the runs of bytes
-    that came out of it are what the kernel is handed. Putting that on `Compute`
+    time into one of the five searches in `pattern.mojo`, and what came out of
+    it is what the kernel is handed: the runs of bytes for the four that take
+    them, and the pattern itself for the general one. Putting that on `Compute`
     would mean carrying two strings and a search on every arithmetic node in
     every plan for the one node in a hundred that is a match.
 
@@ -2091,7 +2093,7 @@ struct Match(Movable):
     and cannot hoist anything out of the loop, and lowering refuses it rather
     than pretending this node can do it.
 
-    A null element gives a null answer, which the four kernels already do, so
+    A null element gives a null answer, which the five kernels already do, so
     nothing here repairs anything.
     """
 
@@ -2198,10 +2200,14 @@ struct Match(Movable):
             made = text_starts_with(text, self.first.as_bytes())
         elif self.kind == MatchKind.ENDS_WITH:
             made = text_ends_with(text, self.first.as_bytes())
-        else:
+        elif self.kind == MatchKind.IN_ORDER:
             made = text_contains_in_order(
                 text, self.first.as_bytes(), self.second.as_bytes()
             )
+        else:
+            # The general search, whose `first` is the whole pattern rather
+            # than a run taken out of it.
+            made = text_like(text, self.first.as_bytes())
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))

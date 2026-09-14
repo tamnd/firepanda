@@ -179,10 +179,12 @@ from .pattern import (
     MatchKind,
     Pattern,
     find_bytes,
+    matches_pattern,
     read_pattern,
     text_contains,
     text_contains_in_order,
     text_ends_with,
+    text_like,
     text_starts_with,
 )
 from .pick import (

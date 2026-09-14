@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a LIKE pattern can hold an underscore, and a run at each end
+
+`word LIKE 'a_p%'` was refused by name and so was `word LIKE 'a%e'`. Both answer now, and there is no pattern left that a query can write and this cannot run. Issue #776.
+
+A `LIKE` pattern here used to be read as one of five searches: an equality, a prefix, a suffix, a substring, or two substrings in order. Those five are what TPC-H writes and they are much faster than a matcher, a prefix being a length test and one compare at a known offset. Anything else was refused, which is the honest thing to do with a gap and is still a gap.
+
+So the matcher is a sixth search rather than a replacement. The five are tried first and keep their kernels exactly as they were, and what used to be refused walks the pattern against the row instead. Nothing that was fast got slower, because a pattern that reads as a prefix never reaches the walk at all.
+
+The underscore stands for one character and not for one byte, which is the thing about it that is easy to get wrong and which DuckDB is clear about: `'héllo' LIKE 'h_llo'` is true and `'héllo' LIKE 'h__llo'` is false, so an underscore steps over the two bytes of the accented letter as one thing. A `%` moves a character at a time for the same reason. The walk carries one remembered wildcard and no stack, so there is no depth to limit and no recursion in a plan, and it costs the length of the row times the length of the pattern in the worst case and nothing like that in practice.
+
+One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
+
+The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+
 ### Changed: `upper` and `lower` over ASCII text run sixty times faster
 
 The last release measured `upper` at four hundred nanoseconds a row over forty bytes of ASCII, with every core already on it, and said that something else inside the kernel had to be wrong. It was. An ASCII element was paying for four walks and a heap allocation, and it needs none of them: a pass to check the bytes are valid UTF-8, a pass looking for a lead byte the correction table could know about, the standard library's walk into a fresh `String`, and then a copy of that `String` into the column being built before it is dropped.
@@ -29,6 +43,7 @@ Both answers are right where they are asked, so this is two operators now rather
 Two more differences came out of measuring the dialect rather than assuming it. On a float `//` is not a floor division at all in DuckDB, so `-7.5 // 3` is `-2.5` and not `-3.0`, because the name there is the division that is integral only when its operands are. And a zero divisor is a null whatever the dtype, so `7.0 // 0.0` is `NULL` while `7.0 / 0.0` next to it is an infinity, which looks like a gap in DuckDB's own overload set and is what it answers today either way. Two bools are refused rather than widened to an int8 zero, which is the pandas answer and not one DuckDB has.
 
 The value differential added below found this on its first run, which is what that harness is for, and the two expressions come off its recorded list with this change. Both operators are pinned at all four sign combinations on both surfaces, both kernels have a scalar twin the fuzzer compares them against over a million cases, and three end to end tests run the queries and read the rows.
+
 ### Added: `str.translate`, which is not a small `replace`
 
 A table of single characters swapped one for one. Two things separate it from the name before it and both of them matter. A key is always exactly one character, so nothing is searched for and no match can overlap another. And every key is applied in the same pass, so a table that sends `a` to `b` and `b` to `a` really swaps them, where the same pair handed to `replace` turns both into `a`.

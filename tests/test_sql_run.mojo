@@ -1619,16 +1619,36 @@ def test_a_like_in_a_select_list_is_a_column_of_answers() raises:
     )
 
 
-def test_a_like_with_an_underscore_in_it_says_what_it_cannot_do() raises:
-    with assert_raises(contains="stands for any one character"):
-        _ = run("SELECT n FROM words WHERE word LIKE 'a_p%'", session())
+def test_a_like_with_an_underscore_in_it_keeps_the_rows_it_names() raises:
+    # `a_p%` is apple and not apricot, the underscore standing for exactly one
+    # character and not for the two apricot would need.
+    same(answer("SELECT n FROM words WHERE word LIKE 'a_p%'", "n"), [1], "n")
+    # Five characters and nothing else, which is apple and grape. The empty row
+    # has none and the null has no answer at all.
+    same(
+        answer("SELECT n FROM words WHERE word LIKE '_____'", "n"), [1, 4], "n"
+    )
 
 
-def test_a_like_with_a_run_in_the_middle_is_refused() raises:
-    # `a%e` is a prefix and a suffix at once and neither kernel answers it, and
-    # answering it as one of the two would keep rows the query did not ask for.
-    with assert_raises(contains="is none of those"):
-        _ = run("SELECT n FROM words WHERE word LIKE 'a%e'", session())
+def test_a_like_with_a_run_in_the_middle_keeps_the_rows_it_names() raises:
+    # `a%e` is a prefix and a suffix at once, which is more than either kernel
+    # can say on its own and which the matcher behind them answers. Reading it
+    # as the prefix alone would have kept apricot as well.
+    same(answer("SELECT n FROM words WHERE word LIKE 'a%e'", "n"), [1], "n")
+    same(answer("SELECT n FROM words WHERE word LIKE '%an%n%'", "n"), [3], "n")
+    same(answer("SELECT n FROM words WHERE word LIKE 'p_ne%le'", "n"), [7], "n")
+
+
+def test_a_like_with_wildcards_in_a_select_list_answers_every_row() raises:
+    # Including the null, which is null and not false, the same as it is for
+    # the four searches.
+    same(
+        truths(
+            run("SELECT word LIKE '%a_e' AS hit FROM words", session()), "hit"
+        ),
+        [0, 0, 0, 1, 0, -1, 0],
+        "hit",
+    )
 
 
 def test_a_like_against_a_column_is_refused() raises:

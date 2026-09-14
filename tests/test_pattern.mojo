@@ -1,9 +1,16 @@
-"""Tests for substring search over a text column.
+"""Tests for substring search over a text column, and for the matcher behind it.
 
 Every test here is the kernel against the scalar twin in `scalar.mojo`, which
 tries every position and compares every byte, because the whole content of the
 kernel is the positions it manages not to try. A twin that skipped the same way
 would agree with the kernel about anything the skipping got wrong.
+
+The matcher at the end is held to the same rule and the twin is chosen the same
+way. The kernel walks both strings once and remembers one wildcard to go back
+to, so its twin fills a table and reconsiders nothing, and the thing the kernel
+could get wrong is the thing the twin has no way to get wrong. Every expected
+answer in those tests was read off DuckDB 1.5.1, so the twin holds the two
+implementations together and the numbers hold both of them to the dialect.
 
 The lengths are chosen to walk both halves of the search. `SCAN_WIDTH` is
 sixteen and a block reads through where the needle's last byte would fall, so a
@@ -26,13 +33,7 @@ into the test is a count, so a failure anywhere in a hundred thousand rows is
 one assertion rather than a hundred thousand.
 """
 
-from std.testing import (
-    TestSuite,
-    assert_equal,
-    assert_false,
-    assert_raises,
-    assert_true,
-)
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.array import Array
 from firepanda.array.strings import (
@@ -53,6 +54,7 @@ from firepanda.kernel.pattern import (
     text_count,
     text_ends_with,
     text_equals,
+    text_like,
     text_replace,
     text_starts_with,
 )
@@ -62,6 +64,7 @@ from firepanda.kernel.scalar import (
     text_count_scalar,
     text_ends_with_scalar,
     text_equals_scalar,
+    text_like_scalar,
     text_replace_scalar,
     text_starts_with_scalar,
 )
@@ -427,20 +430,30 @@ def test_a_lone_percent_is_a_suffix_of_nothing() raises:
     assert_equal(_read("%%"), "contains [] []")
 
 
-def test_an_underscore_says_it_stands_for_any_one_character() raises:
-    with assert_raises(contains="stands for any one character"):
-        _ = read_pattern("a_c")
+def test_an_underscore_sends_the_whole_pattern_to_the_matcher() raises:
+    # And the pattern arrives whole, wildcards and all, because the matcher
+    # reads them itself rather than being handed runs.
+    assert_equal(_read("a_c"), "matches [a_c] []")
+    assert_equal(_read("_"), "matches [_] []")
 
 
-def test_a_run_in_the_middle_is_refused_rather_than_widened() raises:
+def test_an_underscore_wins_over_a_shape_that_would_otherwise_fit() raises:
+    # This is the part that is correctness and not speed. `%a_b%` has a run
+    # wrapped in percent signs on each side, so counting the runs would call it
+    # a substring search and the underscore inside would be compared as an
+    # ordinary byte. The check for one comes first for exactly that reason.
+    assert_equal(_read("%a_b%"), "matches [%a_b%] []")
+    assert_equal(_read("a_c%"), "matches [a_c%] []")
+    assert_equal(_read("%a_c"), "matches [%a_c] []")
+
+
+def test_a_run_in_the_middle_is_the_matcher_rather_than_a_wider_search() raises:
     # Reading `a%c` as the prefix alone would keep every row starting with an a,
     # which is more rows than the query asked for and nothing would say so.
-    with assert_raises(contains="is none of those"):
-        _ = read_pattern("a%c")
-    with assert_raises(contains="is none of those"):
-        _ = read_pattern("%a%b")
-    with assert_raises(contains="is none of those"):
-        _ = read_pattern("%a%%b%")
+    # None of these is one of the four, so all of them go to the sixth search.
+    assert_equal(_read("a%c"), "matches [a%c] []")
+    assert_equal(_read("%a%b"), "matches [%a%b] []")
+    assert_equal(_read("%a%%b%"), "matches [%a%%b%] []")
 
 
 def test_equality_matches_the_twin() raises:
@@ -590,6 +603,140 @@ def test_replace_keeps_a_missing_row_missing() raises:
     var got = text_replace(col, "green".as_bytes(), "X".as_bytes(), -1)
     assert_false(got.is_valid(2), "a missing row has nothing to replace")
     assert_false(got.is_valid(4), "and neither has the other one")
+
+
+def probe() -> StringArray:
+    """The eight rows every matcher answer below was read off DuckDB for.
+
+    Chosen for what a wildcard can get wrong rather than for what a search can.
+    Two of them hold characters wider than a byte, one is empty, one is a single
+    character, and one alternates so that a pattern with two wildcards in it has
+    somewhere to go wrong.
+
+    Returns:
+        The column, with no null in it. The nulls have their own test, because
+        every number here is a DuckDB answer and DuckDB says null rather than
+        true or false for a missing row.
+    """
+    return strings_from_list(
+        [
+            "green",
+            "forest green thread",
+            "abc",
+            "héllo",
+            "",
+            "a",
+            "日本語",
+            "aXbXc",
+        ]
+    )
+
+
+def matched(col: StringArray, pattern: String, want: List[Int]) raises:
+    """Asserts the matcher answers a pattern the way DuckDB did, row by row.
+
+    The twin runs on the same call and has to agree as well, which is what
+    makes the general matcher held to the same standard as the four searches
+    above it rather than to a list of numbers alone.
+
+    Args:
+        col: The column.
+        pattern: The pattern, wildcards and all.
+        want: One per row, one for a match and nought for none.
+
+    Raises:
+        AssertionError: On the first row that differs.
+    """
+    var got = text_like(col, pattern.as_bytes())
+    agrees(got, text_like_scalar(col, pattern), "like " + pattern)
+    assert_equal(len(got), len(want), "like " + pattern + ": lengths differ")
+    for i in range(len(got)):
+        assert_equal(
+            got[i],
+            want[i] == 1,
+            "like " + pattern + " row " + String(i),
+        )
+
+
+def test_an_underscore_stands_for_one_character() raises:
+    var col = probe()
+    matched(col, "a_c", [0, 0, 1, 0, 0, 0, 0, 0])
+    matched(col, "_", [0, 0, 0, 0, 0, 1, 0, 0])
+    matched(col, "__", [0, 0, 0, 0, 0, 0, 0, 0])
+
+
+def test_an_underscore_counts_characters_and_not_bytes() raises:
+    # The one thing about `_` that is easy to get wrong. The accented letter is
+    # two bytes and one character, so the pattern with one underscore matches
+    # and the one with two does not.
+    var col = probe()
+    matched(col, "h_llo", [0, 0, 0, 1, 0, 0, 0, 0])
+    matched(col, "h__llo", [0, 0, 0, 0, 0, 0, 0, 0])
+    # And the same said with three byte characters, where a byte counter would
+    # need three underscores rather than one.
+    matched(col, "日_語", [0, 0, 0, 0, 0, 0, 1, 0])
+    matched(col, "%_語", [0, 0, 0, 0, 0, 0, 1, 0])
+
+
+def test_a_run_at_each_end_is_answered_rather_than_refused() raises:
+    # The shape the four searches could not read. A prefix and a suffix at once,
+    # which is more than either kernel can say on its own.
+    var col = probe()
+    matched(col, "a%c", [0, 0, 1, 0, 0, 0, 0, 1])
+    matched(col, "%e%n", [1, 0, 0, 0, 0, 0, 0, 0])
+    matched(col, "%a%b", [0, 0, 0, 0, 0, 0, 0, 0])
+
+
+def test_two_wildcards_make_the_walk_go_back() raises:
+    # `%X%X%` is the pattern that fails if the walk gives the first wildcard
+    # everything it can take and has no way back, and `a%b%c` is the same
+    # question with the ends anchored.
+    var col = probe()
+    matched(col, "%X%X%", [0, 0, 0, 0, 0, 0, 0, 1])
+    matched(col, "a%b%c", [0, 0, 1, 0, 0, 0, 0, 1])
+    matched(col, "a_b_c", [0, 0, 0, 0, 0, 0, 0, 1])
+    matched(col, "%gree_%", [1, 1, 0, 0, 0, 0, 0, 0])
+
+
+def test_a_percent_takes_nothing_as_readily_as_something() raises:
+    var col = probe()
+    matched(col, "%%c", [0, 0, 1, 0, 0, 0, 0, 1])
+    matched(col, "%thread", [0, 1, 0, 0, 0, 0, 0, 0])
+    # A lone `%` matches every row including the empty one, and `_%` matches
+    # every row that has a character in it, which is the empty one's difference.
+    matched(col, "%", [1, 1, 1, 1, 1, 1, 1, 1])
+    matched(col, "_%", [1, 1, 1, 1, 0, 1, 1, 1])
+
+
+def test_the_matcher_keeps_a_missing_row_missing() raises:
+    var col = sample()
+    var got = text_like(col, "%g_een%".as_bytes())
+    agrees(got, text_like_scalar(col, "%g_een%"), "like %g_een%")
+    assert_false(got.is_valid(2), "a missing row matches nothing")
+    assert_false(got.is_valid(4), "and neither does the other one")
+    assert_true(got[0], "green has an underscore's worth in the middle")
+
+
+def test_the_matcher_agrees_with_the_twin_over_a_column_of_rows() raises:
+    # The rows the searches use, which are long enough to walk a pattern round
+    # a row several times, against patterns that use both wildcards together.
+    var col = sample()
+    var patterns = [
+        String("%g%n%"),
+        String("g_een%"),
+        String("%g_een"),
+        String("%green%green%"),
+        String("_%_%_"),
+        String("%%%"),
+        String("gree_"),
+        String("%a%b%c%d%"),
+    ]
+    for pattern in patterns:
+        agrees(
+            text_like(col, pattern.as_bytes()),
+            text_like_scalar(col, pattern),
+            "like " + pattern,
+        )
 
 
 def main() raises:
