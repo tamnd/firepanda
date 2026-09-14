@@ -122,6 +122,7 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
+    text_case,
     text_character_length,
     text_character_substring,
     text_find,
@@ -2162,6 +2163,110 @@ struct Length(Movable):
                 + " columns"
             )
         var made = text_character_length(chunk.columns[self.at].strings())
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Case(Movable):
+    """Appends a column holding each element written in one case.
+
+    This is SQL's `UPPER` and `LOWER`, and `UCASE` and `LCASE`, which are
+    DuckDB's other names for the same two functions. Which case to write is a
+    flag rather than two nodes, for the reason `Trim` carries two of them: the
+    kernel behind both is one function with that flag on it and nothing else
+    about the two differs.
+
+    It is a node rather than another code on `Apply` because a case change is
+    not a rewrite in place. `straße` raised is `STRASSE`, which is longer than
+    it started, so the kernel builds a new column and cannot be a walk over the
+    payload the way the four operations sharing `Apply` are.
+
+    The case data is the Mojo standard library's, which is an older copy of
+    Unicode than the one DuckDB carries, and the two answer a few code points
+    differently. Every ASCII element agrees. The disagreements that a query is
+    likely to meet are written down where this is lowered.
+
+    A null element gives a null answer, which is what DuckDB answers and what
+    the kernel already does, so nothing here repairs anything.
+    """
+
+    var at: Int
+    """The position of the column being rewritten."""
+
+    var upper: Bool
+    """Whether to write it upper case rather than lower case."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, upper: Bool, name: String):
+        """Constructs a case change over a column.
+
+        Args:
+            at: The position of the column being rewritten.
+            upper: Whether to write it upper case rather than lower case.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.upper = upper
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a text column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one text field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column that does
+            not hold text.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "case: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype != LogicalType.STRING:
+            raise Error(
+                "case: a case change reads text and column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+            )
+        out.append(Field(self.name, LogicalType.STRING, out[self.at].nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Rewrites the column and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not text.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "case: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = text_case(chunk.columns[self.at].strings(), self.upper)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -5700,6 +5805,7 @@ comptime Node = Variant[
     Match,
     Cut,
     Length,
+    Case,
     Trim,
     Locate,
     Part,
@@ -5761,6 +5867,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cut].bind(input^)
     if node.isa[Length]():
         return node[Length].bind(input^)
+    if node.isa[Case]():
+        return node[Case].bind(input^)
     if node.isa[Trim]():
         return node[Trim].bind(input^)
     if node.isa[Locate]():
@@ -5906,7 +6014,7 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Length`, `Trim`, `Locate`, `Part`,
+        `Apply`, `Match`, `Cut`, `Length`, `Case`, `Trim`, `Locate`, `Part`,
         `Truncate`,
         `Presence`,
         `Fill`,
@@ -5922,6 +6030,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Match]()
         or node.isa[Cut]()
         or node.isa[Length]()
+        or node.isa[Case]()
         or node.isa[Trim]()
         or node.isa[Locate]()
         or node.isa[Part]()
@@ -5975,9 +6084,9 @@ def node_computes_per_row(node: Node) -> Bool:
     arithmetic in between, so there is nothing for a second core to speed up.
     `Cut` says no for a different reason: it builds a text column, and the
     payload offset every row writes at is a running total of the ones before it,
-    which is the serial thing `StringBuilder` exists to do. `Trim` says no for
-    that same reason and would whatever its kernel cost, since it builds a text
-    column too.
+    which is the serial thing `StringBuilder` exists to do. `Trim` and `Case`
+    say no for that same reason and would whatever their kernels cost, since
+    both build a text column too.
 
     `Length` says no for a third reason. Counting characters is a compare and an
     add per byte of payload, so it is memory bound rather than waiting on
@@ -6093,6 +6202,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Case]():
+        return node[Case].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
     if node.isa[Locate]():
@@ -6171,6 +6282,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Case]():
+        return node[Case].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
     if node.isa[Locate]():

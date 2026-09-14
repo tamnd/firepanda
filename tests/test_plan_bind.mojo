@@ -368,9 +368,9 @@ def test_a_connective_over_something_that_is_not_a_question_is_refused() raises:
 def test_a_function_nobody_has_written_yet_is_refused_by_name() raises:
     var tree = Expressions()
     var name = tree.column("c_name")
-    var shouted = tree.call("upper", [name], rowwise=True)
-    with assert_raises(contains="there is no function named 'upper' yet"):
-        bind_expr(tree, shouted, _customer(), [0, 0, 0, 0])
+    var backwards = tree.call("reverse", [name], rowwise=True)
+    with assert_raises(contains="there is no function named 'reverse' yet"):
+        bind_expr(tree, backwards, _customer(), [0, 0, 0, 0])
 
 
 def test_a_sum_widens_the_way_the_accumulator_does() raises:

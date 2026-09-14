@@ -1038,6 +1038,10 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "strlen" or name == "length" or name == "len":
         return True
+    if name == "upper" or name == "lower":
+        return True
+    if name == "ucase" or name == "lcase":
+        return True
     if name == "trim" or name == "ltrim" or name == "rtrim":
         return True
     if name == "instr" or name == "strpos" or name == "position":
@@ -2166,6 +2170,12 @@ def _lower_expr(
             # refused as text, which is the right answer until there is a list
             # type to answer about.
             return plan.exprs.call("length", lowered^, True)
+        if name == "ucase" or name == "lcase":
+            # DuckDB's other two names for the case changes, and the plan holds
+            # the pair its catalog documents rather than the aliases.
+            return plan.exprs.call(
+                "upper" if name == "ucase" else "lower", lowered^, True
+            )
         if name == "strpos" or name == "position":
             # The three names DuckDB gives the search for a run of characters,
             # and the plan holds the one its catalog calls the function rather
