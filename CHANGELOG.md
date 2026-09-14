@@ -27,6 +27,7 @@ Two things inside the engine had to be fixed before the rewrite was worth making
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
+
 ### Added: casefold, the one case method pandas does not answer out of Arrow
 
 `s.str.casefold()`. Folding looks like a third case and is not one. Nobody writes text in it and nobody reads it, and its one promise is that two rows a reader would call the same come out as the same bytes, so `Straße` and `STRASSE` both fold to `strasse` where lowering them says they are different.
