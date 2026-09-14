@@ -293,6 +293,9 @@ class Series:
     def string_partition(self, sep: str, from_right: bool) -> list[Series]:
         """Every row cut at a separator, as three columns."""
         ...
+    def string_join(self, sep: str, na_rep: str, skip_missing: bool) -> str:
+        """The whole column folded into one string."""
+        ...
     def window_agg(
         self,
         kind: str,

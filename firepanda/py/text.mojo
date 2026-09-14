@@ -51,6 +51,19 @@ it: the doors are picked by the shape of the answer, and three columns is a
 shape. `translate` beside them is the exception, because what makes it separate
 is the shape of its argument.
 
+### The one answer that is narrower than a column
+
+`cat` with no other column to concatenate against folds the whole thing into a
+single string, which is the other direction off the same rule and gets a
+function of its own for the same reason. Every door here answers a column and a
+scalar is not one.
+
+The other half of that name, the one that takes a column and works row by row,
+is refused in the Python layer and is not represented here. It aligns two
+columns on their labels first, which is a piece of machinery this library does
+not have yet, and serving it by position instead would answer a different
+question to the one that was asked.
+
 The thirty odd names this file does not spell do not resolve at all rather than
 resolving and refusing, for the reason document 07 gives: an absent name reads as
 unimplemented on the board and a refusing one reads as a failure, and the second
@@ -407,6 +420,40 @@ def partition(
     """
     _text_column(column)
     return column.chars_partition(sep, from_right)
+
+
+def join(
+    column: Series, sep: String, na_rep: String, skip_missing: Bool
+) raises -> String:
+    """Folds the whole column into one string.
+
+    The third name outside the three doors and the second one that is outside
+    them for the reason the rule gives. A scalar is a shape, no door carries it,
+    and every door here answers a column. `str.cat` with nothing to concatenate
+    against is a reduction rather than a transformation, so a function of its
+    own is the rule rather than a break from it.
+
+    The half of `str.cat` that takes another column and works row by row is not
+    here at all. That one aligns two columns on their labels before it does
+    anything, and alignment is not written yet, so the Python layer refuses it
+    by name rather than approximating it by position.
+
+    Args:
+        column: The column to read.
+        sep: The text to put between neighbouring rows, which the Python layer
+            has already turned an absent argument into the empty string for.
+        na_rep: The text to stand in for a missing row.
+        skip_missing: Whether a missing row is dropped rather than replaced,
+            which is what pandas decides from whether `na_rep` was given.
+
+    Returns:
+        One string.
+
+    Raises:
+        Error: Tagged `value` if the column is not text.
+    """
+    _text_column(column)
+    return column.chars_join(sep, na_rep, skip_missing)
 
 
 def flag(column: Series, kind: String, arg: String) raises -> Series:

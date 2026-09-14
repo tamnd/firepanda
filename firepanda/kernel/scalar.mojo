@@ -3232,3 +3232,50 @@ def text_replace_folded_scalar(
         built.append(out.as_bytes())
 
     return built^.finish()
+
+
+def text_join_scalar(
+    a: StringArray, sep: String, na_rep: String, skip_missing: Bool
+) raises -> String:
+    """Folds a column into one string by growing the answer a row at a time.
+
+    The kernel adds the length up first and writes into a buffer that is the
+    right size before the first byte goes in. This one appends to a string and
+    lets it grow, which is the way anybody writes a join the first time and is
+    the thing the counting pass exists to avoid.
+
+    Both of them have to agree about the separator, which is the part of a join
+    that is easy to get wrong by one. The separator goes between neighbours and
+    not at either end, and the row that is dropped for being missing takes its
+    separator with it, so what the two are really being checked against each
+    other on is how many separators came out.
+
+    Args:
+        a: The column.
+        sep: The text to put between neighbouring rows.
+        na_rep: The text to stand in for a missing row, read only when
+            `skip_missing` is False.
+        skip_missing: Whether a missing row is dropped rather than replaced.
+
+    Returns:
+        The same string the kernel returns.
+
+    Raises:
+        Error: If the string cannot grow.
+    """
+    var out = String()
+    var written = 0
+
+    for i in range(len(a)):
+        var valid = a.is_valid(i)
+        if not valid and skip_missing:
+            continue
+        if written > 0:
+            out += sep
+        if valid:
+            out += String(StringSlice(unsafe_from_utf8=a.unsafe_bytes(i)))
+        else:
+            out += na_rep
+        written += 1
+
+    return out^

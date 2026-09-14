@@ -63,6 +63,7 @@ from firepanda.kernel.chars import (
     text_is_space,
     text_is_title,
     text_is_upper,
+    text_join,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
@@ -1827,6 +1828,41 @@ struct Series(Copyable, Movable, Sized, Writable):
                 self._relabelled(self.name.copy(), AnyArray(parts.pop(0)))
             )
         return out^
+
+    def chars_join(
+        self, sep: StringSlice, na_rep: StringSlice, skip_missing: Bool
+    ) raises -> String:
+        """Returns the whole column folded into one string.
+
+        This is `str.cat` in the form that has no other column to concatenate
+        against, and it is the first method on a text series whose answer is not
+        a series. Every readable row in order, with the separator between
+        neighbours and none at either end.
+
+        A missing row is either dropped or replaced, and pandas picks between
+        the two by whether `na_rep` was given rather than by a flag of its own.
+        The flag is the honest spelling of that one step lower down, because an
+        empty `na_rep` is a real replacement and is not the same request as no
+        replacement at all.
+
+        Args:
+            sep: The text to put between neighbouring rows.
+            na_rep: The text to stand in for a missing row, read only when
+                `skip_missing` is False.
+            skip_missing: Whether a missing row is dropped rather than replaced.
+
+        Returns:
+            One string, empty for a column with no readable rows to join.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return text_join(
+            self.values.strings(),
+            sep.as_bytes(),
+            na_rep.as_bytes(),
+            skip_missing,
+        )
 
     def chars_translate(self, keys: Self, values: Self) raises -> Self:
         """Returns each row with single characters swapped one for one.

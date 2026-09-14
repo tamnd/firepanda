@@ -371,6 +371,9 @@ def register(mut module: PythonModuleBuilder) raises:
         "string_partition",
         docstring="Every row cut at a separator, as three columns.",
     )
+    _ = series.def_method[PySeries.string_join](
+        "string_join", docstring="The whole column folded into one string."
+    )
     _ = series.def_method[PySeries.window_agg](
         "window_agg", docstring="One reduction over every window of the column."
     )
