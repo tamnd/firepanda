@@ -13,10 +13,13 @@ reverses. Those are the rules a caller already knows, so getting one of them
 subtly wrong is worse than not having the method.
 """
 
+from std.collections.string import Codepoint
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.kernel.casefix import KEPT_BY_SWAP
+from firepanda.kernel.charclass import TITLE_ONLY_EDGES
 from firepanda.kernel.chars import (
     character_at,
     character_count,
@@ -620,6 +623,122 @@ def test_a_case_question_about_bytes_that_are_not_utf8_is_no() raises:
     var col = built^.finish()
     assert_equal(asked(text_is_lower(col))[0], "no")
     assert_equal(asked(text_is_lower(col))[1], "yes")
+
+
+def one(cp: UInt32) -> String:
+    """The one character row for a code point, written as a number.
+
+    Most of the characters the class questions turn on are invisible or are
+    indistinguishable from an ordinary space in a source file, and a test whose
+    reader cannot tell which character it is about is not much of a test.
+
+    Args:
+        cp: The code point.
+
+    Returns:
+        A string of that one character.
+    """
+    return String(Codepoint(unsafe_unchecked_codepoint=cp))
+
+
+def test_the_spaces_above_ascii_are_spaces() raises:
+    # The larger half of issue 748. The standard library's data knew about the
+    # six ASCII spaces and almost nothing else, so a row holding the non
+    # breaking space, which is the one ordinary text is full of, answered no.
+    # These are the non breaking space, the ogham mark, the em space, the
+    # narrow no break space and the ideographic space.
+    var marks: List[String] = [
+        one(0x00A0),
+        one(0x1680),
+        one(0x2003),
+        one(0x202F),
+        one(0x3000),
+    ]
+    var read = asked(text_is_space(made(marks^)))
+    for i in range(5):
+        assert_equal(read[i], "yes")
+
+
+def test_a_control_character_arrow_calls_a_space_is_one() raises:
+    # U+001F is a space to Arrow and is not one to Python, and pandas holds
+    # text in Arrow, so this is a row where following the oracle rather than
+    # the language means answering yes.
+    assert_equal(asked(text_is_space(made(["\x1f"])))[0], "yes")
+
+
+def test_a_space_question_is_asked_of_every_character() raises:
+    var read = asked(text_is_space(made(["  ", " x", "x "])))
+    assert_equal(read[0], "yes")
+    assert_equal(read[1], "no")
+    assert_equal(read[2], "no")
+
+
+def test_a_titlecase_character_is_neither_lower_nor_upper() raises:
+    # The third case, and the reason both questions have to read a class
+    # neither of them is named after. The standard library counted these as
+    # both cases at once, which made a row holding one answer yes twice.
+    var digraphs: List[String] = ["ǅ", "ǈ", "ǋ", "ǲ"]
+    var lower = asked(text_is_lower(made(digraphs.copy())))
+    var upper = asked(text_is_upper(made(digraphs^)))
+    for i in range(4):
+        assert_equal(lower[i], "no")
+        assert_equal(upper[i], "no")
+
+
+def test_a_titlecase_character_spoils_the_row_it_sits_in() raises:
+    var lower = asked(text_is_lower(made(["ǅa", "aǅ", "abc"])))
+    assert_equal(lower[0], "no")
+    assert_equal(lower[1], "no")
+    assert_equal(lower[2], "yes")
+
+
+def test_a_letter_that_looks_lower_case_and_is_in_no_case_at_all() raises:
+    # A modifier letter and the feminine ordinal. Both are letters, neither is
+    # cased, so both behave here exactly like a digit does: they answer no on
+    # their own and they do not stop the row around them answering yes.
+    var alone = asked(text_is_lower(made(["ª", "ᵃ"])))
+    assert_equal(alone[0], "no")
+    assert_equal(alone[1], "no")
+    assert_equal(asked(text_is_lower(made(["ªa"])))[0], "yes")
+
+
+def test_the_case_questions_read_an_alphabet_that_is_not_latin() raises:
+    var lower = asked(text_is_lower(made(["αβγ", "ΑΒΓ", "мир", "МИР"])))
+    var upper = asked(text_is_upper(made(["αβγ", "ΑΒΓ", "мир", "МИР"])))
+    assert_equal(lower[0], "yes")
+    assert_equal(upper[0], "no")
+    assert_equal(lower[1], "no")
+    assert_equal(upper[1], "yes")
+    assert_equal(lower[2], "yes")
+    assert_equal(upper[3], "yes")
+
+
+def test_the_titlecase_class_is_the_list_swapcase_already_had() raises:
+    # The same 31 code points arrived at from opposite directions. `casefix`
+    # derives them from the mappings, because a character both of whose
+    # mappings move it and which is in neither case can only be the third one,
+    # and `charclass` reads the class straight from Arrow. The two agreeing is
+    # a check on both, and it is cheap enough to make rather than to claim.
+    var kept = materialize[KEPT_BY_SWAP]()
+    var edges = materialize[TITLE_ONLY_EDGES]()
+    var counted = 0
+    for i in range(0, len(edges), 2):
+        for cp in range(Int(edges[i]), Int(edges[i + 1])):
+            var found = False
+            for k in range(len(kept)):
+                if Int(kept[k]) == cp:
+                    found = True
+            assert_true(found)
+            counted += 1
+    assert_equal(counted, len(kept))
+
+
+def test_a_character_above_the_basic_plane_has_a_case_too() raises:
+    # Deseret, which is the far end of the table and the one place an edge
+    # search that overflowed somewhere would show.
+    assert_equal(asked(text_is_lower(made(["𐐨"])))[0], "yes")
+    assert_equal(asked(text_is_upper(made(["𐐀"])))[0], "yes")
+    assert_equal(asked(text_is_lower(made(["𐐀"])))[0], "no")
 
 
 def test_capitalising_raises_the_first_character_and_drops_the_rest() raises:

@@ -97,6 +97,18 @@ wrong for everything else in this file. It is also the only kernel here that can
 give back a row longer in characters than the one it was given, since `ß` folds
 to two letters. `casefold.mojo` is the 353 code points whose fold is not their
 lower case, and everything else falls through to the lower case path.
+
+### The three that ask a question do not borrow anything
+
+`isspace`, `islower` and `isupper` are not about a mapping at all, they are
+about a class, and the classes in `charclass.mojo` are Arrow's read straight out
+of pyarrow. They used to be the standard library's, which disagreed with Arrow
+about 1384 code points across the three, mostly by not having heard of the
+spaces above ASCII and by counting a titlecase character as both cases at once.
+None of the three is the loop a reader expects either. A row is lower case when
+one of its characters is lower and none of them is upper or titlecase, so a row
+of digits is neither case, an empty row is neither, and the titlecase class has
+to be read by both questions even though neither is named after it.
 """
 
 from std.collections.span import Span
@@ -116,6 +128,20 @@ from .casefix import (
     LOWEST_CORRECTED_LEAD,
 )
 from .casefold import FOLDED_AT, FOLDED_FROM, FOLDED_TO
+from .charclass import (
+    LOWER_ASCII_HIGH,
+    LOWER_ASCII_LOW,
+    LOWER_EDGES,
+    SPACE_ASCII_HIGH,
+    SPACE_ASCII_LOW,
+    SPACE_EDGES,
+    TITLE_ONLY_ASCII_HIGH,
+    TITLE_ONLY_ASCII_LOW,
+    TITLE_ONLY_EDGES,
+    UPPER_ASCII_HIGH,
+    UPPER_ASCII_LOW,
+    UPPER_EDGES,
+)
 from .mask import repair_range
 
 comptime EVERY_SPACE = 0
@@ -723,6 +749,46 @@ def _listed_at(keys: Span[UInt32, _], point: UInt32) -> Int:
     return -1
 
 
+def _in_class(
+    point: UInt32, low: UInt64, high: UInt64, edges: Span[UInt32, _]
+) -> Bool:
+    """Whether a code point is in one of the classes in `charclass.mojo`.
+
+    A class is held as the ranges it covers, written flat as a start, one past
+    an end, the next start and so on, so a code point is in the class when the
+    number of entries at or below it is odd. That is what the search leaves in
+    `lo`, which is why there is no second comparison at the end the way
+    `_listed_at` has one.
+
+    The first 128 code points never reach the search. Each class carries its
+    ASCII half as two words and nearly all real text is answered by a shift and
+    a mask, which matters here rather than in the mapping kernels because this
+    one asks per character with nothing to skip ahead on.
+
+    Args:
+        point: The code point being asked about.
+        low: The class's bits for code points 0 to 63.
+        high: The class's bits for code points 64 to 127.
+        edges: The class's ranges from `charclass.mojo`, flat and in order.
+
+    Returns:
+        True when the code point is in the class.
+    """
+    if point < 64:
+        return (low >> UInt64(point)) & 1 == 1
+    if point < 128:
+        return (high >> UInt64(point - 64)) & 1 == 1
+    var lo = 0
+    var hi = len(edges)
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if edges[mid] <= point:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo % 2 == 1
+
+
 def _may_need_correcting(bytes: Span[UInt8, _]) -> Bool:
     """Whether an element could hold a code point the table knows about.
 
@@ -1130,13 +1196,18 @@ def _swap_ascii(bytes: Span[UInt8, _], mut into: List[UInt8]):
 def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
     """Asks one question of every character of every element.
 
-    The three questions share everything except the call in the middle, and
-    they share the two rules that come with it. An element answers True only if
-    it has a character in it, so the empty string is False for all three, and an
-    element with no cased character in it is False for the two that are about
-    case, so a row holding a digit is neither lower nor upper. An element that
-    is not valid UTF-8 answers False to all three for the reason `text_case`
-    gives, which is that it is not text to be asked about.
+    The three questions share the two rules that come with them. An element
+    answers True only if it has a character in it, so the empty string is False
+    for all three, and an element with no cased character in it is False for the
+    two that are about case, so a row holding a digit is neither lower nor
+    upper. An element that is not valid UTF-8 answers False to all three for the
+    reason `text_case` gives, which is that it is not text to be asked about.
+
+    The two about case are not each other's opposite and neither is a loop that
+    stops at the first character. A row is lower case when one of its characters
+    is lower and none of them is upper or titlecase, so both of them read the
+    titlecase class as well as their own, and a row can fail either question by
+    holding a character that is not in any of the three.
 
     Args:
         a: The column.
@@ -1151,21 +1222,55 @@ def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
     var n = len(a)
     var out = Array[DType.bool](overwritten=n)
     var validity = Bitmap(copy=a.validity)
+    var spaces = materialize[SPACE_EDGES]()
+    var lowers = materialize[LOWER_EDGES]()
+    var uppers = materialize[UPPER_EDGES]()
+    var titles = materialize[TITLE_ONLY_EDGES]()
 
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var bytes = a.unsafe_bytes(i)
-            var text = StringSlice(unsafe_from_utf8=bytes)
-            var answer: Bool
-            if not _well_formed(bytes):
-                answer = False
-            elif kind == EVERY_SPACE:
-                answer = text.isspace()
-            elif kind == EVERY_LOWER:
-                answer = text.islower()
-            else:
-                answer = text.isupper()
+            var answer = False
+            if _well_formed(bytes):
+                var text = StringSlice(unsafe_from_utf8=bytes)
+                var seen = False
+                var spoiled = False
+                for point in text.codepoints():
+                    var cp = point.to_u32()
+                    if kind == EVERY_SPACE:
+                        if not _in_class(
+                            cp, SPACE_ASCII_LOW, SPACE_ASCII_HIGH, Span(spaces)
+                        ):
+                            spoiled = True
+                            break
+                        seen = True
+                        continue
+                    var lower = _in_class(
+                        cp, LOWER_ASCII_LOW, LOWER_ASCII_HIGH, Span(lowers)
+                    )
+                    var upper = _in_class(
+                        cp, UPPER_ASCII_LOW, UPPER_ASCII_HIGH, Span(uppers)
+                    )
+                    if lower:
+                        if kind == EVERY_UPPER:
+                            spoiled = True
+                            break
+                        seen = True
+                    elif upper:
+                        if kind == EVERY_LOWER:
+                            spoiled = True
+                            break
+                        seen = True
+                    elif _in_class(
+                        cp,
+                        TITLE_ONLY_ASCII_LOW,
+                        TITLE_ONLY_ASCII_HIGH,
+                        Span(titles),
+                    ):
+                        spoiled = True
+                        break
+                answer = seen and not spoiled
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](answer))
         repair_range(out, validity, start, stop)
 

@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `isspace`, `islower` and `isupper` on the 1384 code points they were wrong about
+
+These three answered out of the Mojo standard library's character data, which is close to Arrow's and is not Arrow's, and pandas answers them out of Arrow. Measured over all 1111998 code points the two disagreed about 1384 of them: the standard library had never heard of the non breaking space or the space separators from U+1680 to U+3000, it was missing 841 lower case and 526 upper case characters that Arrow has, and it counted the titlecase characters like `ǅ` as both cases at once where Arrow counts them as neither.
+
+`firepanda/kernel/charclass.mojo` now carries Arrow's four classes, read straight out of pyarrow by `tools/gen_charclass.py` and committed. A class is held as the ranges it covers rather than a row per code point, because Unicode hands out properties in blocks, so all four together are under eleven kilobytes and a lookup is a binary search and a parity test. The first 128 code points are two words per class and no search at all.
+
+All three now agree with pandas on every code point in Unicode and on sixty thousand random words, asserted as a sweep rather than a sample. The test that used to name three specific rows where this library and pandas differed, written to fail the day the data was replaced, is that sweep now. Nothing on the conformance board moves, because the corpus never held one of the 1384 in a row that was asked one of these questions, which is the difference between being correct on a corpus and being correct. Document 65 is the whole of it.
+
 ### Added: casefold, the one case method pandas does not answer out of Arrow
 
 `s.str.casefold()`. Folding looks like a third case and is not one. Nobody writes text in it and nobody reads it, and its one promise is that two rows a reader would call the same come out as the same bytes, so `Straße` and `STRASSE` both fold to `strasse` where lowering them says they are different.
