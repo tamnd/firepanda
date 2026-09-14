@@ -987,6 +987,41 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="contains",
+            kind="method",
+            signature=(
+                "pat: Any, case: Any = True, flags: Any = 0, na: Any = None,"
+                " regex: Any = True"
+            ),
+            body='self._searched("contains", pat, case, flags, na, bool(regex))',
+            doc="Whether every row holds a literal pattern anywhere in it.",
+            returns="Series",
+        ),
+        Member(
+            name="match",
+            kind="method",
+            signature="pat: Any, case: Any = True, flags: Any = 0, na: Any = None",
+            body='self._searched("match", pat, case, flags, na, True)',
+            doc="Whether every row begins with a literal pattern.",
+            returns="Series",
+        ),
+        Member(
+            name="fullmatch",
+            kind="method",
+            signature="pat: Any, case: Any = True, flags: Any = 0, na: Any = None",
+            body='self._searched("fullmatch", pat, case, flags, na, True)',
+            doc="Whether every row is a literal pattern and nothing else.",
+            returns="Series",
+        ),
+        Member(
+            name="count",
+            kind="method",
+            signature="pat: Any, flags: Any = 0",
+            body="self._counted(pat, flags)",
+            doc="How many times a literal pattern appears in every row.",
+            returns="Series",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",

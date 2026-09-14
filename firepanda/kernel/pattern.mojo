@@ -1,4 +1,4 @@
-"""Substring search over a text column: contains, starts with, ends with.
+"""Substring search over a text column: contains, starts, ends, equals, count.
 
 These are what a `LIKE` pattern turns into once the wildcards are read. `LIKE
 '%green%'` is a contains, `LIKE 'forest%'` is a starts with, `LIKE '%BRASS'` is
@@ -31,6 +31,22 @@ never earns back.
 Comparison against a null is null, the same as it is for the ordering kernels,
 and it is handled the same way: the loop writes whatever falls out and the repair
 at the end of each morsel clears the rows where the input was missing.
+
+### The four the str accessor added
+
+`str.contains`, `str.match`, `str.fullmatch` and `str.count` are the same four
+questions this file already answered for `LIKE`, asked by a different caller.
+Contains is contains, match is starts with, fullmatch is equality, and only the
+count needed a kernel, so three of the four cost nothing and the fourth is the
+search in a loop with the cursor moved past each hit.
+
+pandas reads all four arguments as regular expressions, and this file has no
+regular expression engine and does not want one yet. What makes the four useful
+anyway is that a pattern with no metacharacter in it means the same thing to a
+regular expression engine as it does to a byte search, so the Python layer reads
+the pattern, and a literal one comes here while the rest are refused by name.
+That is a smaller promise than pandas makes and it is a true one, which is the
+trade document 07 asks for.
 """
 
 from std.collections.span import Span
@@ -517,6 +533,102 @@ def text_starts_with(
             var bytes = a.unsafe_bytes(i)
             var found = len(bytes) >= m and _starts_at(bytes, prefix, 0)
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_equals(
+    a: StringArray, other: Span[UInt8, _]
+) raises -> Array[DType.bool]:
+    """Whether each element is exactly a run of bytes and nothing more.
+
+    This is what `str.fullmatch` is once the pattern is known to be literal, and
+    it is the cheapest of the five: the lengths have to agree before a byte is
+    read, so a column of forty byte rows against a three byte pattern answers
+    without touching the data at all.
+
+    Args:
+        a: The column.
+        other: The bytes the whole element has to be.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var m = len(other)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var bytes = a.unsafe_bytes(i)
+            var same = len(bytes) == m and _starts_at(bytes, other, 0)
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_count(
+    a: StringArray, needle: Span[UInt8, _]
+) raises -> Array[DType.int64]:
+    """How many times a run of bytes appears in each element, without overlap.
+
+    Without overlap means the cursor moves by the whole needle after a hit, so
+    `aa` appears twice in `aaaa` and not three times. That is what a regular
+    expression engine answers for a literal pattern and it is what pandas
+    answers, and it is the only rule here that a caller is likely to have an
+    opinion about.
+
+    An empty needle is counted in bytes and not in characters, which is the one
+    place in this file where the two differ and is worth saying out loud. Arrow
+    counts a match at every byte offset and one past the end, so an empty needle
+    against a five character word holding one accented letter is seven and not
+    six. pandas answers Arrow here, this library answers pandas, and Python's
+    own `re` module answers six. Document 66 has the measurement.
+
+    Args:
+        a: The column.
+        needle: The bytes to look for.
+
+    Returns:
+        An int64 column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var m = len(needle)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var bytes = a.unsafe_bytes(i)
+            var seen = 0
+            if m == 0:
+                seen = len(bytes) + 1
+            else:
+                var from_ = 0
+                while from_ + m <= len(bytes):
+                    var at = find_bytes(bytes, needle, from_)
+                    if at < 0:
+                        break
+                    seen += 1
+                    from_ = at + m
+            dst.unsafe_offset(i).unsafe_write(Int64(seen))
         repair_range(out, validity, start, stop)
 
     parallel_morsels(compute, n)

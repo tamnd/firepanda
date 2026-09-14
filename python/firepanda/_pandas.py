@@ -8552,6 +8552,19 @@ def _ewm(
     return ExponentialMovingWindow(data, com, span, halflife, alpha, min_periods, adjust, ignore_na)
 
 
+_REGEX_CHARACTERS = frozenset(r".^$*+?{}[]\|()")
+"""The twelve characters that make a string mean something other than itself.
+
+Python's own `re.escape` is the authority for this and it escapes more than
+twelve, because it escapes anything that is not a word character so that the
+answer stays right across versions. Twelve is the list that actually changes a
+match, and being exact here matters in the one direction: a character wrongly
+left out of this set turns a refusal into a wrong answer, and a character
+wrongly put in turns a right answer into a refusal, which is a complaint rather
+than a bug.
+"""
+
+
 class StringMixin:
     """The hand written half of `StringAccessor`.
 
@@ -8800,6 +8813,80 @@ class StringMixin:
         from ._frame import Series
 
         return Series(values, name=self._series.name)
+
+    def _literal(self, pat: Any, regex: bool, name: str) -> str:
+        """Reads a pattern, and refuses one that needs an engine we do not have.
+
+        pandas reads the argument to `contains`, `match`, `fullmatch` and `count`
+        as a regular expression. There is no regular expression engine here yet.
+        What makes the four worth writing anyway is that a pattern holding none
+        of the twelve metacharacters means the same thing to an engine as it does
+        to a byte search, so those patterns are answered exactly and the rest are
+        refused by name rather than answered approximately.
+
+        The refusal names the character it tripped on, because a caller who wrote
+        `contains(".")` meaning a full stop is one keyword away from the answer
+        they want and a caller who wrote `contains("^a")` is not, and the message
+        should let them tell which of the two they are.
+        """
+        if not isinstance(pat, str):
+            raise DTypeError("firepanda:dtype: first argument must be string or compiled pattern")
+        if not regex:
+            return pat
+        for character in pat:
+            if character in _REGEX_CHARACTERS:
+                way_out = (
+                    ", and regex=False searches for the characters themselves"
+                    if name == "contains"
+                    else ""
+                )
+                raise UnsupportedError(
+                    f"firepanda:unsupported: str.{name} reads its pattern as a regular"
+                    f" expression, {character!r} is a regular expression character, and"
+                    f" no engine is written yet{way_out}"
+                )
+        return pat
+
+    @staticmethod
+    def _plain(case: Any, flags: Any, name: str) -> None:
+        """Refuses the two arguments that would change what the pattern means.
+
+        Both have a default that means leave it alone, and both are one line to
+        accept and a case folding pass or an engine to honour, so both say no
+        here rather than being ignored. An ignored argument is the one failure
+        mode a compatibility layer must not have.
+        """
+        if case is not None and not case:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{name} with case=False is not written yet"
+            )
+        if flags:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
+            )
+
+    def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
+        """Whether a literal pattern is in every row, at the front, or the whole row.
+
+        The three share everything except which kernel they reach, including the
+        `na` filling, which is the same list walk `_begins` does and is here for
+        the same reason: a column has no `fillna` yet.
+        """
+        self._plain(case, flags, kind)
+        answer = self._flag(kind, self._literal(pat, regex, kind))
+        if na is None:
+            return answer
+        return self._as_mask([na if one is None else one for one in answer.tolist()])
+
+    def _counted(self, pat: Any, flags: Any) -> Series:
+        """How many times a literal pattern appears in every row.
+
+        `count` has no `case` argument, which is the one place the four disagree
+        about their own signature, so it passes `None` and the check falls
+        through.
+        """
+        self._plain(None, flags, "count")
+        return self._number("count", self._literal(pat, True, "count"))
 
 
 class GroupByMixin[Answer]:

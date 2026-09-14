@@ -50,13 +50,17 @@ from firepanda.kernel.pattern import (
     read_pattern,
     text_contains,
     text_contains_in_order,
+    text_count,
     text_ends_with,
+    text_equals,
     text_starts_with,
 )
 from firepanda.kernel.scalar import (
     text_contains_in_order_scalar,
     text_contains_scalar,
+    text_count_scalar,
     text_ends_with_scalar,
+    text_equals_scalar,
     text_starts_with_scalar,
 )
 
@@ -197,6 +201,46 @@ def check_pair(col: StringArray, first: String, second: String) raises:
         text_contains_in_order_scalar(col, first, second),
         "in_order " + first + " " + second,
     )
+
+
+def check_equals(col: StringArray, other: String) raises:
+    """Runs the equality kernel and its twin and asserts they agree.
+
+    Args:
+        col: The column.
+        other: The string every row is compared against.
+
+    Raises:
+        AssertionError: If they disagree.
+    """
+    agrees(
+        text_equals(col, other.as_bytes()),
+        text_equals_scalar(col, other),
+        "equals " + other,
+    )
+
+
+def check_count(col: StringArray, needle: String) raises:
+    """Runs the count kernel and its twin and asserts they agree.
+
+    Args:
+        col: The column.
+        needle: The substring to count.
+
+    Raises:
+        AssertionError: If they disagree.
+    """
+    var got = text_count(col, needle.as_bytes())
+    var want = text_count_scalar(col, needle)
+    assert_equal(len(got), len(want), "count " + needle + ": lengths differ")
+    for i in range(len(got)):
+        assert_equal(
+            got.is_valid(i), want.is_valid(i), "count " + needle + ": validity"
+        )
+        if got.is_valid(i):
+            assert_equal(
+                got[i], want[i], "count " + needle + " row " + String(i)
+            )
 
 
 def test_contains_matches_the_twin() raises:
@@ -395,6 +439,72 @@ def test_a_run_in_the_middle_is_refused_rather_than_widened() raises:
         _ = read_pattern("%a%b")
     with assert_raises(contains="is none of those"):
         _ = read_pattern("%a%%b%")
+
+
+def test_equality_matches_the_twin() raises:
+    var col = sample()
+    check_equals(col, "green")
+    check_equals(col, "gree")
+    check_equals(col, "")
+    check_equals(col, "greengreen")
+    check_equals(col, "forest green thread")
+    check_equals(col, padded("", 100, "green"))
+
+
+def test_count_matches_the_twin() raises:
+    var col = sample()
+    check_count(col, "green")
+    check_count(col, "g")
+    check_count(col, "gg")
+    check_count(col, "greenx")
+    check_count(col, "")
+    check_count(col, "reen")
+
+
+def test_a_count_does_not_let_matches_overlap() raises:
+    # Four a's hold two runs of two and not three, because the cursor moves past
+    # the whole needle after a hit. A regular expression engine says the same,
+    # and this is the only rule in the kernel a caller is likely to have an
+    # opinion about, so it is asserted on its own and not only through the twin.
+    var col = strings_from_list(["aaaa", "aaaaa", "abab", "aa"])
+    var got = text_count(col, "aa".as_bytes())
+    assert_equal(got[0], 2)
+    assert_equal(got[1], 2)
+    assert_equal(got[2], 0)
+    assert_equal(got[3], 1)
+
+
+def test_an_empty_needle_is_counted_in_bytes_and_not_characters() raises:
+    # This is Arrow's rule and it is the answer pandas gives, and it is not the
+    # one Python's re module gives. A five character word holding one accented
+    # letter is six bytes, so it holds seven empty matches here and six there.
+    var col = strings_from_list(["hello", "h\u00e9llo", "", "\u65e5\u672c"])
+    var got = text_count(col, "".as_bytes())
+    assert_equal(got[0], 6)
+    assert_equal(got[1], 7)
+    assert_equal(got[2], 1)
+    assert_equal(got[3], 7)
+
+
+def test_equality_reads_no_bytes_when_the_lengths_disagree() raises:
+    # Not a timing assertion, which a test cannot make. It is the boundary the
+    # length check creates: a row one byte longer than the pattern and sharing
+    # every byte of it is not equal, and an off by one in the comparison would
+    # call it equal without ever reading past the pattern.
+    var col = strings_from_list(["green", "greens", "gree", "GREEN"])
+    var got = text_equals(col, "green".as_bytes())
+    assert_true(got[0])
+    assert_false(got[1])
+    assert_false(got[2])
+    assert_false(got[3])
+
+
+def test_an_empty_pattern_is_equal_to_the_empty_row_alone() raises:
+    var col = strings_from_list(["", "a", ""])
+    var got = text_equals(col, "".as_bytes())
+    assert_true(got[0])
+    assert_false(got[1])
+    assert_true(got[2])
 
 
 def main() raises:

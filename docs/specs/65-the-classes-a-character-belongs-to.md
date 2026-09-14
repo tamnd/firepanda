@@ -84,4 +84,4 @@ The same measurement found 8946 letters Arrow knows about and Python's copy of t
 
 ## 12. What is left
 
-Nothing in this shape. Every question in the `str` accessor that is about what a character is now has a class behind it, and the remaining 25 `str` names are about patterns, splitting and joining, and most of them want a regex engine rather than a table.
+Nothing in this shape. Every question in the `str` accessor that is about what a character is now has a class behind it, and the 20 `str` names left after this document are about patterns, splitting and joining, and most of them want an engine rather than a table. Document 66 takes the first four of those and is about how far they get without an engine at all.
