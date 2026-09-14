@@ -48,6 +48,8 @@ from firepanda.kernel import (
     not_equal,
     power,
     select_positions,
+    sql_divide,
+    sql_modulo,
     subtract,
     sum_of,
     take_rows,
@@ -69,6 +71,8 @@ from firepanda.kernel.scalar import (
     multiply_scalar,
     negate_scalar,
     power_scalar,
+    sql_divide_scalar,
+    sql_modulo_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
@@ -376,6 +380,60 @@ def test_floor_division_and_the_remainder_match_the_twin() raises:
             assert_equal(quotients[i], quotients_twin[i])
             if not isnan(remainders[i]):
                 assert_equal(remainders[i], remainders_twin[i])
+
+
+def sql_pair_matches[dt: DType](a: Array[dt], b: Array[dt]) raises:
+    """Runs one numerator and one divisor through both SQL loops and the twins.
+
+    Args:
+        a: The numerator column.
+        b: The divisor column, which holds a zero somewhere or the interesting
+            row is not in it.
+
+    Parameters:
+        dt: The dtype.
+    """
+    var quotients = sql_divide(a, b)
+    var quotients_twin = sql_divide_scalar(a, b)
+    var remainders = sql_modulo(a, b)
+    var remainders_twin = sql_modulo_scalar(a, b)
+    for i in range(len(a)):
+        assert_equal(quotients.is_valid(i), quotients_twin.is_valid(i))
+        assert_equal(remainders.is_valid(i), remainders_twin.is_valid(i))
+        assert_equal(quotients[i], quotients_twin[i])
+        # The division nulls a zero divisor on every dtype, so nothing it
+        # produces is a NaN. The remainder is `fmod` on a float and answers one.
+        comptime if dt.is_floating_point():
+            assert_equal(isnan(remainders[i]), isnan(remainders_twin[i]))
+            if isnan(remainders[i]):
+                continue
+        assert_equal(remainders[i], remainders_twin[i])
+
+
+def test_the_sql_division_and_the_remainder_match_the_twin() raises:
+    """The same divisors as the floor pair above, and then the numerator negated
+    on every dtype that can hold a negative.
+
+    The negation is the test. The two roundings agree on every pair of positive
+    numbers, so a column built the way the one above is built would pass with
+    the floor still in place, which is precisely the bug this pair exists to
+    fix. A zero divisor is a null here whatever the dtype, floats included."""
+    comptime for dt in NUMERIC:
+        var a = build[dt](193, 5)
+        var b = Array[dt](193)
+        for i in range(193):
+            b[i] = Scalar[dt]((i * 7) % 90)
+        b.set_null(11)
+        sql_pair_matches(a, b)
+
+        comptime if dt.is_signed():
+            var below = Array[dt](193)
+            for i in range(193):
+                if a.is_valid(i):
+                    below.set_valid(i, -a[i])
+                else:
+                    below.set_null(i)
+            sql_pair_matches(below, b)
 
 
 def test_a_float_quotient_of_an_infinity_is_a_nan() raises:

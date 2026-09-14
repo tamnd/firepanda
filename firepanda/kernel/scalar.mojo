@@ -584,6 +584,94 @@ def modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
     return out^
 
 
+def sql_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Divides two columns the way SQL divides them, one element at a time.
+
+    The specification for `sql_divide`, and the two differences from the twin
+    above are the whole of it. An integer quotient is rounded towards zero
+    rather than towards minus infinity, and it is built out of the remainder
+    here where the kernel corrects the floor, so the two arrive at the answer by
+    different routes and a twin that agrees is saying something. A float is not
+    rounded at all, since `//` on a float is an ordinary division in this
+    dialect.
+
+    The rule about a zero divisor is not the one the twin above uses, and this
+    is the one place the two disagree about which rows have an answer at all.
+    DuckDB nulls a zero divisor whatever the dtype, so `7.0 // 0.0` is a null
+    where `7.0 / 0.0` next to it is an infinity, and the kernel nulls it too.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null wherever either input is null or the divisor
+        is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        if b[i] == 0:
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            # What is left once the truncated remainder is taken off is an
+            # exact multiple of the divisor, so dividing it gives the truncated
+            # quotient whichever way the language rounds. Taking off Mojo's
+            # own remainder instead would give back the floor.
+            var remainder = a[i] % b[i]
+            comptime if dt.is_signed():
+                if remainder != 0 and (a[i] < 0) != (b[i] < 0):
+                    remainder -= b[i]
+            out.set_valid(i, (a[i] - remainder) // b[i])
+        else:
+            out.set_valid(i, a[i] / b[i])
+    return out^
+
+
+def sql_modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Takes the remainder SQL means, one element at a time.
+
+    The remainder of a truncated division, so it takes the sign of the numerator
+    where the twin above takes the sign of the divisor. On a float it is
+    `_c_remainder`, which is the C library call that `_floored_remainder` makes
+    before correcting the sign; this is that call without the correction.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null wherever either input is null and, on an
+        integer dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            if b[i] == 0:
+                out.set_null(i)
+                continue
+            var remainder = a[i] % b[i]
+            comptime if dt.is_signed():
+                if remainder != 0 and (a[i] < 0) != (b[i] < 0):
+                    remainder -= b[i]
+            out.set_valid(i, remainder)
+        else:
+            out.set_valid(i, _c_remainder(a[i], b[i]))
+    return out^
+
+
 def power_scalar[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Raises one column to another, one element at a time.
 
@@ -819,6 +907,96 @@ def modulo_const_scalar[
                 out.set_null(i)
                 continue
         out.set_valid(i, numerator % divisor)
+    return out^
+
+
+def sql_divide_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Divides against a constant the way SQL does, one element at a time.
+
+    The specification for `sql_divide_const`. The quotient is truncated on an
+    integer dtype and not rounded at all on a float, and a zero divisor is a
+    null on both, which is the rule that separates this from the floor division
+    above rather than only the rounding.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null where the column is null or the divisor is
+        zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        if divisor == 0:
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            # The same route as `sql_divide_scalar`, which is the remainder
+            # first and the quotient out of it, so the answer does not depend on
+            # which way the language rounds.
+            var remainder = numerator % divisor
+            comptime if dt.is_signed():
+                if remainder != 0 and (numerator < 0) != (divisor < 0):
+                    remainder -= divisor
+            out.set_valid(i, (numerator - remainder) // divisor)
+        else:
+            out.set_valid(i, numerator / divisor)
+    return out^
+
+
+def sql_modulo_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Takes the remainder SQL means against a constant, one element at a time.
+
+    The remainder that goes with the division above, so it takes the sign of the
+    numerator. On a float it is the C library call and a zero divisor gives the
+    NaN that call gives, which is where it parts company with the division: the
+    division nulls that row and this one does not, and DuckDB answers both ways
+    for the same reason it does upstream.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null where the column is null and, on an integer
+        dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        comptime if dt.is_integral():
+            if divisor == 0:
+                out.set_null(i)
+                continue
+            var remainder = numerator % divisor
+            comptime if dt.is_signed():
+                if remainder != 0 and (numerator < 0) != (divisor < 0):
+                    remainder -= divisor
+            out.set_valid(i, remainder)
+        else:
+            out.set_valid(i, _c_remainder(numerator, divisor))
     return out^
 
 

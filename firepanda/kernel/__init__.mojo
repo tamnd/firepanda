@@ -63,6 +63,10 @@ from .arith import (
     multiply,
     power,
     power_const,
+    sql_divide,
+    sql_divide_const,
+    sql_modulo,
+    sql_modulo_const,
     subtract,
 )
 from .binary import (

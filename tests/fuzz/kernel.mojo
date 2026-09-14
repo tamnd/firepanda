@@ -67,6 +67,10 @@ from firepanda.kernel import (
     power,
     power_const,
     prod_of,
+    sql_divide,
+    sql_divide_const,
+    sql_modulo,
+    sql_modulo_const,
     subtract,
     sum_of,
     take_range,
@@ -118,6 +122,10 @@ from firepanda.kernel.scalar import (
     power_scalar,
     prod_scalar,
     round_to_period_scalar,
+    sql_divide_const_scalar,
+    sql_divide_scalar,
+    sql_modulo_const_scalar,
+    sql_modulo_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
@@ -914,6 +922,26 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         "modulo",
     )
 
+    # The SQL pair runs against the same two columns, because their rule about a
+    # zero divisor is the same rule read one line further: the division nulls
+    # that row on a float dtype as well as on an integer one, where the floor
+    # division above leaves an infinity there. The rounding differs only on a
+    # negative numerator, which `a` holds on every signed dtype.
+    same_column(
+        sql_divide(a, divisors),
+        sql_divide_scalar(a, divisors),
+        step,
+        seed,
+        "sql_divide",
+    )
+    same_column(
+        sql_modulo(a, divisors),
+        sql_modulo_scalar(a, divisors),
+        step,
+        seed,
+        "sql_modulo",
+    )
+
     # The power gets two columns of its own for the reason in `bounded_column`,
     # which is that five cubed is the largest thing that fits in an int8 and the
     # other columns are nowhere near that small. Neither column can hold a
@@ -1012,6 +1040,34 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         step,
         seed,
         "modulo_const flipped",
+    )
+    same_column(
+        sql_divide_const(a, kd),
+        sql_divide_const_scalar(a, kd),
+        step,
+        seed,
+        "sql_divide_const",
+    )
+    same_column(
+        sql_divide_const(divisors, kd, True),
+        sql_divide_const_scalar(divisors, kd, True),
+        step,
+        seed,
+        "sql_divide_const flipped",
+    )
+    same_column(
+        sql_modulo_const(a, kd),
+        sql_modulo_const_scalar(a, kd),
+        step,
+        seed,
+        "sql_modulo_const",
+    )
+    same_column(
+        sql_modulo_const(divisors, kd, True),
+        sql_modulo_const_scalar(divisors, kd, True),
+        step,
+        seed,
+        "sql_modulo_const flipped",
     )
 
     # The power constant is the exponent one way round and the base the other,

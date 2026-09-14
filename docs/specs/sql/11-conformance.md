@@ -91,6 +91,8 @@ A ceiling of zero only means anything if the disagreements that are allowed to s
 
 The oracle is `tools/answers.py`, built the same way `tools/semantics.py` is and running DuckDB in a child process for the same reason.
 
+It has paid for itself once already. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770 and is fixed, and the fix is the shape this section predicts: the two expressions sat on the recorded list with the issue number against them until the kernels existed, and came off it when they did.
+
 ## 7. The plan equality test
 
 The single most valuable test in this specification, and it is not about compatibility at all.
