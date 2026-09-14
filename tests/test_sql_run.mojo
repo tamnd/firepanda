@@ -4044,6 +4044,57 @@ def test_a_timestamp_literal_against_a_date_column_is_refused() raises:
         )
 
 
+def test_a_number_literal_with_an_exponent_is_a_double() raises:
+    # DuckDB reads the type off how the number was written and not off what it
+    # is worth, so `1e3` is a DOUBLE even though one thousand is exact. The
+    # plan holds a double, so there is nothing lost and nothing to refuse.
+    var out = run("SELECT 1e3 AS a, 1.5e3 AS b, 1.1e-2 AS c", session())
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "a double")
+    assert_equal(out.column("a").as_typed[DType.float64]()[0], 1000.0, "1e3")
+    assert_equal(out.column("b").as_typed[DType.float64]()[0], 1500.0, "1.5e3")
+    assert_equal(out.column("c").as_typed[DType.float64]()[0], 0.011, "1.1e-2")
+
+
+def test_a_decimal_literal_past_the_widest_decimal_is_a_double() raises:
+    # The count is of digits as written, so the trailing zeros are what pushes
+    # this one over 38 and makes DuckDB read a DOUBLE. Written as `1.5` it is a
+    # DECIMAL(2,1) and is refused by the test below.
+    var out = run(
+        "SELECT 1.5000000000000000000000000000000000000000 AS a", session()
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "a double")
+    assert_equal(out.column("a").as_typed[DType.float64]()[0], 1.5, "1.5")
+
+
+def test_a_decimal_literal_that_fits_a_decimal_is_refused() raises:
+    # The refusal that stands. A double in its place answers 3.3000000000000003
+    # where DuckDB answers 3.3, and the plan has no exact decimal to hold the
+    # right answer in.
+    with assert_raises(contains="does not lower the decimal literal"):
+        _ = run("SELECT 1.1 AS a", session())
+    with assert_raises(contains="does not lower the decimal literal"):
+        _ = run(
+            "SELECT 1234567890123456789012345678901234567.8 AS a", session()
+        )
+
+
+def test_an_integer_literal_past_a_bigint_is_refused_rather_than_wrapped() raises:
+    # DuckDB reads a HUGEINT here and the plan has no 128 bit integer. It used
+    # to wrap and answer -9223372036854775808, which is the one kind of failure
+    # this front end is not allowed to have.
+    assert_equal(
+        run("SELECT 9223372036854775807 AS a", session())
+        .column("a")
+        .as_typed[DType.int64]()[0],
+        9223372036854775807,
+        "the largest one that fits",
+    )
+    with assert_raises(contains="does not lower the integer literal"):
+        _ = run("SELECT 9223372036854775808 AS a", session())
+
+
 def test_an_extract_reads_the_field_off_every_row() raises:
     same(
         answer("SELECT EXTRACT(YEAR FROM eventdate) AS y FROM hits", "y"),

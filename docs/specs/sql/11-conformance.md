@@ -93,7 +93,9 @@ A ceiling of zero only means anything if the disagreements that are allowed to s
 
 The oracle is `tools/answers.py`, built the same way `tools/semantics.py` is and running DuckDB in a child process for the same reason.
 
-It has paid for itself twice already, and the recorded list it was written with is now empty. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770, and `s LIKE '_b_'` refused where DuckDB answered, which is issue #776. Both are fixed and both took the shape this section predicts: the expressions sat on the recorded list with an issue number against them until the kernels existed, and came off it when they did. The list is now empty rather than deleted, because the reason for having one does not go away when it happens to be short.
+It has paid for itself three times. Its first run found `n // 3` and `n % 3` answering Python's rounding where DuckDB uses C's, which is issue #770, and `s LIKE '_b_'` refused where DuckDB answered, which is issue #776. Both are fixed and both took the shape this section predicts: the expressions sat on the recorded list with an issue number against them until the kernels existed, and came off it when they did.
+
+The third arrived with the double literals and is on the list now. `CAST(2.6 AS BIGINT)` is 3 in DuckDB and 2 in firepanda, because DuckDB rounds to the nearest and firepanda truncates the way the machine instruction does. That one is issue #786 and is on the list rather than fixed for a reason worth saying: `astype` on the dataframe side has to keep truncating, since that is what pandas does, so the two front ends want different answers out of one conversion and the fix is a decision about where to put the difference.
 
 ## 7. The plan equality test
 
