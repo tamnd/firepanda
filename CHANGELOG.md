@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
+
+The other half of what the last release flagged. `trim` ran at 13.5 nanoseconds a row over forty byte text against `substring` at 4.3 on the same column, and both build a text column and read every element, so three times the cost had to come from somewhere.
+
+It came from counting in characters. The kernel asked for a character by its ordinal and the function that answers that scans from the front of the element every time it is called, so trimming a row with nothing to trim did about five passes over it: one to count the characters, two for the right hand test because both of its offsets are at the far end, and two more for the slice.
+
+None of that was needed. Going left, the next character starts at the next byte that is not a continuation byte. Going right, the previous character starts at the previous such byte, which is at most three bytes back. Both ends stop at the first character that is not wanted, so a row with nothing to strip is two lead byte tests and the middle of it is never read at all.
+
+Measured on the i9-13900K over four million rows, three rounds alternated, every measurement within one per cent of its neighbours. Rows with nothing to trim went from 53.9 milliseconds to 26.4, which is two times. Rows with three spaces on each end went from 135.1 to 28.0, which is 4.8 times, and that row is new because a change that made the common case cheap by making the real work expensive would look like a win without it.
+
+Nothing about the answers moves. The set is still read as a set of characters rather than as a prefix, both whitespace tables stay where they are, and the same characters are tested in the same order.
+
 ### Changed: `upper` and `lower` over ASCII text run sixty times faster
 
 The last release measured `upper` at four hundred nanoseconds a row over forty bytes of ASCII, with every core already on it, and said that something else inside the kernel had to be wrong. It was. An ASCII element was paying for four walks and a heap allocation, and it needs none of them: a pass to check the bytes are valid UTF-8, a pass looking for a lead byte the correction table could know about, the standard library's walk into a fresh `String`, and then a copy of that `String` into the column being built before it is dropped.
