@@ -88,6 +88,18 @@ Text, category and temporal columns, a null constant, and any constant the colum
 
 Part of #521.
 
+### Changed: a WHERE that compares against a constant lowers to one operator
+
+`WHERE CounterID = 62` was a compute writing a mask column and a filter reading it. It is now one filter that does the comparison itself. The operator that can do this shipped in the entry above and nothing emitted it; this is the lowering that does.
+
+`_constant_side` asks one question of each conjunct before anything is lowered: is this a comparison with a literal on one side. When it is, only the other side is lowered, and the comparison and its constant are handed to the filter instead of being written into a column. A constant on the left is not rewritten into a constant on the right, because the filter carries which side it was on and mirrors the operator when it runs, so `62 = CounterID` and `CounterID = 62` are the same one operator rather than one of them being a special case somebody has to remember.
+
+The comparison is not remembered in the memo, so two conjuncts holding the same comparison each do it rather than one reading a column the other wrote. That is the right trade here: the column was never the expensive part, and a repeated identical conjunct is not a query anybody writes. What the memo still shares is the operand underneath, so `WHERE a + b > 1 AND a + b < 9` computes the sum once and compares it twice.
+
+Most ClickBench predicates are this shape. q1 and q19 are one integer comparison against a constant and go straight down the fused path. q36 through q42 are five or six constant comparisons anded together, which is the shape the operator entry measured at 23 to 25 percent, because every conjunct after the first used to gather its operand out of a chunk an earlier one had already narrowed. The text and date comparisons in those predicates and in q10 through q14 are one operator now rather than two, but the filter still builds a mask inside itself for them, since the fused kernel covers the fixed width types and hands everything else back. A conjunct that is not a comparison against a constant, `LIKE` among them, lowers the way it always did.
+
+Part of #521.
+
 
 ## [0.8.1] - 2026-09-14
 
