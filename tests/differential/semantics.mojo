@@ -28,13 +28,13 @@ every combination of a smaller matrix. Both halves of a call are compared, which
 signature won and what it comes out as, the second having to be derived wherever
 the catalog writes a rule in place of a type.
 
-What is left unclaimed is the containers. A signature returning `T[]` or `MAP`
-needs an element type and `SqlType` carries none, so 112 probes across nine
-names are compared on the choice of overload alone and nothing is said about
-their type. Those are counted and named in the report rather than being absorbed
-into the agreement figure, because the two claims are not the same claim and
-folding them together would give a number that goes up when the binder is taught
-less. Issue #780 is the list.
+What is left unclaimed is the maps. A signature returning `MAP` needs two
+element types and `SqlType` carries one, so 12 probes across one name are
+compared on the choice of overload alone and nothing is said about their type.
+Those are counted and named in the report rather than being absorbed into the
+agreement figure, because the two claims are not the same claim and folding them
+together would give a number that goes up when the binder is taught less. Issue
+#780 is the list.
 
 The oracle is `tools/semantics.py`, which builds a table with one column per
 type in the matrix and asks DuckDB for `typeof` of each expression over it. The
@@ -110,8 +110,8 @@ comptime OURS_UNKNOWN = "*"
 say about the type.
 
 Only the call section produces one, and only for a signature that returns a
-container. `list(T) -> T[]` needs an element type to answer with and `SqlType`
-does not carry one, so nothing is claimed about the type either way. It counts
+`MAP`. A map needs a key type and a value type to answer with and `SqlType`
+carries one element, so nothing is claimed about the type either way. It counts
 as agreement against whatever DuckDB gives, because what is being compared there
 is the choice of overload and not the type.
 """
@@ -469,7 +469,7 @@ def returned(
 
     Returns:
         The type's name, or `OURS_UNKNOWN` where it comes out invalid, which is
-        a macro and a container and nothing else now.
+        a macro and a `MAP` and nothing else now.
 
     Raises:
         Error: Never, but the deriving it calls can.
@@ -802,18 +802,21 @@ def main() raises:
             "   ",
             deferred,
             (
-                "of those are calls returning a container, which needs an"
-                " element type that"
+                "of those are calls returning a map, which needs a key type and"
+                " a value type"
             ),
         )
         print(
             "   ",
             (
-                "SqlType does not carry yet, so only the choice of overload is"
+                "where SqlType carries one element, so only the overload is"
                 " compared."
             ),
         )
-        print("   ", len(deferred_names), "names are involved:")
+        if len(deferred_names) == 1:
+            print("   ", "one name is involved:")
+        else:
+            print("   ", len(deferred_names), "names are involved:")
         # Wrapped by hand at 76 bytes, with the comma attached to the name
         # rather than trailing the line, so that a name landing at the edge
         # does not leave a space at the end of a line for git to complain
