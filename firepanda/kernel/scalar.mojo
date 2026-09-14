@@ -2530,6 +2530,50 @@ def text_count_scalar(a: StringArray, needle: String) -> Array[DType.int64]:
     return out^
 
 
+def text_translate_scalar(
+    a: StringArray, keys: StringArray, values: StringArray
+) raises -> StringArray:
+    """Swaps single characters one for one, looking each one up in a list.
+
+    The twin does not have the fast kernel's two seat lookup, and that is the
+    point of it: it walks the table from the front for every character and so
+    it does not care whether the keys are in order or where they sit relative
+    to 128. If the two ever disagree it is the seats and not the rule.
+
+    Args:
+        a: The column.
+        keys: The characters to replace, one character per row.
+        values: What to put in their place, in the same order. Empty deletes.
+
+    Returns:
+        A text column, null where the column is null.
+
+    Raises:
+        Error: If the two tables are different heights.
+    """
+    if len(keys) != len(values):
+        raise Error("translate: the two tables are different heights")
+    var builder = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            builder.append_null()
+            continue
+        var piece = String()
+        for point in a[i].codepoints():
+            var one = String(point)
+            var found = -1
+            for j in range(len(keys)):
+                if keys.is_valid(j) and keys[j] == one:
+                    found = j
+                    break
+            if found < 0:
+                piece += one
+            else:
+                piece += values[found]
+        builder.append(piece.as_bytes())
+    return builder^.finish()
+
+
 def text_replace_scalar(
     a: StringArray, needle: String, repl: String, limit: Int
 ) raises -> StringArray:

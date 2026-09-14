@@ -363,6 +363,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "string_text",
         docstring="One str accessor method that answers text, as a column.",
     )
+    _ = series.def_method[PySeries.string_translate](
+        "string_translate",
+        docstring="Every row with single characters swapped out of a table.",
+    )
     _ = series.def_method[PySeries.window_agg](
         "window_agg", docstring="One reduction over every window of the column."
     )

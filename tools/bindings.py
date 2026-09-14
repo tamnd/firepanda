@@ -1033,6 +1033,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="translate",
+            kind="method",
+            signature="table: Any",
+            body="self._translated(table)",
+            doc="Every row with single characters swapped one for one.",
+            returns="Series",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",
@@ -3003,6 +3011,13 @@ SERIES = Exposed(
                 ("stop", "int | None"),
                 ("step", "int"),
             ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_translate",
+            name="string_translate",
+            doc="Every row with single characters swapped out of a table.",
+            params=(("keys", "Series"), ("values", "Series")),
             returns="Series",
         ),
         Binding(

@@ -8930,6 +8930,71 @@ class StringMixin:
             "replace", self._literal(pat, bool(regex), "replace"), self._width(n, "n"), other=repl
         )
 
+    def _translated(self, table: Any) -> Series:
+        """Every row with single characters swapped one for one.
+
+        pandas hands the table straight to Python's `str.translate`, which reads
+        it with `table[ord(character)]` and leaves the character alone whenever
+        that raises a `LookupError`. So anything with a `__getitem__` works in
+        pandas and a mapping is only the usual case. This takes a mapping and
+        refuses the rest, because serving the general case means calling back
+        into Python once per character, which is the one thing crossing into a
+        kernel is for avoiding.
+
+        A key that is not an integer is dropped rather than refused, and that is
+        exact rather than lenient: Python looks the character up by its ordinal,
+        so a key of `"a"` can never be found no matter what the table says, and
+        `str.maketrans` is the reason anybody would have one.
+
+        `None` and the empty string are the same request and Python treats them
+        as the same request, so the delete arrives at the kernel as an empty
+        replacement and there is no third case to carry across.
+
+        The table is sorted here rather than in the kernel because a caller has
+        one table and any number of columns, and sorting once on this side is
+        the difference between paying for it once and paying for it per call.
+        """
+        if not isinstance(table, dict):
+            raise UnsupportedError(
+                "firepanda:unsupported: str.translate takes a mapping, and"
+                f" {type(table).__name__} would have to be read one character at a time"
+            )
+        pairs = []
+        for key, value in table.items():
+            if not isinstance(key, int) or isinstance(key, bool):
+                continue
+            if not 0 <= key < 0x110000:
+                continue
+            if value is None:
+                pairs.append((key, ""))
+            elif isinstance(value, str):
+                pairs.append((key, value))
+            elif isinstance(value, int) and not isinstance(value, bool):
+                if not 0 <= value < 0x110000:
+                    raise InvalidArgumentError(
+                        "firepanda:value: character mapping must be in range(0x110000)"
+                    )
+                pairs.append((key, chr(value)))
+            else:
+                raise DTypeError(
+                    "firepanda:dtype: character mapping must return integer, None or str"
+                )
+        pairs.sort()
+        from ._frame import Series
+
+        if not pairs:
+            # An empty table hands every row back, which the kernel would do
+            # too, but a table of no entries is two columns of no rows and a
+            # list with nothing in it has no dtype for this side to build one
+            # from. A whole slice is the same answer and is already written.
+            return self._text("slice")
+        keys = Series([chr(key) for key, _ in pairs])
+        values = Series([value for _, value in pairs])
+        try:
+            return Series._wrap(self._series._inner.string_translate(keys._inner, values._inner))
+        except Exception as error:
+            raise translate(error) from None
+
 
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.

@@ -246,7 +246,7 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [x] `isspace`, `islower`, `isupper` (M6), answered out of Arrow's own character classes and exact on every code point there is, and answering a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
 - [x] `istitle`, `isascii` (M6), the first sharing the word rule `title` uses and the second needing no table at all, and it is the one question in the group a row of nothing answers yes to, both exact on every code point there is and both carrying the same missing row divergence
 - [x] `isalnum`, `isalpha`, `isdigit`, `isnumeric`, `isdecimal` (M6), four more Arrow character classes with `isalnum` needing none of its own because a character is alphanumeric exactly when it is alphabetic or numeric, exact on every code point there is, and note that Arrow's digit is wider than Python's by 877 code points so pandas calls `½` a digit and `str.isdigit` does not
-- [ ] `translate` (M6), and `casefold` is ticked above with the rest of the case group
+- [x] `translate` (M6), documented in `68-a-table-is-not-a-small-replace.md`, a table of single characters applied in one pass so a swap really swaps, taking a mapping where pandas takes anything subscriptable because the general case is a Python call per character, and `casefold` is ticked above with the rest of the case group
 
 ## 5. The `.dt` accessor
 

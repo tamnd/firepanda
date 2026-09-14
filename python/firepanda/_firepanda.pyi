@@ -287,6 +287,9 @@ class Series:
     ) -> Series:
         """One str accessor method that answers text, as a column."""
         ...
+    def string_translate(self, keys: Series, values: Series) -> Series:
+        """Every row with single characters swapped out of a table."""
+        ...
     def window_agg(
         self,
         kind: str,

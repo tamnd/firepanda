@@ -50,6 +50,7 @@ from firepanda.py.reduce import reduction
 from firepanda.py.text import flag as text_flag
 from firepanda.py.text import number as text_number
 from firepanda.py.text import text as text_text
+from firepanda.py.text import translate as text_translate
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
@@ -1311,6 +1312,44 @@ struct PySeries(Movable, Writable):
                         maybe_whole(start, "start"),
                         maybe_whole(stop, "stop"),
                         whole(step, "step"),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def string_translate(
+        py_self: PythonObject, keys: PythonObject, values: PythonObject
+    ) raises -> PythonObject:
+        """Swaps single characters one for one and hands back a column.
+
+        The one `str` method with a door to itself. Not because of what it
+        answers, which is text like most of the accessor, but because what it
+        takes is a table rather than a scalar, and the three doors above carry
+        scalars. `firepanda/py/text.mojo` argues it at length.
+
+        Args:
+            py_self: The series.
+            keys: The characters to replace, as a text column of one character
+                rows, in ascending order of code point.
+            values: What to put in their place, as a text column of the same
+                height. An empty row deletes.
+
+        Returns:
+            A new series.
+
+        Raises:
+            Error: Tagged `dtype` if either table is not a series, tagged
+                `value` if the column is not text, and whatever the kernel
+                raises about the table otherwise.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    text_translate(
+                        Self._held(py_self)[].series[],
+                        Self._other(keys, "keys")[],
+                        Self._other(values, "values")[],
                     )
                 )
             )
