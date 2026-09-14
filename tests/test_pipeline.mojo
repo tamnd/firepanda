@@ -2840,10 +2840,10 @@ def test_giving_up_the_columns_flattens_first() raises:
 
 
 def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
-    """The safety property the whole step rests on. A limit has not been taught
-    to read a selection, so a limit handed a selected chunk sees it flattened and
-    gives the answer it would have given anyway."""
-    var node = Node(Limit(5))
+    """The safety property the whole step rests on. A constant column has not
+    been taught to read a selection, so a node that appends one sees its input
+    flattened and gives the answer it would have given anyway."""
+    var node = Node(Constant(Value(Int64(9)), LogicalType.INT64, "nine"))
     var out = node_process(node, selected_chunk())
     assert_true(out.__bool__(), "a chunk came back")
     var got = out.take()
@@ -3345,6 +3345,80 @@ def test_materializing_a_column_leaves_it_where_it_can_be_found() raises:
     chunk.materialize(1)
     assert_false(chunk.selected(), "and with both gathered the selection goes")
     assert_equal(len(chunk), 3, "three rows, which is what it said")
+
+
+def test_a_limit_cuts_the_selection_rather_than_the_columns() raises:
+    """`LIMIT 2` after a filter used to gather every row the filter kept in
+    order to throw all but two of them away. The positions are cut instead and
+    the columns are left where they are, so what gets gathered later is two
+    rows."""
+    var node = Node(Limit(2))
+    var out = node_process(node, two_under_a_selection())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 2, "two rows of the three")
+    assert_equal(len(got.columns[0]), 6, "over columns that still hold six")
+    assert_equal(len(got.columns[1]), 6, "both of them")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 2, "the row at position 1")
+    assert_equal(values[1], 4, "and the row at position 3")
+
+
+def test_a_limit_that_skips_under_a_selection_skips_rows() raises:
+    """The offset counts rows of the chunk and not positions in the arrays
+    underneath, which is the thing that would be wrong if the two were
+    confused."""
+    var node = Node(Limit(1, 1))
+    var out = node_process(node, two_under_a_selection())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 1, "one row")
+    var values = ints_of(got.column(0), 1)
+    assert_equal(values[0], 4, "the second row, not the second value")
+
+
+def test_a_limit_slices_a_dense_column_with_the_positions() raises:
+    """A column already at the chunk's rows has to be cut where the selection
+    is cut, since its element i is row i and the rows are what a limit takes."""
+    var node = Node(Limit(2))
+    var out = node_process(node, selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under a selection")
+    assert_equal(len(got), 2, "two rows")
+    assert_equal(len(got.columns[0]), 6, "the values were left where they were")
+    assert_equal(len(got.columns[1]), 2, "and the dense mask was sliced")
+    var values = ints_of(got.column(0), 2)
+    assert_equal(values[0], 2, "the row at position 1")
+    assert_equal(values[1], 4, "and the row at position 3")
+    var mask = truths_of(got.column(1), 2)
+    assert_true(mask[0], "the first row of the mask")
+    assert_false(mask[1], "and the second")
+
+
+def test_a_limit_under_a_selection_agrees_with_one_over_a_flat_chunk() raises:
+    """The equivalence again, for the operator this one was added to."""
+    var node = Node(Limit(2, 1))
+    var under = node_process(node, two_under_a_selection())
+    assert_true(under.__bool__(), "a chunk came back")
+    var carried = under.take()
+    var through = ints_of(carried.column(0), len(carried))
+
+    var flat = two_under_a_selection()
+    flat.flatten()
+    var again = Node(Limit(2, 1))
+    var over = node_process(again, flat^)
+    assert_true(over.__bool__(), "and one the other way")
+    var plain = over.take()
+    var moved = ints_of(plain.column(0), len(plain))
+
+    assert_equal(len(through), 2, "two rows either way")
+    assert_equal(len(moved), 2, "two the other way too")
+    for i in range(2):
+        assert_equal(through[i], moved[i], "the same row in the same place")
+    assert_equal(through[0], 4, "the row after the one that was skipped")
 
 
 def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:
