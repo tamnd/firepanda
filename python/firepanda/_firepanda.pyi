@@ -290,6 +290,9 @@ class Series:
     def string_translate(self, keys: Series, values: Series) -> Series:
         """Every row with single characters swapped out of a table."""
         ...
+    def string_partition(self, sep: str, from_right: bool) -> list[Series]:
+        """Every row cut at a separator, as three columns."""
+        ...
     def window_agg(
         self,
         kind: str,

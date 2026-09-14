@@ -2738,6 +2738,79 @@ def text_replace_scalar(
     return builder^.finish()
 
 
+def text_partition_scalar(
+    a: StringArray, sep: String, from_right: Bool
+) raises -> List[StringArray]:
+    """Cuts every element at a separator, testing every position in the row.
+
+    The kernel picks the first or the last occurrence with two different
+    searches, one of which skips ahead. This one has a single loop that tries
+    every offset and keeps either the first hit it sees or the last, which is
+    the smallest difference the two names can be written with and is the point
+    of a twin: if the two disagree about which occurrence was chosen, the
+    disagreement is in the search and not in the rule.
+
+    Args:
+        a: The column.
+        sep: The separator.
+        from_right: Whether to cut at the last occurrence rather than the first.
+
+    Returns:
+        Three text columns, each null where the column is null, shaped the way
+        the kernel shapes them.
+
+    Raises:
+        Error: If a builder cannot allocate.
+    """
+    var heads = StringBuilder(capacity=len(a))
+    var middles = StringBuilder(capacity=len(a))
+    var tails = StringBuilder(capacity=len(a))
+    var nothing = List[UInt8]()
+    var needle = sep.as_bytes()
+    var m = len(needle)
+
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            heads.append_null()
+            middles.append_null()
+            tails.append_null()
+            continue
+
+        var bytes = a.unsafe_bytes(i)
+        var at = -1
+        for start in range(len(bytes) - m + 1):
+            var same = True
+            for k in range(m):
+                if bytes[start + k] != needle[k]:
+                    same = False
+                    break
+            if same:
+                at = start
+                if not from_right:
+                    break
+
+        if at < 0:
+            if from_right:
+                heads.append(Span(nothing))
+                middles.append(Span(nothing))
+                tails.append(bytes)
+            else:
+                heads.append(bytes)
+                middles.append(Span(nothing))
+                tails.append(Span(nothing))
+            continue
+
+        heads.append(bytes[0:at])
+        middles.append(bytes[at : at + m])
+        tails.append(bytes[at + m : len(bytes)])
+
+    var out = List[StringArray](capacity=3)
+    out.append(heads^.finish())
+    out.append(middles^.finish())
+    out.append(tails^.finish())
+    return out^
+
+
 def text_substring_scalar(
     a: StringArray, offset: Int, length: Int
 ) raises -> StringArray:

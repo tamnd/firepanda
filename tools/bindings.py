@@ -1041,6 +1041,22 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="partition",
+            kind="method",
+            signature='sep: Any = " ", expand: Any = True',
+            body='self._cut(sep, expand, False, "partition")',
+            doc="Every row cut at the first occurrence of a separator, as three columns.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="rpartition",
+            kind="method",
+            signature='sep: Any = " ", expand: Any = True',
+            body='self._cut(sep, expand, True, "rpartition")',
+            doc="Every row cut at the last occurrence of a separator, as three columns.",
+            returns="DataFrame",
+        ),
+        Member(
             name="upper",
             kind="method",
             signature="",
@@ -3019,6 +3035,13 @@ SERIES = Exposed(
             doc="Every row with single characters swapped out of a table.",
             params=(("keys", "Series"), ("values", "Series")),
             returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_partition",
+            name="string_partition",
+            doc="Every row cut at a separator, as three columns.",
+            params=(("sep", "str"), ("from_right", "bool")),
+            returns="list[Series]",
         ),
         Binding(
             mojo="PySeries.window_agg",

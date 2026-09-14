@@ -234,7 +234,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
 - [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)
-- [ ] `split`, `rsplit`, `partition`, `rpartition`, with `expand=` (M6)
+- [ ] `split`, `rsplit`, with `expand=` (M6)
+- [x] `partition`, `rpartition` (M6), documented in `70-an-answer-that-is-wider-than-a-column.md`, the first two names on this accessor whose answer is a frame rather than a column, cut in one search rather than three because the search is the whole cost, putting a row the separator is not in first for one name and last for the other because that is Python's rule and pandas calls Python's own method here on both of its backends, refusing `expand=False` by name because it wants a column of tuples and there is no type for one, and labelling the three columns `"0"`, `"1"` and `"2"` where pandas uses the integers, which is registered as a divergence because what closes it is a column label type
 - [ ] `join` (M6)
 - [x] `contains`, `startswith`, `endswith`, `match`, `fullmatch` (M6), the last three exact for any pattern holding none of the twelve regular expression characters and refusing by name for any pattern that does, since a pattern with no metacharacter in it means the same thing to an engine as it does to a byte search and there is no engine here yet
 - [x] `case=False` on `contains`, `match`, `fullmatch` and `replace` (M6), documented in `69-the-fold-a-search-is-not-the-fold-a-reader-gets.md`, folding one code point to exactly one code point out of a second Unicode table because the fold a search compares through is not the one `casefold` does, so `STRASSE` does not hold `straße` here for the same reason it does not in pandas
