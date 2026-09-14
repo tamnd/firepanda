@@ -5572,7 +5572,11 @@ def bench_pipeline(mut harness: Harness) raises:
     # row above says what that costs against the row before it. This row asks
     # whether a scan could pay its way out: the cut is a copy of both columns
     # today, since a slice allocates, so this is the whole cost of re-chunking
-    # plus the cheaper run, against the dearer run on its own.
+    # plus the cheaper run, against the dearer run on its own. It cannot. On the
+    # i9-13900K at four million rows the cut and the run together are 11.9 ms
+    # against 3.46 for the run on its own, because a copy of the source costs
+    # more than the whole query does. A scan that re-chunks has to slice without
+    # allocating, which is what issue 800 is about.
     def line_whole_split() raises {imm whole}:
         keep(whole.rows)
         var cut = _in_chunks(DataFrame(copy=whole), MORSEL_ROWS, 0, 1)
@@ -5590,9 +5594,12 @@ def bench_pipeline(mut harness: Harness) raises:
     # The same line over two chunks and over eight, which is what says why the
     # one chunk row above is the slow one. Two chunks is as far past every cache
     # as one chunk is, so if the cost were the size of the intermediates these
-    # would sit with the one chunk row. If it is the driver declining to hand a
-    # prefix out because there is nothing to hand out, they sit with the morsel
-    # row instead and the boundary is worth two rather than worth a cache.
+    # would sit with the one chunk row. They do not. Measured on the i9-13900K
+    # at four million rows with the machine idle, one chunk is 3.46 ms, two is
+    # 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is
+    # 2.26. The whole of the cost is the step from one chunk to two, which is
+    # where `Pipeline._parallel_lead` stops returning zero, so what the one
+    # chunk frame is missing is the batched prefix and not a cache.
     var halved = _in_chunks(flat, (rows + 1) // 2, 0, 1)
     var eighths = _in_chunks(flat, (rows + 7) // 8, 0, 1)
 
