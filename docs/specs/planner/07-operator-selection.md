@@ -20,6 +20,8 @@ The rule: broadcast when the group count is small relative to the row count, gro
 
 `firepanda/join/pairs.mojo` builds from the right side because the parameter is called right. It should build from the smaller side, because the hash table is what has to be resident. Compare the two lengths, build from the smaller, flip the output pair order to compensate. DuckDB has this as a distinct optimizer pass from join ordering.
 
+There is a second input to that choice and it is not the heights. The streaming join indexes its build side by a single row number, so a build side that arrives in several chunks is stacked into one array first, which is a copy of it. A frame that is already one chunk is lent rather than copied. So of two sides of similar height the one already in a single piece is the cheaper build side, and the pass should read the chunk counts as well as the row counts rather than deciding on size alone.
+
 **Keys that do not take the dictionary route.**
 
 DuckDB's perfect hash join detects a dense integer key at runtime, after the minimum and maximum are known, and skips hashing entirely: the key minus the minimum is the slot. We have that for one case and not for the others, and the shape of what is missing is worth writing down because it is not the shape the name suggests.

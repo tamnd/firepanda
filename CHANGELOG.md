@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: which side of a `JOIN` a table is written on decided whether the query ran
+
+`SELECT band, qty FROM tiers JOIN sales ON band = qty` raised `column has 3 chunks, not one; call combine() first`, and the same join written the other way round answered. Nothing about the query decided it. The right side of a join is the build side, `sales` is ten rows in three chunks, and the operator read the build side's columns with the borrow that only a column of exactly one chunk has. Issue #583.
+
+A build side of several chunks is stacked into one array now, once, when the node binds. Everything the operator does after that indexes the build side by a single row number: the hash table, the null bitmap and both of the gathers that write the output. A row number means nothing against a list of pieces, so this is not a borrow that could be taught about chunks, it is a shape the rest of the node is built on.
+
+The stack is a copy of the build side and it is the only case here that costs anything. The pieces are borrowed rather than collected into a list first, so the bytes move once and not twice. A build side of one chunk, which is what a table read or materialized in one piece gives and is the common case, still lends its chunk and copies nothing, and a build side of no chunks still gets the empty column it always did.
+
+It was easy to miss because almost every frame in the tests has one chunk. It is not easy to hit accidentally: a table read from several row groups is the ordinary case for anything real, and a derived table on the right of a join reaches it too.
+
 ## [0.8.4] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).
