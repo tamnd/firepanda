@@ -27,6 +27,17 @@ The rewrite that makes a correlated subquery run once rather than once per outer
 The zero goes back on above the join, where the expression the subquery was taken out of reads the column, because that is the one place that knows the null is the join padding a row rather than anything the count answered. `count(DISTINCT x)` takes the same reading, being zero over nothing for the same reason.
 
 It is put back only where the count is the whole of the subquery's value. `count(k) + 1` over an empty group is one rather than zero, and the addition happens under the join where the count is not there to be zero yet, so there is no one constant the padding stands for. That shape is refused with a message that says so, rather than answered wrong.
+### Added: the parser that decides which regular expression engine answers a call
+
+pandas runs two regular expression engines and picks between them per call, by handing the pattern to Python's own `re._parser` and walking what comes back: a lookaround or a backreference sends the call to Python, and everything else goes to Arrow, which is RE2. Document 73 measured that the choice is visible in answers rather than only in refusals. This is the front end both engines will share and the decision itself, with no matching behind it yet and nothing on the string accessor wired to it. Issue #158, document 76.
+
+The grammar is Python's rather than RE2's, which matters more than it sounds. A pattern Python cannot read is not an error in pandas, it is a pattern Arrow gets, so `\p{L}` works there today for the reason that it failed to parse. Every refusal in the new parser is therefore a routing decision, and a refusal that Python does not make would send a working pattern to an engine that will not run it.
+
+The router copies two upstream mistakes on purpose. pandas walks into two of the seven node kinds that can hold another node, so a lookaround under a quantifier, an atomic group or a conditional is invisible to it: `(?=a)` is answered by Python and `(?=a)?` goes to RE2 and raises an Arrow error naming a library the caller did not call. And `(?!)` collapses to a node that never matches, so it routes to RE2 and raises, while `(?=)` on the same line keeps its node and is answered. Reproducing both is a decision rather than an accident, and the argument is in document 76 section 6.
+
+`tests/differential/regex.mojo` asks both questions of thirty thousand generated patterns against a live pandas, through `pixi run differential-regex`, with a ceiling of zero disagreements. Its first run disagreed on eighty nine patterns and every one traced to a rule in Python's grammar that had to be read rather than reasoned about, including what a quantifier repeats when a comment is in the way and when a backslash and some digits are an octal number instead of a backreference. None of the seven would have been in a hand written test file.
+
+Two patterns are counted and held out rather than compared, and the counts are printed. `(?a)(?u)` makes Python's parser raise a `ValueError` that pandas does not catch, so there is no routing decision to agree with and the whole `str.contains` call dies upstream. `\N{NAME}` needs the Unicode name table, which is not carried yet, so the braces are read and the name is not, and the parse says so through `Parsed.approximate` rather than leaving a pattern that quietly matches the replacement character.
 
 ### Fixed: an average over a column of times answered one thing from SQL and another from the frame
 
