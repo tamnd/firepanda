@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a value is written where pandas writes it
+
+A column holding a negative number printed one place to the right of where pandas prints it, so `fp.DataFrame({"k": [1, 2], "b": [1.5, -0.5]}).set_index("k")["b"]` gave `1     1.5` where pandas gives `1    1.5`. pandas writes every value one place in from the separator and lets a negative number spend that place on its minus, which is one rule and was not being followed, and it showed up on most numeric columns because most numeric columns hold a negative sooner or later.
+
+Three smaller layout differences went with it. A column's name is held in by the same place on the types pandas calls numeric, which includes the booleans, so a boolean column named `available` is one wider than a text column named the same. The elision is two dots in a column of three or fewer and three dots in a wider one, centred on a printed column, right aligned on a frame and left aligned under the row labels, and the elided column is four wide. And the footer of a truncated column reads `Name: v, Length: 30, dtype: int64` rather than putting the length first.
+
+Every one of those was measured against a running pandas rather than reasoned about, and the tests in `python/tests/test_printing.py` compare whole renderings against pandas rather than against a literal, which is the assertion that would have caught issue 719 on its own. A timestamp column is the exception to the whole thing: pandas keeps no place in front of a temporal value and neither does this.
+
 ### Fixed: a column prints its labels rather than its positions
 
 `fp.DataFrame({"k": ["p", "q"], "v": [1, 2]}).set_index("k")["v"]` printed `0` and `1` down the left where pandas prints `p` and `q`. The labels were in the column the whole time, so `s.index.tolist()`, `s["p"]` and `list(s.items())` all gave the right answer and only the rendering was wrong, which is issue 719.

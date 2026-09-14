@@ -10,7 +10,14 @@ to accept both.
 The parts that are not compared whole are the two elisions, because a twelve row
 frame written out in full in a test file is less readable than the code that
 generates it. Those are checked on the properties that matter: the line count, the
-positions that survived, and the ones that did not.
+positions that survived, the ones that did not, and the elided line itself, which
+is compared whole because where the dots sit and how many of them there are is
+the thing being asserted.
+
+Every expected string in here that has spacing in it was measured against a
+running pandas rather than worked out. That is worth saying because several of
+them look wrong: a line that ends in spaces, a column elided by two dots beside
+one elided by three, a name held in by a sign that the column will never print.
 
 `format_float` gets its own tests separate from any frame, because the interesting
 inputs are the ones a frame is unlikely to contain by accident. Negative zero,
@@ -161,7 +168,9 @@ def test_the_limits_are_options_not_constants() raises:
     var lines = rendered.split("\n")
     # Header, two rows, the elision, two rows, a blank line and the shape.
     assert_equal(len(lines), 8, "line count at four rows")
-    assert_true(has(String(lines[3]), "..."), "the middle is elided")
+    # Two dots rather than three, because neither column is wider than three
+    # and pandas drops a dot rather than widening a column to fit one.
+    assert_true(has(String(lines[3]), ".."), "the middle is elided")
 
 
 def test_a_null_and_a_nan_do_not_look_the_same() raises:
@@ -235,7 +244,7 @@ def test_a_long_series_reports_its_length() raises:
 
     assert_equal(len(lines), 12, "ten rows, the elision and the footer")
     assert_equal(
-        lines[11], String("Length: 30, Name: a, dtype: int64"), "footer"
+        lines[11], String("Name: a, Length: 30, dtype: int64"), "footer"
     )
 
 
@@ -400,7 +409,9 @@ def test_the_label_elision_lines_up_with_the_row_elision() raises:
     var lines = String(s).split("\n")
     assert_equal(len(lines), 12, "ten rows, the gap and the footer")
     assert_true(has(String(lines[0]), "r0"), "the first label")
-    assert_true(has(String(lines[5]), "..."), "the gap is a gap on both sides")
+    # The label on the elided row is blank, which is what pandas leaves there on
+    # a column, and the value is the dots.
+    assert_equal(String(lines[5]), String("       .."), "the gap")
     assert_true(has(String(lines[6]), "r7"), "the tail resumes where rows do")
     assert_true(has(String(lines[10]), "r11"), "the last label")
 
@@ -451,6 +462,143 @@ def test_only_the_labels_that_will_be_printed_are_rendered() raises:
     assert_equal(cells.cells[5], String("..."), "the gap")
     assert_equal(cells.cells[10], String("999999"), "the last label")
     assert_false(Bool(cells.name), "and the default range is unnamed")
+
+
+def named_frame(name: String, var column: AnyArray) raises -> DataFrame:
+    """A frame of one column, for the tests about where a name is written."""
+    var columns = List[Series]()
+    columns.append(Series(name, column^))
+    return DataFrame.from_series(columns^)
+
+
+def test_a_frame_writes_a_minus_into_the_gap() raises:
+    # Measured against pandas 3, which pads a column of `1` and `-20` to the
+    # width of `20` and lets the minus have the gap. Every expected string in
+    # this group came out of a running pandas rather than out of a head.
+    var a = Array[DType.int64](2)
+    a.set_valid(0, Int64(1))
+    a.set_valid(1, Int64(-20))
+
+    var b = Array[DType.float64](2)
+    b.set_valid(0, Float64(1.5))
+    b.set_valid(1, Float64(-0.5))
+
+    var columns = List[Series]()
+    columns.append(Series("a", a^))
+    columns.append(Series("b", b^))
+    columns.append(Series("c", strings_from_list(["x", "-y"])))
+    var df = DataFrame.from_series(columns^)
+    df.index = text_index(["p", "qq"], String("k"))
+
+    assert_equal(
+        String(df),
+        String(
+            "     a    b   c\n"
+            "k              \n"
+            "p    1  1.5   x\n"
+            "qq -20 -0.5  -y\n"
+            "\n[2 rows x 3 columns]"
+        ),
+        "a frame with a negative in it",
+    )
+
+
+def test_a_numeric_name_is_held_in_and_a_text_name_is_not() raises:
+    # Nothing about the data explains the difference between these two. The
+    # integer column's name is indented by the place kept for a sign and the
+    # text column's name is not, which is the dtype and nothing else.
+    var text = named_frame("aaaaaa", AnyArray(strings_from_list(["x", "y"])))
+    assert_equal(
+        String(text),
+        String("  aaaaaa\n0      x\n1      y\n\n[2 rows x 1 columns]"),
+        "a text column",
+    )
+
+    var a = Array[DType.int64](2)
+    a.set_valid(0, Int64(1))
+    a.set_valid(1, Int64(-20))
+    assert_equal(
+        String(named_frame("aaaaaa", AnyArray(a^))),
+        String("   aaaaaa\n0       1\n1     -20\n\n[2 rows x 1 columns]"),
+        "an integer column",
+    )
+
+
+def test_a_boolean_name_is_held_in_like_a_number() raises:
+    # A sign no boolean will ever print, which is the one place where pandas
+    # counting a boolean as numeric can be seen.
+    var col = Array[DType.bool](2)
+    col.set_valid(0, True)
+    col.set_valid(1, False)
+    assert_equal(
+        String(named_frame("aaaaaa", AnyArray(col^))),
+        String("   aaaaaa\n0    True\n1   False\n\n[2 rows x 1 columns]"),
+        "a boolean column",
+    )
+
+
+def test_a_narrow_column_is_elided_by_two_dots_and_a_wide_one_by_three() raises:
+    var a = List[Int64]()
+    var b = Array[DType.float64](30)
+    for i in range(30):
+        a.append(Int64(i))
+        b.set_valid(i, -Float64(i))
+    var columns = List[Series]()
+    columns.append(int_column("a", a))
+    columns.append(Series("b", b^))
+    var lines = String(DataFrame.from_series(columns^)).split("\n")
+
+    assert_equal(String(lines[0]), String("     a     b"), "the header")
+    assert_equal(String(lines[6]), String("..  ..   ..."), "the elision")
+
+
+def test_the_dots_under_the_labels_are_left_aligned() raises:
+    var values = List[Int64]()
+    var names = List[String]()
+    for i in range(12):
+        values.append(Int64(i))
+        names.append(String("label", i))
+    var columns = List[Series]()
+    columns.append(int_column("a", values))
+    var df = DataFrame.from_series(columns^)
+    df.index = text_index(names, None)
+    var lines = String(df).split("\n")
+
+    assert_equal(String(lines[1]), String("label0    0"), "the first row")
+    assert_equal(String(lines[6]), String("...      .."), "the elision")
+
+
+def test_the_elided_column_is_four_wide_in_every_row() raises:
+    var columns = List[Series]()
+    for c in range(10):
+        var values = List[Int64]()
+        for r in range(6):
+            values.append(Int64(r + 1))
+        columns.append(int_column(String(c), values))
+    var df = DataFrame.from_series(columns^)
+    df.index = Index(0, 6, String("idx"))
+    var rendered = render_table(
+        df.schema,
+        df.column_refs(),
+        len(df),
+        DisplayOptions(max_rows=4, max_columns=6),
+        df.index.display_cells(DisplayOptions(max_rows=4, max_columns=6)),
+    )
+    var lines = rendered.split("\n")
+
+    assert_equal(
+        String(lines[0]), String("     0  1  2  ...  7  8  9"), "the header"
+    )
+    # The dots reach the name row too, which is pandas filling the whole column
+    # when it inserts it rather than a statement about the index.
+    assert_equal(
+        String(lines[1]), String("idx           ...         "), "the name row"
+    )
+    assert_equal(
+        String(lines[4]),
+        String("..  .. .. ..  ... .. .. .."),
+        "the elided row",
+    )
 
 
 def main() raises:
