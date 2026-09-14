@@ -425,6 +425,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.parse_time import parse_instant
 from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
@@ -501,7 +502,7 @@ from .star import (
     empty_select_list,
     not_in_from,
 )
-from .types import engine_type, parse_type
+from .types import engine_type, instant_type, parse_type
 
 
 struct Lowered(Movable):
@@ -1036,6 +1037,10 @@ def _lowers(name: String) -> Bool:
     if name == "date_trunc" or name == "datetrunc":
         return True
     if name == "strlen" or name == "length" or name == "len":
+        return True
+    if name == "upper" or name == "lower":
+        return True
+    if name == "ucase" or name == "lcase":
         return True
     if name == "trim" or name == "ltrim" or name == "rtrim":
         return True
@@ -2165,6 +2170,12 @@ def _lower_expr(
             # refused as text, which is the right answer until there is a list
             # type to answer about.
             return plan.exprs.call("length", lowered^, True)
+        if name == "ucase" or name == "lcase":
+            # DuckDB's other two names for the case changes, and the plan holds
+            # the pair its catalog documents rather than the aliases.
+            return plan.exprs.call(
+                "upper" if name == "ucase" else "lower", lowered^, True
+            )
         if name == "strpos" or name == "position":
             # The three names DuckDB gives the search for a run of characters,
             # and the plan holds the one its catalog calls the function rather
@@ -2187,8 +2198,25 @@ def _lower_expr(
                 " null rather than an error"
             )
         var written = ast.text(node.payload)
+        var want = parse_type(written)
+        if want.is_temporal():
+            # `DATE '2020-01-01'` arrives here as a cast, because that is what
+            # it means and what the transform builds. A cast of a string to a
+            # temporal type is the one case that is read now rather than
+            # refused, and it is read here into a constant rather than run as a
+            # conversion: `cast_any` converts a column to the layout its target
+            # sits on, so a column of text run through it would come back as
+            # the bytes and not as the days. One written out instant has no
+            # column to convert and `parse_instant` reads it outright.
+            var inner = ast.exprs[Int(node.a)]
+            if inner.kind == EXPR_LITERAL and inner.b == LITERAL_STRING:
+                return plan.exprs.literal(
+                    parse_instant(
+                        ast.text(inner.payload).as_bytes(), instant_type(want)
+                    )
+                )
         var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
-        return plan.exprs.cast(engine_type(parse_type(written)), over)
+        return plan.exprs.cast(engine_type(want), over)
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
     if node.kind == EXPR_SUBQUERY:

@@ -6,19 +6,22 @@ rest on the same piece of data, which is the table that says what the other case
 of a character is, and because the interesting rows are the same rows for all
 five.
 
-Case is not a byte and it is not even a character. `ß` raises to two letters, so
-a row can come back longer than it went in, and a capital I with a dot over it
-lowers to a letter and a separate dot, so a row can come back with more
-characters in it than it started with. Both of those are in here, because an
-implementation that walked the bytes or mapped one character to one character
-would pass every ASCII test and get both of them wrong.
+Which table that is turns out to matter more than anything else here. pandas 3
+holds a text column in Arrow and answers `upper` and `lower` out of an Arrow
+kernel, which uses the simple case mappings, so a row is never longer coming out
+than it was going in. The same column held as object goes through Python's own
+string methods, which use the full mappings, and the two disagree: a sharp s
+raises to one letter in the first and two in the second, and a Turkish capital I
+keeps its dot in the second and loses it in the first. So these tests compare
+against the default dtype, which is what a caller gets without asking, and the
+test at the end of the file writes both pandas answers out side by side so that
+the choice is visible rather than implied.
 
-The last test in the file asserts three differences rather than working around
-them. The standard library this is built on carries an older and smaller copy of
-the Unicode case data than CPython does, and document 64 measures exactly how
-much smaller. Those three are the differences a caller is most likely to meet,
-they are written down here so that the day the data is replaced the test fails
-and somebody has to come and read the document.
+The last test asserts three differences rather than working around them. The
+standard library underneath this carries an older copy of the Unicode data than
+Arrow does, and document 64 measures exactly how much older. The three names
+that ask a question still answer out of that copy, so they differ on characters
+neither table here corrects.
 """
 
 from __future__ import annotations
@@ -48,12 +51,13 @@ ROWS = [
 """Ten rows, each of them there to catch a different way of being wrong.
 
 The second and the fourth are the rows where a byte walk would change the letter
-and leave the accent, the fifth is the row that comes back longer than it went
-in, and the sixth and the seventh are the Turkish pair, which is the one place
-in a Latin alphabet where the two cases are not a pair at all. The empty string
-and the row of digits are the two rows where a question about case has no cased
-character to answer about, and the None is here because a case change on a
-missing row is a missing row rather than an empty string.
+and leave the accent, the fifth is the row where Python and Arrow disagree about
+how many letters the answer has, and the sixth and the seventh are the Turkish
+pair, which is the one place in a Latin alphabet where the two cases are not a
+pair at all. The empty string and the row of digits are the two rows where a
+question about case has no cased character to answer about, and the None is here
+because a case change on a missing row is a missing row rather than an empty
+string.
 """
 
 
@@ -63,10 +67,10 @@ def made(firepanda: ModuleType, values: list[Any] = ROWS) -> Any:
 
 
 def theirs(values: list[Any] = ROWS) -> Any:
-    """The same column in pandas, held as object so that None stays None."""
+    """The same column in pandas, held the way pandas holds it by default."""
     import pandas as pd
 
-    return pd.Series(values, dtype="object")
+    return pd.Series(values, dtype="str")
 
 
 def like(mine: list[Any], them: list[Any]) -> bool:
@@ -85,7 +89,7 @@ def like(mine: list[Any], them: list[Any]) -> bool:
 
 @needs_pandas
 def test_upper_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
-    """Every row, including the two that change length and the two Turkish ones."""
+    """Every row, including the sharp s and the two Turkish ones."""
     assert like(made(firepanda).str.upper().tolist(), theirs().str.upper().tolist())
 
 
@@ -95,26 +99,42 @@ def test_lower_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
     assert like(made(firepanda).str.lower().tolist(), theirs().str.lower().tolist())
 
 
-def test_a_row_can_come_back_longer_than_it_went_in(firepanda: ModuleType) -> None:
-    """The row that proves this is not a character for a character rewrite."""
-    assert made(firepanda, ["straße"]).str.upper().tolist() == ["STRASSE"]
+@needs_pandas
+def test_the_two_pandas_string_backends_do_not_agree_with_each_other(
+    firepanda: ModuleType,
+) -> None:
+    """Which is why the tests above name a dtype, and this is the name they chose.
 
-
-def test_the_turkish_pair_is_not_a_pair(firepanda: ModuleType) -> None:
-    """A capital I with a dot keeps its dot, and a small i without one stays without.
-
-    Both are written out rather than compared, because they are the two answers
-    that look like mistakes: the first is nine characters where the input was
-    eight, and the second loses nothing at all despite the dotless letter having
-    no capital of its own.
+    Held as pandas holds it by default the answer comes out of Arrow, and held
+    as object it comes out of Python. This library follows the first, because
+    that is what a caller gets from `pd.Series([...])` without asking for
+    anything, and because a case change that can make a row longer is a
+    different kind of operation from one that cannot.
     """
-    assert made(firepanda, ["İstanbul"]).str.lower().tolist() == ["i̇stanbul"]
-    assert made(firepanda, ["\u0131stanbul"]).str.upper().tolist() == ["ISTANBUL"]
+    import pandas as pd
+
+    rows = ["straße", "İstanbul"]
+    assert pd.Series(rows, dtype="str").str.upper().tolist() == ["STRAẞE", "İSTANBUL"]
+    assert pd.Series(rows, dtype="object").str.upper().tolist() == ["STRASSE", "İSTANBUL"]
+    assert pd.Series(rows, dtype="str").str.lower().tolist() == ["straße", "istanbul"]
+    assert pd.Series(rows, dtype="object").str.lower().tolist() == [
+        "straße",
+        "i̇stanbul",
+    ]
+    assert made(firepanda, rows).str.upper().tolist() == ["STRAẞE", "İSTANBUL"]
+    assert made(firepanda, rows).str.lower().tolist() == ["straße", "istanbul"]
+
+
+def test_a_row_keeps_its_length_through_a_case_change(firepanda: ModuleType) -> None:
+    """The simple mappings are one character in and one character out, always."""
+    for row in ("straße", "İstanbul", "ﬁance", "ŉ"):
+        assert len(made(firepanda, [row]).str.upper().tolist()[0]) == len(row)
+        assert len(made(firepanda, [row]).str.lower().tolist()[0]) == len(row)
 
 
 def test_changing_case_twice_does_not_come_back(firepanda: ModuleType) -> None:
     """Which is a fact about Unicode rather than about this library."""
-    assert made(firepanda, ["straße"]).str.upper().str.lower().tolist() == ["strasse"]
+    assert made(firepanda, ["İstanbul"]).str.lower().str.upper().tolist() == ["ISTANBUL"]
 
 
 def test_a_case_change_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
@@ -125,10 +145,10 @@ def test_a_case_change_keeps_a_missing_row_missing(firepanda: ModuleType) -> Non
 
 @needs_pandas
 def test_the_three_questions_match_pandas_row_for_row(firepanda: ModuleType) -> None:
-    """Held as object on the pandas side, which is where None stays None there too."""
+    """On every row of the ten except the missing one, which the next test is about."""
     for name in ("isspace", "islower", "isupper"):
-        mine = getattr(made(firepanda).str, name)().tolist()
-        assert like(mine, getattr(theirs().str, name)().tolist()), name
+        mine = getattr(made(firepanda).str, name)().tolist()[:-1]
+        assert mine == getattr(theirs().str, name)().tolist()[:-1], name
 
 
 def test_a_row_with_no_cased_character_is_neither_lower_nor_upper(
@@ -152,8 +172,8 @@ def test_a_question_about_a_missing_row_is_missing_here_and_false_there(
 ) -> None:
     """The asserted difference, which is `engine/string-predicate-null` in the registry.
 
-    pandas holding the column in its own string dtype has nowhere to put a
-    missing answer, because the answer is a numpy array of bools, so a missing
+    pandas holding the column the way it holds it by default has nowhere to put
+    a missing answer, because the answer is a numpy array of bools, so a missing
     row comes back False and cannot be told from a row that was really not upper
     case. Held as object it comes back None, which is what this library answers
     whatever the column is made of.
@@ -178,20 +198,22 @@ def test_the_accessor_refuses_a_column_that_is_not_text(firepanda: ModuleType) -
 
 
 @needs_pandas
-def test_three_measured_differences_in_the_case_data(firepanda: ModuleType) -> None:
-    """The three gaps a caller is most likely to meet, written down on purpose.
+def test_three_measured_differences_in_the_case_questions(firepanda: ModuleType) -> None:
+    """The gaps the three questions still have, written down on purpose.
 
-    Document 64 measures the whole of it: about a hundred code points map
-    differently and about seventeen hundred answer a question about case
-    differently, out of the million or so there are. These three are the ones
-    inside a script somebody is likely to be holding. A no break space is
-    whitespace in Python and not here, the feminine ordinal is a lower case
-    letter in Python and not here, and a Greek sigma at the end of a word lowers
-    to its own final form in Python and to the ordinary one here.
+    The two that rewrite a row are corrected against Arrow's table for all
+    hundred and forty nine code points where the standard library underneath
+    disagrees with it, so they match pandas everywhere. The three that ask a
+    question are not corrected, because the same measurement counts more than a
+    thousand code points that Arrow calls cased and the library here does not,
+    which is a table rather than a list. Document 64 has the counts. These three
+    rows are the ones a caller is most likely to meet, and they are here so that
+    the day the library's data is replaced a test fails and somebody comes and
+    reads the document.
     """
     assert made(firepanda, ["\u00a0"]).str.isspace().tolist() == [False]
     assert theirs(["\u00a0"]).str.isspace().tolist() == [True]
-    assert made(firepanda, ["ª"]).str.islower().tolist() == [False]
-    assert theirs(["ª"]).str.islower().tolist() == [True]
-    assert made(firepanda, ["ΟΔΟΣ"]).str.lower().tolist() == ["οδοσ"]
-    assert theirs(["ΟΔΟΣ"]).str.lower().tolist() == ["οδος"]
+    assert made(firepanda, ["ĸ"]).str.islower().tolist() == [False]
+    assert theirs(["ĸ"]).str.islower().tolist() == [True]
+    assert made(firepanda, ["\u2102"]).str.isupper().tolist() == [False]
+    assert theirs(["\u2102"]).str.isupper().tolist() == [True]

@@ -20,21 +20,43 @@ Measured on the i9-13900K over four million rows of forty byte text, with the tw
 
 `x IN (a, b, c)` was written out as an equality per member joined by `or`, which is a node per member plus a disjunction over all of them, and every one of those nodes writes a boolean column that only the disjunction ever reads. Lowering now reads that shape back and builds a single set lookup instead. Measured on the i9-13900K over four million rows, a set of two ran 408 microseconds as a chain and 215 as a lookup, a set of four 630 against 248, a set of eight 1.149 milliseconds against 340, and a set of thirty two 5.935 milliseconds against 986 microseconds. That is 1.9x at the smallest set anybody writes and 6.0x at the largest the kernel answers by comparing.
 
-Two things inside the engine had to be fixed before the rewrite was worth making, and the first one is general rather than being about sets. The new node said it did not need the cores, on the grounds that its kernel spreads itself over them already, and that made it four times slower than the chain it replaced. The reason is that a morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. `Locate` and `Length` say the same thing for the same reason and are worth a second look.
+Two things inside the engine had to be fixed before the rewrite was worth making, and the first one is general rather than being about sets. The new node said it did not need the cores, on the grounds that its kernel spreads itself over them already, and that made it four times slower than the chain it replaced. The reason is that a morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. The five text operators said the same thing for the same reason, and the entry above is what fixing that came to.
 
 The second is the kernel. Below the threshold where it builds a hash table, `is_in` compares each block of rows against every member of the set, and it was doing that with one block live, so the loop over the set was entered once per block along with a fresh load and splat of the needle. It now keeps eight blocks live and walks the set once for the group, which is three times faster at every set size. The threshold between that route and the hash table was remeasured with the table lifted out so it could be run below it, and thirty two is still where the two cross.
 
 A set is not built in two cases, and both of them keep the query on the chain of equalities. A null member is one, because `x = NULL` is null where a set lookup answers false and the two are not the same predicate. The other is a constant the column cannot hold, which is checked by converting the set to the column's type and back and comparing: `x = 3.7` against an integer column is false for every row, and a set holding 3.7 rounded to 4 is not.
 
+### Added: UPPER and LOWER in SQL
+
+`upper(s)` and `lower(s)`, and `ucase` and `lcase`, which are DuckDB's other names for the same two. The kernel behind them is the one the `str` accessor got a release ago, so this is the wiring and not the work: a `Case` operator that appends the rewritten column, one branch in the binder saying it reads text and answers text, and the two aliases folded to the two names DuckDB's catalog documents.
+
+The case data is the Mojo standard library's, which is an older copy of Unicode than the one DuckDB carries, so a few rows disagree. Every ASCII row agrees and so does every accented Latin letter. The two disagreements a query is most likely to meet are the German sharp s, which raises to `SS` here and to the capital sharp s in DuckDB, and the Turkish capital I with a dot, which lowers to a small i and a separate combining dot here and to a bare small i there. Both follow Python's rule, which is the rule the accessor over the same kernel already follows, and answering two different things depending on which door the call came through would be worse than either.
+
+### Added: the typed literal, so DATE '2020-01-01' is a date
+
+A type name in front of a string is read now, which is the spelling TPC-H writes its date bounds in and the one that says what it means without a column next to it. `DATE '2020-01-01'`, `TIMESTAMP '2020-01-01 06:07:08'` and the three timestamps at other resolutions all parse into a constant where the query is planned.
+
+It is the cast it means. The transform builds `CAST('2020-01-01' AS DATE)` out of it, which is the rewrite DuckDB's own parser does, so the two spellings are one path from there on and `CAST('2020-01-01' AS DATE)` reads as a date too.
+
+A cast of a column to a date is still refused, and for the reason it always was: converting a column means converting its values and the cast kernel converts layouts, so the column would come back holding the bytes and answering to a date's name. One written out instant has no column to convert.
+
+`TIME` and `TIME_NS` have no engine type, because a time of day with no date under it is not a point on any line the engine holds. `TIMESTAMP WITH TIME ZONE` is refused for a different reason: DuckDB reads one against the session's time zone, so the same literal is a different instant for two people running the same query, and firepanda has no session to ask.
+
+### Changed: a date constant in a plan prints as the day it names
+
+`EXPLAIN` used to write a temporal constant as the count underneath it, so a filter on a date read `d == 18262`. It reads `d == 2020-01-01` now, and a timestamp writes its clock reading with the fraction only where there is one. Nothing about what runs has changed.
+
 ### Added: a column of text can be written in one case or asked what case it is in
 
-`s.str.upper()`, `s.str.lower()`, `s.str.isspace()`, `s.str.islower()` and `s.str.isupper()`. The first two answer a column of text and keep a missing row missing, the other three answer a column of bools, and none of them takes an argument. A row with no cased character in it, which includes the empty row and a row of digits, is neither lower case nor upper case, which is Python's rule and the reason the two questions are not opposites.
+`s.str.upper()`, `s.str.lower()`, `s.str.isspace()`, `s.str.islower()` and `s.str.isupper()`. The first two answer a column of text and keep a missing row missing, the other three answer a column of bools, and none of them takes an argument. A row with no cased character in it, which includes the empty row and a row of digits, is neither lower case nor upper case, which is the reason the two questions are not opposites.
 
-A case change is not a byte for a byte rewrite and it is not a character for a character rewrite either. `straße` raises to `STRASSE`, which is longer than it started, and `İstanbul` lowers to a small i followed by a separate combining dot, which is more characters than it started with, so the two rewriting kernels build a new column rather than mapping the payload where it lies.
+pandas has two answers for the case of a letter and they are not the same answer. A column held the way pandas holds text by default is an Arrow column and its case methods are Arrow kernels, which use the simple case mappings, so `pd.Series(['straße']).str.upper()` is `STRAẞE` and a row never changes length in characters. The same column held as object goes through Python's own string methods, which use the full mappings, and answers `STRASSE`. `İstanbul` lowers to `istanbul` in the first and keeps its dot as a separate character in the second. This library follows the first, because it is what a caller gets without asking for anything.
 
-The three questions answer a missing row with a missing value where pandas holding the column in its own string dtype answers False, because the answer there is a numpy array of bools with nowhere to put a third state. Held as object pandas answers None and agrees. That is the registered entry `engine/string-predicate-null`, which already covered `startswith` and `endswith`.
+The Mojo standard library underneath uses the full mappings for 39 code points and has never heard of 110 others, so `firepanda/kernel/casefix.mojo` carries the 149 with Arrow's answer for each, generated by `tools/gen_casefix.py`. An element is tested for holding one before it is handed to the standard library, first by a pass over the bytes that rules out anything ASCII and then by a lookup per character, so ordinary text takes the same one call per element it always did. With the table in place `upper` and `lower` agree with pandas on every code point there is.
 
-The case data underneath is the Mojo standard library's, which is an older and smaller copy of Unicode than CPython's, so a few rows disagree with pandas. Every ASCII row, every Latin 1 row except the ordinal indicators and every accented Latin letter agree exactly. A Greek sigma at the end of a word lowers to the ordinary letter here and to the final form in pandas, a no break space is not whitespace here and is there, and about a hundred code points map to a different case. Document 64 measures all of it by walking every code point through both sides, and the one difference that reaches a Latin alphabet, the Turkish capital I with a dot, is corrected in the kernel rather than left. The rest is asserted in the test suite so that replacing the data cannot change behaviour quietly.
+The three questions are not corrected and the asymmetry is deliberate. The same measurement counts 1384 code points where the library and Arrow disagree about whether a character is whitespace or has a case, which is a table rather than a list, and the general case of it is carrying our own Unicode data. Three of those, one per question, are asserted in the test suite so that replacing the data cannot change behaviour quietly. Document 64 has all the counts and the reasoning.
+
+The three questions answer a missing row with a missing value where pandas answers False, because the answer there is a numpy array of bools with nowhere to put a third state. Held as object pandas answers None and agrees. That is the registered entry `engine/string-predicate-null`, which already covered `startswith` and `endswith`.
 
 ### Fixed: a float column is formatted as a column
 
@@ -193,6 +215,14 @@ The share is read off a sample rather than counted. Counting the whole mask cost
 A selection is not allowed out of the parallel part of a run. The sink flattens what it is handed on the thread that called `run`, so a selection reaching it turns a gather every core was sharing into a gather done one chunk at a time in the serial tail, which measured 3.37 milliseconds against 1.60 for the copying filter it was meant to beat. The morsel loop flattens at the end of its prefix instead, on the worker that ran it.
 
 Everything other than the filter still receives a flat chunk. `node_reads_selection` names the operators that handle a selection themselves and the filter is the only one on that list, so every other operator sees what it saw before and no answer moves. Turning the rest on one at a time is the rest of #521.
+
+### Changed: a projection passes a selection through rather than flattening it
+
+A projection keeps some columns of a chunk in the order the plan asked for, which moves no rows, so it now hands the positions it was given straight on and rearranges the dense flags with the columns they belong to. Before this it flattened, which gathered every column the chunk had including the ones it was about to drop, and a projection over a filter is one of the commonest pairs a plan produces.
+
+A projection that keeps only columns already at the chunk's rows drops the selection on the way out, since there is nothing left for the positions to point at, and carrying it on would make every operator above it flatten a chunk that is already flat. That is the rule a narrowing filter follows for the same reason.
+
+The columns are taken out of the chunk and the chunk itself is kept rather than consumed and rebuilt, because the selection is one position per row and copying it to hand it back would cost more than some of the gathers this is here to put off.
 
 ## [0.8.0] - 2026-09-12
 

@@ -711,8 +711,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
         _ = _printed("SELECT ROW(1, 2)", g, rules)
     with assert_raises(contains="an INTERVAL literal"):
         _ = _printed("SELECT INTERVAL '1 day'", g, rules)
-    with assert_raises(contains="a typed literal"):
-        _ = _printed("SELECT DATE '2020-01-01'", g, rules)
     with assert_raises(contains="a lambda"):
         _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
@@ -763,6 +761,23 @@ def test_the_keyword_calls_that_no_longer_refuse() raises:
     assert_equal(
         _printed("SELECT POSITION(a IN b) FROM t", g, rules),
         "SELECT instr(b, a) FROM t",
+    )
+
+
+def test_a_typed_literal_is_the_cast_it_means() raises:
+    # `DATE '2020-01-01'` is a type name in front of a string, and the type is
+    # what decides how the string is read, which is the whole of what a cast
+    # does. DuckDB rewrites it the same way, so this prints back longer than it
+    # was written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT DATE '2020-01-01' FROM t", g, rules),
+        "SELECT CAST('2020-01-01' AS DATE) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT INTEGER '42' FROM t", g, rules),
+        "SELECT CAST('42' AS INTEGER) FROM t",
     )
 
 

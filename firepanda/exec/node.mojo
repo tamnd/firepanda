@@ -122,6 +122,7 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
+    text_case,
     text_character_length,
     text_character_substring,
     text_find,
@@ -635,6 +636,17 @@ struct Project(Movable):
     `SELECT qty AS howmany` is, and what every aggregate with an alias is, since
     the aggregate writes its answer to a column of its own naming and the
     projection above it is the only thing that knows what the query called it.
+
+    A selection passes straight through, because reordering columns and dropping
+    some of them moves no rows and a selection is about rows. The dense flags are
+    rearranged with the columns they belong to and the positions are not touched
+    at all. That is the whole of it, and it is worth having because a projection
+    over a filter is one of the commonest pairs there is: flattening here would
+    gather the columns this is about to drop.
+
+    A projection that keeps only dense columns drops the selection on the way
+    out, since there is nothing left for the positions to point at. A filter that
+    narrows does the same thing for the same reason.
     """
 
     var keep: List[Int]
@@ -669,12 +681,12 @@ struct Project(Movable):
             chunk: The chunk. Consumed.
 
         Returns:
-            A chunk of the kept columns, with the same number of rows.
+            A chunk of the kept columns, with the same number of rows, under the
+            same selection it arrived with if any of the kept columns needs one.
 
         Raises:
             If a position is outside the chunk.
         """
-        var rows = len(chunk)
         var width = chunk.width()
         for i in range(len(self.keep)):
             if self.keep[i] < 0 or self.keep[i] >= width:
@@ -685,8 +697,14 @@ struct Project(Movable):
                     + String(width)
                     + " columns"
                 )
+        var composing = chunk.selected()
+        var dense = List[Bool](copy=chunk.dense)
         var held = List[Optional[AnyArray]](capacity=width)
-        var backwards = chunk^.into_columns()
+        # The columns are taken out and the chunk is kept, rather than the chunk
+        # being consumed, so that the selection stays where it is. It is one
+        # position per row and copying it to hand it back would cost more than
+        # some of the gathers this is here to put off.
+        var backwards = chunk.columns^
         var flipped = List[AnyArray](capacity=width)
         while len(backwards) > 0:
             flipped.append(backwards.pop())
@@ -698,12 +716,23 @@ struct Project(Movable):
             last[i] = not seen[self.keep[i]]
             seen[self.keep[i]] = True
         var out = List[AnyArray](capacity=len(self.keep))
+        var out_dense = List[Bool](capacity=len(self.keep))
+        var all_dense = True
         for i in range(len(self.keep)):
             if last[i]:
                 out.append(held[self.keep[i]].take())
             else:
                 out.append(AnyArray(copy=held[self.keep[i]].value()))
-        return Chunk(out^, rows)
+            if composing:
+                out_dense.append(dense[self.keep[i]])
+                all_dense = all_dense and dense[self.keep[i]]
+        chunk.columns = out^
+        if composing and not all_dense:
+            chunk.dense = out_dense^
+            return chunk^
+        chunk.picks = List[UInt32]()
+        chunk.dense = List[Bool]()
+        return chunk^
 
 
 struct Limit(Movable):
@@ -2246,6 +2275,110 @@ struct Length(Movable):
                 + " columns"
             )
         var made = text_character_length(chunk.columns[self.at].strings())
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Case(Movable):
+    """Appends a column holding each element written in one case.
+
+    This is SQL's `UPPER` and `LOWER`, and `UCASE` and `LCASE`, which are
+    DuckDB's other names for the same two functions. Which case to write is a
+    flag rather than two nodes, for the reason `Trim` carries two of them: the
+    kernel behind both is one function with that flag on it and nothing else
+    about the two differs.
+
+    It is a node rather than another code on `Apply` because a case change is
+    not a rewrite in place. `straße` raised is `STRASSE`, which is longer than
+    it started, so the kernel builds a new column and cannot be a walk over the
+    payload the way the four operations sharing `Apply` are.
+
+    The case data is the Mojo standard library's, which is an older copy of
+    Unicode than the one DuckDB carries, and the two answer a few code points
+    differently. Every ASCII element agrees. The disagreements that a query is
+    likely to meet are written down where this is lowered.
+
+    A null element gives a null answer, which is what DuckDB answers and what
+    the kernel already does, so nothing here repairs anything.
+    """
+
+    var at: Int
+    """The position of the column being rewritten."""
+
+    var upper: Bool
+    """Whether to write it upper case rather than lower case."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, upper: Bool, name: String):
+        """Constructs a case change over a column.
+
+        Args:
+            at: The position of the column being rewritten.
+            upper: Whether to write it upper case rather than lower case.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.upper = upper
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a text column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one text field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column that does
+            not hold text.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "case: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype != LogicalType.STRING:
+            raise Error(
+                "case: a case change reads text and column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+            )
+        out.append(Field(self.name, LogicalType.STRING, out[self.at].nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Rewrites the column and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not text.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "case: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = text_case(chunk.columns[self.at].strings(), self.upper)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
@@ -5785,6 +5918,7 @@ comptime Node = Variant[
     Member,
     Cut,
     Length,
+    Case,
     Trim,
     Locate,
     Part,
@@ -5848,6 +5982,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cut].bind(input^)
     if node.isa[Length]():
         return node[Length].bind(input^)
+    if node.isa[Case]():
+        return node[Case].bind(input^)
     if node.isa[Trim]():
         return node[Trim].bind(input^)
     if node.isa[Locate]():
@@ -5993,7 +6129,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Member`, `Cut`, `Length`, `Trim`, `Locate`, `Part`,
+        `Apply`, `Match`, `Member`, `Cut`, `Length`, `Case`, `Trim`, `Locate`,
+        `Part`,
         `Truncate`,
         `Presence`,
         `Fill`,
@@ -6010,6 +6147,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Member]()
         or node.isa[Cut]()
         or node.isa[Length]()
+        or node.isa[Case]()
         or node.isa[Trim]()
         or node.isa[Locate]()
         or node.isa[Part]()
@@ -6062,12 +6200,12 @@ def node_computes_per_row(node: Node) -> Bool:
     reads a validity bit per row and moves a value, and neither does any
     arithmetic in between, so there is nothing for a second core to speed up.
 
-    The five text operators all used to be on that side and none of them belongs
+    The six text operators all used to be on that side and none of them belongs
     there. `Length` and `Locate` said no on the grounds that their kernels call
     `parallel_morsels` themselves, so handing the chunks out as well would be
-    paying for two sets of tasks to do one pass. `Cut` and `Trim` said no because
-    they build a text column and the payload offset every row writes at is a
-    running total of the ones before it, which is the serial thing
+    paying for two sets of tasks to do one pass. `Cut`, `Trim` and `Case` said no
+    because they build a text column and the payload offset every row writes at
+    is a running total of the ones before it, which is the serial thing
     `StringBuilder` exists to do. `Member` said no for `Locate`'s reason, and
     that is how the mistake was found: the set lookup it was added for came out
     four times slower than the chain of equalities it replaced.
@@ -6098,8 +6236,8 @@ def node_computes_per_row(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Member`,
-        `Length`, `Locate`, `Cut`, `Trim`, `Part`, `Truncate`, `Choose` and
-        `Join`.
+        `Length`, `Locate`, `Cut`, `Trim`, `Case`, `Part`, `Truncate`, `Choose`
+        and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -6112,6 +6250,7 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Locate]()
         or node.isa[Cut]()
         or node.isa[Trim]()
+        or node.isa[Case]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Choose]()
@@ -6150,7 +6289,9 @@ def node_reads_selection(node: Node) -> Bool:
 
     `Filter` reads one, because it is also the only thing that writes one, and a
     chain of filters composing their selections rather than each one copying is
-    most of what issue #521 is for. Everything else is still flattened.
+    most of what issue #521 is for. `Project` reads one because it moves no rows,
+    so passing the positions along costs nothing and flattening would gather the
+    columns it is about to drop. Everything else is still flattened.
 
     Args:
         node: The node.
@@ -6158,7 +6299,7 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return node.isa[Filter]()
+    return node.isa[Filter]() or node.isa[Project]()
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -6199,6 +6340,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Case]():
+        return node[Case].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
     if node.isa[Locate]():
@@ -6279,6 +6422,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Length]():
         return node[Length].process(chunk^)
+    if node.isa[Case]():
+        return node[Case].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
     if node.isa[Locate]():

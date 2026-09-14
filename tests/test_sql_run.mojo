@@ -1674,6 +1674,50 @@ def cuts(sql: StringSlice) raises -> List[String]:
     return out^
 
 
+def test_a_case_change_rewrites_every_row() raises:
+    var up = cuts("SELECT upper(word) AS piece FROM words")
+    assert_equal(len(up), 7, "one answer per row")
+    assert_equal(up[0], "APPLE", "a row was raised")
+    assert_equal(up[4], "", "an empty row stays empty")
+    assert_equal(up[5], "null", "and a null stays a null")
+    var down = cuts("SELECT lower(upper(word)) AS piece FROM words")
+    assert_equal(down[0], "apple", "and lowering it again gives it back")
+
+
+def test_a_case_change_reads_characters_and_not_bytes() raises:
+    # `glyphs` holds a row that is not ASCII and a row that has no case at all,
+    # which are the two a case change written over the payload gets wrong.
+    var up = cuts("SELECT upper(word) AS piece FROM glyphs")
+    assert_equal(up[0], "ABC", "the ASCII row is the easy one")
+    assert_equal(up[1], "HÉLLO", "an accented letter raises to its own capital")
+    assert_equal(up[2], "日本語です", "and a script with no case is left alone")
+    var down = cuts("SELECT lower(word) AS piece FROM glyphs WHERE n = 2")
+    assert_equal(down[0], "héllo", "and it lowers back to what it was")
+
+
+def test_the_other_two_names_for_a_case_change_answer_the_same() raises:
+    var up = cuts("SELECT ucase(word) AS piece FROM words WHERE n = 1")
+    var down = cuts("SELECT lcase(word) AS piece FROM words WHERE n = 1")
+    assert_equal(up[0], "APPLE", "ucase is upper")
+    assert_equal(down[0], "apple", "and lcase is lower")
+
+
+def test_a_case_change_is_a_column_like_any_other() raises:
+    # The answer goes under a `WHERE` and through another function without
+    # either of them knowing what made it, which is the thing a new node has
+    # to earn rather than be given.
+    same(
+        answer("SELECT n FROM words WHERE upper(word) = 'BANANA'", "n"),
+        [3],
+        "n",
+    )
+    same(
+        answer("SELECT length(lower(word)) AS c FROM glyphs WHERE n = 3", "c"),
+        [5],
+        "c",
+    )
+
+
 def test_a_trim_takes_the_spaces_off_both_ends() raises:
     var got = cuts("SELECT trim(word) AS piece FROM padded")
     assert_equal(len(got), 6, "one answer per row")
@@ -3817,6 +3861,81 @@ def test_a_clock_reading_against_a_date_column_is_refused() raises:
             (
                 "SELECT advengineid FROM hits WHERE eventdate >= '2013-07-01"
                 " 12:00:00'"
+            ),
+            session(),
+        )
+
+
+def test_a_date_literal_written_with_its_type_is_the_same_bound() raises:
+    # The spelling with the type in front of it, which is the one TPC-H writes
+    # and the one that says what it means without the column next to it.
+    same(
+        answer(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= DATE"
+                " '2013-07-01' AND eventdate <= DATE '2013-07-31'"
+            ),
+            "AdvEngineID",
+        ),
+        [2, 2],
+        "the two rows inside July",
+    )
+
+
+def test_a_date_literal_and_a_bare_string_are_the_same_bound() raises:
+    # Both spellings end up as one typed constant, so the plan cannot tell them
+    # apart by the time it runs and neither can the answer.
+    same(
+        answer(
+            "SELECT advengineid FROM hits WHERE eventdate = DATE '2013-07-15'",
+            "AdvEngineID",
+        ),
+        answer(
+            "SELECT advengineid FROM hits WHERE eventdate = '2013-07-15'",
+            "AdvEngineID",
+        ),
+        "one day, written twice",
+    )
+
+
+def test_a_date_literal_reads_before_the_column_is_looked_at() raises:
+    # The string is read where the query is planned rather than once per row,
+    # which is the whole reason the literal becomes a constant. Nothing here
+    # sees that directly, so what is checked is the consequence: a literal that
+    # is not a date is refused by a query that never reaches a row.
+    with assert_raises(contains="'the first of July'"):
+        _ = run(
+            (
+                "SELECT count(*) AS c FROM hits WHERE eventdate >= DATE 'the"
+                " first of July'"
+            ),
+            session(),
+        )
+
+
+def test_a_date_literal_carrying_a_clock_reading_is_refused() raises:
+    # Same refusal the bare string gets, and for the same reason: a date holds
+    # whole days and the time of day would have nowhere to go.
+    with assert_raises(contains="carries a time of day"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate >= DATE"
+                " '2013-07-01 12:00:00'"
+            ),
+            session(),
+        )
+
+
+def test_a_timestamp_literal_against_a_date_column_is_refused() raises:
+    # A timestamp literal is a count of microseconds and the column is a count
+    # of days, and the promotion has no common type for the two. DuckDB widens
+    # the date to a timestamp here and firepanda does not, which is a
+    # divergence and a refusal rather than a wrong answer.
+    with assert_raises(contains="differ in kind"):
+        _ = run(
+            (
+                "SELECT advengineid FROM hits WHERE eventdate = TIMESTAMP"
+                " '2013-07-15 00:00:00'"
             ),
             session(),
         )

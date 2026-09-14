@@ -74,7 +74,7 @@ from firepanda.dtype.lists import NUMERIC
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
 from firepanda.exec import Join
-from firepanda.exec import Cut, Length, Locate, Member, Trim
+from firepanda.exec import Case, Cut, Length, Locate, Member, Trim
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
@@ -5247,6 +5247,25 @@ def _trim_alone(var frame: DataFrame) raises -> DataFrame:
     return pipeline^.run()
 
 
+def _case_alone(var frame: DataFrame) raises -> DataFrame:
+    """A case change with nothing after it that computes per row.
+
+    Args:
+        frame: A frame whose first column is text. Consumed.
+
+    Returns:
+        One column, the text raised.
+
+    Raises:
+        If the pipeline raises.
+    """
+    var wide = len(frame.schema)
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Case(0, True, "loud")))
+    pipeline.add(Node(Project([wide])))
+    return pipeline^.run()
+
+
 def _locate_alone(var frame: DataFrame) raises -> DataFrame:
     """A search with nothing after it that computes per row.
 
@@ -5891,10 +5910,13 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record("exec/member_set_32", "rows", rows, set_once_many)
 
-    # A length and a search, each with nothing after it that computes per row.
-    # Both nodes say they do not need the cores because their kernels call
-    # `parallel_morsels` themselves, and a chunk is one morsel, so what they
-    # actually get is one core. These two rows are what that costs.
+    # The five text operators, each with nothing after it that computes per row,
+    # which is the shape that decides whether the driver hands the leading run
+    # out to the cores at all. All five used to say they did not need them, two
+    # because their kernels call `parallel_morsels` themselves and three because
+    # they build a text column at a running offset. A chunk is one morsel, so
+    # the first two were getting one core, and a running total inside one
+    # chunk says nothing about two. These rows are what that cost.
     var phrases = _phrase_frame(rows, MORSEL_ROWS)
 
     def text_length() raises {imm phrases}:
@@ -5922,6 +5944,13 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/text_trim", "rows", rows, text_trim)
+
+    def text_case() raises {imm phrases}:
+        keep(phrases.rows)
+        var out = _case_alone(DataFrame(copy=phrases))
+        keep(out.rows)
+
+    harness.record("exec/text_case", "rows", rows, text_case)
 
 
 def bench_join(mut harness: Harness) raises:
