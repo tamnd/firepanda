@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: an average over a column of times answered one thing from SQL and another from the frame
+
+`df.group_by(["k"], [AggSpec("ts", AggKind.MEAN)])` answered a point in time and `SELECT avg(ts) FROM t GROUP BY k` answered a count of seconds over the same column. Neither half was wrong on its own terms, which is why every test of either half passed. The frame path runs the grouped kernel, which reads the pandas table and puts the label back. The SQL path runs the streaming group operator, which keeps a running sum and a running count and divides at the end, and a division of two numbers is a number. Issue #552.
+
+The hole was in `agg_type`, the function that says what a reduction produces. It had a paragraph admitting it did not handle a column of times and returned float64 anyway, which was not a description of what either path produced. It now hands a temporal input straight to `temporal_agg_type`, the same table both kernels already read, so there is no second copy left to drift.
+
+Reading that table means inheriting its refusals, and those now happen at bind time. `SELECT sum(ts) FROM t` used to report the error about a sum, but it reported it from inside a mean the user never wrote, because the operator split every mean into a sum and the sum went past the same table. A variance over instants is refused for the same reason it always was, that the answer would be in units of time squared, and it is refused about the query now rather than after the first chunk arrives.
+
+A mean over a column of times no longer folds. Its running state would have to hold a sum of points in time, which is a value this library refuses to produce by name, so the operator holds the column and calls the whole frame kernel once at the end, which is the route a median and a distinct count already take. The two front doors agree because they are the same call. It costs memory on a query that is rare next to a mean of numbers.
+
+The reductions that do still fold over a column of times needed a smaller fix: an accumulator is widened and settled against the physical dtype, so a total of lengths of time came out as the int64 it is counted in, with the right numbers and no label. The declared type is put back at the point the state becomes output and nowhere else.
+
 ### Fixed: which side of a `JOIN` a table is written on decided whether the query ran
 
 `SELECT band, qty FROM tiers JOIN sales ON band = qty` raised `column has 3 chunks, not one; call combine() first`, and the same join written the other way round answered. Nothing about the query decided it. The right side of a join is the build side, `sales` is ten rows in three chunks, and the operator read the build side's columns with the borrow that only a column of exactly one chunk has. Issue #583.

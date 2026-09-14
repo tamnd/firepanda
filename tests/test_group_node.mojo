@@ -42,6 +42,7 @@ from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import (
     Compute,
     Filter,
@@ -220,6 +221,75 @@ def worded_frame() raises -> DataFrame:
     fields.append(Field("colour", LogicalType.STRING))
     fields.append(Field("fruit", LogicalType.STRING))
     fields.append(Field("n", LogicalType.INT64))
+    return cut(pieces^, fields^)
+
+
+def instants(values: List[Int64]) raises -> AnyArray:
+    """Builds a fully valid column of points in time, counted in seconds."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return AnyArray(col^.into_data(), LogicalType.timestamp(TimeUnit.SECOND))
+
+
+def spans(values: List[Int64]) raises -> AnyArray:
+    """Builds a fully valid column of lengths of time, counted in seconds."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return AnyArray(col^.into_data(), LogicalType.duration(TimeUnit.SECOND))
+
+
+def dated_frame() raises -> DataFrame:
+    """Six rows in three chunks, two groups, a column of instants.
+
+    Each group has a row in every chunk, so a reduction over it is merged twice
+    however the node routes it. The values are chosen so that each group's mean
+    has a fraction to lose: 100, 200 and 301 average to 200.33 and 10, 20 and 31
+    average to 20.33, and both truncate towards zero the way pandas does.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([1, 2]))
+    one.append(instants([100, 10]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([1, 2]))
+    two.append(instants([200, 20]))
+    pieces.append(two^)
+    var three = List[AnyArray]()
+    three.append(numbers([1, 2]))
+    three.append(instants([301, 31]))
+    pieces.append(three^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("ts", LogicalType.timestamp(TimeUnit.SECOND)))
+    return cut(pieces^, fields^)
+
+
+def spanned_frame() raises -> DataFrame:
+    """`dated_frame` with the same numbers read as lengths of time.
+
+    Which is the other half of the table: a total of instants has no answer and
+    a total of spans does, so the two frames differ in what they refuse as well
+    as in what they answer.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([1, 2]))
+    one.append(spans([100, 10]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([1, 2]))
+    two.append(spans([200, 20]))
+    pieces.append(two^)
+    var three = List[AnyArray]()
+    three.append(numbers([1, 2]))
+    three.append(spans([301, 31]))
+    pieces.append(three^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("gap", LogicalType.duration(TimeUnit.SECOND)))
     return cut(pieces^, fields^)
 
 
@@ -869,6 +939,101 @@ def test_no_keys_at_all_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(keyed_frame())
     with assert_raises(contains="at least one key column"):
         pipeline.add(Node(Group(List[Int](), aggs^)))
+
+
+def test_a_mean_of_instants_is_an_instant_down_both_paths() raises:
+    """The same rows, grouped by the node and by the frame, and the answer is a
+    point in time either way.
+
+    It was a count of seconds from the node and an instant from the frame, which
+    is the same library answering one question two ways depending on which door
+    the caller came through. See #552. The node used to split a mean into a
+    running sum and a count, and a sum of instants is a value this library
+    refuses to produce, so the split could not have been made to work here
+    however it was labelled afterwards.
+    """
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("ts", AggKind.MEAN))
+    var want = flat(dated_frame()).group_by(
+        ["k"], specs^, dropna=False, sort=False
+    )
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.MEAN, "ts_mean"))
+    var got = run_group(dated_frame(), [0], aggs^)
+    assert_equal(len(got), 2, "two groups")
+    assert_true(
+        got.schema[1].dtype == LogicalType.timestamp(TimeUnit.SECOND),
+        "the node answers an instant",
+    )
+    same_ints(got, want, "a mean of instants")
+
+
+def test_a_total_of_spans_keeps_the_units_it_was_counted_in() raises:
+    """A sum is the one reduction a column of times answers for and only for a
+    length of time, and the answer is a length of time rather than the integer
+    it is counted in.
+
+    This one does fold, so it goes through the running slot and comes back out
+    of an accumulator that was widened and settled in the physical dtype. The
+    label goes back on at the end, and that is what this checks.
+    """
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("gap", AggKind.SUM))
+    var want = flat(spanned_frame()).group_by(
+        ["k"], specs^, dropna=False, sort=False
+    )
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "gap_sum"))
+    var got = run_group(spanned_frame(), [0], aggs^)
+    assert_equal(len(got), 2, "two groups")
+    assert_true(
+        got.schema[1].dtype == LogicalType.duration(TimeUnit.SECOND),
+        "a total of spans is a span",
+    )
+    same_ints(got, want, "a total of spans")
+
+
+def test_a_mean_of_spans_is_a_span_down_both_paths() raises:
+    """The other half of the mean. A length of time has a mean and it is a
+    length of time, and the division truncates towards zero the way pandas
+    does rather than coming back as the fraction it computed."""
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("gap", AggKind.MEAN))
+    var want = flat(spanned_frame()).group_by(
+        ["k"], specs^, dropna=False, sort=False
+    )
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.MEAN, "gap_mean"))
+    var got = run_group(spanned_frame(), [0], aggs^)
+    assert_true(
+        got.schema[1].dtype == LogicalType.duration(TimeUnit.SECOND),
+        "a mean of spans is a span",
+    )
+    same_ints(got, want, "a mean of spans")
+
+
+def test_a_total_of_instants_is_caught_at_plan_time() raises:
+    """Adding two points in time has no answer, so a total of them has none
+    either, and the node says so before a row moves rather than declaring a
+    float64 and raising in the middle of the first chunk."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="a sum over datetime64[s] has no answer"):
+        pipeline.add(Node(Group([0], aggs^)))
+
+
+def test_a_variance_of_instants_is_caught_at_plan_time() raises:
+    """The refusals the table makes are the node's refusals too. A variance of
+    times is in units of time squared and there is no dtype to put one in."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.VAR, "spread"))
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="multiplied by itself"):
+        pipeline.add(Node(Group([0], aggs^)))
 
 
 def test_a_sum_of_text_is_caught_at_plan_time() raises:

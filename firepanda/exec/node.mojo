@@ -135,7 +135,12 @@ from firepanda.kernel.concat import (
     concat_two_any,
 )
 from firepanda.kernel.edges import text_trim
-from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
+from firepanda.kernel.group import (
+    AggKind,
+    agg_type,
+    aggregate_group_any,
+    retag_temporal,
+)
 from firepanda.kernel.logic import (
     LogicOp,
     logic_all_any,
@@ -1490,7 +1495,12 @@ struct Window(Movable):
                 kind == AggKind.SUM or kind == AggKind.MEAN
             ):
                 raise Error(String("window: ", kind, " is not defined on text"))
-            fields.append(Field(self.names[a], agg_type(kind, source)))
+            fields.append(
+                Field(
+                    self.names[a],
+                    agg_type(kind, source, whole_column=False),
+                )
+            )
 
         self.input = input^
         self.width = len(self.input)
@@ -4485,7 +4495,7 @@ struct GroupAgg(Copyable, Movable, Writable):
         writer.write(") as ", self.name)
 
 
-def _folds(kind: AggKind) -> Bool:
+def _folds(kind: AggKind, source: LogicalType) -> Bool:
     """Reports whether a reduction can be computed a chunk at a time.
 
     A reduction folds when the answer over two pieces can be recovered from the
@@ -4507,13 +4517,25 @@ def _folds(kind: AggKind) -> Bool:
     the key columns held alongside. What this answers is which of the two a
     reduction gets, not whether it runs.
 
+    A mean over a column of times is the one place the column's type decides it
+    rather than the reduction. Splitting that mean would put a sum of instants
+    in the running state, which is a value the library refuses to produce by
+    name, and it would divide out to a count of units where every other path
+    answers an instant. Holding the column instead sends it to the same kernel
+    `DataFrame.agg` and `group_by` call, which is the only way the two front
+    doors cannot drift apart. See #552. It costs what a median already costs on
+    the same column, and a mean of times is rare next to a mean of numbers.
+
     Args:
         kind: The reduction.
+        source: The type of the column it reads.
 
     Returns:
         True if a running state is enough, False if the values themselves are
         the state.
     """
+    if kind == AggKind.MEAN and source.is_temporal():
+        return False
     return (
         kind == AggKind.SUM
         or kind == AggKind.MEAN
@@ -4551,9 +4573,11 @@ def _sum_wraps(source: LogicalType) -> Bool:
     1.9e18 add up to 1.9e24 and int64 stops two hundred thousand times short of
     that. A float column already accumulates in float64 and has nothing to fix.
 
-    A column of times is left alone even though it counts units in an integer,
-    because a sum over instants is a question with no answer and the reductions
-    below already have their own opinion about what to do with one. See #552.
+    Only a mean asks, and a mean over a column of times does not fold at all
+    now, so a temporal type never reaches here. The answer for one is kept
+    anyway and it is that the sum is left alone, because a total of instants is
+    a value the library refuses to produce and widening it would be dressing up
+    a refusal as an accumulator. See #552 and `_folds`.
 
     Args:
         source: The column's type.
@@ -4564,6 +4588,37 @@ def _sum_wraps(source: LogicalType) -> Bool:
     if source.is_temporal():
         return False
     return accumulator(source.physical) != DType.float64
+
+
+def _labelled(var made: AnyArray, want: LogicalType) raises -> AnyArray:
+    """Puts a temporal label back on a folded answer that arrived without one.
+
+    A running slot is an accumulator, and the widening and settling it goes
+    through are written against the physical dtype, so a total of spans comes
+    out of the fold as the int64 it is counted in. The schema this node reported
+    says what the answer means, and the two have to be the same thing by the
+    time a row leaves.
+
+    Nothing happens unless the declared type is temporal and the answer is not
+    already carrying it, so every reduction over a number pays a comparison and
+    nothing else, and a minimum that kept its label all the way through is left
+    alone rather than relabelled to what it already says.
+
+    Args:
+        made: The answer the fold produced. Consumed.
+        want: The type the output schema declared for it.
+
+    Returns:
+        The same column, carrying `want`.
+
+    Raises:
+        If the answer is neither `want`'s own layout nor the float64 that the
+        averaging cores produce, which would mean the fold and the schema
+        disagree about what was computed.
+    """
+    if not want.is_temporal() or made.type == want:
+        return made^
+    return retag_temporal(made^, want)
 
 
 def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
@@ -4918,9 +4973,11 @@ struct Group(Movable):
                     raise Error(
                         "group: two output columns would both be called " + name
                     )
-            fields.append(Field(name, agg_type(kind, source)))
+            fields.append(
+                Field(name, agg_type(kind, source, whole_column=False))
+            )
 
-            if not _folds(kind):
+            if not _folds(kind, source):
                 # The values themselves are the state, so the column goes by and
                 # the kernel runs once over each group's share of it at the end.
                 self._holds.append(True)
@@ -5314,14 +5371,19 @@ struct Group(Movable):
         var base = len(self.keys)
         for a in range(len(self.aggs)):
             var at = self._at[a]
+            var want = self.output[base + a].dtype
             if self._holds[a]:
+                # The kernel read the same table this node's schema was built
+                # from, so a held answer already carries what was declared.
                 out.append(AnyArray(copy=late[at]))
             elif self.aggs[a].kind == AggKind.MEAN:
                 out.append(
                     _mean_of(self.state[base + at], self.state[base + at + 1])
                 )
             else:
-                out.append(AnyArray(copy=self.state[base + at]))
+                out.append(
+                    _labelled(AnyArray(copy=self.state[base + at]), want)
+                )
         self.state = List[AnyArray]()
 
         # Same reversed, chunk major layout `_stripe` produces, for the same
@@ -5587,9 +5649,11 @@ struct Reduce(Movable):
                         "reduce: two output columns would both be called "
                         + name
                     )
-            fields.append(Field(name, agg_type(kind, source)))
+            fields.append(
+                Field(name, agg_type(kind, source, whole_column=True))
+            )
 
-            if not _folds(kind):
+            if not _folds(kind, source):
                 # The values themselves are the state, so the column goes by
                 # and the kernel runs once over all of it at the end.
                 self._holds.append(True)
@@ -5822,7 +5886,11 @@ struct Reduce(Movable):
             elif self.aggs[a].kind == AggKind.MEAN:
                 out.append(_mean_of(self.state[at], self.state[at + 1]))
             else:
-                out.append(AnyArray(copy=self.state[at]))
+                out.append(
+                    _labelled(
+                        AnyArray(copy=self.state[at]), self.output[a].dtype
+                    )
+                )
         self.state = List[AnyArray]()
         self.held = List[ChunkedArray]()
         return Chunk(out^)
