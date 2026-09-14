@@ -1136,6 +1136,15 @@ def filter_offsets(mask: Array[DType.bool]) raises -> List[Int]:
     per row does not vectorize and a mask with nulls in it is rare, since a mask
     is written by whatever compared the column above it.
 
+    Measured on the i9-13900K, six alternated rounds with the machine idle.
+    `exec/pipeline_line_one_chunk`, which is four million rows read as one chunk
+    and a filter keeping two columns, went from 4.52 milliseconds to 3.70, which
+    is 1.22 times. The same line split into chunks of a hundred and thirty one
+    thousand rows, `exec/pipeline_line`, went from 2.11 to 2.01, which is five
+    per cent, because a smaller chunk has less mask to walk in the first place.
+    `select/filter_50` is one column and does not move, which is the row that
+    says the saving is the second column onwards and not the counting itself.
+
     Args:
         mask: The mask. A null in it drops the row.
 

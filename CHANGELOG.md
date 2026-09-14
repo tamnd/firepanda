@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a filter counts its mask once for the chunk and not once per column
+
+A filter that copies its columns called the same kernel once per column, and that kernel began by counting the mask so it would know where each morsel's output starts. The mask is the same for every column and nothing between the calls can write to it, so a filter keeping four columns walked a byte a row four times to arrive at the same four numbers. Issue #737.
+
+The counting pass is its own function now and the filter calls it once, before the loop over the columns. What each column gets handed is the answer, and a caller with one column to filter passes nothing and the kernel counts for itself exactly as before. A text column still counts its own, because it has to size its payload as it goes and that is a different number per column, so the count is only computed at all when at least one fixed width column will read it.
+
+The dense half of the count also stopped being a byte at a time. It adds a register of mask bytes and takes one horizontal add at the end, which is what `mask_kept` next to it already did and what this one should have been doing all along.
+
+Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
+
 ### Changed: `strip` and `trim` walk the ends of a row and not the whole of it
 
 The other half of what the last release flagged. `trim` ran at 13.5 nanoseconds a row over forty byte text against `substring` at 4.3 on the same column, and both build a text column and read every element, so three times the cost had to come from somewhere.
