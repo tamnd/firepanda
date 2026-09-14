@@ -1,10 +1,14 @@
 """Tests for casting between text and numbers.
 
-The numeric cast is a loop with no branch in it and is tested elsewhere. This is
-the pair that crosses the line between bytes and values, where the interesting
-cases are all about what happens to something that is not a number: a null, an
-empty string, a word, a number too large for the target, and a float written
-where an integer was asked for.
+The numeric cast is a loop with one branch in it and is otherwise tested
+elsewhere. This is the pair that crosses the line between bytes and values, where
+the interesting cases are all about what happens to something that is not a
+number: a null, an empty string, a word, a number too large for the target, and a
+float written where an integer was asked for.
+
+The one branch is here as well, because it is the only place two callers want two
+answers from the same conversion. A float losing its fraction to an integer
+truncates for `astype` and rounds for a SQL cast, and the tests spell out both.
 
 The property that ties the two directions together is the round trip. A number
 column rendered as text and read back has to be the same column, which is why the
@@ -491,6 +495,104 @@ def test_a_frame_column_makes_the_same_round_trip() raises:
     assert_true(
         isnan(out[0].unsafe_ptr[DType.float64]().unsafe_offset(1).unsafe_load())
     )
+
+
+def _fractions() -> Array[DType.float64]:
+    """Builds a float column of the values that round two different ways.
+
+    Returns:
+        Eight rows: four ties, two values either side of a half, and a negative
+        one that truncates towards a different number than it rounds to.
+    """
+    var values = Array[DType.float64](8)
+    values.set_valid(0, 7.5)
+    values.set_valid(1, 8.5)
+    values.set_valid(2, -7.5)
+    values.set_valid(3, 0.5)
+    values.set_valid(4, 2.6)
+    values.set_valid(5, 3.4)
+    values.set_valid(6, -7.9)
+    values.set_valid(7, 7.9)
+    return values^
+
+
+def _whole(column: AnyArray, at: Int) -> Int64:
+    """Reads one row of an integer column.
+
+    Args:
+        column: The column.
+        at: The row.
+
+    Returns:
+        The value.
+    """
+    return column.unsafe_ptr[DType.int64]().unsafe_offset(at).unsafe_load()
+
+
+def test_a_float_truncates_towards_zero_by_default() raises:
+    # Which is pandas and NumPy, and is what `astype` means.
+    var out = cast_any(AnyArray(_fractions()), DType.int64)
+    assert_equal(_whole(out, 0), 7)
+    assert_equal(_whole(out, 1), 8)
+    assert_equal(_whole(out, 2), -7)
+    assert_equal(_whole(out, 3), 0)
+    assert_equal(_whole(out, 4), 2)
+    assert_equal(_whole(out, 5), 3)
+    assert_equal(_whole(out, 6), -7)
+    assert_equal(_whole(out, 7), 7)
+
+
+def test_a_float_told_to_round_gives_duckdbs_answers() raises:
+    # DuckDB 1.5.1, asked the same eight values as doubles: 8, 8, -8, 0, 3, 3,
+    # -8, 8. The ties go to the even number, so 7.5 and 8.5 are both 8, and that
+    # is what makes this rounding rather than adding a half and truncating.
+    var out = cast_any(AnyArray(_fractions()), DType.int64, nearest=True)
+    assert_equal(_whole(out, 0), 8)
+    assert_equal(_whole(out, 1), 8)
+    assert_equal(_whole(out, 2), -8)
+    assert_equal(_whole(out, 3), 0)
+    assert_equal(_whole(out, 4), 3)
+    assert_equal(_whole(out, 5), 3)
+    assert_equal(_whole(out, 6), -8)
+    assert_equal(_whole(out, 7), 8)
+
+
+def test_rounding_is_asked_for_and_ignored_everywhere_else() raises:
+    # The flag only has something to lose when a float becomes an integer, and
+    # the conversion loop decides that at compile time, so every other pair
+    # answers the same either way.
+    var values = Array[DType.float64](2)
+    values.set_valid(0, 2.5)
+    values.set_valid(1, -2.5)
+    var wider = cast_any(AnyArray(values^), DType.float32, nearest=True)
+    assert_equal(
+        wider.unsafe_ptr[DType.float32]().unsafe_offset(0).unsafe_load(), 2.5
+    )
+    var whole = Array[DType.int64](1)
+    whole.set_valid(0, 9)
+    var narrower = cast_any(AnyArray(whole^), DType.int32, nearest=True)
+    assert_equal(
+        narrower.unsafe_ptr[DType.int32]().unsafe_offset(0).unsafe_load(), 9
+    )
+
+
+def test_a_series_cast_to_an_integer_truncates_and_keeps_truncating() raises:
+    # The dataframe surface never asks to round, because pandas and NumPy do not
+    # and a library that agreed with DuckDB here would disagree with the thing it
+    # is a copy of. SQL asks, and the SQL tests are where that is checked.
+    var out = Series("value", _fractions()).cast(DType.int64)
+    assert_equal(_whole(out.values, 0), 7)
+    assert_equal(_whole(out.values, 1), 8)
+    assert_equal(_whole(out.values, 2), -7)
+
+
+def test_a_rounded_float_keeps_the_row_it_has_nothing_to_say_about() raises:
+    var values = Array[DType.float64](2)
+    values.set_valid(0, 4.5)
+    values.set_null(1)
+    var out = cast_any(AnyArray(values^), DType.int64, nearest=True)
+    assert_equal(_whole(out, 0), 4)
+    assert_false(out.is_valid(1))
 
 
 def test_a_clean_float_column_is_ready_to_be_an_integer() raises:

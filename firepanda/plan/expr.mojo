@@ -163,6 +163,13 @@ still this, because a wrong answer there is a pushdown that moves a predicate
 past the only node that could provide its columns."""
 
 
+comptime NEAREST = 1
+"""What a cast holds in `op` when a float to integer conversion rounds to the
+nearest whole number rather than truncating towards zero. A cast is the one kind
+with nothing of its own to keep in `op`, so the flag lives there instead of in a
+field that every other expression would carry and never read."""
+
+
 struct Expr(Copyable, Movable):
     """One node of an expression tree.
 
@@ -477,15 +484,27 @@ struct Expressions(Movable, Sized):
             )
         )
 
-    def cast(mut self, to: LogicalType, over: Int) raises -> Int:
+    def cast(
+        mut self, to: LogicalType, over: Int, nearest: Bool = False
+    ) raises -> Int:
         """Builds a cast.
 
         One child, the operand. The target type is known here rather than
         computed at binding, so it is written straight onto the node.
 
+        A float that becomes an integer has a fraction to lose and the two front
+        ends lose it differently, so `nearest` says which caller this is. The
+        flag lives in `op`, which every other kind uses for an operator code and
+        a cast has never used at all, rather than in a field of its own that
+        would cost every expression in every plan a byte to answer a question
+        only this kind asks. `NEAREST` is the value it takes.
+
         Args:
             to: The target type.
             over: The operand.
+            nearest: Whether a float to integer conversion rounds to the nearest
+                whole number rather than truncating towards zero. False is
+                `astype`, which is pandas. True is a SQL cast, which is DuckDB.
 
         Returns:
             The index of the new node.
@@ -501,7 +520,7 @@ struct Expressions(Movable, Sized):
                 UNBOUND,
                 UNBOUND,
                 Value(null=LogicalType.NULL),
-                0,
+                NEAREST if nearest else 0,
                 True,
                 0,
                 [over],
