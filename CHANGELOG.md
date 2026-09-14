@@ -18,6 +18,24 @@ The dense half of the count also stopped being a byte at a time. It adds a regis
 
 Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
 
+### Added: TPC-H, asked of firepanda and DuckDB over the same bytes
+
+`pixi run tpch` runs whole TPC-H queries through both engines and compares the answers row for row. The four comparisons already here ask about one expression at a time, which is the right size for a kernel and the wrong size for a query: a join that drops a row, a group that keys on the wrong column and a sort that is not stable all go through them untouched.
+
+The data is DuckDB's own generator, exported to Parquet, and both engines read the same files. Two generators seeded the same way is a claim about two programs, and a claim about two programs is what a comparison like this exists to stop making. The queries are DuckDB's own `tpch_queries()`, written out beside the data, so there is no second copy of the text to drift from the first.
+
+q1 and q3 agree with DuckDB at scale factor 1, over six million lineitem rows, in about nine seconds. q6 is refused for the decimal literals in `l_discount BETWEEN 0.05 AND 0.07` and the refusal is recorded with that reason, which is the shape the other comparisons already use: a refusal with nothing written against it fails the run, and so does a query that answers where a refusal was recorded.
+
+Eight TPC-H columns are `DECIMAL(15,2)` and firepanda has no decimal type, so they are exported as `DOUBLE` and DuckDB is asked the same question over the same doubles. That keeps the comparison exact and makes it a comparison against DuckDB over this data rather than against the published answer set. The published answers come back when there is a decimal type.
+
+The scale factor is `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is three megabytes and a few seconds.
+
+### Fixed: reading Parquet and calling Python in one program did not build
+
+A binary that used both `read_parquet` and `std.python` failed to link with "existing function with conflicting signature" on `dlopen`. firepanda declared `dlopen` and `dlsym` itself, returning an optional pointer to a byte, and the standard library declares them too, returning an optional pointer to nothing, and those two go back to the caller differently. One C function declared twice with two return types is a program that does not build.
+
+Neither declaration was wrong on its own, which is why this went unnoticed until the TPC-H comparison wanted to read Parquet and ask Python for the data in one program. The loader now calls the standard library's declarations, since using the one declaration is the only way to be sure there is one. Everything else in that file still declares what is in duckdb.h.
+
 ### Fixed: a correlated subquery that counts, which is the count bug
 
 `SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop = shops.shop) FROM shops` was refused by name, because answering it would have given the wrong number for a shop that sold nothing. It answers now.
@@ -27,6 +45,7 @@ The rewrite that makes a correlated subquery run once rather than once per outer
 The zero goes back on above the join, where the expression the subquery was taken out of reads the column, because that is the one place that knows the null is the join padding a row rather than anything the count answered. `count(DISTINCT x)` takes the same reading, being zero over nothing for the same reason.
 
 It is put back only where the count is the whole of the subquery's value. `count(k) + 1` over an empty group is one rather than zero, and the addition happens under the join where the count is not there to be zero yet, so there is no one constant the padding stands for. That shape is refused with a message that says so, rather than answered wrong.
+
 ### Added: the parser that decides which regular expression engine answers a call
 
 pandas runs two regular expression engines and picks between them per call, by handing the pattern to Python's own `re._parser` and walking what comes back: a lookaround or a backreference sends the call to Python, and everything else goes to Arrow, which is RE2. Document 73 measured that the choice is visible in answers rather than only in refusals. This is the front end both engines will share and the decision itself, with no matching behind it yet and nothing on the string accessor wired to it. Issue #158, document 76.

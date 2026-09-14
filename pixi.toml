@@ -127,7 +127,7 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the steps below from compiling everything
 # once per step. Each of them depends on this task, and without a cache key pixi
 # would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . tests/differential/regex.mojo -o build/differential/regex", default-environment = "differential", inputs = [
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers && mojo build -I . tests/differential/regex.mojo -o build/differential/regex && mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
@@ -137,6 +137,7 @@ differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tes
   "build/differential/semantics",
   "build/differential/answers",
   "build/differential/regex",
+  "build/differential/tpch",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -178,6 +179,16 @@ differential-sql-generated = { cmd = "./build/differential/generated", default-e
 # decisions against pandas' own predicate. It needs no corpus.
 # See docs/specs/76-two-engines-and-the-parser-that-picks-one.md section 6.
 differential-regex = { cmd = "./build/differential/regex", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The same comparison one size up. Everything above asks about an expression,
+# and an expression comparison cannot reach a join order, a group, a sort or a
+# limit. This asks whole TPC-H queries, over data DuckDB's own generator wrote
+# out to Parquet so that both engines read the same bytes. The scale factor is
+# `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is three megabytes and a
+# few seconds; the S4 exit criterion is written at 1, which is a hundred times
+# that and is a number to run by hand.
+# See docs/specs/sql/11-conformance.md section 7.
+tpch = { cmd = "./build/differential/tpch", default-environment = "differential", depends-on = ["differential-build"] }
 
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
