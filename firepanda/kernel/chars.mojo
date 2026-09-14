@@ -98,17 +98,36 @@ give back a row longer in characters than the one it was given, since `ß` folds
 to two letters. `casefold.mojo` is the 353 code points whose fold is not their
 lower case, and everything else falls through to the lower case path.
 
-### The three that ask a question do not borrow anything
+### The questions do not borrow anything
 
-`isspace`, `islower` and `isupper` are not about a mapping at all, they are
-about a class, and the classes in `charclass.mojo` are Arrow's read straight out
-of pyarrow. They used to be the standard library's, which disagreed with Arrow
-about 1384 code points across the three, mostly by not having heard of the
-spaces above ASCII and by counting a titlecase character as both cases at once.
-None of the three is the loop a reader expects either. A row is lower case when
-one of its characters is lower and none of them is upper or titlecase, so a row
-of digits is neither case, an empty row is neither, and the titlecase class has
-to be read by both questions even though neither is named after it.
+`isspace`, `islower`, `isupper` and `istitle` are not about a mapping at all,
+they are about a class, and the classes in `charclass.mojo` are Arrow's read
+straight out of pyarrow. They used to be the standard library's, which
+disagreed with Arrow about 1384 code points across the first three, mostly by
+not having heard of the spaces above ASCII and by counting a titlecase
+character as both cases at once. None of them is the loop a reader expects
+either. A row is lower case when one of its characters is lower and none of
+them is upper or titlecase, so a row of digits is neither case, an empty row is
+neither, and the titlecase class has to be read by both questions even though
+neither is named after it.
+
+`isascii` is the exception to all of that and to most of this file. It needs no
+class, no mapping and no decoding, it is a pass over the bytes looking for a
+top bit, and it is the one question here that answers True on an empty row.
+
+### A word is the thing a case table cannot tell you about
+
+`title` and `istitle` need to know where a word starts, which pandas and Arrow
+both decide by asking whether the character before was cased. That is the one
+question the mappings cannot answer, because a cased character need not have
+another case to be mapped to, and `ĸ` and 1294 others are exactly that. So both
+of these waited for the classes rather than for the mappings, and `_is_cased`
+is the three case classes together, which is Arrow's cased set exactly.
+
+The character a word starts with is Arrow's upper case and not its titlecase,
+which sounds wrong and is measured: Arrow's titlecase mapping equals its upper
+case mapping for every code point in Unicode, so there is no third mapping
+table here and `ǅungla` titles to `Ǆungla`.
 """
 
 from std.collections.span import Span
@@ -152,6 +171,9 @@ comptime EVERY_LOWER = 1
 
 comptime EVERY_UPPER = 2
 """Ask `_every_character` whether the text is upper case."""
+
+comptime EVERY_TITLE = 3
+"""Ask `_every_character` whether the text is in title case."""
 
 
 def starts_character(b: UInt8) -> Bool:
@@ -1193,25 +1215,190 @@ def _swap_ascii(bytes: Span[UInt8, _], mut into: List[UInt8]):
             into.append(b)
 
 
-def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
-    """Asks one question of every character of every element.
+def _title_ascii(bytes: Span[UInt8, _], mut into: List[UInt8]):
+    """Titles an element that is all ASCII, a byte at a time.
 
-    The three questions share the two rules that come with them. An element
-    answers True only if it has a character in it, so the empty string is False
-    for all three, and an element with no cased character in it is False for the
-    two that are about case, so a row holding a digit is neither lower nor
-    upper. An element that is not valid UTF-8 answers False to all three for the
-    reason `text_case` gives, which is that it is not text to be asked about.
+    The same shortcut `_swap_ascii` is, and it carries the word boundary as
+    well as the case, which it can because within ASCII a cased character is
+    exactly a letter and nothing else needs asking.
 
-    The two about case are not each other's opposite and neither is a loop that
-    stops at the first character. A row is lower case when one of its characters
-    is lower and none of them is upper or titlecase, so both of them read the
-    titlecase class as well as their own, and a row can fail either question by
-    holding a character that is not in any of the three.
+    Args:
+        bytes: The element, already known to be ASCII.
+        into: Where to write, cleared first and reused across elements.
+    """
+    into.clear()
+    into.reserve(len(bytes))
+    var after_cased = False
+    for k in range(len(bytes)):
+        var b = bytes[k]
+        var letter = (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A)
+        if letter:
+            into.append(b | 0x20 if after_cased else b & 0xDF)
+        else:
+            into.append(b)
+        after_cased = letter
+
+
+def _is_cased(
+    point: UInt32,
+    lowers: Span[UInt32, _],
+    uppers: Span[UInt32, _],
+    titles: Span[UInt32, _],
+) -> Bool:
+    """Whether a character has a case at all, which is not whether it is a letter.
+
+    This is the question `title` and `istitle` turn on and the one the case
+    mappings cannot answer, because a cased character need not have another
+    case to be mapped to. `ĸ` is lower case and raises to itself, and there are
+    1295 more like it, so a word boundary decided by asking whether a mapping
+    moves a character is wrong on every one of them.
+
+    It is the three classes together rather than a fourth table, since Arrow's
+    cased set is exactly its lower, upper and titlecase sets put side by side,
+    which was measured over every code point rather than assumed.
+
+    Args:
+        point: The code point being asked about.
+        lowers: `LOWER_EDGES`.
+        uppers: `UPPER_EDGES`.
+        titles: `TITLE_ONLY_EDGES`.
+
+    Returns:
+        True when the character is in one of the three cases.
+    """
+    return (
+        _in_class(point, LOWER_ASCII_LOW, LOWER_ASCII_HIGH, lowers)
+        or _in_class(point, UPPER_ASCII_LOW, UPPER_ASCII_HIGH, uppers)
+        or _in_class(point, TITLE_ONLY_ASCII_LOW, TITLE_ONLY_ASCII_HIGH, titles)
+    )
+
+
+def text_title(a: StringArray) raises -> StringArray:
+    """Raises the first character of every word and drops the rest.
+
+    A word starts at a cased character that does not follow another one, which
+    means the apostrophe in `o'brien` starts a word and the row comes back
+    `O'Brien`, and it means a digit does too, so `a1b` comes back `A1B`. Both
+    are pandas, and both fall out of the rule rather than being written into
+    it.
+
+    The character a word starts with is Arrow's upper case for it and not its
+    titlecase, which is the one surprise here and was measured rather than
+    assumed: Arrow's titlecase mapping is its upper case mapping for every code
+    point in Unicode, so `ǅungla` titles to `Ǆungla` with the full capital
+    rather than to the digraph's own title form. That is why this needs no
+    third mapping table beside `CORRECTED_UP` and `CORRECTED_DOWN`, and it is
+    the whole reason this name arrived one slice after the classes did rather
+    than one slice after the mappings.
 
     Args:
         a: The column.
-        kind: Which question, one of the three `EVERY_` words above.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var keys = materialize[CORRECTED_FROM]()
+    var raised = materialize[CORRECTED_UP]()
+    var dropped = materialize[CORRECTED_DOWN]()
+    var lowers = materialize[LOWER_EDGES]()
+    var uppers = materialize[UPPER_EDGES]()
+    var titles = materialize[TITLE_ONLY_EDGES]()
+    var titled = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if len(bytes) == 0 or not _well_formed(bytes):
+            built.append(bytes)
+            continue
+        if _is_ascii(bytes):
+            _title_ascii(bytes, titled)
+            built.append(Span(titled))
+            continue
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        var out = String()
+        var after_cased = False
+        for point in text.codepoints():
+            out += _case_one(
+                point, Span(keys), Span(raised), Span(dropped), not after_cased
+            )
+            after_cased = _is_cased(
+                point.to_u32(), Span(lowers), Span(uppers), Span(titles)
+            )
+        built.append(out.as_bytes())
+    return built^.finish()
+
+
+def text_is_ascii(a: StringArray) raises -> Array[DType.bool]:
+    """Whether every byte of each element is below 128.
+
+    The one question in this file that needs no character data and no decoding,
+    and the one that does not ask for a character to be there: the empty row is
+    True here and is False for every other question in the file, because there
+    is no byte in it that is not ASCII. pandas answers the same way.
+
+    It is also the one pandas does not answer out of Arrow, since pyarrow has
+    no kernel for it at all, and it does not matter here for once. Whether a
+    byte has its top bit set is not a thing two Unicode tables can disagree
+    about.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var answer = _is_ascii(a.unsafe_bytes(i))
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](answer))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
+    """Asks one question of every character of every element.
+
+    The four questions share the two rules that come with them. An element
+    answers True only if it has a character in it, so the empty string is False
+    for all four, and an element with no cased character in it is False for the
+    three that are about case, so a row holding a digit is none of them. An
+    element that is not valid UTF-8 answers False to all four for the reason
+    `text_case` gives, which is that it is not text to be asked about.
+
+    The three about case are not each other's opposites and none is a loop that
+    stops at the first character. A row is lower case when one of its characters
+    is lower and none of them is upper or titlecase, so both of the first two
+    read the titlecase class as well as their own, and a row can fail either by
+    holding a character that is in none of the three classes.
+
+    Title case is the only one of the four that is a question about a pair of
+    characters rather than about a character. Every character that starts a word
+    has to be upper or titlecase and every character that continues one has to
+    be lower, and what tells those two apart is whether the character before was
+    cased, which is why this loop carries a flag the other three ignore.
+
+    Args:
+        a: The column.
+        kind: Which question, one of the four `EVERY_` words above.
 
     Returns:
         A bool column, null wherever the input is null.
@@ -1236,6 +1423,7 @@ def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
                 var text = StringSlice(unsafe_from_utf8=bytes)
                 var seen = False
                 var spoiled = False
+                var after_cased = False
                 for point in text.codepoints():
                     var cp = point.to_u32()
                     if kind == EVERY_SPACE:
@@ -1252,6 +1440,27 @@ def _every_character(a: StringArray, kind: Int) raises -> Array[DType.bool]:
                     var upper = _in_class(
                         cp, UPPER_ASCII_LOW, UPPER_ASCII_HIGH, Span(uppers)
                     )
+                    if kind == EVERY_TITLE:
+                        var third = False
+                        if not lower and not upper:
+                            third = _in_class(
+                                cp,
+                                TITLE_ONLY_ASCII_LOW,
+                                TITLE_ONLY_ASCII_HIGH,
+                                Span(titles),
+                            )
+                        if upper or third:
+                            if after_cased:
+                                spoiled = True
+                                break
+                            seen = True
+                        elif lower:
+                            if not after_cased:
+                                spoiled = True
+                                break
+                            seen = True
+                        after_cased = lower or upper or third
+                        continue
                     if lower:
                         if kind == EVERY_UPPER:
                             spoiled = True
@@ -1326,3 +1535,25 @@ def text_is_upper(a: StringArray) raises -> Array[DType.bool]:
         Error: Only what the morsel runtime raises.
     """
     return _every_character(a, EVERY_UPPER)
+
+
+def text_is_title(a: StringArray) raises -> Array[DType.bool]:
+    """Whether each element reads as a title, word by word.
+
+    Which is every word starting with an upper or titlecase character and
+    continuing in lower case, with at least one cased character somewhere. A
+    word starts after anything that is not cased, so `a1b` is not in title case
+    and `A1B` is, and `O'Brien` is because the apostrophe ends a word as surely
+    as a space does.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A bool column, null wherever the input is null and False wherever the
+        element has no cased character in it.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _every_character(a, EVERY_TITLE)

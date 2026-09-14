@@ -1011,6 +1011,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="title",
+            kind="method",
+            signature="",
+            body='self._text("title")',
+            doc="Every row with each word's first character raised and the rest dropped.",
+            returns="Series",
+        ),
+        Member(
             name="swapcase",
             kind="method",
             signature="",
@@ -1048,6 +1056,22 @@ def _string_members() -> tuple[Member, ...]:
             signature="",
             body='self._flag("isupper", "")',
             doc="Whether every row is upper case.",
+            returns="Series",
+        ),
+        Member(
+            name="istitle",
+            kind="method",
+            signature="",
+            body='self._flag("istitle", "")',
+            doc="Whether every word in every row starts with a raised character.",
+            returns="Series",
+        ),
+        Member(
+            name="isascii",
+            kind="method",
+            signature="",
+            body='self._flag("isascii", "")',
+            doc="Whether every row is made of ASCII characters only.",
             returns="Series",
         ),
         Member(

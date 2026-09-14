@@ -54,8 +54,18 @@ Nothing moves, and that is the point worth writing down. The three questions wer
 
 The one divergence these three carry is unchanged and is `engine/string-predicate-null`, which is that a missing row answers a missing value here and False in pandas, because the answer in pandas is a numpy array of bools with nowhere to put a third state.
 
-## 9. What is left
+What does move the board is the three names section 9 is about, since `strings/title`, `strings/istitle` and `strings/isascii` were declared arms with nothing behind them and are now scored. The two questions of the three carry the same missing row divergence the others do, for the same reason.
 
-The classes here are the four the three existing questions need. The other class questions in the accessor need four more of the same kind, which are the alphabetic characters, the numeric ones, the digits and the decimal digits, and those are 684, 146, 136 and 72 runs respectively. `isalnum` needs no table at all, since a character is alphanumeric exactly when it is alphabetic or numeric, which was measured rather than assumed. `isascii` has no Arrow kernel, which is worth knowing before anybody writes it.
+## 9. A word is a thing no table can tell you about
 
-`istitle` and `title` need one thing these four classes do not give, which is whether a character is cased at all, and that is the union of the lower class and the titlecase class and needs no fifth table either. What they do need is a rule about what comes before a character rather than about the character, which is the first question in this part of the library that is not answerable one code point at a time.
+`title` and `istitle` came next and they are the first two names in this part of the library whose answer is not decidable one code point at a time. Everything before them reads a character, looks it up and writes something down. These two need to know whether the character before the one in hand was cased, because that is what decides whether this character starts a word.
+
+The rule is not the one the name suggests. A word does not end at whitespace, it ends at the first character that is in no case at all, which is the union of the three case classes read the other way round. So a digit ends a word and an apostrophe ends a word and `don't` titles to `Don'T` and `abc1def` titles to `Abc1Def`, and `A1b` is not titled while `A1B` is. That is pandas' answer and it surprises people, and it is worth writing down here rather than leaving it to be discovered in a bug report.
+
+Neither name needed a table. The cased question is the three classes already here ORed together, and the mapping question turned out to need nothing at all: `pc.utf8_title(c)` equals `pc.utf8_upper(c)` for every code point in Unicode, and is never longer than one character, so a word's first character is raised with the mapping `upper` already uses and the rest are dropped with the mapping `lower` already uses. The consequence a reader should see coming and will not is that `ǆ` at the start of a word becomes `Ǆ`, the whole capital, and not `ǅ`, the titlecase form that exists for exactly this purpose. Arrow does not use it and so neither does this.
+
+`isascii` landed alongside them and is the odd one out twice. pyarrow has no `utf8_is_ascii` kernel, so pandas answers it somewhere other than Arrow, and there is nothing for the two to disagree about because the question is whether any byte has its top bit set. It needs no table, no decoding and no pass past the first byte that fails. It is also the only question in this group that a row of nothing answers yes to, since it asks what a row does not contain.
+
+## 10. What is left
+
+The classes here are the four the case questions need. The remaining class questions in the accessor need four more of the same kind, which are the alphabetic characters, the numeric ones, the digits and the decimal digits, and those are 684, 146, 136 and 72 runs respectively. `isalnum` needs no table at all, since a character is alphanumeric exactly when it is alphabetic or numeric, which was measured rather than assumed.
