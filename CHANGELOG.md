@@ -190,6 +190,14 @@ A selection is not allowed out of the parallel part of a run. The sink flattens 
 
 Everything other than the filter still receives a flat chunk. `node_reads_selection` names the operators that handle a selection themselves and the filter is the only one on that list, so every other operator sees what it saw before and no answer moves. Turning the rest on one at a time is the rest of #521.
 
+### Changed: a projection passes a selection through rather than flattening it
+
+A projection keeps some columns of a chunk in the order the plan asked for, which moves no rows, so it now hands the positions it was given straight on and rearranges the dense flags with the columns they belong to. Before this it flattened, which gathered every column the chunk had including the ones it was about to drop, and a projection over a filter is one of the commonest pairs a plan produces.
+
+A projection that keeps only columns already at the chunk's rows drops the selection on the way out, since there is nothing left for the positions to point at, and carrying it on would make every operator above it flatten a chunk that is already flat. That is the rule a narrowing filter follows for the same reason.
+
+The columns are taken out of the chunk and the chunk itself is kept rather than consumed and rebuilt, because the selection is one position per row and copying it to hand it back would cost more than some of the gathers this is here to put off.
+
 ## [0.8.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

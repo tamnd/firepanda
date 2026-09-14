@@ -62,6 +62,7 @@ from firepanda.exec import (
     node_ends_early,
     node_is_breaker,
     node_is_row_local,
+    node_process,
     node_status,
 )
 from firepanda.frame.frame import DataFrame
@@ -2785,23 +2786,20 @@ def test_giving_up_the_columns_flattens_first() raises:
 
 
 def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
-    """The safety property the whole step rests on. A projection has not been
-    taught to read a selection, so a projection handed a selected chunk sees it
-    flattened and gives the answer it would have given anyway."""
-    var keep = List[Int]()
-    keep.append(1)
-    keep.append(0)
-    var node = Node(Project(keep^))
-    var out = node_apply(node, selected_chunk())
+    """The safety property the whole step rests on. A limit has not been taught
+    to read a selection, so a limit handed a selected chunk sees it flattened and
+    gives the answer it would have given anyway."""
+    var node = Node(Limit(5))
+    var out = node_process(node, selected_chunk())
     assert_true(out.__bool__(), "a chunk came back")
     var got = out.take()
     assert_false(got.selected(), "and it is not selected")
     assert_equal(len(got), 2, "two rows")
-    var swapped = ints_of(got.columns[0], 2)
-    assert_equal(swapped[0], 70, "what was column 1")
-    var under = ints_of(got.columns[1], 2)
-    assert_equal(under[0], 2, "and what was column 0, gathered")
-    assert_equal(under[1], 4, "and its second row")
+    var first = ints_of(got.columns[0], 2)
+    assert_equal(first[0], 2, "position 1 of the six, gathered")
+    assert_equal(first[1], 4, "and position 3")
+    var second = ints_of(got.columns[1], 2)
+    assert_equal(second[0], 70, "the dense column as it stood")
 
 
 def truths_of(col: AnyArray, rows: Int) raises -> List[Bool]:
@@ -3052,6 +3050,105 @@ def test_two_filters_agree_with_the_same_pair_flattened_between() raises:
         assert_equal(through[i], moved[i], "the same row in the same place")
     assert_equal(through[0], 1, "the first row both masks kept")
     assert_equal(through[1], 7, "and the second")
+
+
+def test_a_projection_passes_a_selection_through() raises:
+    """Reordering columns moves no rows, so the positions come out the way they
+    went in and the dense flags follow the columns they belong to. Nothing is
+    gathered here at all, which is the point: the gather is left for whoever
+    actually reads a column, and it may never happen for a column that is
+    dropped further up."""
+    var keep = List[Int]()
+    keep.append(1)
+    keep.append(0)
+    var out = node_apply(Node(Project(keep^)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under the selection it arrived with")
+    assert_equal(len(got), 3, "three rows")
+    assert_equal(got.width(), 2, "two columns, swapped")
+    assert_equal(len(got.columns[1]), 6, "the values were not touched")
+    var mask = truths_of(got.column(0), 3)
+    assert_true(mask[0], "what was the dense mask, read as it stands")
+    assert_false(mask[1], "its second row")
+    var values = ints_of(got.column(1), 3)
+    assert_equal(values[0], 2, "and the values, read through the positions")
+    assert_equal(values[1], 4, "the second row")
+    assert_equal(values[2], 6, "and the third")
+
+
+def test_a_projection_of_dense_columns_only_drops_the_selection() raises:
+    """Nothing left for the positions to point at, so carrying them on would
+    make every operator above this flatten a chunk that is already flat. The
+    same rule a narrowing filter follows."""
+    var keep = List[Int]()
+    keep.append(1)
+    var out = node_apply(Node(Project(keep^)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "no selection to carry")
+    assert_equal(len(got), 3, "three rows, which is what the selection said")
+    assert_equal(got.width(), 1, "one column")
+    var mask = truths_of(got.columns[0], 3)
+    assert_true(mask[0], "the dense column, unmoved")
+    assert_false(mask[1], "and its second row")
+
+
+def test_a_projection_repeating_a_column_under_a_selection() raises:
+    """The last use of an array takes it and an earlier one copies, and neither
+    of them is gathered, so the two copies are two views of the same six values
+    through the same three positions."""
+    var keep = List[Int]()
+    keep.append(0)
+    keep.append(0)
+    var out = node_apply(Node(Project(keep^)), selected_masked_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "both columns are read through the selection")
+    assert_equal(got.width(), 2, "two columns out of one")
+    var left = ints_of(got.column(0), 3)
+    var right = ints_of(got.column(1), 3)
+    assert_equal(left[0], 2, "the first copy")
+    assert_equal(left[2], 6, "and its last row")
+    assert_equal(right[0], 2, "the second copy, the same rows")
+    assert_equal(right[2], 6, "and the same last row")
+
+
+def test_a_projection_agrees_with_the_same_one_flattened_first() raises:
+    """The equivalence this step rests on, for the operator it was added to. A
+    filter then a projection, once with the selection carried across and once
+    flattened in between, and the answers have to agree row for row."""
+    var mask: List[Bool] = [True, False, False, True, False, False, True, False]
+    var second = List[Bool](length=8, fill=False)
+
+    var keep = List[Int]()
+    keep.append(2)
+    keep.append(0)
+
+    var filtered = node_apply(Node(Filter(1)), two_masked_chunk(mask, second))
+    assert_true(filtered.__bool__(), "the filter kept three rows")
+    var carried = node_apply(
+        Node(Project(List[Int](copy=keep))), filtered.take()
+    )
+    assert_true(carried.__bool__(), "and the projection passed them on")
+    var under = carried.take()
+    var through = ints_of(under.column(1), len(under))
+
+    var again = node_apply(Node(Filter(1)), two_masked_chunk(mask, second))
+    assert_true(again.__bool__(), "the same three rows")
+    var flat = again.take()
+    flat.flatten()
+    var copied = node_apply(Node(Project(keep^)), flat^)
+    assert_true(copied.__bool__(), "and the same projection over them")
+    var plain = copied.take()
+    var moved = ints_of(plain.column(1), len(plain))
+
+    assert_equal(len(through), 3, "three rows either way")
+    assert_equal(len(moved), 3, "three the other way too")
+    for i in range(3):
+        assert_equal(through[i], moved[i], "the same row in the same place")
+    assert_equal(through[0], 1, "the first row the mask kept")
+    assert_equal(through[2], 7, "and the last")
 
 
 def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:
