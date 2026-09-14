@@ -296,6 +296,9 @@ class Series:
     def string_join(self, sep: str, na_rep: str, skip_missing: bool) -> str:
         """The whole column folded into one string."""
         ...
+    def string_dummies(self, sep: str) -> tuple[list[str], list[Series]]:
+        """The token labels and one flag column for each of them."""
+        ...
     def window_agg(
         self,
         kind: str,

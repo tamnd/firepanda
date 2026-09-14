@@ -78,6 +78,26 @@ happens when the separator is not there at all: `partition` puts the whole row
 in the first column and `rpartition` puts it in the third, which is Python's
 rule and is the one thing an implementation written from the name alone gets
 wrong.
+
+### The seventh, whose answer has a width the arguments do not give
+
+`str.get_dummies` splits each row at a separator and answers one column per
+distinct token, holding one where the row had that token and zero where it did
+not. Nothing else in this file has an answer whose width comes out of the data,
+and that is why it is two kernels rather than one: `text_dummy_tokens` works out
+the set of tokens, which is both the width and the column labels, and
+`text_dummies` fills the columns in once the caller knows what it is building.
+
+The token set is kept sorted as it is built, by inserting each new token where
+it belongs rather than gathering everything and sorting at the end. That costs a
+move per insertion and buys the lookup the second pass needs, which is a binary
+search against the same list. Byte order is code point order in UTF-8, so no
+decoding happens anywhere in either pass.
+
+What falls out between two separators is a token even when it is nothing, so a
+row starting with the separator contributes the empty token and so does an empty
+row. The empty string is a real column label in a dummy frame, which reads like
+an accident and is pandas.
 """
 
 from std.collections.span import Span
@@ -1457,3 +1477,171 @@ def text_replace_folded(
         built.append(Span(scratch))
 
     return built^.finish()
+
+
+def compare_bytes(a: Span[UInt8, _], b: Span[UInt8, _]) -> Int:
+    """Orders two runs of bytes the way sorting a token set needs them ordered.
+
+    Byte order and code point order are the same thing in UTF-8, which is the
+    property the encoding was designed around and the reason this can be a byte
+    compare rather than a decode. So `1` before `C` before `_` before `a` before
+    `é` falls out of comparing bytes, and that is the order pandas puts the
+    columns of a dummy frame in.
+
+    Args:
+        a: The first run.
+        b: The second run.
+
+    Returns:
+        A negative number if the first sorts earlier, zero if they are the same
+        bytes, and a positive number otherwise. A prefix sorts before what it is
+        a prefix of, which is what makes the empty token sort first.
+    """
+    var shared = min(len(a), len(b))
+    for i in range(shared):
+        if a[i] != b[i]:
+            return Int(a[i]) - Int(b[i])
+    return len(a) - len(b)
+
+
+def seek_token(tokens: List[String], token: Span[UInt8, _]) -> Int:
+    """Finds a token in a sorted list, or says where it would go.
+
+    Args:
+        tokens: The tokens, already in byte order and without duplicates.
+        token: The bytes to look for.
+
+    Returns:
+        The position of the token if it is there, and otherwise minus one less
+        than the position it would be inserted at, so that a caller can tell a
+        hit at position zero from a miss that belongs at position zero.
+    """
+    var low = 0
+    var high = len(tokens)
+    while low < high:
+        var mid = (low + high) // 2
+        var order = compare_bytes(tokens[mid].as_bytes(), token)
+        if order == 0:
+            return mid
+        if order < 0:
+            low = mid + 1
+        else:
+            high = mid
+    return -(low + 1)
+
+
+def text_dummy_tokens(
+    a: StringArray, sep: Span[UInt8, _]
+) raises -> List[String]:
+    """Every distinct token in the column, in the order the columns go in.
+
+    This is the first half of `str.get_dummies`, and it is a separate kernel
+    from the second half because the answer to the first half is the shape of
+    the answer to the second. How many columns the frame has and what they are
+    called comes out of the data rather than out of the arguments, which is a
+    thing nothing else on this accessor does.
+
+    A row is split at every occurrence of the separator, and what falls out
+    between two of them is a token even when it is nothing at all, so a row
+    starting with the separator contributes the empty token and so does an empty
+    row. That reads like an accident and is pandas' answer, and it means the
+    empty string is a column label that a dummy frame really can have.
+
+    A missing row contributes nothing and a token that appears twice in one row
+    contributes once, because what is being built is a set.
+
+    Args:
+        a: The column.
+        sep: The bytes to split at, which the Python layer has already checked
+            is not empty because pandas refuses that.
+
+    Returns:
+        The distinct tokens in byte order, which is code point order and is the
+        order pandas labels the columns in.
+
+    Raises:
+        Error: If the list cannot grow.
+    """
+    var tokens = List[String]()
+    var m = len(sep)
+
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            continue
+        var bytes = a.unsafe_bytes(i)
+        var start = 0
+        while True:
+            var at = find_bytes(bytes, sep, start)
+            var stop = len(bytes) if at < 0 else at
+            var found = seek_token(tokens, bytes[start:stop])
+            if found < 0:
+                tokens.insert(
+                    -(found + 1),
+                    String(StringSlice(unsafe_from_utf8=bytes[start:stop])),
+                )
+            if at < 0:
+                break
+            start = at + m
+
+    return tokens^
+
+
+def text_dummies(
+    a: StringArray, sep: Span[UInt8, _], tokens: List[String]
+) raises -> List[Array[DType.int64]]:
+    """One column per token, holding one where the row has it and zero where not.
+
+    The second half of `str.get_dummies`. It takes the tokens rather than
+    working them out, both because the caller already needed them to name the
+    columns and because splitting the column twice is the cost of this
+    operation and doing it a third time per token would be worse again.
+
+    So each row is split once and its tokens are marked off against the sorted
+    list, which is a binary search per token rather than a scan per column.
+
+    A missing row is not missing in the answer. It is a row of zeros, because
+    pandas answers a frame of counts here and a count of a row that says nothing
+    is nothing rather than unknown. That is the one place this method does not
+    propagate a null and it is worth knowing before reading the output.
+
+    Args:
+        a: The column.
+        sep: The bytes to split at.
+        tokens: The distinct tokens in byte order, as `text_dummy_tokens`
+            answered them.
+
+    Returns:
+        One int64 column per token, in the same order, each as tall as the
+        input and with no nulls in it.
+
+    Raises:
+        Error: If a column cannot allocate.
+    """
+    var n = len(a)
+    var m = len(sep)
+    var out = List[Array[DType.int64]](capacity=len(tokens))
+    for _ in range(len(tokens)):
+        var column = Array[DType.int64](overwritten=n)
+        var dst = column.unsafe_mut_ptr()
+        for i in range(n):
+            dst.unsafe_offset(i).unsafe_write(Int64(0))
+        out.append(column^)
+
+    for i in range(n):
+        if not a.is_valid(i):
+            continue
+        var bytes = a.unsafe_bytes(i)
+        var start = 0
+        while True:
+            var at = find_bytes(bytes, sep, start)
+            var stop = len(bytes) if at < 0 else at
+            var found = seek_token(tokens, bytes[start:stop])
+            if found >= 0:
+                out[found].unsafe_mut_ptr().unsafe_offset(i).unsafe_write(
+                    Int64(1)
+                )
+            if at < 0:
+                break
+            start = at + m
+
+    return out^

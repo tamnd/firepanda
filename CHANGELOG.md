@@ -48,6 +48,18 @@ That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equa
 
 Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
 
+### Added: `str.get_dummies`, an answer whose width is in the data
+
+`s.str.get_dummies()` splits every row at a separator and answers a frame with one column per distinct piece, labelled with the piece and holding a 1 where the row held it. It is the third answer shape on the `str` accessor after a column and a scalar, and the first whose width nobody can work out before the column has been read, since both how many columns there are and what they are called are properties of the data.
+
+The answer is a membership and not a count. A row holding the same token twice still gives a 1, and there is no 2 anywhere in the output, even though the columns come back as int64 because that is what pandas answers. `dtype=bool` reads them as flags instead. Any other `dtype` is refused by name rather than ignored.
+
+What falls out between two separators is a token even when it is nothing, so an empty row, a row starting with the separator, a row ending with one and two separators together all contribute the empty string as a column label. The columns are sorted in byte order, which for UTF-8 is code point order, and no locale is consulted.
+
+A missing row is a row of zeros rather than a row of nulls, and it contributes no label. That is the one place on this accessor where a missing row does not stay missing, and it follows from the answer being a membership: a row that says nothing holds no tokens, which is a no rather than an unknown.
+
+A column of only missing rows answers a frame of no columns here, which is the same answer as a column of no rows at all. pandas answers that second one and raises `ValueError: Empty data passed with indices specified.` for the first, out of its own frame constructor rather than out of any rule about this method.
+
 ### Added: `str.cat`, the first answer narrower than a column
 
 `s.str.cat()` folds a whole text column into one string, with `sep` between neighbouring rows and none at either end. It is the first name on the `str` accessor whose answer is a scalar rather than a column, and it gets a function of its own in the accessor layer for the same reason `partition` does: the doors there are picked by the shape of the answer, and a string is not a column.
