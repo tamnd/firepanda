@@ -166,6 +166,101 @@ def test_a_trim_of_one_end_leaves_the_other_alone() raises:
     )
 
 
+def test_both_ends_come_off_at_every_arrangement_of_widths() raises:
+    # The two ends are walked in byte offsets and a character is one to four
+    # bytes, so the walk that matters is the one going right, which has to find
+    # where a character starts by going back over its continuation bytes. This
+    # builds every row so that the answer is known without decoding anything:
+    # some number of characters from the strip set, then a core that begins and
+    # ends with a character that is not in the set, then some more from the set.
+    # Widths are mixed on both sides of every boundary, which is what a loop
+    # counting bytes rather than characters would get wrong.
+    var set = String("ab") + "é" + "中"
+    var removable = [String("a"), String("b"), String("é"), String("中")]
+    var keepable = [String("X"), String("ü"), String("𝄞")]
+
+    var values = List[String]()
+    var wanted = List[String]()
+    var pick = 0
+    for lead in range(5):
+        for trail in range(5):
+            for core in range(1, 4):
+                var middle = String("")
+                for k in range(core):
+                    middle += keepable[(pick + k) % len(keepable)]
+                var one = String("")
+                for k in range(lead):
+                    one += removable[(pick + k) % len(removable)]
+                one += middle
+                for k in range(trail):
+                    one += removable[(pick + trail + k) % len(removable)]
+                values.append(one^)
+                wanted.append(middle^)
+                pick += 1
+
+    var column = made(values.copy())
+    var both = rows(text_strip(column, set.as_bytes(), True, True, True))
+    for i in range(len(wanted)):
+        assert_equal(both[i], wanted[i], "row " + String(i) + " from both ends")
+
+    # One end at a time, checked against the whole row rather than against the
+    # core, because the side that was not asked for has to come back untouched.
+    var column_left = made(values.copy())
+    var left = rows(text_strip(column_left, set.as_bytes(), True, True, False))
+    var column_right = made(values.copy())
+    var right = rows(
+        text_strip(column_right, set.as_bytes(), True, False, True)
+    )
+    for i in range(len(wanted)):
+        var at = values[i].find(wanted[i])
+        var past = at + wanted[i].byte_length()
+        assert_equal(
+            left[i],
+            values[i][byte=at:],
+            "row " + String(i) + " from the left",
+        )
+        assert_equal(
+            right[i],
+            values[i][byte=:past],
+            "row " + String(i) + " from the right",
+        )
+
+
+def test_a_row_that_is_all_strip_set_comes_back_empty_at_every_width() raises:
+    # The stopping condition of the two walks, which is the one place a byte
+    # offset loop can run past the other end of the element.
+    var removable = [String("a"), String("é"), String("中"), String("𝄞")]
+    var values = List[String]()
+    for count in range(1, 9):
+        var one = String("")
+        for k in range(count):
+            one += removable[k % len(removable)]
+        values.append(one^)
+    var set = String("a") + "é" + "中" + "𝄞"
+    var column = made(values.copy())
+    var answer = rows(text_strip(column, set.as_bytes(), True, True, True))
+    for i in range(len(values)):
+        assert_equal(answer[i], "", "row " + String(i) + " is empty")
+
+
+def test_stripping_whitespace_crosses_the_same_width_boundaries() raises:
+    # The whitespace route reads a code point rather than comparing bytes, and
+    # the spaces worth using are the ones that are not one byte wide.
+    var column = made(
+        [
+            "   hi 　",
+            "  ",
+            "　x ",
+            "x y",
+        ]
+    )
+    var answer = rows(text_strip(column, "".as_bytes(), False, True, True))
+    assert_equal(answer[0], "hi")
+    assert_equal(answer[1], "")
+    assert_equal(answer[2], "x")
+    assert_equal(answer[3], "x y")
+
+
 def test_every_sql_space_is_a_python_space_and_not_the_other_way() raises:
     var zs = [
         0x20,

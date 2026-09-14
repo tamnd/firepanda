@@ -56,7 +56,7 @@ from std.collections.span import Span
 
 from firepanda.array.strings import StringArray, StringBuilder
 
-from .chars import character_at, character_count, starts_character
+from .chars import character_count, starts_character
 
 
 def _code_point(bytes: Span[UInt8, _], at: Int) -> Int:
@@ -204,6 +204,22 @@ def _strip(
 ) raises -> StringArray:
     """Takes characters off one end of every element, or off both.
 
+    The two ends are walked in byte offsets rather than in character ordinals,
+    and that is the whole of what makes this cheap. `character_at` answers which
+    byte a character starts at by scanning from the front of the element, so a
+    loop that asks for the last character and then the one before it scans the
+    element twice to move three bytes. Counting the characters first is a third
+    scan and slicing at the end is two more, which came to about five passes to
+    take nothing off a forty byte element and was three times the cost of the
+    substring beside it in the benchmarks.
+
+    Nothing here needs an ordinal. Going left, the next character starts at the
+    next byte that is not a continuation byte, which is at most three bytes on.
+    Going right, the previous character starts at the previous such byte, found
+    the same way. Both ends stop the moment a character is not wanted, so an
+    element with nothing to strip is two lead byte tests and the element is
+    never read in the middle at all.
+
     Args:
         a: The column.
         set: The characters to remove, when there are any.
@@ -225,26 +241,25 @@ def _strip(
             built.append_null()
             continue
         var bytes = a.unsafe_bytes(i)
-        var count = character_count(bytes)
         var first = 0
-        var last = count
+        var last = len(bytes)
         if from_left:
             while first < last:
-                var at = character_at(bytes, first)
-                var until = character_at(bytes, first + 1)
-                if not _wanted(bytes, at, until, set, by_set, sql):
+                var until = first + 1
+                while until < last and not starts_character(bytes[until]):
+                    until += 1
+                if not _wanted(bytes, first, until, set, by_set, sql):
                     break
-                first += 1
+                first = until
         if from_right:
             while last > first:
-                var at = character_at(bytes, last - 1)
-                var until = character_at(bytes, last)
-                if not _wanted(bytes, at, until, set, by_set, sql):
+                var at = last - 1
+                while at > first and not starts_character(bytes[at]):
+                    at -= 1
+                if not _wanted(bytes, at, last, set, by_set, sql):
                     break
-                last -= 1
-        built.append(
-            bytes[character_at(bytes, first) : character_at(bytes, last)]
-        )
+                last = at
+        built.append(bytes[first:last])
     return built^.finish()
 
 
