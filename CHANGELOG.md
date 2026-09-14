@@ -17,6 +17,7 @@ The counting pass is its own function now and the filter calls it once, before t
 The dense half of the count also stopped being a byte at a time. It adds a register of mask bytes and takes one horizontal add at the end, which is what `mask_kept` next to it already did and what this one should have been doing all along.
 
 Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
+
 ### Fixed: a SQL cast of a double to an integer rounds where it used to truncate
 
 `SELECT CAST(2.6 AS BIGINT)` answered 2 and DuckDB answers 3. The conversion loses a fraction and there are two ways to lose it: truncate towards zero, which is what the machine instruction does and what pandas and NumPy mean by `astype`, or round to the nearest whole number with a tie going to the even one, which is what a SQL cast means. firepanda did the first for both front ends and only one of them was asking for it. Issue #786.
