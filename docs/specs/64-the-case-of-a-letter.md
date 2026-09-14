@@ -1,12 +1,12 @@
 # The case of a letter
 
-## 1. Seven names and one table underneath
+## 1. Eight names and one table underneath
 
-`upper`, `lower`, `capitalize`, `swapcase`, `isspace`, `islower` and `isupper` are the names of the `str` accessor that are about case rather than about position, and they belong together because they all rest on the same thing. Somewhere there is a table that says what the other case of a character is and which characters have a case at all, and every one of the seven is a walk over a row asking that table a question. Which table it is turns out to be the whole content of this document, because the answer to every other question here is short.
+`upper`, `lower`, `capitalize`, `swapcase`, `casefold`, `isspace`, `islower` and `isupper` are the names of the `str` accessor that are about case rather than about position, and they belong together because they all rest on the same thing. Somewhere there is a table that says what the other case of a character is and which characters have a case at all, and every one of the eight is a walk over a row asking that table a question. Which table it is turns out to be the whole content of this document, because the answer to every other question here is short.
 
-The first five landed together and the other two followed, once the first five had been corrected and there was a table worth building on. Sections 2 through 6 are about that correction and section 7 is about the two that came after it.
+The first five landed together, then `capitalize` and `swapcase` followed once the first five had been corrected and there was a table worth building on, and `casefold` came last because it is the one name here that is not answering the same table at all. Sections 2 through 6 are about the correction, section 7 is about the two that came after it, and section 8 is about the one that came from somewhere else.
 
-The short answers first. A missing row stays missing through all four names that write text, which is pandas and is what every other kernel in the library does. A question about case answers False on a row with no cased character in it, so a row holding `42` is neither lower case nor upper case, and False on an empty row, because the rule is that all of nothing is not enough. The three questions answer a column of bools and the four rewrites answer a column of text, which is what picks which of the three doors in `text.mojo` each of them comes through. None of the seven takes an argument.
+The short answers first. A missing row stays missing through all five names that write text, which is pandas and is what every other kernel in the library does. A question about case answers False on a row with no cased character in it, so a row holding `42` is neither lower case nor upper case, and False on an empty row, because the rule is that all of nothing is not enough. The three questions answer a column of bools and the five rewrites answer a column of text, which is what picks which of the three doors in `text.mojo` each of them comes through. None of the eight takes an argument. Four of the five rewrites give back a row exactly as many characters long as the one they were given and `casefold` is the one that does not, which is section 8.
 
 ## 2. pandas has two answers and they are not the same answer
 
@@ -72,23 +72,39 @@ There is one more thing worth writing down, which is that `swapcase` deliberatel
 
 An ASCII element does not go near any of this. `swapcase` checks for a byte with its top bit set and, finding none, flips one bit per letter, because the two cases of an ASCII letter differ in exactly that bit and nothing else in the range has a case at all.
 
-## 8. `title` is the name that is not here
+## 8. Folding is not a case
 
-`title` is the fourth member of this shape and it is missing on purpose. It needs to know where a word starts, pandas and Arrow agree that a word starts at a character that is cased, and whether a character is cased is the category question rather than the mapping question. Measured the same way as everything else here: the boundary rule built out of the corrected mappings disagrees with Arrow on 1295 code points, all of them letters that are cased and have no case mapping at all, `ĸ` and `ƍ` and their kind.
+`casefold` looks like a third case and it is not one. Nobody writes text in it and nobody reads it. Its one promise is that two rows a reader would call the same come out as the same bytes, which is what you want when you are comparing rows rather than showing them, and everything odd about it follows from that. `Straße` and `STRASSE` both fold to `strasse`, where lowering leaves the first as `straße` and the second as `strasse` and so says the two are different. The German sharp s is the row in the corpus that makes the difference visible and it is not a curiosity: it is the reason the name exists.
 
-That is not a list, it is the same table section 6 declined to build, so `title` waits for it and is tracked as [#748](https://github.com/tamnd/firepanda/issues/748) along with the three questions. `istitle` waits for the same thing, and so do `isalpha`, `isalnum` and the rest of the questions that are about a category rather than about a case.
+The price of that promise is that a folded row can be longer than the row that went in. `ß` folds to two letters, `ﬁ` folds to two letters, and 104 of the code points in the table fold to more than one, none to more than three. That is the opposite of the rule sections 2 through 6 spend their length on, where the whole point was that an Arrow backed `upper` never makes a row longer, and it is worth being clear that this is not an inconsistency anybody chose.
 
-`casefold` is the other name nearby and it is a different animal again. pyarrow has no casefold kernel, so pandas falls back to Python for it whatever dtype the column has, which means it is the one name in this group where the full mappings are the right answer and a row really can come back longer than it went in. `ß` folds to `ss` in both pandas backends. It needs its own generated table, 297 code points where folding is not lowering, and it does not need the Unicode categories, so it can be written before `title` can.
+It is what pandas does. pyarrow has no casefold kernel. The case related compute functions it does have are `ascii_capitalize`, `ascii_is_title`, `ascii_swapcase`, `ascii_title`, `case_when`, `utf8_capitalize`, `utf8_is_title`, `utf8_swapcase` and `utf8_title`, and no folding anywhere in that list, so a pandas text column falls back to Python's own `str.casefold` for this one method while every other case method stays in Arrow. Both pandas backends therefore give the same answer here, which is the only name in this group where that is true, and Python is the oracle rather than the thing being corrected. Follow Arrow for `upper` and follow Python for `casefold` and you are not being inconsistent, you are copying what pandas actually answers in each case, which is the only rule this library has.
 
-## 9. What this does to the board
+The table is small for a reason worth stating. 353 code points fold to something other than their lower case, and everything else in Unicode folds to exactly what it lowers to, so `casefold.mojo` is a difference table rather than a copy of the folding database. The kernel asks it first and falls through to the corrected lower case path of section 6 for everything else, which means the 149 corrections are carrying their weight a third time. A capital theta symbol is not in the fold table at all, because folding it is lowering it, and it still comes out right because the lower case path knows about it.
+
+The table holds rows of different lengths, so it is three arrays rather than one: the code points, an offset per code point with the end on the tail, and the answers end to end. There is also no byte test on this path, which is a difference from `upper` and `lower` worth naming. Those can rule out an element by looking for a byte at or above 0xC3, since the lowest code point they correct is U+00DF, and a good deal of ordinary accented text leaves on that test. The lowest code point here is the micro sign at U+00B5, whose lead byte is 0xC2, and 0xC2 is the lowest lead byte any non ASCII character can have, so asking whether an element could hold one of these and asking whether it is not ASCII are the same question. The kernel asks the second one because it is the cheaper spelling of it, and an ASCII element folds by lowering, which is one call.
+
+Two rows are worth having in your head. `İstanbul` folds to a plain i followed by a combining dot and then `stanbul`, which is Python's answer and is longer in characters than the row that went in, where the same row lowered by Arrow is `istanbul` with no dot at all. And the three letters of a titlecase family, `Ǆ` and `ǅ` and `ǆ`, all fold to the last of them, where `swapcase` in section 7 leaves the middle one exactly as it found it. Both of those are in the tests, because they are the two places where folding and the rest of this document visibly part company.
+
+Verified the same way as everything else here: over all 1112064 code points on their own and over sixty thousand random words against a live pandas, with no row differing. The generator also checks the one rule the walk rests on, which is that folding a row is folding each of its characters and sticking the answers together, and it refuses to write a table if that stops holding.
+
+## 9. `title` is the name that is not here
+
+`title` is the last member of this shape and it is missing on purpose. It needs to know where a word starts, pandas and Arrow agree that a word starts at a character that is cased, and whether a character is cased is the category question rather than the mapping question. Measured the same way as everything else here: the boundary rule built out of the corrected mappings disagrees with Arrow on 1295 code points, all of them letters that are cased and have no case mapping at all, `ĸ` and `ƍ` and their kind.
+
+That is not a list, it is the same table section 6 declined to build, so `title` waits for it and is tracked as [#748](https://github.com/tamnd/firepanda/issues/748) along with the three questions.
+
+`istitle` is on the same list for the same reason, and so are `isalpha`, `isalnum`, `isnumeric`, `isdecimal` and the rest of the questions that are about a category rather than about a case. Those are the only names of this group still missing.
+
+## 10. What this does to the board
 
 The three questions answer a missing row with a missing value where pandas answers False. That is `engine/string-predicate-null`, which was registered when `startswith` and `endswith` landed and which rests on the same fact: the answer in pandas is a numpy array of bools with nowhere to put a third state, so a row that was missing and a row that was really not upper case come back the same. Held as object, pandas answers None on that row and agrees with us, which is a useful check that the difference is about storage rather than about the question.
 
-Nothing else here is a divergence. All seven names are scored on all four string frames, and two rows of the unicode frame are what section 2 is about: the row holding `ß`, and the row holding the `ﬁ` ligature, both of which change length under Python's mappings and neither of which changes length under Arrow's.
+Nothing else here is a divergence. All eight names are scored on all four string frames, and two rows of the unicode frame are what section 2 is about: the row holding `ß`, and the row holding the `ﬁ` ligature, both of which change length under Python's mappings and neither of which changes length under Arrow's.
 
-## 10. What is left
+## 11. What is left
 
-The twenty nine names of the accessor that are still missing, most of which need a regex engine, a splitter that can answer more than one column, or both. `casefold` and `title` are covered in section 8 and are the two nearest, for different reasons.
+The twenty eight names of the accessor that are still missing, most of which need a regex engine, a splitter that can answer more than one column, or both. `title` is covered in section 9 and is the nearest of them, and it is nearest to a table rather than to an afternoon.
 
 `normalize` is worth naming separately. It is the name that exists because a visible letter can arrive composed or decomposed, which is also the reason a character count can surprise somebody, and it needs the normalization tables rather than the case ones.
 
