@@ -15,16 +15,21 @@ subtly wrong is worse than not having the method.
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
+from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.kernel.chars import (
     character_at,
     character_count,
     characters_before,
+    text_case,
     text_character_get,
     text_character_length,
     text_character_slice,
     text_character_substring,
     text_find,
+    text_is_lower,
+    text_is_space,
+    text_is_upper,
     text_remove_prefix,
     text_remove_suffix,
     text_slice_replace,
@@ -390,6 +395,171 @@ def test_a_missing_row_is_missing_in_the_answer() raises:
     var read = cut(["hello", "null"], 1, 2)
     assert_equal(read[0], "he")
     assert_equal(read[1], "null")
+
+
+def cased(var values: List[String], upper: Bool) raises -> List[String]:
+    """Changes the case of a column built from a list and reads it back.
+
+    Args:
+        values: The values.
+        upper: Whether to raise the case rather than lower it.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the column cannot be built.
+    """
+    return rows(text_case(made(values^), upper))
+
+
+def asked(column: Array[DType.bool]) raises -> List[String]:
+    """Reads a mask back as words, so that a missing row can be named.
+
+    Args:
+        column: The mask.
+
+    Returns:
+        `yes`, `no` or `null`, one per row.
+
+    Raises:
+        Error: If a row cannot be read.
+    """
+    var read: List[String] = []
+    for i in range(len(column)):
+        if not column.is_valid(i):
+            read.append("null")
+        elif column[i]:
+            read.append("yes")
+        else:
+            read.append("no")
+    return read^
+
+
+def test_a_case_change_rewrites_every_row() raises:
+    var raised = cased(["abc", "Mixed Case", ""], True)
+    assert_equal(raised[0], "ABC")
+    assert_equal(raised[1], "MIXED CASE")
+    assert_equal(raised[2], "")
+    var dropped = cased(["ABC", "Mixed Case", ""], False)
+    assert_equal(dropped[0], "abc")
+    assert_equal(dropped[1], "mixed case")
+    assert_equal(dropped[2], "")
+
+
+def test_a_case_change_keeps_a_missing_row_missing() raises:
+    var raised = cased(["abc", "null"], True)
+    assert_equal(raised[0], "ABC")
+    assert_equal(raised[1], "null")
+
+
+def test_an_accented_letter_changes_case_like_a_plain_one() raises:
+    assert_equal(cased(["café"], True)[0], "CAFÉ")
+    assert_equal(cased(["CAFÉ"], False)[0], "café")
+
+
+def test_a_row_can_come_back_longer_than_it_went_in() raises:
+    # The one that proves a case change is not a byte for a byte rewrite, and
+    # not a character for a character one either.
+    var raised = cased(["straße"], True)
+    assert_equal(raised[0], "STRASSE")
+    assert_equal(len(raised[0].as_bytes()), 7)
+
+
+def test_a_capital_i_with_a_dot_lowers_to_the_letter_and_the_dot() raises:
+    # Python writes U+0130 out as `i` followed by a combining dot above, so
+    # that the dot the capital carries is not lost. The standard library here
+    # drops it, and the kernel puts it back, because this one reaches a Latin
+    # alphabet and the rest of the difference does not.
+    var dropped = cased(["İstanbul"], False)
+    var bytes = dropped[0].as_bytes()
+    assert_equal(len(bytes), 10)
+    assert_equal(Int(bytes[0]), 0x69)
+    assert_equal(Int(bytes[1]), 0xCC)
+    assert_equal(Int(bytes[2]), 0x87)
+    assert_equal(dropped[0][codepoint=2:], "stanbul")
+
+
+def test_the_dot_is_put_back_wherever_the_capital_sits() raises:
+    var dropped = cased(["AİB", "İİ", "plain"], False)
+    assert_equal(len(dropped[0].as_bytes()), 5)
+    assert_equal(len(dropped[1].as_bytes()), 6)
+    assert_equal(dropped[2], "plain")
+
+
+def test_a_dotless_i_raises_to_a_plain_capital() raises:
+    assert_equal(cased(["ıstanbul"], True)[0], "ISTANBUL")
+
+
+def test_bytes_that_are_not_utf8_come_back_as_they_went_in() raises:
+    # The element is a letter and then a lead byte with nothing after it. The
+    # standard library's walk would take the first byte of the next row to
+    # finish the character, which is the one thing this file promises not to
+    # do, so the element is copied instead.
+    var truncated = List[UInt8]()
+    truncated.append(0x61)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("b".as_bytes())
+    var raised = text_case(built^.finish(), True)
+    var first = raised.unsafe_bytes(0)
+    assert_equal(len(first), 2)
+    assert_equal(Int(first[0]), 0x61)
+    assert_equal(Int(first[1]), 0xC4)
+    assert_equal(raised[1], "B")
+
+
+def test_whitespace_is_a_question_about_every_character() raises:
+    var read = asked(text_is_space(made([" ", " \t\n", "a b", "ab"])))
+    assert_equal(read[0], "yes")
+    assert_equal(read[1], "yes")
+    assert_equal(read[2], "no")
+    assert_equal(read[3], "no")
+
+
+def test_an_empty_row_answers_no_to_all_three() raises:
+    # Python's rule, which is that all of nothing is not enough: there has to
+    # be a character for the question to be about.
+    assert_equal(asked(text_is_space(made([""])))[0], "no")
+    assert_equal(asked(text_is_lower(made([""])))[0], "no")
+    assert_equal(asked(text_is_upper(made([""])))[0], "no")
+
+
+def test_the_two_case_questions_are_not_opposites() raises:
+    var lower = asked(text_is_lower(made(["abc", "ABC", "aBc", "42", "a1"])))
+    var upper = asked(text_is_upper(made(["abc", "ABC", "aBc", "42", "a1"])))
+    assert_equal(lower[0], "yes")
+    assert_equal(upper[0], "no")
+    assert_equal(lower[1], "no")
+    assert_equal(upper[1], "yes")
+    assert_equal(lower[2], "no")
+    assert_equal(upper[2], "no")
+    # A row with no cased character in it is neither, rather than both.
+    assert_equal(lower[3], "no")
+    assert_equal(upper[3], "no")
+    # And one cased character is enough to answer, whatever it is sitting next
+    # to.
+    assert_equal(lower[4], "yes")
+    assert_equal(upper[4], "no")
+
+
+def test_a_case_question_keeps_a_missing_row_missing() raises:
+    assert_equal(asked(text_is_lower(made(["abc", "null"])))[1], "null")
+    assert_equal(asked(text_is_upper(made(["ABC", "null"])))[1], "null")
+    assert_equal(asked(text_is_space(made([" ", "null"])))[1], "null")
+
+
+def test_a_case_question_about_bytes_that_are_not_utf8_is_no() raises:
+    var truncated = List[UInt8]()
+    truncated.append(0x61)
+    truncated.append(0xC4)
+    var built = StringBuilder(capacity=2)
+    built.append(Span(truncated))
+    built.append("b".as_bytes())
+    var col = built^.finish()
+    assert_equal(asked(text_is_lower(col))[0], "no")
+    assert_equal(asked(text_is_lower(col))[1], "yes")
 
 
 def main() raises:

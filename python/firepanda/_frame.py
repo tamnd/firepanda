@@ -384,10 +384,14 @@ class StringAccessor(StringMixin):
     `AttributeError` there and here. The same reasoning the `cat` accessor gives
     applies, since a caller writing `s.str` has already decided what the column is.
 
-    Twelve of the fifty seven names so far, and the twelve share one idea: a position in
-    a string is a character and not a byte. Every other kernel in this library counts
-    bytes, which is right for a `LIKE` pattern and for a sort order and is not what
-    `s.str.len()` answers.
+    Twenty six of the fifty seven names so far. Most of them share one idea, which is
+    that a position in a string is a character and not a byte. Every other kernel in
+    this library counts bytes, which is right for a `LIKE` pattern and for a sort order
+    and is not what `s.str.len()` answers.
+
+    The five newest share the other half of the same idea. Case is not a property of a
+    byte either, and it is not even a property of one character, since `ß` raises to two
+    letters and a row can come back longer than it went in.
     """
 
     __slots__ = ()
@@ -459,6 +463,41 @@ class StringAccessor(StringMixin):
         """Whether every row ends with a string, or with any of several."""
         try:
             return self._begins("endswith", pat, na)
+        except Exception as error:
+            raise translate(error) from None
+
+    def upper(self) -> Series:
+        """Every row written in upper case."""
+        try:
+            return self._text("upper")
+        except Exception as error:
+            raise translate(error) from None
+
+    def lower(self) -> Series:
+        """Every row written in lower case."""
+        try:
+            return self._text("lower")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isspace(self) -> Series:
+        """Whether every row is whitespace and nothing else."""
+        try:
+            return self._flag("isspace", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def islower(self) -> Series:
+        """Whether every row is lower case."""
+        try:
+            return self._flag("islower", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isupper(self) -> Series:
+        """Whether every row is upper case."""
+        try:
+            return self._flag("isupper", "")
         except Exception as error:
             raise translate(error) from None
 
