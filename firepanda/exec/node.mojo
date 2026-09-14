@@ -6222,9 +6222,16 @@ def node_computes_per_row(node: Node) -> Bool:
     Measured on the i9-13900K over four million rows of forty byte text, with
     nothing after the operator that computes per row, and with the two settings
     alternated twice. `Length` ran 108 milliseconds on the calling thread and 7.9
-    on the cores, `Locate` 35 against 4.7, `Cut` 200 against 15, and `Trim` 631
-    against 52. Between six and fourteen times, on operators that were being told
-    they had nothing to gain.
+    on the cores, `Locate` 35 against 4.7, `Cut` 200 against 15, `Trim` 631
+    against 52, and `Case` 13.5 seconds against 1.7. Between six and fourteen
+    times, on operators that were being told they had nothing to gain.
+
+    `Case` is the one to look at twice, and not for its ratio. Four hundred
+    nanoseconds a row to raise forty bytes of ASCII, after the cores have been
+    handed the work, is about forty times what the walk itself should cost, so
+    there is a second thing wrong inside that kernel that this does not touch.
+    `Trim` at thirteen nanoseconds a row is the same story a great deal smaller.
+    Both are worth their own measurement.
 
     `Part` and `Truncate` say yes. Turning a day number into a year, or a year
     back into a day number, is a run of multiplies and shifts per row and not a

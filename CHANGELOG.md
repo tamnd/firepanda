@@ -10,11 +10,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Changed: the text operators get the cores
 
-A pipeline hands its leading operators out to the cores only if one of them works out a value for every row, and `length`, `position`, `substring` and `trim` all said they did not. Two reasons were given. `length` and `position` said their kernels spread themselves over the cores already, so handing the chunks out as well would be paying twice to do one pass, and `substring` and `trim` said they build a text column whose payload offsets are a running total, which is a serial thing.
+A pipeline hands its leading operators out to the cores only if one of them works out a value for every row, and `length`, `position`, `substring`, `trim` and `upper` all said they did not. Two reasons were given. `length` and `position` said their kernels spread themselves over the cores already, so handing the chunks out as well would be paying twice to do one pass, and the three that build a text column said the payload offsets they write at are a running total, which is a serial thing.
 
 Neither holds. A morsel and a chunk are the same number of rows, so a kernel handed one chunk is handed exactly one morsel and runs on one core however well it parallelises, and a kernel only spreads itself out when it is called on a whole column, which inside a pipeline it never is. A running total inside one chunk says nothing about two chunks either, because each one builds its own column and neither waits on the other. The question was never whether to parallelise twice, it was whether to parallelise at all.
 
-Measured on the i9-13900K over four million rows of forty byte text, with the two settings alternated twice: `length` ran 108 milliseconds on the calling thread and 7.9 on the cores, `position` 35 against 4.7, `substring` 200 against 15, and `trim` 631 against 52. That is between six and fourteen times on four operators, and it is the kind of query that reads a text column and does nothing else to it that gains the most.
+Measured on the i9-13900K over four million rows of forty byte text, with the two settings alternated twice: `length` ran 108 milliseconds on the calling thread and 7.9 on the cores, `position` 35 against 4.7, `substring` 200 against 15, `trim` 631 against 52, and `upper` 13.5 seconds against 1.7. That is between six and fourteen times on five operators, and it is the kind of query that reads a text column and does nothing else to it that gains the most.
+
+`upper` is worth a second look for a reason that has nothing to do with this. Four hundred nanoseconds a row to raise forty bytes of ASCII, with the cores already doing the work, is roughly forty times what walking the bytes should cost, so something else inside that kernel is wrong. `trim` at thirteen nanoseconds a row is the same story a great deal smaller. Neither is touched here and both are worth their own measurement.
 
 ### Changed: `IN` against a list of constants runs as one set lookup
 
