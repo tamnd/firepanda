@@ -3517,6 +3517,13 @@ struct Cast(Movable):
     expression already bound against it. A cast written inside an expression
     lands in a column of its own for the same reason every other expression
     does, and the name it is given is the name that expression was given.
+
+    A float losing its fraction to an integer has two right answers and `nearest`
+    picks one. Off is `astype`, which truncates towards zero the way pandas and
+    NumPy do. On is a SQL cast, which rounds to the nearest whole number with a
+    tie going to the even one the way DuckDB does. The plan carries the flag down
+    from whichever front end built the node, and it means nothing for any other
+    pair of types.
     """
 
     var on: Int
@@ -3528,13 +3535,22 @@ struct Cast(Movable):
     var strict: Bool
     """Whether text that is not a number raises rather than becoming a null."""
 
+    var nearest: Bool
+    """Whether a float to integer conversion rounds rather than truncates."""
+
     var appends: Bool
     """Whether the converted column lands at the end rather than in place."""
 
     var name: String
     """The name the appended column takes. Empty when the cast is in place."""
 
-    def __init__(out self, on: Int, to: LogicalType, strict: Bool = True):
+    def __init__(
+        out self,
+        on: Int,
+        to: LogicalType,
+        strict: Bool = True,
+        nearest: Bool = False,
+    ):
         """Constructs a cast that converts the column where it lies.
 
         Args:
@@ -3542,10 +3558,14 @@ struct Cast(Movable):
             to: The target type.
             strict: Whether a text value that is not a number raises rather than
                 becoming a null. Ignored for a column that is not text.
+            nearest: Whether a float to integer conversion rounds to the nearest
+                whole number rather than truncating towards zero. Ignored for
+                every other pair of types.
         """
         self.on = on
         self.to = to
         self.strict = strict
+        self.nearest = nearest
         self.appends = False
         self.name = String()
 
@@ -3555,6 +3575,7 @@ struct Cast(Movable):
         to: LogicalType,
         var name: String,
         strict: Bool = True,
+        nearest: Bool = False,
     ):
         """Constructs a cast that appends the converted column.
 
@@ -3564,10 +3585,14 @@ struct Cast(Movable):
             name: The name the new column gets.
             strict: Whether a text value that is not a number raises rather than
                 becoming a null. Ignored for a column that is not text.
+            nearest: Whether a float to integer conversion rounds to the nearest
+                whole number rather than truncating towards zero. Ignored for
+                every other pair of types.
         """
         self.on = on
         self.to = to
         self.strict = strict
+        self.nearest = nearest
         self.appends = True
         self.name = name^
 
@@ -3641,7 +3666,9 @@ struct Cast(Movable):
                 + " columns"
             )
         chunk.materialize(self.on, spread)
-        var made = cast_any(chunk.columns[self.on], self.to, self.strict)
+        var made = cast_any(
+            chunk.columns[self.on], self.to, self.strict, self.nearest
+        )
         if self.appends:
             chunk.append(made^, True)
         else:

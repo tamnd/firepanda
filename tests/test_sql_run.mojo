@@ -2235,6 +2235,49 @@ def test_a_cast_in_a_where_runs_before_the_rows_are_kept() raises:
     )
 
 
+def test_a_cast_of_a_double_to_an_integer_rounds_the_way_duckdb_does() raises:
+    # Halving the quantities gives five values that land on a half and five
+    # that do not, and DuckDB 1.5.1 answers this query 2, 10, 2, 20, 6, 4, 12,
+    # 0, 15, 8. Truncating would say 1 where it says 2 and 7 where it says 8.
+    # The ties go to the even number, so 2.5 is 2 and 7.5 is 8, which is why
+    # this is rounding and not adding a half first.
+    same(
+        answer(
+            "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS BIGINT) AS half FROM sales",
+            "half",
+        ),
+        [2, 10, 2, 20, 6, 4, 12, 0, 15, 8],
+        "half",
+    )
+
+
+def test_a_cast_of_a_double_rounds_whatever_integer_it_is_asked_for() raises:
+    # The flag is set from the target type, so every integer width gets it and
+    # not just the one the first test happened to name.
+    var out = run(
+        "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS SMALLINT) AS half FROM sales",
+        session(),
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.INT16, "int16")
+    var col = out.column("half").as_typed[DType.int16]()
+    assert_equal(col[2], 2, "1.5 rounded up")
+    assert_equal(col[9], 8, "and 7.5 did too")
+
+
+def test_a_cast_of_a_double_to_a_double_keeps_the_fraction() raises:
+    # Nothing rounds on the way to a type that can hold what it is given, and
+    # the flag the SQL side sets for an integer target is not set here at all.
+    var out = run(
+        "SELECT CAST(CAST(qty AS DOUBLE) / 2 AS DOUBLE) AS half FROM sales",
+        session(),
+    )
+
+    var col = out.column("half").as_typed[DType.float64]()
+    assert_equal(col[0], 2.5, "the first is still a half")
+    assert_equal(col[9], 7.5, "and so is the last")
+
+
 def test_a_cast_to_a_type_the_engine_has_no_column_for_says_so() raises:
     with assert_raises(contains="integers stop at 64 bits"):
         _ = run("SELECT CAST(qty AS HUGEINT) FROM sales", session())

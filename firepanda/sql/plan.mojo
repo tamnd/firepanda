@@ -2291,7 +2291,13 @@ def _lower_expr(
                     )
                 )
         var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
-        return plan.exprs.cast(engine_type(want), over)
+        var target = engine_type(want)
+        # DuckDB rounds a fraction away on the way to an integer and `astype`
+        # truncates it, and both are right for the caller that asks, so the flag
+        # is set here and nowhere else. It is set on the target type rather than
+        # on the pair because the operand's type is not known until binding, and
+        # it costs nothing to ask a cast of a string to round.
+        return plan.exprs.cast(target, over, nearest=target.is_integer())
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
     if node.kind == EXPR_SUBQUERY:

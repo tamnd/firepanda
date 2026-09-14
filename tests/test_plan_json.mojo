@@ -24,7 +24,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
-from firepanda.plan.expr import UNBOUND, ExprKind
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind
 from firepanda.plan.json import Loaded, from_json, to_json
 from firepanda.plan.node import (
     NO_LIMIT,
@@ -441,7 +441,35 @@ def test_a_cast_says_the_type_it_is_casting_to() raises:
         to_json(plan, at).find('"to": "int32"') != -1,
         "the target is in the JSON",
     )
+    assert_true(
+        to_json(plan, at).find('"nearest"') == -1,
+        "and a cast that truncates says nothing, the way it always did",
+    )
     _ = _trip(plan, at)
+
+
+def test_a_cast_that_rounds_says_so_and_still_rounds_when_it_comes_back() raises:
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var at = plan.project(
+        t,
+        [
+            plan.exprs.cast(
+                LogicalType.INT32, plan.exprs.column("a"), nearest=True
+            )
+        ],
+        ["a"],
+    )
+    assert_true(
+        to_json(plan, at).find('"nearest": true') != -1,
+        "the flag is in the JSON",
+    )
+    var back = _trip(plan, at)
+    assert_equal(
+        back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].op,
+        NEAREST,
+        "and it is still on the node that came back",
+    )
 
 
 def test_a_bound_plan_comes_back_bound() raises:

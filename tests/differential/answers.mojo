@@ -117,20 +117,12 @@ def recorded(expression: StringSlice) -> String:
     Returns:
         The reason, or an empty string if this disagreement is a new one.
     """
-    # One entry. The two it was written with are both gone: the integer
-    # division under issue #770 and the LIKE pattern under issue #776, each one
-    # found here and fixed rather than written down and left. This one is here
-    # rather than fixed because the fix is a decision and not a patch, which
-    # #786 sets out.
-    if expression.startswith("CAST(n * 1.5000") and expression.endswith(
-        "AS BIGINT)"
-    ):
-        return String(
-            "issue #786: DuckDB rounds a double to the nearest whole number on"
-            " a cast and firepanda truncates, so 7.5 is 8 there and 7 here."
-            " The kernel cannot simply change, because astype has to keep"
-            " truncating to match pandas."
-        )
+    # Empty, and it has been empty three times over now. The integer division
+    # under issue #770, the LIKE pattern under issue #776 and the cast of a
+    # double to an integer under issue #786 were each found here and then fixed
+    # rather than written down and left. The list is worth keeping for the next
+    # one whose fix is a decision rather than a patch.
+    _ = expression
     return ""
 
 

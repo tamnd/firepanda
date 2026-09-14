@@ -83,7 +83,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -632,6 +632,13 @@ def _expr_json(
         out += String(
             '"kind": "cast", "to": ',
             _quoted(_type_text(node.type)),
+        )
+        # Written only when it is on, the way `weak` is on a literal, so that a
+        # document produced before there was a flag and one produced now for the
+        # same plan are the same bytes.
+        if node.op == NEAREST:
+            out += ', "nearest": true'
+        out += String(
             ', "over": ',
             _expr_json(tree, node.children[0], naming),
         )
@@ -1231,6 +1238,7 @@ def _expr_of(
         var to = _type_of(
             text_of(bytes, members[_need(bytes, members, "to", "a cast")].value)
         )
+        var nearest = _at(bytes, members, "nearest")
         at = tree.cast(
             to,
             _expr_of(
@@ -1239,6 +1247,7 @@ def _expr_of(
                 tree,
                 ids,
             ),
+            nearest != -1 and _flag(bytes, members[nearest].value, "nearest"),
         )
     elif kind == "call":
         var name = text_of(

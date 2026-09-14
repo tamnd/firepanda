@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a SQL cast of a double to an integer rounds where it used to truncate
+
+`SELECT CAST(2.6 AS BIGINT)` answered 2 and DuckDB answers 3. The conversion loses a fraction and there are two ways to lose it: truncate towards zero, which is what the machine instruction does and what pandas and NumPy mean by `astype`, or round to the nearest whole number with a tie going to the even one, which is what a SQL cast means. firepanda did the first for both front ends and only one of them was asking for it. Issue #786.
+
+So the fix is not the kernel changing its mind. `astype` still truncates, because a dataframe library that disagreed with pandas here would be wrong at the surface it is a copy of, and `df["x"].astype("int64")` on 7.9 is still 7. The cast kernel takes a flag instead and the caller says which conversion this is.
+
+The flag is set on the plan's cast expression, which is the one place that knows which front end asked. The SQL lowering sets it whenever the cast names an integer type and the dataframe path never sets it. It rides in the `op` field, which every other kind of expression uses for an operator code and a cast has never used at all, so no expression anywhere got wider to carry it. A plan prints it as `a::int64 nearest` and writes it into JSON only when it is on, so a plan that truncates reads and serializes exactly the way it always did.
+
+Nothing else moves. Rounding only has something to lose when the source is a float and the target is an integer, so the conversion loop decides that at compile time and every other one of the 144 type pairs compiles to the loop it compiled to before. A cast of a string to an integer parses and is not affected either.
+
+`CAST(2.6 AS BIGINT)` came off the value differential's recorded list, which is now empty, and all 79 expressions agree with DuckDB 1.5 with nothing written down beside them.
+
 ### Fixed: a join written as a comma and a `WHERE` would not run
 
 `SELECT count(*) FROM orders, customer WHERE c_custkey = o_custkey` refused to run, and the same query written with a `JOIN` and an `ON` answered 15000. They are the same query. The first one lowers to a cross join with the equality in a filter above it, and pairing 15,000 rows against 1,500 is 22 million pairs built before the filter ever sees one, so the operator behind a cross join declines to start rather than spend the memory.
@@ -19,6 +31,7 @@ It runs before the transitive copying rather than after, so a filter on one side
 That unblocks TPC-H q3, which writes three tables in the `FROM` and its two equalities in the `WHERE`. It runs now, and its ten order keys and their revenues agree with DuckDB 1.5 at scale factor 0.01. The claim in `firepanda/sql/plan.mojo` that a comma in the `FROM` and a written `JOIN` reach the same plan was there before any of this was, and it was not true. It is a test now.
 
 Nothing moves for a cross join that stays one. Pushing a predicate into one of its sides would be sound, and the operator behind a cross join pairs a whole frame against a single row, so a predicate that emptied that side would leave a shape the lowering refuses. That one is written down where it is not done.
+
 ### Added: `str.cat`, the first answer narrower than a column
 
 `s.str.cat()` folds a whole text column into one string, with `sep` between neighbouring rows and none at either end. It is the first name on the `str` accessor whose answer is a scalar rather than a column, and it gets a function of its own in the accessor layer for the same reason `partition` does: the doors there are picked by the shape of the answer, and a string is not a column.
@@ -53,7 +66,7 @@ Two of those are doubles and were being refused along with the decimals. A liter
 
 What is still refused is the decimal literal that fits, for the reason it always was. A double in its place answers `3.3000000000000003` where DuckDB answers `3.3`, and the plan has nowhere to hold the right answer.
 
-Every case was put to DuckDB 1.5 first, and four of them went into the value differential, read back as whole numbers and yes and no because that harness compares three types and a double is not one of them. Adding them found issue #786: a cast of a double to an integer truncates where DuckDB rounds, so `CAST(2.6 AS BIGINT)` is 2 here and 3 there. That is recorded in the harness with the issue against it rather than fixed here, because `astype` has to keep truncating to match pandas and deciding where the two front ends part company is not this entry's work.
+Every case was put to DuckDB 1.5 first, and four of them went into the value differential, read back as whole numbers and yes and no because that harness compares three types and a double is not one of them. Adding them found issue #786: a cast of a double to an integer truncated where DuckDB rounds, so `CAST(2.6 AS BIGINT)` was 2 here and 3 there. That was recorded in the harness with the issue against it rather than fixed here, because deciding where the two front ends part company was not this entry's work. The entry above is where that was decided, and the two ship together.
 
 ### Added: a SQL type carries a list's element, so a call returning a list has a type
 

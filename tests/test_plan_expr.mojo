@@ -23,7 +23,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
 from firepanda.plan.print import render_expr
 
 
@@ -106,6 +106,22 @@ def test_a_cast_carries_the_type_it_was_asked_for() raises:
     var widened = tree.cast(LogicalType.FLOAT64, a)
     assert_true(
         tree.nodes[widened].type == LogicalType.FLOAT64, "the target is on it"
+    )
+    assert_equal(tree.nodes[widened].op, 0, "and it truncates unless asked")
+
+
+def test_a_cast_told_to_round_keeps_that_in_the_field_nothing_else_uses() raises:
+    var tree = Expressions()
+    var a = tree.column("a")
+    var whole = tree.cast(LogicalType.INT64, a, nearest=True)
+    assert_equal(tree.nodes[whole].op, NEAREST, "the flag went into op")
+    assert_equal(
+        render_expr(tree, whole), "a::int64 nearest", "and the plan says so"
+    )
+    assert_equal(
+        render_expr(tree, tree.cast(LogicalType.INT64, a)),
+        "a::int64",
+        "where one that truncates reads the way it always did",
     )
 
 
