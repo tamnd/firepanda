@@ -32,8 +32,13 @@ from firepanda.kernel.chars import (
     text_character_slice,
     text_character_substring,
     text_find,
+    text_is_alnum,
+    text_is_alpha,
     text_is_ascii,
+    text_is_decimal,
+    text_is_digit,
     text_is_lower,
+    text_is_numeric,
     text_is_space,
     text_is_title,
     text_is_upper,
@@ -1020,6 +1025,112 @@ def test_the_ascii_question_is_the_one_that_says_yes_to_an_empty_row() raises:
     assert_equal(out[0], "yes")
     assert_equal(out[1], "null")
     assert_equal(out[2], "yes")
+
+
+def test_a_letter_question_wants_every_character_to_be_a_letter() raises:
+    var out = asked(text_is_alpha(made(["abc", "café", "ab1", "a b", "ǅ"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "no")
+    assert_equal(out[3], "no")
+    assert_equal(out[4], "yes")
+
+
+def test_a_letter_is_not_a_number_and_a_number_is_not_a_letter() raises:
+    # Measured against Arrow over every code point there is by the generator,
+    # which refuses to write a table if the two classes ever overlap. It
+    # matters because a Roman numeral looks like both and Arrow calls it one.
+    var column = made(["三", one(0x2167), one(0x3007)])
+    var letters = asked(text_is_alpha(column))
+    var numbers = asked(text_is_numeric(column))
+    assert_equal(letters[0], "yes")
+    assert_equal(numbers[0], "no")
+    assert_equal(letters[1], "no")
+    assert_equal(numbers[1], "yes")
+    assert_equal(letters[2], "no")
+    assert_equal(numbers[2], "yes")
+
+
+def test_the_three_number_questions_narrow_in_that_order() raises:
+    # An ASCII four is all three. A superscript two and a half sign are digits
+    # and are not decimal. A Roman numeral is neither, because it is a number
+    # and a letter at once, which is the only thing the widest question adds.
+    var column = made(["4", one(0x00B2), one(0x00BD), one(0x2167)])
+    var numeric = asked(text_is_numeric(column))
+    var digit = asked(text_is_digit(column))
+    var decimal = asked(text_is_decimal(column))
+    assert_equal(numeric[0] + digit[0] + decimal[0], "yesyesyes")
+    assert_equal(numeric[1] + digit[1] + decimal[1], "yesyesno")
+    assert_equal(numeric[2] + digit[2] + decimal[2], "yesyesno")
+    assert_equal(numeric[3] + digit[3] + decimal[3], "yesnono")
+
+
+def test_a_half_sign_is_a_digit_here_and_is_not_one_in_python() raises:
+    # The single most surprising answer in this file, and it is pandas' answer
+    # rather than a choice made here. Arrow calls anything written as one
+    # number sign a digit, Python calls it numeric and not a digit, and the two
+    # disagree about 877 code points. pandas reads its text out of Arrow.
+    var out = asked(
+        text_is_digit(made([one(0x00BD), one(0x00BC), one(0x00B3)]))
+    )
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+
+
+def test_a_decimal_digit_need_not_be_an_ascii_one() raises:
+    # Arabic Indic four and Extended Arabic Indic five, both of which are a
+    # place in a base ten number in exactly the way an ASCII four is.
+    var out = asked(text_is_decimal(made([one(0x0664), one(0x06F5), "42"])))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+
+
+def test_the_alphanumeric_question_is_the_other_two_together() raises:
+    # There is no alphanumeric class anywhere in this library, because a
+    # character is alphanumeric exactly when it is a letter or a number, and
+    # that identity is measured against Arrow rather than assumed.
+    var column = made(["abc", "123", "ab1", one(0x2167) + "x", "a b", "1.5"])
+    var out = asked(text_is_alnum(column))
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "yes")
+    assert_equal(out[2], "yes")
+    assert_equal(out[3], "yes")
+    assert_equal(out[4], "no")
+    assert_equal(out[5], "no")
+
+
+def test_an_empty_row_answers_no_to_all_five() raises:
+    # The rule is that the row has a character and every character it has is in
+    # the class, and the first half of that is what an empty row fails. Only
+    # `isascii` says yes to a row of nothing, because it asks the other way.
+    var column = made([""])
+    assert_equal(asked(text_is_alpha(column))[0], "no")
+    assert_equal(asked(text_is_numeric(column))[0], "no")
+    assert_equal(asked(text_is_digit(column))[0], "no")
+    assert_equal(asked(text_is_decimal(column))[0], "no")
+    assert_equal(asked(text_is_alnum(column))[0], "no")
+
+
+def test_all_five_keep_a_missing_row_missing() raises:
+    var column = made(["null", "a1"])
+    assert_equal(asked(text_is_alpha(column))[0], "null")
+    assert_equal(asked(text_is_numeric(column))[0], "null")
+    assert_equal(asked(text_is_digit(column))[0], "null")
+    assert_equal(asked(text_is_decimal(column))[0], "null")
+    assert_equal(asked(text_is_alnum(column))[0], "null")
+    assert_equal(asked(text_is_alnum(column))[1], "yes")
+
+
+def test_the_class_questions_stop_at_the_first_character_that_fails() raises:
+    # Not a timing assertion, a correctness one. The loop breaks early and the
+    # characters after the break are never read, so a row whose tail would
+    # answer differently has to come out the same as one whose tail is short.
+    var out = asked(text_is_alpha(made(["1abc", "1", "1" + one(0x2167)])))
+    assert_equal(out[0], "no")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "no")
 
 
 def main() raises:

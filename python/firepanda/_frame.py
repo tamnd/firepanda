@@ -543,6 +543,41 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def isalpha(self) -> Series:
+        """Whether every row is letters and nothing else."""
+        try:
+            return self._flag("isalpha", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isnumeric(self) -> Series:
+        """Whether every row is numbers and nothing else."""
+        try:
+            return self._flag("isnumeric", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isdigit(self) -> Series:
+        """Whether every row is digits and nothing else."""
+        try:
+            return self._flag("isdigit", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isdecimal(self) -> Series:
+        """Whether every row is decimal digits and nothing else."""
+        try:
+            return self._flag("isdecimal", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def isalnum(self) -> Series:
+        """Whether every row is letters and numbers and nothing else."""
+        try:
+            return self._flag("isalnum", "")
+        except Exception as error:
+            raise translate(error) from None
+
     def removeprefix(self, prefix: Any) -> Series:
         """Every row with a leading string taken off, if it has one."""
         try:
