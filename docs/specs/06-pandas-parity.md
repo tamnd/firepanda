@@ -237,8 +237,9 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `split`, `rsplit`, `partition`, `rpartition`, with `expand=` (M6)
 - [ ] `join` (M6)
 - [x] `contains`, `startswith`, `endswith`, `match`, `fullmatch` (M6), the last three exact for any pattern holding none of the twelve regular expression characters and refusing by name for any pattern that does, since a pattern with no metacharacter in it means the same thing to an engine as it does to a byte search and there is no engine here yet
+- [x] `case=False` on `contains`, `match`, `fullmatch` and `replace` (M6), documented in `69-the-fold-a-search-is-not-the-fold-a-reader-gets.md`, folding one code point to exactly one code point out of a second Unicode table because the fold a search compares through is not the one `casefold` does, so `STRASSE` does not hold `straße` here for the same reason it does not in pandas
 - [x] `find`, `rfind`, `index`, `rindex`, `count` (M6), `count` counting matches that do not overlap and counting an empty pattern in bytes rather than characters, which is Arrow's rule and pandas' answer and is one more than Python's on every non ASCII character in the row
-- [x] `replace` with a literal, `removeprefix`, `removesuffix` (M6), `replace` reading its pattern literally because `regex` defaults to False in pandas 3 so the ordinary call needs no engine and narrows nothing, honouring `n` at every sign it can have, refusing `case` and `flags` rather than ignoring them, and inserting between characters for an empty pattern where `count` counts bytes for the same argument, which is pandas' own split and comes from a pyarrow kernel that does not terminate
+- [x] `replace` with a literal, `removeprefix`, `removesuffix` (M6), `replace` reading its pattern literally because `regex` defaults to False in pandas 3 so the ordinary call needs no engine and narrows nothing, honouring `n` at every sign it can have, honouring `case=False` through the folded search and matching pandas' own reading of `n=0` as all of them once the search is folded, refusing `flags` rather than ignoring them, and inserting between characters for an empty pattern where `count` counts bytes for the same argument, which is pandas' own split and comes from a pyarrow kernel that does not terminate
 - [ ] `replace` with a regular expression, which needs the engine and a backreference syntax with it (M6)
 - [ ] `extract`, `extractall`, `findall` (M6)
 - [ ] `get_dummies` (M6)
@@ -246,7 +247,7 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [x] `isspace`, `islower`, `isupper` (M6), answered out of Arrow's own character classes and exact on every code point there is, and answering a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
 - [x] `istitle`, `isascii` (M6), the first sharing the word rule `title` uses and the second needing no table at all, and it is the one question in the group a row of nothing answers yes to, both exact on every code point there is and both carrying the same missing row divergence
 - [x] `isalnum`, `isalpha`, `isdigit`, `isnumeric`, `isdecimal` (M6), four more Arrow character classes with `isalnum` needing none of its own because a character is alphanumeric exactly when it is alphabetic or numeric, exact on every code point there is, and note that Arrow's digit is wider than Python's by 877 code points so pandas calls `½` a digit and `str.isdigit` does not
-- [ ] `translate` (M6), and `casefold` is ticked above with the rest of the case group
+- [x] `translate` (M6), documented in `68-a-table-is-not-a-small-replace.md`, a table of single characters applied in one pass so a swap really swaps, taking a mapping where pandas takes anything subscriptable because the general case is a Python call per character, and `casefold` is ticked above with the rest of the case group
 
 ## 5. The `.dt` accessor
 

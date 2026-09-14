@@ -21,14 +21,20 @@ Negation, which is a short list and a different rule from subtraction.
 The lattice, through `CASE`, over every ordered pair. This is
 `firepanda/sql/cast.mojo`, the type two branches of one expression agree on.
 
-Calls, over the tier 1 catalog. This is `firepanda/sql/registry.mojo` and
-`resolve.mojo` together, and it is the resolution fuzzer document 07 asks for:
-every name, at every arity it declares up to two, over every combination of a
-smaller matrix. Where the winning signature names a concrete return type, the
-type is compared. Where it says `ANY`, a template letter or a bare `DECIMAL`,
-only the choice between binding and refusing is, because substituting a template
-and deriving a decimal's precision are the binder's job and the binder does not
-do them yet.
+Calls, over the tier 1 catalog. This is `firepanda/sql/registry.mojo`,
+`resolve.mojo` and `result.mojo` together, and it is the resolution fuzzer
+document 07 asks for: every name, at every arity it declares up to two, over
+every combination of a smaller matrix. Both halves of a call are compared, which
+signature won and what it comes out as, the second having to be derived wherever
+the catalog writes a rule in place of a type.
+
+What is left unclaimed is the maps. A signature returning `MAP` needs two
+element types and `SqlType` carries one, so 12 probes across one name are
+compared on the choice of overload alone and nothing is said about their type.
+Those are counted and named in the report rather than being absorbed into the
+agreement figure, because the two claims are not the same claim and folding them
+together would give a number that goes up when the binder is taught less. Issue
+#780 is the list.
 
 The oracle is `tools/semantics.py`, which builds a table with one column per
 type in the matrix and asks DuckDB for `typeof` of each expression over it. The
@@ -60,8 +66,9 @@ from firepanda.sql import (
 )
 from firepanda.sql.arith import operator_name
 from firepanda.sql.generated.functions import KIND_MACRO
-from firepanda.sql.registry import NO_SLOT, ROLE_EXACT, Overload
+from firepanda.sql.registry import Overload
 from firepanda.sql.resolve import resolve
+from firepanda.sql.result import result_type
 from firepanda.sql.types import (
     BLOB,
     BOOLEAN,
@@ -70,15 +77,10 @@ from firepanda.sql.types import (
     FLOAT,
     HUGEINT,
     INTERVAL,
-    TYPE_ARRAY,
-    TYPE_DECIMAL,
-    TYPE_LIST,
-    TYPE_MAP,
-    TYPE_STRUCT,
+    INVALID,
     TYPE_UBIGINT,
     TYPE_UHUGEINT,
     TYPE_UINTEGER,
-    TYPE_UNION,
     TYPE_USMALLINT,
     TYPE_UTINYINT,
     TYPE_UUID,
@@ -107,11 +109,11 @@ comptime OURS_UNKNOWN = "*"
 """What firepanda's answer is when it binds the expression and has nothing to
 say about the type.
 
-Only the call section produces one. A signature that returns `ANY`, a template
-letter or a bare `DECIMAL` has a return type that is a rule over the arguments
-rather than a type, and those rules are the binder's and are not written yet. It
-counts as agreement against any type DuckDB gives, because what is being
-compared there is the choice of overload and not the type.
+Only the call section produces one, and only for a signature that returns a
+`MAP`. A map needs a key type and a value type to answer with and `SqlType`
+carries one element, so nothing is claimed about the type either way. It counts
+as agreement against whatever DuckDB gives, because what is being compared there
+is the choice of overload and not the type.
 """
 
 comptime MOST_ARGUMENTS = 2
@@ -411,38 +413,69 @@ def lattice_probes(types: List[SqlType]) raises -> List[Probe]:
     return out^
 
 
-def returned(registry: Registry, overload: Overload) -> String:
-    """What a signature says its result type is, when it says one.
+def called_name(expression: StringSlice) -> String:
+    """The function name a call probe was written for.
+
+    Args:
+        expression: The probe's expression.
+
+    Returns:
+        Everything before the first bracket, or an empty string for a probe
+        that is not a call and so has no name to report.
+    """
+    var text = String(expression)
+    var at = text.find("(")
+    if at <= 0:
+        return String("")
+    return String(text[byte=0:at])
+
+
+def listed(names: List[String], name: StringSlice) -> Bool:
+    """Whether a name has already been collected.
+
+    A walk rather than a set, because the list is the number of names whose
+    return type is a rule and that is tens, not thousands.
+
+    Args:
+        names: What has been collected.
+        name: The name to look for.
+
+    Returns:
+        True if it is already there.
+    """
+    for other in names:
+        if other == name:
+            return True
+    return False
+
+
+def returned(
+    registry: Registry,
+    name: StringSlice,
+    overload: Overload,
+    arguments: List[SqlType],
+) raises -> String:
+    """What a resolved call comes out as, when that can be said.
+
+    The deriving is `sql/result.mojo` rather than here, because it is the
+    binder's answer and not the harness's. What is left here is turning the one
+    thing it cannot say into the mark the report counts.
 
     Args:
         registry: The catalog.
+        name: The name the call was written with.
         overload: The winning signature.
+        arguments: The argument types.
 
     Returns:
-        The type's name, or `OURS_UNKNOWN` where the signature names a rule
-        rather than a type.
+        The type's name, or `OURS_UNKNOWN` where it comes out invalid, which is
+        a macro and a `MAP` and nothing else now.
+
+    Raises:
+        Error: Never, but the deriving it calls can.
     """
-    if overload.kind == KIND_MACRO or overload.returns == NO_SLOT:
-        return String(OURS_UNKNOWN)
-    var slot = Int(overload.returns)
-    if registry.roles[slot] != ROLE_EXACT:
-        return String(OURS_UNKNOWN)
-    var type = registry.types[slot]
-    # A bare `DECIMAL` in the catalog is a promise about the family and not
-    # about the width. `sum(DECIMAL(5,2))` is a `DECIMAL(38,2)` and the
-    # signature says neither number. A container is the same promise about its
-    # elements: `histogram` is declared to return `MAP` and returns
-    # `MAP(BOOLEAN, UBIGINT)`, and the two words in there come from the
-    # argument and from what the aggregate does, neither of which the catalog
-    # writes down.
-    if (
-        type.id == TYPE_DECIMAL
-        or type.id == TYPE_LIST
-        or type.id == TYPE_ARRAY
-        or type.id == TYPE_STRUCT
-        or type.id == TYPE_MAP
-        or type.id == TYPE_UNION
-    ):
+    var type = result_type(registry, name, overload, arguments)
+    if type == INVALID:
         return String(OURS_UNKNOWN)
     return type.name()
 
@@ -536,7 +569,9 @@ def call_probes(
                 var resolved = resolve(registry, casts, at, arguments)
                 var ours = String(OURS_REFUSED)
                 if resolved.matched() and not resolved.ambiguous():
-                    ours = returned(registry, overloads[resolved.at])
+                    ours = returned(
+                        registry, name, overloads[resolved.at], arguments
+                    )
                 out.append(Probe(SECTION_CALL, written^, ours^))
 
                 var slot = count - 1
@@ -703,6 +738,8 @@ def main() raises:
     var answers = ask_duckdb(types, probes)
 
     var explained = 0
+    var deferred = 0
+    var deferred_names = List[String]()
     var wrong_type = List[Probe]()
     var wrong_type_answers = List[String]()
     var we_bind = List[Probe]()
@@ -719,7 +756,13 @@ def main() raises:
         if we_refused and they_refused:
             continue
         if not we_refused and not they_refused:
-            if probe.ours == OURS_UNKNOWN or probe.ours == theirs:
+            if probe.ours == OURS_UNKNOWN:
+                deferred += 1
+                var name = called_name(probe.expression)
+                if name != "" and not listed(deferred_names, name):
+                    deferred_names.append(name)
+                continue
+            if probe.ours == theirs:
                 continue
 
         if known(probe, theirs):
@@ -742,8 +785,56 @@ def main() raises:
         len(probes),
         "expressions,",
         explained,
-        "were known cases",
+        "were known cases,",
+        deferred,
+        "were compared on the overload alone",
     )
+
+    if deferred != 0:
+        # Said out loud rather than folded into the agreement number, because a
+        # probe that both sides bind and that this cannot name a type for is
+        # not a comparison of types at all. It is a comparison of which
+        # overload won, which is worth making and is a weaker claim, and an
+        # agreement figure that counts the two the same way is a figure that
+        # improves when the binder learns less.
+        print()
+        print(
+            "   ",
+            deferred,
+            (
+                "of those are calls returning a map, which needs a key type and"
+                " a value type"
+            ),
+        )
+        print(
+            "   ",
+            (
+                "where SqlType carries one element, so only the overload is"
+                " compared."
+            ),
+        )
+        if len(deferred_names) == 1:
+            print("   ", "one name is involved:")
+        else:
+            print("   ", len(deferred_names), "names are involved:")
+        # Wrapped by hand at 76 bytes, with the comma attached to the name
+        # rather than trailing the line, so that a name landing at the edge
+        # does not leave a space at the end of a line for git to complain
+        # about later.
+        var line = String("    ")
+        for at in range(len(deferred_names)):
+            var piece = deferred_names[at]
+            if at != len(deferred_names) - 1:
+                piece += ","
+            if line == "    ":
+                line += piece
+            elif line.byte_length() + 1 + piece.byte_length() > 76:
+                print(line)
+                line = String("    ") + piece
+            else:
+                line += " " + piece
+        if line != "    ":
+            print(line)
 
     report(
         "these come out a different type:",

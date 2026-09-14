@@ -181,6 +181,7 @@ from firepanda.kernel import (
     text_is_in,
     text_byte_length,
     text_extreme_row,
+    text_like,
     text_starts_with,
     text_pick,
     text_substring,
@@ -3395,6 +3396,28 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/contains_pair", "rows", rows, contains_pair)
+
+    # The matcher, against the contains rows above it. A pattern that reads as
+    # one of the searches never reaches it, so what these two measure is the
+    # price of the shapes that used to be refused rather than a regression risk
+    # for the ones that were not. `%ghij_%` is `contains_hit` with one byte of
+    # it made a wildcard, which is as close as the suite can get to reading the
+    # difference between the search and the walk on the same question, and the
+    # miss is the row where the walk has nowhere to stop early.
+    var globbed = String("%ghij_%")
+    var globbed_miss = String("%ghijx_%")
+
+    def like_hit() raises {imm flat, imm globbed}:
+        var out = text_like(flat, globbed.as_bytes())
+        keep(out)
+
+    harness.record("text/like_hit", "rows", rows, like_hit)
+
+    def like_miss() raises {imm flat, imm globbed_miss}:
+        var out = text_like(flat, globbed_miss.as_bytes())
+        keep(out)
+
+    harness.record("text/like_miss", "rows", rows, like_miss)
 
     var front = String("abcd")
 

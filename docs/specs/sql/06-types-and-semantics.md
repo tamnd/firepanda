@@ -37,6 +37,11 @@ Two of these are not optional and both are absent from firepanda today.
 1/0        ->  inf        DOUBLE
 5%3        ->  2          INTEGER
 2^3        ->  8.0        DOUBLE
+-7//3      ->  -2         INTEGER
+-7%3       ->  -1         INTEGER
+-7.5//3    ->  -2.5       DOUBLE
+7.0//0.0   ->  NULL
+7.0/0.0    ->  inf        DOUBLE
 ```
 
 `/` on two integers is floating point division producing a DOUBLE. Integer division is `//`. The `integer_division` setting flips `/` back and defaults to false.
@@ -44,6 +49,10 @@ Two of these are not optional and both are absent from firepanda today.
 Division by zero follows `ieee_floating_point_ops`, which defaults to true, so `1/0` is `inf`, not an error and not null. `1//0` is `NULL`. Postgres raises on both. pandas gives `inf` for the float case and raises for the integer one.
 
 Three different systems, three different answers, no error in any of them. This is the archetype of what this document is for.
+
+The rounding is the part that cost something. `//` truncates towards zero and `%` gives the remainder the sign of the dividend, which is C's rule, where Python and so pandas floor the quotient and give the remainder the sign of the divisor. The two agree on every pair of positive numbers and part company on a negative one, so lowering a query's `//` onto the kernel the dataframe surface uses answered `-3` to `-7 // 3` for as long as nothing asked. That was issue #770 and the fix is a second pair of kernels rather than a mode on the first, because both answers are right where they are asked.
+
+Two more readings that no rule predicts, both measured against DuckDB 1.5.1 rather than reasoned out. On a float `//` does not round at all, so `-7.5 // 3` is `-2.5`: the name in this dialect is the division that is integral only when its operands are. And a zero divisor is a null whatever the dtype, so `7.0 // 0.0` is `NULL` while `7.0 / 0.0` beside it is an infinity, with `ieee_floating_point_ops` on in both cases, which reads as a gap in the overload set upstream and is the answer either way.
 
 ## 3. Decimals, and why `1.1 + 2.2` is exactly `3.3`
 

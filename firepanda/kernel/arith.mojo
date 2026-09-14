@@ -35,6 +35,16 @@ of the types alone, and it is a registered divergence rather than a quiet
 difference. Floats still answer the infinity, because a float column can hold
 one.
 
+Those two have a second pair beside them, `sql_divide` and `sql_modulo`, which
+are the same two operators as SQL means them. A negative quotient rounds towards
+zero there rather than towards minus infinity and the remainder takes the sign of
+the dividend rather than the divisor, which is C's rule and every SQL engine's.
+Two operators rather than one with a flag, because both answers are right where
+they are asked: a query that writes `//` asked for SQL and a frame that writes
+`//` asked for pandas. On a float dtype the SQL division is not a floor division
+at all, since `-7.5 // 3` is `-2.5` in that dialect, and a zero divisor is a
+null there too rather than the infinity pandas wants.
+
 On a float those two are not vector instructions either, for a reason of their
 own that has nothing to do with a zero divisor. Mojo's `//` and `%` on a
 register of floats compute `floor(x / y)` and `x - floor(x / y) * y`, which is
@@ -121,6 +131,21 @@ through `OP_ADD`.
 
 comptime OP_AND = 8
 """Operation code for the logical and, which is what `*` means on two bools."""
+
+comptime OP_SQLDIV = 9
+"""Operation code for the division SQL means by `//`.
+
+Not a second opinion about what `//` should do. It is a second operator, because
+the SQL front end answers DuckDB and the frame surface answers pandas, and the
+two disagree about which way a negative quotient rounds. See `sql_divide`.
+"""
+
+comptime OP_SQLMOD = 10
+"""Operation code for the remainder that goes with `OP_SQLDIV`.
+
+It takes the sign of the dividend where `OP_MOD` takes the sign of the divisor,
+which is the same one difference read from the other end. See `sql_modulo`.
+"""
 
 
 def add[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
@@ -271,7 +296,7 @@ def floor_divide[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
         Error: Only what the morsel runtime raises.
     """
     comptime if dt.is_integral():
-        return _int_divide[dt, OP_FLOORDIV](a, b)
+        return _divide_nulling[dt, OP_FLOORDIV](a, b)
     else:
         return _arith[dt, OP_FLOORDIV](a, b)
 
@@ -303,9 +328,84 @@ def modulo[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
         Error: Only what the morsel runtime raises.
     """
     comptime if dt.is_integral():
-        return _int_divide[dt, OP_MOD](a, b)
+        return _divide_nulling[dt, OP_MOD](a, b)
     else:
         return _arith[dt, OP_MOD](a, b)
+
+
+def sql_divide[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Divides two columns elementwise the way SQL's `//` divides them.
+
+    The pair above is pandas' and this pair is DuckDB's, and they are two
+    operators rather than one with an opinion, because both answers are right
+    where they are asked. A query that says `//` asked for SQL and a frame that
+    says `//` asked for pandas, and answering one of them the other's number
+    because the kernel was shared is how `-2 // 3` came out `-1` in a SQL query
+    that DuckDB answers `0`.
+
+    Two differences, and the second one is the surprise. On integers the
+    quotient is truncated towards zero rather than floored, which is C's
+    rounding and the one every SQL engine uses. On floats `//` is not a floor
+    division at all: DuckDB answers `-7.5 // 3` with `-2.5`, which is the
+    ordinary quotient, because `//` in that dialect is the name of the division
+    that is integral only when its operands are.
+
+    A zero divisor is a null, and on a float dtype as well as on an integer one,
+    which is the third difference and the one no rule predicts. DuckDB answers
+    `NULL` to `7 // 0` and also to `7.0 // 0.0`, while `7.0 / 0.0` beside it
+    answers an infinity, because the setting that puts the IEEE answers back has
+    nothing registered for `//`. So this nulls where `divide_float` does not.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of the same dtype, null wherever either input is null or the
+        divisor is zero.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _divide_nulling[dt, OP_SQLDIV](a, b)
+
+
+def sql_modulo[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Takes the remainder SQL's `%` means, elementwise.
+
+    The remainder that goes with `sql_divide`, and it is consistent with it for
+    the same reason `modulo` is consistent with `floor_divide`: the quotient and
+    the remainder come out of one rounding. Truncating the quotient gives the
+    remainder the sign of the dividend, so `-2 % 3` is `-2` here and `1` next
+    door, and `-7.5 % 3` is `-1.5`.
+
+    On a float this is the C library's `fmod` and nothing added, which is
+    exactly the call `_remainders` makes before it corrects the sign. The
+    correction is the whole of the difference between the two remainders and
+    this is the uncorrected one.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders of the same dtype, null wherever either input is
+        null and, on an integer dtype, null wherever the divisor is zero. A
+        float column has a NaN there rather than a null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime if dt.is_integral():
+        return _divide_nulling[dt, OP_SQLMOD](a, b)
+    else:
+        return _arith[dt, OP_SQLMOD](a, b)
 
 
 def power[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
@@ -469,6 +569,71 @@ def _remainders[
     return is_zero.select(copysign(zero, y), differ.select(mod + y, mod))
 
 
+def _truncated[
+    dt: DType, width: Int
+](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Turns a register of floored integer quotients into truncated ones.
+
+    The two roundings agree on every pair but one: a negative quotient that did
+    not come out exact. Flooring sends `-2 / 3` to `-1` and truncating sends it
+    to `0`, so adding one back where the signs of the operands differ and the
+    division left a remainder is the whole correction.
+
+    It is written out of `//` and `%` rather than out of a truncating
+    instruction because Mojo's integer operators are Python's, and because the
+    two the hardware computes together are the two this needs. A compiler that
+    sees both gets one division out of it.
+
+    Args:
+        x: The numerators.
+        y: The denominators.
+
+    Parameters:
+        dt: An integer dtype.
+        width: How many lanes.
+
+    Returns:
+        A register of quotients rounded towards zero.
+    """
+    var quotient = x // y
+    comptime if not dt.is_signed():
+        return quotient
+    else:
+        var zero = SIMD[dt, width](0)
+        var apart = x.lt(zero) ^ y.lt(zero)
+        return (apart & (x % y).ne(zero)).select(quotient + 1, quotient)
+
+
+def _truncated_remainders[
+    dt: DType, width: Int
+](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Turns a register of integer remainders into the ones C answers.
+
+    The same one correction as `_truncated`, read from the other end. Where the
+    quotient gains a one, the remainder loses a divisor, so `-2 % 3` goes from
+    `1` to `-2` and the identity between the two is kept: the quotient times the
+    divisor plus the remainder is still the numerator.
+
+    Args:
+        x: The numerators.
+        y: The denominators.
+
+    Parameters:
+        dt: An integer dtype.
+        width: How many lanes.
+
+    Returns:
+        A register of remainders taking the sign of the numerator.
+    """
+    var remainder = x % y
+    comptime if not dt.is_signed():
+        return remainder
+    else:
+        var zero = SIMD[dt, width](0)
+        var apart = x.lt(zero) ^ y.lt(zero)
+        return (apart & remainder.ne(zero)).select(remainder - y, remainder)
+
+
 def _quotients[
     dt: DType, width: Int
 ](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
@@ -547,11 +712,13 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
 
     Parameters:
         dt: The dtype.
-        op: One of the seven operation codes. Floor division, the remainder and
-            true division reach here on a float dtype only; the integer forms of
-            the first two need the validity and go through `_int_divide`, and an
-            integer true division answers a wider dtype than it was given and
-            goes through `divide`.
+        op: One of the nine operation codes, and not `OP_SQLDIV`, which nulls a
+            zero divisor on every dtype and so is always a `_divide_nulling`.
+            Floor division, the remainder, SQL's remainder and true division
+            reach here on a float dtype only; the integer forms of the three
+            need the validity and go through `_divide_nulling`, and an integer
+            true division answers a wider dtype than it was given and goes
+            through `divide`.
 
     Returns:
         A column of results, null wherever either input is null.
@@ -591,6 +758,8 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
                 dst.unsafe_offset(i).unsafe_store(_remainders(x, y))
             elif op == OP_DIV:
                 dst.unsafe_offset(i).unsafe_store(x / y)
+            elif op == OP_SQLMOD:
+                dst.unsafe_offset(i).unsafe_store(_fmods(x, y))
             elif op == OP_OR:
                 dst.unsafe_offset(i).unsafe_store(x | y)
             elif op == OP_AND:
@@ -620,16 +789,22 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     return out^
 
 
-def _int_divide[
+def _divide_nulling[
     dt: DType, op: Int
 ](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
-    """Floor divides or takes a remainder on integers, nulling the zero rows.
+    """Divides or takes a remainder, nulling the rows with a zero divisor.
 
     This is the only loop in the file whose answer depends on a value rather
     than only on the types, and it is why the shape differs from `_arith`. The
     validity is not a copy of the inputs' any more: a row whose divisor is zero
-    has no integer answer and comes out null, so the bitmap is written inside
-    the loop and not just read at the end of it.
+    comes out null, so the bitmap is written inside the loop and not just read
+    at the end of it.
+
+    Three of the four operations reach here on an integer dtype only, because a
+    zero divisor has no integer answer and a float has an infinity to put there.
+    `OP_SQLDIV` reaches here on both, because DuckDB answers `NULL` to
+    `7.0 // 0.0` as well as to `7 // 0`, even with `ieee_floating_point_ops` on
+    and `7.0 / 0.0` answering an infinity beside it.
 
     Writing it there is safe because a morsel boundary is a multiple of 64
     rows, so two workers never reach for the same byte of the bitmap. It is
@@ -649,8 +824,8 @@ def _int_divide[
         b: The denominator column. Must be the same length as `a`.
 
     Parameters:
-        dt: An integer dtype.
-        op: `OP_FLOORDIV` or `OP_MOD`.
+        dt: An integer dtype, or a float one when the operation is `OP_SQLDIV`.
+        op: `OP_FLOORDIV`, `OP_MOD`, `OP_SQLDIV` or `OP_SQLMOD`.
 
     Returns:
         A column of results, null wherever either input is null or the divisor
@@ -679,8 +854,17 @@ def _int_divide[
 
             comptime if op == OP_FLOORDIV:
                 dst.unsafe_offset(i).unsafe_store(x // y)
-            else:
+            elif op == OP_MOD:
                 dst.unsafe_offset(i).unsafe_store(x % y)
+            elif op == OP_SQLDIV:
+                comptime if dt.is_integral():
+                    dst.unsafe_offset(i).unsafe_store(_truncated(x, y))
+                else:
+                    # Not a floor division, because SQL's `//` is not one on a
+                    # float. See `sql_divide`.
+                    dst.unsafe_offset(i).unsafe_store(x / y)
+            else:
+                dst.unsafe_offset(i).unsafe_store(_truncated_remainders(x, y))
 
             # A zero divisor is rare, so the whole register is tested at once
             # and the walk that clears the bits only runs on a register that
@@ -819,8 +1003,10 @@ def arith_const[
 
     Parameters:
         dt: The dtype. The constant is already at it; promotion happened above.
-        op: One of the seven operation codes. Floor division, the remainder and
-            true division reach here on a float dtype only.
+        op: One of the nine operation codes, and not `OP_SQLDIV`, which nulls a
+            zero divisor on every dtype and so is always a
+            `_divide_nulling_const`. Floor division, the remainder, SQL's
+            remainder and true division reach here on a float dtype only.
 
     Returns:
         A column of results, null wherever the column is null. A constant is
@@ -917,6 +1103,19 @@ def arith_const[
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
                     dst.unsafe_offset(i).unsafe_store(x / y)
+                    i += width
+        elif op == OP_SQLMOD:
+            if flip:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(_fmods(y, x))
+                    i += width
+            else:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(_fmods(x, y))
                     i += width
         elif op == OP_OR:
             # No branch on `flip`, for the same reason addition and
@@ -1042,7 +1241,7 @@ def floor_divide_const[
         Error: Only what the morsel runtime raises.
     """
     comptime if dt.is_integral():
-        return _int_divide_const[dt, OP_FLOORDIV](a, b, flip)
+        return _divide_nulling_const[dt, OP_FLOORDIV](a, b, flip)
     else:
         return arith_const[dt, OP_FLOORDIV](a, b, flip)
 
@@ -1068,9 +1267,66 @@ def modulo_const[
         Error: Only what the morsel runtime raises.
     """
     comptime if dt.is_integral():
-        return _int_divide_const[dt, OP_MOD](a, b, flip)
+        return _divide_nulling_const[dt, OP_MOD](a, b, flip)
     else:
         return arith_const[dt, OP_MOD](a, b, flip)
+
+
+def sql_divide_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
+    """Divides a column by a constant the way SQL's `//` divides them.
+
+    The constant form of `sql_divide`, and it has the same three differences
+    from the floor division above it: the quotient truncates towards zero on an
+    integer dtype, on a float dtype there is no rounding at all, and a zero
+    divisor is a null on both.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of the same dtype, null wherever the column is null or the
+        divisor is zero.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _divide_nulling_const[dt, OP_SQLDIV](a, b, flip)
+
+
+def sql_modulo_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
+    """Takes the remainder SQL means, between a column and a constant.
+
+    The constant form of `sql_modulo`. The remainder takes the sign of the
+    numerator, whichever side of the operator the column is on.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders of the same dtype, null wherever the column is
+        null and, on an integer dtype, wherever the divisor is zero.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime if dt.is_integral():
+        return _divide_nulling_const[dt, OP_SQLMOD](a, b, flip)
+    else:
+        return arith_const[dt, OP_SQLMOD](a, b, flip)
 
 
 def power_const[
@@ -1097,10 +1353,10 @@ def power_const[
     return arith_const[dt, OP_POW](a, b, flip)
 
 
-def _int_divide_const[
+def _divide_nulling_const[
     dt: DType, op: Int
 ](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
-    """Floor divides or takes a remainder on integers against one constant.
+    """Divides against one constant, nulling the rows with a zero divisor.
 
     Which side the constant is on decides how much work there is. With the
     column on top the divisor is the constant, so whether any row is null is
@@ -1114,8 +1370,10 @@ def _int_divide_const[
         flip: True if the constant is the numerator.
 
     Parameters:
-        dt: An integer dtype.
-        op: `OP_FLOORDIV` or `OP_MOD`.
+        dt: An integer dtype, or a float one when the operation is `OP_SQLDIV`,
+            which nulls a zero divisor on every dtype. `_divide_nulling` says
+            why.
+        op: `OP_FLOORDIV`, `OP_MOD`, `OP_SQLDIV` or `OP_SQLMOD`.
 
     Returns:
         A column of results, null wherever the column is null or the divisor is
@@ -1157,8 +1415,17 @@ def _int_divide_const[
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
                 comptime if op == OP_FLOORDIV:
                     dst.unsafe_offset(i).unsafe_store(y // x)
-                else:
+                elif op == OP_MOD:
                     dst.unsafe_offset(i).unsafe_store(y % x)
+                elif op == OP_SQLDIV:
+                    comptime if dt.is_integral():
+                        dst.unsafe_offset(i).unsafe_store(_truncated(y, x))
+                    else:
+                        dst.unsafe_offset(i).unsafe_store(y / x)
+                else:
+                    dst.unsafe_offset(i).unsafe_store(
+                        _truncated_remainders(y, x)
+                    )
 
                 # Same reduce and same walk as the two column form, and the
                 # walk stops at `stop` for the same reason: the padding past
@@ -1175,8 +1442,17 @@ def _int_divide_const[
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
                 comptime if op == OP_FLOORDIV:
                     dst.unsafe_offset(i).unsafe_store(x // y)
-                else:
+                elif op == OP_MOD:
                     dst.unsafe_offset(i).unsafe_store(x % y)
+                elif op == OP_SQLDIV:
+                    comptime if dt.is_integral():
+                        dst.unsafe_offset(i).unsafe_store(_truncated(x, y))
+                    else:
+                        dst.unsafe_offset(i).unsafe_store(x / y)
+                else:
+                    dst.unsafe_offset(i).unsafe_store(
+                        _truncated_remainders(x, y)
+                    )
                 i += width
 
         repair_range(out, validity, start, stop)

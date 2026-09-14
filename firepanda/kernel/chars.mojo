@@ -1189,6 +1189,155 @@ def text_swapcase(a: StringArray) raises -> StringArray:
     return built^.finish()
 
 
+def _one_point(bytes: Span[UInt8, _]) raises -> UInt32:
+    """Reads a key out of a row that is supposed to hold exactly one character.
+
+    Args:
+        bytes: The row.
+
+    Returns:
+        The code point.
+
+    Raises:
+        Error: If the row is not well formed UTF-8 or is not exactly one
+            character long, since a translation key is a single code point and
+            anything else would never have matched.
+    """
+    if not _well_formed(bytes) or character_count(bytes) != 1:
+        raise Error(
+            "translate: a key is one character and this one is "
+            + String(character_count(bytes))
+        )
+    for point in StringSlice(unsafe_from_utf8=bytes).codepoints():
+        return point.to_u32()
+    raise Error("translate: a key is one character and this one is empty")
+
+
+def text_translate(
+    a: StringArray, keys: StringArray, values: StringArray
+) raises -> StringArray:
+    """Writes every element out with single characters swapped one for one.
+
+    This is Python's `str.translate` and pandas' name for it, and it is not a
+    small `replace` even though it looks like one. Two things separate them. A
+    key is always exactly one character, never a run, so nothing has to be
+    searched for and there is no question of a match overlapping another. And
+    every key is applied in the same pass, so a table that swaps `a` for `b`
+    and `b` for `a` really swaps them, where the same pair given to `replace`
+    one after another would turn both into the same letter. What a key maps to
+    is never looked at again, so a key that maps to itself is a no-op and a key
+    that maps to another key does not chain.
+
+    A key the table does not hold leaves its character alone, which is why an
+    empty table hands every row back unchanged rather than emptying it.
+
+    Deleting a character and mapping it to the empty string are the same
+    operation and Python treats them as the same operation, so `None` in a
+    caller's table arrives here as an empty row of `values` and there is no
+    third case to carry. That is measured rather than assumed: pandas answers
+    `bc` for both `{ord("a"): None}` and `{ord("a"): ""}` on the row `abc`.
+
+    The lookup is a direct table for the first 128 code points and a binary
+    search for the rest, which is the same split `_in_class` makes and for the
+    same reason: most tables anybody writes come out of `str.maketrans` over
+    ASCII, and a table that is entirely ASCII lets a row that is entirely ASCII
+    be walked a byte at a time with no decoding at all.
+
+    Args:
+        a: The column.
+        keys: The characters to replace, one character per row, in ascending
+            order of code point and with no repeats.
+        values: What to put in their place, in the same order and the same
+            number of rows. An empty row deletes.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the two tables are different heights, if either holds a null,
+            if a key is not exactly one character, or if the keys are not in
+            ascending order. The order is a requirement rather than something
+            this fixes, because the caller holding the table is the side that
+            can sort it once instead of once per column.
+    """
+    var entries = len(keys)
+    if entries != len(values):
+        raise Error(
+            "translate: "
+            + String(entries)
+            + " keys and "
+            + String(len(values))
+            + " replacements"
+        )
+
+    # Two seats per key: the direct one for ASCII and the ordered list for
+    # everything above it. A key lands in exactly one of them.
+    var ascii_seat = List[Int32](length=128, fill=-1)
+    var wide_keys = List[UInt32]()
+    var wide_seat = List[Int32]()
+    var previous = UInt32(0)
+    for j in range(entries):
+        if not keys.is_valid(j) or not values.is_valid(j):
+            raise Error("translate: a table has no room for a missing value")
+        var point = _one_point(keys.unsafe_bytes(j))
+        if j > 0 and point <= previous:
+            raise Error(
+                "translate: the keys are out of order at entry " + String(j)
+            )
+        previous = point
+        if point < 128:
+            ascii_seat[Int(point)] = Int32(j)
+        else:
+            wide_keys.append(point)
+            wide_seat.append(Int32(j))
+
+    var plain = len(wide_keys) == 0
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var scratch = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if entries == 0:
+            built.append(bytes)
+            continue
+        if not _well_formed(bytes):
+            built.append(bytes)
+            continue
+
+        scratch.clear()
+        if plain and _is_ascii(bytes):
+            for k in range(len(bytes)):
+                var seat = ascii_seat[Int(bytes[k])]
+                if seat < 0:
+                    scratch.append(bytes[k])
+                else:
+                    scratch.extend(values.unsafe_bytes(Int(seat)))
+            built.append(Span(scratch))
+            continue
+
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        for point in text.codepoints():
+            var raw = point.to_u32()
+            var seat = Int32(-1)
+            if raw < 128:
+                seat = ascii_seat[Int(raw)]
+            else:
+                var found = _listed_at(Span(wide_keys), raw)
+                if found >= 0:
+                    seat = wide_seat[found]
+            if seat < 0:
+                var one = String(point)
+                scratch.extend(one.as_bytes())
+            else:
+                scratch.extend(values.unsafe_bytes(Int(seat)))
+        built.append(Span(scratch))
+
+    return built^.finish()
+
+
 def text_casefold(a: StringArray) raises -> StringArray:
     """Writes every element in the form two equal rows agree on.
 

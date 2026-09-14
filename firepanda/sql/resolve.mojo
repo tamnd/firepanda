@@ -29,12 +29,14 @@ already the cheapest a cast can be and going under it would put a template
 level with an exact match.
 
 The second is the containers. `ANY[]`, `T[]` and `MAP(K, V)` are shapes rather
-than types, and firepanda's `SqlType` carries no element type yet, so a list
-argument against a list parameter is as far as this can look. It matches on the
-shape and charges `ANY_COST`, which is right for the case where the elements
-already agree and optimistic for the case where they do not. Nothing in tier 1
-has two list overloads to choose between, so the optimism costs nothing today,
-and the day `SqlType` grows an element type is the day this gets to be exact.
+than types, and a list argument against a list parameter is as far as this
+looks. It matches on the shape and charges `ANY_COST`, which is right for the
+case where the elements already agree and optimistic for the case where they do
+not. `SqlType` does carry a list's element now, so charging the elements against
+each other is there to be written, but nothing in tier 1 has two list overloads
+to choose between and the harness has no list column to measure the answer
+against. The rest of this file was measured rather than reasoned out and this
+would be the one part that was not, so it waits for a case that can be.
 
 A macro resolves on its argument count alone. It declares parameters and no
 types for them, so there is nothing to charge, and DuckDB's own refusal for a
@@ -50,8 +52,12 @@ is the only place DuckDB ever says out loud that two signatures cost the same.
 
 What is not here is what the call's type comes out as. A concrete signature
 says, and `registry.spelling(overload.returns)` is it, but a template says `T`
-and answering that means substituting what `T` bound to, which is the binder's
-job and not the scorer's.
+and answering that means substituting what `T` bound to. That is `result.mojo`,
+next door, because it is a different question: this one is about which signature
+DuckDB would pick and that one is about what DuckDB's bind function for the name
+then does with the arguments, and the two disagree often enough to be worth
+keeping apart. `sum` and `avg` both declare a bare `DECIMAL` and produce
+different types.
 """
 
 from .cast import common_type

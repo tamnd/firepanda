@@ -490,6 +490,73 @@ def test_an_expression_in_the_select_list_is_computed() raises:
     )
 
 
+def test_an_integer_division_rounds_the_way_the_dialect_rounds() raises:
+    """A query asked for SQL, so `//` truncates towards zero and `%` takes the
+    sign of the dividend. Both lists came off DuckDB 1.5.1.
+
+    The frame surface answers the other rounding to the same expression and that
+    is not a bug on either side. What was a bug is that this went through the
+    pandas kernels until issue #770, so `-7 // 3` came back `-3` here where the
+    engine being copied says `-2`, and the rows that are positive agreed all
+    along, which is why nothing noticed."""
+    same(
+        answer("SELECT (qty - 12) // 3 AS q FROM sales", "q"),
+        [-2, 2, -3, 9, 0, -1, 4, -3, 6, 1],
+        "truncated",
+    )
+    same(
+        answer("SELECT (qty - 12) % 3 AS r FROM sales", "r"),
+        [-1, 2, 0, 1, 0, -1, 1, -2, 0, 0],
+        "remainder",
+    )
+    same(
+        answer("SELECT (qty - 12) // (-3) AS q FROM sales", "q"),
+        [2, -2, 3, -9, 0, 1, -4, 3, -6, -1],
+        "a negative divisor",
+    )
+
+
+def test_a_zero_divisor_in_a_query_is_a_null_and_not_an_error() raises:
+    """DuckDB answers `NULL` rather than raising, and the divisor here is a
+    column, which is the path that has to find the zero a row at a time rather
+    than once above the loop. Row four is the one where `qty` is twelve."""
+    var out = run("SELECT 12 // (qty - 12) AS q FROM sales", session())
+    var col = out.column("q").as_typed[DType.int64]()
+    var want: List[Int64] = [-1, 1, -1, 0, 0, -3, 0, -1, 0, 4]
+    assert_equal(len(col), 10, "how many rows")
+    for i in range(10):
+        if i == 4:
+            assert_true(not col.is_valid(i), "the zero divisor is a null")
+            continue
+        assert_true(col.is_valid(i), "row " + String(i))
+        assert_equal(col[i], want[i], "row " + String(i))
+
+
+def test_two_columns_divide_the_same_way_a_column_and_a_constant_do() raises:
+    """The two column loop is a different loop from the constant one, and a
+    dialect that was right in one of them and pandas' in the other is exactly
+    the failure the differential found. Both columns hold negatives here and
+    `price - 5` holds a zero."""
+    var out = run(
+        (
+            "SELECT (qty - 12) // (price - 5) AS q, (qty - 12) % (price - 5) AS"
+            " r FROM sales"
+        ),
+        session(),
+    )
+    var quotients = out.column("q").as_typed[DType.int64]()
+    var remainders = out.column("r").as_typed[DType.int64]()
+    var want_q: List[Int64] = [-1, -2, -4, -7, 0, -1, -6, 0, -18, 3]
+    var want_r: List[Int64] = [-2, 2, -1, 0, 0, 0, 1, -11, 0, 0]
+    for i in range(10):
+        if i == 4:
+            assert_true(not quotients.is_valid(i), "the zero divisor")
+            assert_true(not remainders.is_valid(i), "and its remainder")
+            continue
+        assert_equal(quotients[i], want_q[i], "quotient at " + String(i))
+        assert_equal(remainders[i], want_r[i], "remainder at " + String(i))
+
+
 def test_an_alias_is_the_name_the_answer_comes_back_under() raises:
     var out = run("SELECT qty AS howmany FROM sales", session())
     assert_equal(out.schema[0].name, "howmany")
@@ -1552,16 +1619,36 @@ def test_a_like_in_a_select_list_is_a_column_of_answers() raises:
     )
 
 
-def test_a_like_with_an_underscore_in_it_says_what_it_cannot_do() raises:
-    with assert_raises(contains="stands for any one character"):
-        _ = run("SELECT n FROM words WHERE word LIKE 'a_p%'", session())
+def test_a_like_with_an_underscore_in_it_keeps_the_rows_it_names() raises:
+    # `a_p%` is apple and not apricot, the underscore standing for exactly one
+    # character and not for the two apricot would need.
+    same(answer("SELECT n FROM words WHERE word LIKE 'a_p%'", "n"), [1], "n")
+    # Five characters and nothing else, which is apple and grape. The empty row
+    # has none and the null has no answer at all.
+    same(
+        answer("SELECT n FROM words WHERE word LIKE '_____'", "n"), [1, 4], "n"
+    )
 
 
-def test_a_like_with_a_run_in_the_middle_is_refused() raises:
-    # `a%e` is a prefix and a suffix at once and neither kernel answers it, and
-    # answering it as one of the two would keep rows the query did not ask for.
-    with assert_raises(contains="is none of those"):
-        _ = run("SELECT n FROM words WHERE word LIKE 'a%e'", session())
+def test_a_like_with_a_run_in_the_middle_keeps_the_rows_it_names() raises:
+    # `a%e` is a prefix and a suffix at once, which is more than either kernel
+    # can say on its own and which the matcher behind them answers. Reading it
+    # as the prefix alone would have kept apricot as well.
+    same(answer("SELECT n FROM words WHERE word LIKE 'a%e'", "n"), [1], "n")
+    same(answer("SELECT n FROM words WHERE word LIKE '%an%n%'", "n"), [3], "n")
+    same(answer("SELECT n FROM words WHERE word LIKE 'p_ne%le'", "n"), [7], "n")
+
+
+def test_a_like_with_wildcards_in_a_select_list_answers_every_row() raises:
+    # Including the null, which is null and not false, the same as it is for
+    # the four searches.
+    same(
+        truths(
+            run("SELECT word LIKE '%a_e' AS hit FROM words", session()), "hit"
+        ),
+        [0, 0, 0, 1, 0, -1, 0],
+        "hit",
+    )
 
 
 def test_a_like_against_a_column_is_refused() raises:

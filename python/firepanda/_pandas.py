@@ -8856,22 +8856,26 @@ class StringMixin:
         return pat
 
     @staticmethod
-    def _plain(case: Any, flags: Any, name: str) -> None:
-        """Refuses the two arguments that would change what the pattern means.
+    def _fold_word(case: Any, flags: Any, name: str) -> str:
+        """Picks which of the two searches the pattern runs through.
 
-        Both have a default that means leave it alone, and both are one line to
-        accept and a case folding pass or an engine to honour, so both say no
-        here rather than being ignored. An ignored argument is the one failure
-        mode a compatibility layer must not have.
+        `case=False` used to be refused here beside `flags` and is now served,
+        which leaves one refusal rather than two. `flags` still says no because
+        every one of them is a statement about a regular expression and there is
+        no engine, and an ignored argument is the one failure mode a
+        compatibility layer must not have.
+
+        The fold a search compares through is not the one `casefold` does. It
+        maps one character to one character, so `STRASSE` does not hold `straße`
+        even though the two casefold to the same word, and document 69 says
+        where that rule was measured from. The word carries the choice because
+        the kernel has a second entry point rather than a flag.
         """
-        if case is not None and not case:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{name} with case=False is not written yet"
-            )
         if flags:
             raise UnsupportedError(
                 f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
             )
+        return "" if case is None or case else "_folded"
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
         """Whether a literal pattern is in every row, at the front, or the whole row.
@@ -8880,8 +8884,8 @@ class StringMixin:
         `na` filling, which is the same list walk `_begins` does and is here for
         the same reason: a column has no `fillna` yet.
         """
-        self._plain(case, flags, kind)
-        answer = self._flag(kind, self._literal(pat, regex, kind))
+        fold = self._fold_word(case, flags, kind)
+        answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
@@ -8893,7 +8897,7 @@ class StringMixin:
         about their own signature, so it passes `None` and the check falls
         through.
         """
-        self._plain(None, flags, "count")
+        self._fold_word(None, flags, "count")
         return self._number("count", self._literal(pat, True, "count"))
 
     def _replaced(self, pat: Any, repl: Any, n: Any, case: Any, flags: Any, regex: Any) -> Series:
@@ -8925,10 +8929,90 @@ class StringMixin:
             )
         if not isinstance(repl, str):
             raise DTypeError("firepanda:dtype: repl must be a string or callable")
-        self._plain(case, flags, "replace")
+        fold = self._fold_word(case, flags, "replace")
+        limit = self._width(n, "n")
+        if fold and limit == 0:
+            # `n=0` means no replacements to pandas and all of them to pandas,
+            # depending on `case`, on the same column in the same call. The
+            # Arrow path takes the number at its word and the fallback path
+            # hands it to `re.sub`, where a count of zero has meant unlimited
+            # since long before pandas existed, so turning the search insensitive
+            # silently turns a request for nothing into a request for everything.
+            # It is measured, it is pandas, and matching it is the job, so the
+            # zero is widened here rather than in the kernel, where the number
+            # still means what it says.
+            limit = -1
         return self._text(
-            "replace", self._literal(pat, bool(regex), "replace"), self._width(n, "n"), other=repl
+            f"replace{fold}",
+            self._literal(pat, bool(regex), "replace"),
+            limit,
+            other=repl,
         )
+
+    def _translated(self, table: Any) -> Series:
+        """Every row with single characters swapped one for one.
+
+        pandas hands the table straight to Python's `str.translate`, which reads
+        it with `table[ord(character)]` and leaves the character alone whenever
+        that raises a `LookupError`. So anything with a `__getitem__` works in
+        pandas and a mapping is only the usual case. This takes a mapping and
+        refuses the rest, because serving the general case means calling back
+        into Python once per character, which is the one thing crossing into a
+        kernel is for avoiding.
+
+        A key that is not an integer is dropped rather than refused, and that is
+        exact rather than lenient: Python looks the character up by its ordinal,
+        so a key of `"a"` can never be found no matter what the table says, and
+        `str.maketrans` is the reason anybody would have one.
+
+        `None` and the empty string are the same request and Python treats them
+        as the same request, so the delete arrives at the kernel as an empty
+        replacement and there is no third case to carry across.
+
+        The table is sorted here rather than in the kernel because a caller has
+        one table and any number of columns, and sorting once on this side is
+        the difference between paying for it once and paying for it per call.
+        """
+        if not isinstance(table, dict):
+            raise UnsupportedError(
+                "firepanda:unsupported: str.translate takes a mapping, and"
+                f" {type(table).__name__} would have to be read one character at a time"
+            )
+        pairs = []
+        for key, value in table.items():
+            if not isinstance(key, int) or isinstance(key, bool):
+                continue
+            if not 0 <= key < 0x110000:
+                continue
+            if value is None:
+                pairs.append((key, ""))
+            elif isinstance(value, str):
+                pairs.append((key, value))
+            elif isinstance(value, int) and not isinstance(value, bool):
+                if not 0 <= value < 0x110000:
+                    raise InvalidArgumentError(
+                        "firepanda:value: character mapping must be in range(0x110000)"
+                    )
+                pairs.append((key, chr(value)))
+            else:
+                raise DTypeError(
+                    "firepanda:dtype: character mapping must return integer, None or str"
+                )
+        pairs.sort()
+        from ._frame import Series
+
+        if not pairs:
+            # An empty table hands every row back, which the kernel would do
+            # too, but a table of no entries is two columns of no rows and a
+            # list with nothing in it has no dtype for this side to build one
+            # from. A whole slice is the same answer and is already written.
+            return self._text("slice")
+        keys = Series([chr(key) for key, _ in pairs])
+        values = Series([value for _, value in pairs])
+        try:
+            return Series._wrap(self._series._inner.string_translate(keys._inner, values._inner))
+        except Exception as error:
+            raise translate(error) from None
 
 
 class GroupByMixin[Answer]:

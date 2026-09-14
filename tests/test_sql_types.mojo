@@ -359,5 +359,37 @@ def test_a_type_writes_itself_the_way_typeof_prints_it() raises:
     assert_equal(String(TIMESTAMP_TZ), "TIMESTAMP WITH TIME ZONE")
 
 
+def test_a_list_carries_one_element_and_prints_it() raises:
+    """`typeof(list(a))` over a `DECIMAL(5,2)` column is `DECIMAL(5,2)[]`."""
+    assert_equal(String(SqlType.list_of(INTEGER)), "INTEGER[]")
+    assert_equal(String(SqlType.list_of(decimal(5, 2))), "DECIMAL(5,2)[]")
+    assert_equal(SqlType.list_of(INTEGER).element_type(), INTEGER)
+    assert_equal(parse_type("VARCHAR[]"), SqlType.list_of(VARCHAR))
+    assert_equal(parse_type("DECIMAL(5,2)[]"), SqlType.list_of(decimal(5, 2)))
+
+
+def test_two_lists_over_different_elements_are_different_types() raises:
+    """The same reason two decimals of different widths are.
+
+    A list with no element is not equal to one that has one either, since the
+    one that knows is a stronger claim and letting them compare equal would
+    make an unanswered type slip through a check.
+    """
+    assert_not_equal(SqlType.list_of(INTEGER), SqlType.list_of(BIGINT))
+    assert_not_equal(SqlType.list_of(INTEGER), SqlType(TYPE_LIST))
+    assert_equal(SqlType.list_of(INTEGER), SqlType.list_of(INTEGER))
+
+
+def test_a_list_of_lists_has_nowhere_to_put_the_inner_one() raises:
+    """The element is flat, so the depth stops at one and says so.
+
+    `INTEGER[][]` comes back as a bare `LIST` rather than as `INTEGER[]`, which
+    would be a wrong answer, or as an error, which would refuse a type DuckDB
+    accepts.
+    """
+    assert_equal(String(SqlType.list_of(SqlType.list_of(INTEGER))), "LIST")
+    assert_equal(String(parse_type("INTEGER[][]")), "LIST")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

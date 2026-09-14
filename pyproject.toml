@@ -69,6 +69,14 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# RUF001 and RUF002 warn about a character that looks like another character,
+# and one file exists to check that a case insensitive search treats a pair of
+# them as the same letter. Long s against s, the Kelvin sign against K, the
+# micro sign against mu: every one of those is in there because it is a
+# confusable, so the rule is right about the file and wrong about the code.
+"python/tests/test_str_case_insensitive.py" = ["RUF001", "RUF002"]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 addopts = "-q --strict-markers"

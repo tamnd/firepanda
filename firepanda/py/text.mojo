@@ -89,6 +89,7 @@ def _text_name(name: String) raises -> String:
         or name == "zfill"
         or name == "repeat"
         or name == "replace"
+        or name == "replace_folded"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -122,6 +123,9 @@ def _flag_name(name: String) raises -> String:
         or name == "contains"
         or name == "match"
         or name == "fullmatch"
+        or name == "contains_folded"
+        or name == "match_folded"
+        or name == "fullmatch_folded"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -316,7 +320,46 @@ def text(
         # argument defaults to False in pandas 3. So nothing is refused on the
         # way in and `n` rides in the position slot the way a width does.
         return column.chars_replace(arg, other, _whole(start, "n"))
+    if wanted == "replace_folded":
+        # `case=False`, and the one of the four folded names whose answer is
+        # text. pandas answers this one out of Python rather than out of Arrow
+        # and the two fold the same way anyway, which document 69 measures.
+        return column.chars_replace_folded(arg, other, _whole(start, "n"))
     return column.chars_repeat(_whole(start, "repeats"))
+
+
+def translate(column: Series, keys: Series, values: Series) raises -> Series:
+    """Swaps single characters one for one, out of a table.
+
+    The one name in this accessor that does not come through `text`, and the
+    reason is not the shape of its answer, which is text like twenty two others.
+    It is that its argument is not a scalar. A table has as many entries as it
+    has, the same way `isin`'s set does, and the three doors carry two strings
+    and two positions between them because that is what a scalar argument looks
+    like. There is no way to fold a table into a string: a replacement can hold
+    any character, so no character is available to separate one entry from the
+    next, and an encoding that got around that would be a format nobody asked
+    for in a place nobody would look for it.
+
+    So the rule the three doors follow is unchanged and this is outside it
+    rather than an exception to it. A fourth door for a fourth argument shape
+    would have been the thing document 07 warns about; a door for the one
+    argument in the namespace that is column sized is a different claim.
+
+    Args:
+        column: The column to read.
+        keys: The characters to replace, one character per row.
+        values: What to put in their place, in the same order.
+
+    Returns:
+        A new column, as tall as the one it read.
+
+    Raises:
+        Error: Tagged `value` if the column is not text, and whatever the
+            kernel raises about the table otherwise.
+    """
+    _text_column(column)
+    return column.chars_translate(keys, values)
 
 
 def flag(column: Series, kind: String, arg: String) raises -> Series:
@@ -370,6 +413,16 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         return column.chars_match(arg)
     if wanted == "fullmatch":
         return column.chars_full_match(arg)
+    # The same three with `case=False`, which is a word of its own rather than a
+    # seventh argument on the door, for the reason `strip` and `strip_chars` are
+    # two words: the name and what it does with its argument are what a caller
+    # picked, and a flag beside the name would put that choice in two places.
+    if wanted == "contains_folded":
+        return column.chars_contains_folded(arg)
+    if wanted == "match_folded":
+        return column.chars_match_folded(arg)
+    if wanted == "fullmatch_folded":
+        return column.chars_full_match_folded(arg)
     return column.chars_ends_with(arg)
 
 

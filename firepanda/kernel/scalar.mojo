@@ -26,6 +26,8 @@ from .arith import OP_ADD, OP_MUL, OP_SUB
 from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
+from .pattern import fold_point
+from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
 
 
@@ -584,6 +586,94 @@ def modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
     return out^
 
 
+def sql_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Divides two columns the way SQL divides them, one element at a time.
+
+    The specification for `sql_divide`, and the two differences from the twin
+    above are the whole of it. An integer quotient is rounded towards zero
+    rather than towards minus infinity, and it is built out of the remainder
+    here where the kernel corrects the floor, so the two arrive at the answer by
+    different routes and a twin that agrees is saying something. A float is not
+    rounded at all, since `//` on a float is an ordinary division in this
+    dialect.
+
+    The rule about a zero divisor is not the one the twin above uses, and this
+    is the one place the two disagree about which rows have an answer at all.
+    DuckDB nulls a zero divisor whatever the dtype, so `7.0 // 0.0` is a null
+    where `7.0 / 0.0` next to it is an infinity, and the kernel nulls it too.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null wherever either input is null or the divisor
+        is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        if b[i] == 0:
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            # What is left once the truncated remainder is taken off is an
+            # exact multiple of the divisor, so dividing it gives the truncated
+            # quotient whichever way the language rounds. Taking off Mojo's
+            # own remainder instead would give back the floor.
+            var remainder = a[i] % b[i]
+            comptime if dt.is_signed():
+                if remainder != 0 and (a[i] < 0) != (b[i] < 0):
+                    remainder -= b[i]
+            out.set_valid(i, (a[i] - remainder) // b[i])
+        else:
+            out.set_valid(i, a[i] / b[i])
+    return out^
+
+
+def sql_modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Takes the remainder SQL means, one element at a time.
+
+    The remainder of a truncated division, so it takes the sign of the numerator
+    where the twin above takes the sign of the divisor. On a float it is
+    `_c_remainder`, which is the C library call that `_floored_remainder` makes
+    before correcting the sign; this is that call without the correction.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null wherever either input is null and, on an
+        integer dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            if b[i] == 0:
+                out.set_null(i)
+                continue
+            var remainder = a[i] % b[i]
+            comptime if dt.is_signed():
+                if remainder != 0 and (a[i] < 0) != (b[i] < 0):
+                    remainder -= b[i]
+            out.set_valid(i, remainder)
+        else:
+            out.set_valid(i, _c_remainder(a[i], b[i]))
+    return out^
+
+
 def power_scalar[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Raises one column to another, one element at a time.
 
@@ -819,6 +909,96 @@ def modulo_const_scalar[
                 out.set_null(i)
                 continue
         out.set_valid(i, numerator % divisor)
+    return out^
+
+
+def sql_divide_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Divides against a constant the way SQL does, one element at a time.
+
+    The specification for `sql_divide_const`. The quotient is truncated on an
+    integer dtype and not rounded at all on a float, and a zero divisor is a
+    null on both, which is the rule that separates this from the floor division
+    above rather than only the rounding.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null where the column is null or the divisor is
+        zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        if divisor == 0:
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            # The same route as `sql_divide_scalar`, which is the remainder
+            # first and the quotient out of it, so the answer does not depend on
+            # which way the language rounds.
+            var remainder = numerator % divisor
+            comptime if dt.is_signed():
+                if remainder != 0 and (numerator < 0) != (divisor < 0):
+                    remainder -= divisor
+            out.set_valid(i, (numerator - remainder) // divisor)
+        else:
+            out.set_valid(i, numerator / divisor)
+    return out^
+
+
+def sql_modulo_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Takes the remainder SQL means against a constant, one element at a time.
+
+    The remainder that goes with the division above, so it takes the sign of the
+    numerator. On a float it is the C library call and a zero divisor gives the
+    NaN that call gives, which is where it parts company with the division: the
+    division nulls that row and this one does not, and DuckDB answers both ways
+    for the same reason it does upstream.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null where the column is null and, on an integer
+        dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        comptime if dt.is_integral():
+            if divisor == 0:
+                out.set_null(i)
+                continue
+            var remainder = numerator % divisor
+            comptime if dt.is_signed():
+                if remainder != 0 and (numerator < 0) != (divisor < 0):
+                    remainder -= divisor
+            out.set_valid(i, remainder)
+        else:
+            out.set_valid(i, _c_remainder(numerator, divisor))
     return out^
 
 
@@ -2289,6 +2469,106 @@ def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
     return out^
 
 
+def _boundaries_scalar(text: String) -> List[Int]:
+    """Every byte offset in a string where a character starts, and the end.
+
+    Args:
+        text: The string.
+
+    Returns:
+        The offsets, ascending, with the byte length last. A string of three
+        characters gives four numbers, so that the count of characters is one
+        less than the length of the list however wide they are.
+    """
+    var bytes = text.as_bytes()
+    var out = List[Int]()
+    for at in range(len(bytes)):
+        if (bytes[at] & 0xC0) != 0x80:
+            out.append(at)
+    out.append(len(bytes))
+    return out^
+
+
+def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
+    """Whether a string matches a `LIKE` pattern, by trying every division.
+
+    A different algorithm from the kernel's and not a slower copy of it, which
+    is the only kind of twin worth having here. The kernel walks both strings
+    once and remembers a single `%` to go back to, and the argument for why one
+    is enough is a real argument that could be wrong. This decides the question
+    by filling a table instead: `fits[j]` says whether the first `j` characters
+    of the string can be matched by the pattern read so far, and each piece of
+    the pattern rewrites the whole row. A `%` lets a true entry spread to the
+    right, a `_` shifts every entry along by one, and a literal character shifts
+    the entries that agree with it. Nothing is remembered and nothing is
+    reconsidered, so there is no claim about backtracking left to be wrong.
+
+    Characters and not bytes, the same as the kernel, which is why the
+    boundaries are taken first.
+
+    Args:
+        text: The string being matched.
+        pattern: The pattern, wildcards and all.
+
+    Returns:
+        True if the whole string matches the whole pattern.
+    """
+    var subject = text.as_bytes()
+    var glob = pattern.as_bytes()
+    var rows = _boundaries_scalar(text)
+    var cols = _boundaries_scalar(pattern)
+    var n = len(rows) - 1
+    var m = len(cols) - 1
+
+    var fits = List[Bool](length=n + 1, fill=False)
+    fits[0] = True
+
+    for k in range(m):
+        var width = cols[k + 1] - cols[k]
+        var lead = glob[cols[k]]
+        var next = List[Bool](length=n + 1, fill=False)
+        if width == 1 and lead == UInt8(ord("%")):
+            var seen = False
+            for j in range(n + 1):
+                seen = seen or fits[j]
+                next[j] = seen
+        elif width == 1 and lead == UInt8(ord("_")):
+            for j in range(n):
+                next[j + 1] = fits[j]
+        else:
+            for j in range(n):
+                if not fits[j] or rows[j + 1] - rows[j] != width:
+                    continue
+                var same = True
+                for b in range(width):
+                    if subject[rows[j] + b] != glob[cols[k] + b]:
+                        same = False
+                        break
+                next[j + 1] = same
+        fits = next^
+
+    return fits[n]
+
+
+def text_like_scalar(a: StringArray, pattern: String) -> Array[DType.bool]:
+    """Whether each element matches a `LIKE` pattern, one element at a time.
+
+    Args:
+        a: The column.
+        pattern: The pattern, wildcards and all.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _matches_pattern_scalar(a[i], pattern))
+    return out^
+
+
 def text_equals_scalar(a: StringArray, other: String) -> Array[DType.bool]:
     """Whether each element is a string and nothing else, one at a time.
 
@@ -2350,6 +2630,50 @@ def text_count_scalar(a: StringArray, needle: String) -> Array[DType.int64]:
             from_ = at + m
         out.set_valid(i, Int64(seen))
     return out^
+
+
+def text_translate_scalar(
+    a: StringArray, keys: StringArray, values: StringArray
+) raises -> StringArray:
+    """Swaps single characters one for one, looking each one up in a list.
+
+    The twin does not have the fast kernel's two seat lookup, and that is the
+    point of it: it walks the table from the front for every character and so
+    it does not care whether the keys are in order or where they sit relative
+    to 128. If the two ever disagree it is the seats and not the rule.
+
+    Args:
+        a: The column.
+        keys: The characters to replace, one character per row.
+        values: What to put in their place, in the same order. Empty deletes.
+
+    Returns:
+        A text column, null where the column is null.
+
+    Raises:
+        Error: If the two tables are different heights.
+    """
+    if len(keys) != len(values):
+        raise Error("translate: the two tables are different heights")
+    var builder = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            builder.append_null()
+            continue
+        var piece = String()
+        for point in a[i].codepoints():
+            var one = String(point)
+            var found = -1
+            for j in range(len(keys)):
+                if keys.is_valid(j) and keys[j] == one:
+                    found = j
+                    break
+            if found < 0:
+                piece += one
+            else:
+                piece += values[found]
+        builder.append(piece.as_bytes())
+    return builder^.finish()
 
 
 def text_replace_scalar(
@@ -2621,3 +2945,217 @@ def text_pick_scalar(
         else:
             builder.append_null()
     return builder^.finish()
+
+
+def _bytes_find_scalar(hay: Span[UInt8, _], needle: Span[UInt8, _]) -> Int:
+    """Where a run of bytes first appears in another, or minus one.
+
+    The twin above this one searches strings rather than bytes and asks a
+    `String` for a byte at a position, which is only legal when the position is
+    a character boundary and so is only legal on ASCII. Everything in the
+    folded half of this file is about text that is not ASCII, so it searches
+    bytes and leaves the boundaries to the caller, which already knows where
+    they are because it walked them.
+
+    Args:
+        hay: The bytes being searched.
+        needle: The bytes being looked for.
+
+    Returns:
+        The offset of the match, or minus one.
+    """
+    var m = len(needle)
+    if m == 0:
+        return 0
+    for at in range(len(hay) - m + 1):
+        var same = True
+        for k in range(m):
+            if hay[at + k] != needle[k]:
+                same = False
+                break
+        if same:
+            return at
+    return -1
+
+
+def _folded_copy_scalar(text: String) -> String:
+    """Folds a whole string into a new one, a character at a time.
+
+    This is the thing the kernel refuses to do. `pattern.mojo` folds the pattern
+    once and folds the row a character at a time as the search walks it, so
+    nothing the size of a column is ever copied. The twin does the opposite on
+    purpose: it builds the folded copy, then searches it with a plain substring
+    search that knows nothing about case. If the two ever disagree, the bug is
+    in the walk and not in the fold, which is the only thing a twin is for.
+
+    Args:
+        text: The string.
+
+    Returns:
+        The folded string, which has the same number of characters and may have
+        a different number of bytes.
+    """
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var out = String()
+    for point in text.codepoints():
+        var folded = fold_point(point.to_u32(), Span(keys), Span(answers))
+        out += String(Codepoint(unsafe_unchecked_codepoint=folded))
+    return out^
+
+
+def text_contains_folded_scalar(
+    a: StringArray, needle: String
+) -> Array[DType.bool]:
+    """Whether each element holds a pattern with case ignored, one at a time.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(needle)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = _folded_copy_scalar(a[i])
+        out.set_valid(
+            i, _bytes_find_scalar(text.as_bytes(), wanted.as_bytes()) >= 0
+        )
+    return out^
+
+
+def text_starts_with_folded_scalar(
+    a: StringArray, prefix: String
+) -> Array[DType.bool]:
+    """Whether each element begins with a pattern, case ignored, one at a time.
+
+    Args:
+        a: The column.
+        prefix: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(prefix)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = _folded_copy_scalar(a[i])
+        out.set_valid(
+            i, _bytes_find_scalar(text.as_bytes(), wanted.as_bytes()) == 0
+        )
+    return out^
+
+
+def text_equals_folded_scalar(
+    a: StringArray, other: String
+) -> Array[DType.bool]:
+    """Whether each element is a pattern and nothing else, case ignored.
+
+    Args:
+        a: The column.
+        other: The pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var wanted = _folded_copy_scalar(other)
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _folded_copy_scalar(a[i]) == wanted)
+    return out^
+
+
+def text_replace_folded_scalar(
+    a: StringArray, needle: String, repl: String, limit: Int
+) raises -> StringArray:
+    """Replaces a pattern with case ignored, one element at a time.
+
+    The twin cannot search a folded copy and splice into the original, because
+    an offset into the folded copy is not an offset into the row: `ſ` is two
+    bytes and folds to one. So it walks character boundaries and asks at each
+    one whether the folded pattern starts there, which is the same question the
+    kernel asks and a different way of asking it, since this one folds the whole
+    remainder of the row every time and the kernel folds one character.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+        repl: The replacement.
+        limit: How many matches per row, negative for all and zero for none.
+
+    Returns:
+        A text column of the same height.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var wanted = _folded_copy_scalar(needle)
+    var built = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var text = a[i]
+        if limit == 0 or wanted.byte_length() == 0:
+            built.append(text.as_bytes())
+            continue
+
+        var out = String()
+        var left = limit
+        var at = 0
+        var bytes = text.as_bytes()
+        while at < len(bytes):
+            var width = 1
+            for point in StringSlice(
+                unsafe_from_utf8=bytes[at : len(bytes)]
+            ).codepoints():
+                width = point.utf8_byte_length()
+                break
+            var matched = -1
+            if left != 0:
+                var here = at
+                var folded = String()
+                while (
+                    here < len(bytes)
+                    and folded.byte_length() < wanted.byte_length()
+                ):
+                    var step = 1
+                    for point in StringSlice(
+                        unsafe_from_utf8=bytes[here : len(bytes)]
+                    ).codepoints():
+                        step = point.utf8_byte_length()
+                        break
+                    folded += _folded_copy_scalar(
+                        String(
+                            StringSlice(
+                                unsafe_from_utf8=bytes[here : here + step]
+                            )
+                        )
+                    )
+                    here += step
+                if folded == wanted:
+                    matched = here
+            if matched >= 0:
+                out += repl
+                at = matched
+                if left > 0:
+                    left -= 1
+            else:
+                out += String(
+                    StringSlice(unsafe_from_utf8=bytes[at : at + width])
+                )
+                at += width
+        built.append(out.as_bytes())
+
+    return built^.finish()

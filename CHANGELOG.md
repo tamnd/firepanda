@@ -19,6 +19,75 @@ None of that was needed. Going left, the next character starts at the next byte 
 Measured on the i9-13900K over four million rows, three rounds alternated, every measurement within one per cent of its neighbours. Rows with nothing to trim went from 53.9 milliseconds to 26.4, which is two times. Rows with three spaces on each end went from 135.1 to 28.0, which is 4.8 times, and that row is new because a change that made the common case cheap by making the real work expensive would look like a win without it.
 
 Nothing about the answers moves. The set is still read as a set of characters rather than as a prefix, both whitespace tables stay where they are, and the same characters are tested in the same order.
+### Added: a SQL type carries a list's element, so a call returning a list has a type
+
+The entry below left nine names whose return type the differential could not compare, because a signature returning `T[]` or `MAP` needs an element type and `SqlType` carried none. Eight of the nine are answered now. Issue #780.
+
+`SqlType` grew an element beside the outer identifier, width and scale it already had. It is flat, one identifier and a width and a scale, which means a list of scalars and nothing deeper. `INTEGER[][]` has nowhere to put the inner list and comes back as a bare `LIST`, which says it does not know rather than saying something wrong, and `STRUCT` and `MAP` are out of reach for the same reason from the other direction: a struct needs a list of members and a map needs two element types.
+
+Flat is the size the binder needs and not a step towards anything. `firepanda/dtype/logical.mojo` carries no element at all and is right not to, because a logical type describes a column and the column's children are columns. A `SqlType` describes a type before a column exists, which is why it has to say the element itself.
+
+What that buys is the return side. `list(T) -> T[]` over a `DECIMAL(5,2)` column is a `DECIMAL(5,2)[]`, `array_agg` the same, `max(ANY, BIGINT) -> ANY[]` is a list over its first argument rather than its count, and `str_split(VARCHAR, VARCHAR) -> VARCHAR[]` says its element in the catalog and needs no argument read at all. `concat` joins lists rather than writing them out where it is given them, so two `INTEGER[]` give an `INTEGER[]` and an `INTEGER[]` beside a `BIGINT[]` gives a `BIGINT[]`.
+
+`parse_type` reads one trailing `[]`, so `INTEGER[]` and `DECIMAL(5,2)[]` are types you can write down, and `SqlType` prints them back the same way.
+
+The type differential now compares 14,630 of its 15,001 expressions on the type and 12 on the overload alone, where it was 14,530 and 112. The 12 are all `histogram`, which returns a `MAP`. Every type asserted was put to DuckDB 1.5 first.
+
+### Added: the binder derives the return type of a call the catalog writes a rule for
+
+The entry below counted 932 expressions the type differential was not comparing the type of, across 29 function names. 820 of them are compared now and agree with DuckDB, and the names left are nine rather than 29. Issue #780.
+
+DuckDB's catalog says what a function returns and for most of them that is a type, `length(VARCHAR) -> BIGINT` being every one of them. For the rest it is a rule, written as a word that is not a type, and the rule has to be read off the signature because the word is the same either way.
+
+`firepanda/sql/result.mojo` is where they are read now. A template letter or `ANY` means the type of the argument it stands for, so `first` over a `UUID` column is a `UUID` and `arg_max(ANY, ANY)` is its first argument rather than its second, which the second one being the thing you order by explains. In the trailing slot of a variadic it means the type all the arguments agree on instead, because that is a common type DuckDB works out and casts to: `greatest(DECIMAL(5,2), INTEGER, TINYINT)` is a `DECIMAL(12,2)` and is none of the three.
+
+A bare `DECIMAL` is a promise about the family and not the width. As a parameter it is a cast target, so the result is what the arguments were cast to and `mod(DECIMAL(5,2), INTEGER)` is a `DECIMAL(12,2)`. Six names then do something else with that. `sum` widens to 38 digits and keeps the scale. `avg` gives a `DOUBLE` despite declaring a `DECIMAL`, which is DuckDB's bind function disagreeing with DuckDB's own catalog. `ceil`, `ceiling`, `floor` and `round` keep the width and drop the scale.
+
+`median` is its own rule and a nice one. It is declared to return whatever it was given, and over an even number of rows it is the midpoint of the middle two, so for a type whose midpoint is not a value of that type it widens: ten integer types give a `DOUBLE`, a `DATE` gives a `TIMESTAMP`, and a `FLOAT` stays a `FLOAT` because the midpoint of two floats is one. `concat` is the other odd one, declared over `ANY` returning `ANY` and being a `VARCHAR`.
+
+Every rule was measured against DuckDB 1.5 rather than reasoned out, which is how `median` was found at all: the first run of the harness with the rest of this in place reported six disagreements and all six were `median`.
+
+What is left is the containers, `T[]` and `MAP` and the rest, which is 112 expressions across nine names. Those need an element type and `SqlType` carries none, so there is no way to write `DECIMAL(5,2)[]` down even where the answer is obvious. They stay counted apart and unclaimed.
+
+### Changed: the type differential now says how much of its agreement is not a type comparison
+
+The harness reported agreement over 15,001 expressions and zero disagreements, and 932 of those expressions never had their type compared. It prints both numbers now. Issue #780.
+
+A probe agrees in one of two ways. Either both sides bind the call and the types match, which is the claim the harness exists to make, or both sides bind the call and firepanda cannot name a type because the winning signature declares a rule rather than a type, which is 29 names like `abs` and `sum` and `list`. The second is worth checking and it is weaker, since all it says is that the same overload won.
+
+Counting them as one number is worse than losing information. It is a figure that goes up when the binder is taught less, because a function whose return type the binder stops deriving moves from the compared pile to the free pile. So the report now ends with 13,710 compared, 932 compared on the overload alone, and the 29 names printed out, and that list is a list of work rather than a footnote.
+
+Nothing about what the harness checks changed, and it still runs at zero disagreements.
+
+### Added: a LIKE pattern can hold an underscore, and a run at each end
+
+`word LIKE 'a_p%'` was refused by name and so was `word LIKE 'a%e'`. Both answer now, and there is no pattern left that a query can write and this cannot run. Issue #776.
+
+A `LIKE` pattern here used to be read as one of five searches: an equality, a prefix, a suffix, a substring, or two substrings in order. Those five are what TPC-H writes and they are much faster than a matcher, a prefix being a length test and one compare at a known offset. Anything else was refused, which is the honest thing to do with a gap and is still a gap.
+
+So the matcher is a sixth search rather than a replacement. The five are tried first and keep their kernels exactly as they were, and what used to be refused walks the pattern against the row instead. Nothing that was fast got slower, because a pattern that reads as a prefix never reaches the walk at all.
+
+The underscore stands for one character and not for one byte, which is the thing about it that is easy to get wrong and which DuckDB is clear about: `'héllo' LIKE 'h_llo'` is true and `'héllo' LIKE 'h__llo'` is false, so an underscore steps over the two bytes of the accented letter as one thing. A `%` moves a character at a time for the same reason. The walk carries one remembered wildcard and no stack, so there is no depth to limit and no recursion in a plan, and it costs the length of the row times the length of the pattern in the worst case and nothing like that in practice.
+
+One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
+
+The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+
+### Added: `case=False` on `contains`, `match`, `fullmatch` and `replace`
+
+The four names that look for a pattern stop refusing the argument that turns the search insensitive. They had refused it for five documents, on the grounds that ignoring an argument which changes the answer is worse than saying no to it, and `casefold` looked like the missing half. It is not.
+
+A fold that is read by a person may make a row longer, so `ß` folds to `ss` and `ﬁ` folds to `fi`. A search cannot afford that, because a match would then cover a number of bytes with no relation to the number of bytes it was found in, and pandas does not do it either. Measured: `STRASSE` does not hold `straße` in pandas and `FIANCE` does not hold `ﬁance`, because three of these four names are answered by Arrow's `match_substring` with `ignore_case=True`, which folds one code point to exactly one code point. It is not the lower case either, which misses final sigma against capital sigma, the micro sign against Greek mu, long s against s, and the Kelvin sign against k.
+
+So this library carries a second fold table of 1457 entries beside the one `casefold` uses, and `tools/gen_searchfold.py` writes it. The generator verifies rather than trusts: every entry is asked of pyarrow in both directions, and every one of the 1427 targets is swept against all 1.1 million code points to check that the set Arrow folds onto it is exactly the set the table claims. That sweep takes ninety two seconds and is why the file is committed rather than built.
+
+`replace` is the odd one and is worth a sentence. pandas refuses `case=False` in its Arrow path for that name alone and falls back to Python, where `re.escape` and `re.IGNORECASE` decide the answer. There is no reason in principle for a different engine in a different language to agree, so every pair the table calls equal was checked against `re.IGNORECASE` and they all agree, which is what lets one table serve all four names.
+
+The pattern is folded once and the row is never folded at all, so nothing column sized is copied. The cost is that the skip table and the wide scan both go: a skip is a statement about bytes, and this search compares code points the bytes in front of it do not hold. A folded match may cover a different number of bytes than its pattern, since `ſ` is two bytes and compares as the one byte `s`, so the folded `fullmatch` walks both sides rather than comparing lengths.
+
+One finding came out of sweeping the argument space. `n=0` means no replacements to `str.replace` and every replacement to `str.replace(case=False)`, because the Arrow path takes the number at its word and the fallback hands it to `re.sub`, where zero has meant unlimited since long before pandas existed. Same method, same column, two answers. This library matches pandas, and widens the zero in the Python layer so that the number still means what it says in the kernel.
+
+`flags` is still refused. Every flag is a statement about a regular expression and there is still no engine, so `re.IGNORECASE` written as a flag says no even though it is the same request `case=False` makes.
 
 ### Changed: `upper` and `lower` over ASCII text run sixty times faster
 
@@ -30,6 +99,28 @@ Measured on the i9-13900K over four million rows of forty byte ASCII, alternated
 
 An element with a byte at or above 0x80 is refused and takes exactly the path it took before, so none of the Unicode answers move and the hundred and forty nine corrections keep their table. A refusal is not free, because whether an element is ASCII is only known once every byte has been looked at, so it is one wasted pass over bytes that get walked again. The same four million rows with an accent in every one of them ran 1.692 and 1.665 seconds before and 1.702 and 1.688 after, which is under one and a half per cent, and there is a benchmark row holding it there.
 
+### Fixed: a query that divided two integers answered the wrong number
+
+`SELECT -7 // 3` came back `-3` and `SELECT -7 % 3` came back `2`. DuckDB answers `-2` and `-1`, and so does every other SQL engine. Issue #770.
+
+The SQL front end was lowering `//` and `%` onto the kernels the dataframe surface uses, and those are pandas': a quotient rounds towards minus infinity and the remainder takes the sign of the divisor, which is Python's rule. SQL truncates towards zero and gives the remainder the sign of the dividend, which is C's. The two agree on every pair of positive numbers, which is why a front end that had been checked against thousands of queries had never shown it.
+
+Both answers are right where they are asked, so this is two operators now rather than one with a flag. `//` written in a query and `//` written on a frame go to different kernels, `sql_divide` and `floor_divide`, and the frame surface is untouched. The alternative was a mode on the shared kernel, which would have put a question about who is calling inside a loop that runs per register.
+
+Two more differences came out of measuring the dialect rather than assuming it. On a float `//` is not a floor division at all in DuckDB, so `-7.5 // 3` is `-2.5` and not `-3.0`, because the name there is the division that is integral only when its operands are. And a zero divisor is a null whatever the dtype, so `7.0 // 0.0` is `NULL` while `7.0 / 0.0` next to it is an infinity, which looks like a gap in DuckDB's own overload set and is what it answers today either way. Two bools are refused rather than widened to an int8 zero, which is the pandas answer and not one DuckDB has.
+
+The value differential added below found this on its first run, which is what that harness is for, and the two expressions come off its recorded list with this change. Both operators are pinned at all four sign combinations on both surfaces, both kernels have a scalar twin the fuzzer compares them against over a million cases, and three end to end tests run the queries and read the rows.
+
+### Added: `str.translate`, which is not a small `replace`
+
+A table of single characters swapped one for one. Two things separate it from the name before it and both of them matter. A key is always exactly one character, so nothing is searched for and no match can overlap another. And every key is applied in the same pass, so a table that sends `a` to `b` and `b` to `a` really swaps them, where the same pair handed to `replace` turns both into `a`.
+
+The rule here is Python's rule with no Arrow in it, because pandas hands the table straight to Python's own `str.translate`. A key is a code point ordinal. A value may be an ordinal, a string of any length, or `None`, and `None` and the empty string are the same request. What a key maps to is never looked at again, so `{ord("a"): "aa"}` on `ab` is `aab`. A key that is not an integer, or is negative, or is at or above `0x110000`, never matches anything and is dropped rather than refused, which is what pandas does with it. A value out of range and a value of the wrong type are refused with pandas' own two sentences.
+
+The table has to be a mapping. pandas takes anything subscriptable, since it only ever indexes the thing, but serving that means a Python call for every character of every row, which is the one thing crossing into a kernel is for avoiding. `str.maketrans` builds a mapping in all four of its forms, so the refused shapes are the unusual ones.
+
+The lookup keeps two seats, a direct array for the first 128 code points and an ordered list with a binary search above that, the same split the character classes already use, with a byte loop for the case where both the table and the row are ASCII.
+
 ### Added: a value differential, which is what would have caught the STRLEN bug
 
 `pixi run differential-answers` runs the same expressions over the same eight rows through firepanda and through DuckDB and compares the values that come back.
@@ -40,7 +131,7 @@ The probe table is described once as SQL literal text and built twice from that 
 
 Answers are compared as text, which is the one rendering both engines can be asked for without either having an opinion about formatting. That covers whole numbers, text and booleans. Floating point renders differently on the two sides, so nothing in the list answers one yet, and the decimals and the timestamps come with the renderings being settled rather than being papered over now.
 
-It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, and until it is fixed the two expressions are on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
+It found two wrong answers on its first run, both of them the same disagreement: integer division and the remainder follow Python's rule here and C's rule in DuckDB, so they part company on a negative left side and nothing above this had noticed. That is issue #770, fixed in the entry above, and until it was the two expressions sat on the harness's recorded list with the issue number against them, which is how a ceiling of zero stays a ceiling of zero without hiding anything.
 
 It runs on every commit and needs no corpus. It takes a couple of minutes, almost all of it DuckDB answering seventy expressions one query at a time.
 

@@ -6,10 +6,15 @@ These are what a `LIKE` pattern turns into once the wildcards are read. `LIKE
 an ends with, and `LIKE '%special%requests%'` is a contains followed by another
 contains in what is left. Those four cover every pattern TPC-H uses and most of
 what a filter on a text column is asked for outside a benchmark, which is why
-they are four named kernels rather than a pattern compiler. A general matcher
-with a wildcard alphabet is a different piece of work and it should not be built
-first: it would be slower on all four of these and would answer questions nobody
-has asked yet.
+they are four named kernels rather than a pattern compiler.
+
+Anything else is the general matcher at the end of the file, which is a sixth
+search and not a replacement for the five. That order was deliberate. A matcher
+walks the pattern and the row together and it cannot do any of the things that
+make a prefix cheap, so building it first would have made every pattern anybody
+actually writes pay for the ones nobody does. Built second it costs the five
+nothing: a pattern that reads as one of them still gets its kernel, and the
+matcher only ever sees what used to be refused.
 
 Two of the four cost almost nothing and one of them is the whole file. Starts
 with and ends with are a length test and one run of bytes compared at a known
@@ -67,6 +72,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 
 from .mask import repair_range
+from .searchfold import SEARCHED_FROM, SEARCHED_TO
 
 
 comptime SCAN_WIDTH = 16
@@ -96,10 +102,14 @@ The same number `_bytes_equal` uses in `strings.mojo` and for the same reason.
 struct MatchKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Which of the searches a `LIKE` pattern turned out to be.
 
-    Equality is in here with the other four although it is not a search at all,
+    Equality is in here with the other five although it is not a search at all,
     because what reads a pattern hands back one thing and the caller decides
     what to do with it. A pattern with no wildcard in it is an equality against
     a constant, and saying so here is one place rather than one per caller.
+
+    `GENERAL` is the one that answers everything, so it is last on purpose. A
+    pattern is only read as that one once the shapes above it have been tried
+    and none of them fit.
     """
 
     var code: UInt8
@@ -119,6 +129,9 @@ struct MatchKind(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     comptime IN_ORDER = Self(4)
     """Two runs each wrapped in wildcards, so `%special%requests%`."""
+
+    comptime GENERAL = Self(5)
+    """Any other pattern, so `a_c` or `a%e`, walked against the row."""
 
     def __init__(out self, code: UInt8):
         """Constructs a search from its code.
@@ -164,8 +177,10 @@ struct MatchKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("starts with")
         elif self == Self.ENDS_WITH:
             writer.write("ends with")
-        else:
+        elif self == Self.IN_ORDER:
             writer.write("contains in order")
+        else:
+            writer.write("matches")
 
 
 struct Pattern(ImplicitlyCopyable, Movable):
@@ -176,13 +191,18 @@ struct Pattern(ImplicitlyCopyable, Movable):
     and an empty run is a real answer for the others: `%` reads as an ends with
     against nothing, which every element ends with and no null does, and that is
     what `LIKE '%'` means.
+
+    The general search is the exception, because it has no runs to take out. Its
+    `first` is the pattern exactly as the query wrote it, wildcards and all,
+    since the matcher reads them itself.
     """
 
     var kind: MatchKind
     """Which search answers it."""
 
     var first: String
-    """The run of bytes to look for, or the whole element for an equality."""
+    """The run of bytes to look for, the whole element for an equality, or the
+    pattern itself for the general search."""
 
     var second: String
     """The run that has to follow the first one, and empty otherwise."""
@@ -205,10 +225,18 @@ struct Pattern(ImplicitlyCopyable, Movable):
 def read_pattern(pattern: StringSlice) raises -> Pattern:
     """Reads a `LIKE` pattern into the search that answers it.
 
-    The five shapes in `MatchKind` are the ones with a kernel, and the module
-    docstring above says why those five and not a matcher. Anything else is
-    refused here rather than answered approximately, because a pattern read as a
-    weaker one silently returns rows the query did not ask for.
+    The five shapes above `GENERAL` are the ones with a kernel of their own, and
+    they are tried first because each of them is much cheaper than walking the
+    pattern. A pattern that is none of them reads as the general search, which
+    answers every pattern there is and is the only one that has to look at a
+    wildcard while the rows go past.
+
+    An underscore anywhere sends the pattern straight to the general search
+    without the split below being tried at all. That is not an optimisation, it
+    is the correctness of the four: they are found by counting the runs between
+    the `%` signs, and an underscore sitting inside one of those runs would be
+    compared as an ordinary byte. `a_c` would read as an equality and `%a_b%` as
+    a substring, and both would quietly answer the wrong rows.
 
     There is no escape character. DuckDB has none by default either, so a
     backslash in a pattern is an ordinary byte to both, and `ESCAPE` is refused
@@ -221,53 +249,47 @@ def read_pattern(pattern: StringSlice) raises -> Pattern:
         The search and the runs of bytes it reads.
 
     Raises:
-        Error: If the pattern is a shape none of the five kernels answers.
+        Error: Nothing here raises. The signature keeps it because every caller
+            is already in a context that can, and because reading a pattern is
+            where an escape character would be refused if one is ever added.
     """
     var text = String(pattern)
     var bytes = text.as_bytes()
+    var general = False
     for i in range(len(bytes)):
         if bytes[i] == UInt8(ord("_")):
-            raise Error(
-                String(
-                    "like: the _ in '",
-                    text,
-                    (
-                        "' stands for any one character, and firepanda reads a"
-                        " LIKE pattern as a substring search so far, which has"
-                        " no way to say that"
-                    ),
+            general = True
+            break
+
+    if not general:
+        var runs = List[String]()
+        for piece in text.split("%"):
+            runs.append(String(piece))
+
+        if len(runs) == 1:
+            return Pattern(MatchKind.EQUALS, runs[0].copy(), String(""))
+        if len(runs) == 2:
+            if runs[0] == "":
+                return Pattern(MatchKind.ENDS_WITH, runs[1].copy(), String(""))
+            if runs[1] == "":
+                return Pattern(
+                    MatchKind.STARTS_WITH, runs[0].copy(), String("")
                 )
-            )
+        elif len(runs) == 3:
+            if runs[0] == "" and runs[2] == "":
+                return Pattern(MatchKind.CONTAINS, runs[1].copy(), String(""))
+        elif len(runs) == 4:
+            if (
+                runs[0] == ""
+                and runs[3] == ""
+                and runs[1] != ""
+                and runs[2] != ""
+            ):
+                return Pattern(
+                    MatchKind.IN_ORDER, runs[1].copy(), runs[2].copy()
+                )
 
-    var runs = List[String]()
-    for piece in text.split("%"):
-        runs.append(String(piece))
-
-    if len(runs) == 1:
-        return Pattern(MatchKind.EQUALS, runs[0].copy(), String(""))
-    if len(runs) == 2:
-        if runs[0] == "":
-            return Pattern(MatchKind.ENDS_WITH, runs[1].copy(), String(""))
-        if runs[1] == "":
-            return Pattern(MatchKind.STARTS_WITH, runs[0].copy(), String(""))
-    elif len(runs) == 3:
-        if runs[0] == "" and runs[2] == "":
-            return Pattern(MatchKind.CONTAINS, runs[1].copy(), String(""))
-    elif len(runs) == 4:
-        if runs[0] == "" and runs[3] == "" and runs[1] != "" and runs[2] != "":
-            return Pattern(MatchKind.IN_ORDER, runs[1].copy(), runs[2].copy())
-
-    raise Error(
-        String(
-            (
-                "like: firepanda reads a pattern that is literal text, text"
-                " with a % at one end or at both, or two runs each wrapped in"
-                " one, and '"
-            ),
-            text,
-            "' is none of those",
-        )
-    )
+    return Pattern(MatchKind.GENERAL, String(pattern), String(""))
 
 
 def _match_at(
@@ -730,6 +752,147 @@ def text_replace(
     return built^.finish()
 
 
+def _character_width(bytes: Span[UInt8, _], at: Int) -> Int:
+    """How many bytes the character starting at an offset takes up.
+
+    The length is counted rather than read off the lead byte, because a run of
+    bytes that is not well formed UTF-8 still has to make progress. Anything
+    whose top two bits are not `10` starts something, so the width is one plus
+    however many continuation bytes follow it, and a stray continuation byte on
+    its own comes out as one.
+
+    Written here rather than imported from `chars.mojo`, which has the same
+    test, because that file reads the search out of this one and the two cannot
+    read each other.
+
+    Args:
+        bytes: The bytes.
+        at: Where the character starts. The caller guarantees it is inside.
+
+    Returns:
+        The width in bytes, always at least one.
+    """
+    var end = at + 1
+    while end < len(bytes) and (bytes[end] & 0xC0) == 0x80:
+        end += 1
+    return end - at
+
+
+def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
+    """Whether a run of bytes matches a `LIKE` pattern, wildcards and all.
+
+    The pattern language is two wildcards and everything else. `%` stands for
+    any run of characters including none, `_` stands for exactly one character,
+    and every other byte stands for itself.
+
+    Characters and not bytes, which is the one thing about `_` that is easy to
+    get wrong and that DuckDB is clear about: `'héllo' LIKE 'h_llo'` is true
+    there and `'héllo' LIKE 'h__llo'` is false, so an underscore steps over the
+    two bytes of the accented letter as one thing. `%` has to move a character
+    at a time for the same reason, since a `%` that stopped halfway into a
+    letter would let the pattern after it compare against the tail of one.
+
+    The walk carries one remembered `%` and no stack. Both pointers move
+    forward, and the only way to go back is to the last `%` seen, whose match
+    then grows by one character. That is enough because a pattern has no
+    alternation in it, so an earlier `%` never needs to be reconsidered once a
+    later one has been reached: whatever the earlier one gave up would have to
+    be taken by the later one anyway. It costs the length of the row times the
+    length of the pattern in the worst case and nothing like that in practice,
+    and it means there is no depth to limit and no recursion in a plan.
+
+    Literal bytes are compared as bytes even though the wildcards count
+    characters, which is safe and not a shortcut: two characters are equal
+    exactly when their bytes are, and a literal run in a well formed pattern is
+    whole characters, so the cursor is only ever left on a character boundary
+    when a wildcard is reached.
+
+    Args:
+        bytes: The element being matched.
+        pattern: The pattern as the query wrote it.
+
+    Returns:
+        True if the whole element matches the whole pattern.
+    """
+    var n = len(bytes)
+    var m = len(pattern)
+    comptime PERCENT = UInt8(ord("%"))
+    comptime UNDERSCORE = UInt8(ord("_"))
+
+    var s = 0
+    var p = 0
+    # Where the last `%` sits in the pattern, and how much of the row it has
+    # been given so far. Minus one for the first means none has been seen, which
+    # is what makes a mismatch final rather than something to go back from.
+    var star_p = -1
+    var star_s = 0
+
+    while s < n:
+        if p < m and pattern[p] == UNDERSCORE:
+            s += _character_width(bytes, s)
+            p += 1
+        elif p < m and pattern[p] == PERCENT:
+            star_p = p
+            star_s = s
+            p += 1
+        elif p < m and pattern[p] == bytes[s]:
+            p += 1
+            s += 1
+        elif star_p >= 0:
+            # The last `%` takes one more character and the pattern after it
+            # starts again from there. `star_s` is on a boundary, because it was
+            # set where a wildcard was reached and only ever moves by a whole
+            # character.
+            star_s += _character_width(bytes, star_s)
+            s = star_s
+            p = star_p + 1
+        else:
+            return False
+
+    # The row is used up. What is left of the pattern can only match nothing,
+    # which `%` does and neither `_` nor a literal byte does.
+    while p < m and pattern[p] == PERCENT:
+        p += 1
+    return p == m
+
+
+def text_like(
+    a: StringArray, pattern: Span[UInt8, _]
+) raises -> Array[DType.bool]:
+    """Whether each element matches a `LIKE` pattern with wildcards in it.
+
+    The sixth search, and the one nothing reaches unless the five above it were
+    tried first. `read_pattern` does that trying, so a prefix never arrives here
+    and never pays for the walk.
+
+    Args:
+        a: The column.
+        pattern: The pattern as the query wrote it, wildcards and all. Borrowed
+            for the length of the call and not stored.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var hit = matches_pattern(a.unsafe_bytes(i), pattern)
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](hit))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
 def text_ends_with(
     a: StringArray, suffix: Span[UInt8, _]
 ) raises -> Array[DType.bool]:
@@ -763,3 +926,433 @@ def text_ends_with(
 
     out.data.validity = validity^
     return out^
+
+
+# ---------------------------------------------------------------------------
+# The case insensitive half
+#
+# pandas answers `contains`, `match` and `fullmatch` with `case=False` out of
+# Arrow's `match_substring(ignore_case=True)`, and `replace` with `case=False`
+# out of Python's `re.IGNORECASE`, because it refuses that argument in its Arrow
+# path for that one method. The two rules were measured against each other over
+# every pair of code points in a fold class and they agree, so there is one
+# folded search here and not two. `searchfold.mojo` has the measurement.
+#
+# The fold a search uses is not the fold `str.casefold` writes. That one is
+# allowed to make a row longer, so it sends `ß` to `ss`, and a search cannot
+# have that: a match would then cover a number of bytes with no relation to the
+# number of bytes it was found in. The search fold sends one code point to one
+# code point, always, which is why `STRASSE` does not contain `straße` in
+# pandas and why this file can splice a replacement into the original bytes.
+# ---------------------------------------------------------------------------
+
+
+def _step(bytes: Span[UInt8, _], at: Int) -> Int:
+    """How many bytes the character at an offset takes.
+
+    A lead byte says its own length, and a length that runs off the end of the
+    element is not a character, so this answers one byte for it. That is the
+    same reading a byte comparison would give, which is what the rest of this
+    section falls back to when an element is not text.
+
+    Args:
+        bytes: The element.
+        at: A byte offset into it, which has to be inside it.
+
+    Returns:
+        One, two, three or four.
+    """
+    var lead = bytes[at]
+    var want = 1
+    if lead >= 0xF0:
+        want = 4
+    elif lead >= 0xE0:
+        want = 3
+    elif lead >= 0xC0:
+        want = 2
+    if at + want > len(bytes):
+        return 1
+    return want
+
+
+def _point_at(bytes: Span[UInt8, _], at: Int) -> UInt32:
+    """Reads the code point that starts at an offset.
+
+    There is no validity check beyond the length one `_step` makes. A run of
+    bytes that is not UTF-8 is read here as whatever the arithmetic gives, and
+    the only promise this section makes about such an element is that it walks
+    the whole of it and never reads past the end.
+
+    Args:
+        bytes: The element.
+        at: The offset the character starts at.
+
+    Returns:
+        The code point.
+    """
+    var width = _step(bytes, at)
+    var lead = UInt32(bytes[at])
+    if width == 1:
+        return lead
+    if width == 2:
+        return ((lead & 0x1F) << 6) | (UInt32(bytes[at + 1]) & 0x3F)
+    if width == 3:
+        return (
+            ((lead & 0x0F) << 12)
+            | ((UInt32(bytes[at + 1]) & 0x3F) << 6)
+            | (UInt32(bytes[at + 2]) & 0x3F)
+        )
+    return (
+        ((lead & 0x07) << 18)
+        | ((UInt32(bytes[at + 1]) & 0x3F) << 12)
+        | ((UInt32(bytes[at + 2]) & 0x3F) << 6)
+        | (UInt32(bytes[at + 3]) & 0x3F)
+    )
+
+
+def fold_point(
+    point: UInt32, keys: Span[UInt32, _], answers: Span[UInt32, _]
+) -> UInt32:
+    """The single code point a case insensitive search compares this one as.
+
+    ASCII is answered by arithmetic and never reaches the table, which is the
+    whole point of splitting it out: 26 letters would otherwise be 26 rows in
+    front of a binary search that almost every character of almost every column
+    would have to walk. Everything else is a search of `searchfold.mojo`, and a
+    code point that is not in it is compared as itself.
+
+    Args:
+        point: The code point.
+        keys: `SEARCHED_FROM`, in order.
+        answers: `SEARCHED_TO`, in the order the keys are in.
+
+    Returns:
+        The code point to compare, which is the argument when nothing folds it.
+    """
+    if point < 128:
+        if point >= 0x41 and point <= 0x5A:
+            return point + 32
+        return point
+    var low = 0
+    var high = len(keys)
+    while low < high:
+        var mid = (low + high) >> 1
+        if keys[mid] < point:
+            low = mid + 1
+        else:
+            high = mid
+    if low < len(keys) and keys[low] == point:
+        return answers[low]
+    return point
+
+
+def fold_pattern(
+    needle: Span[UInt8, _], keys: Span[UInt32, _], answers: Span[UInt32, _]
+) raises -> List[UInt32]:
+    """Folds a pattern once, into the code points a row is compared against.
+
+    The pattern is folded here and the row is folded a character at a time as
+    the search walks it, which is the arrangement the whole section exists for.
+    Folding the column instead would be correct and would allocate a second copy
+    of every row to throw away, and a column is the large side of this.
+
+    Args:
+        needle: The pattern.
+        keys: `SEARCHED_FROM`, in order.
+        answers: `SEARCHED_TO`.
+
+    Returns:
+        One folded code point per character of the pattern.
+
+    Raises:
+        Error: If the list cannot allocate.
+    """
+    var out = List[UInt32]()
+    var at = 0
+    while at < len(needle):
+        out.append(fold_point(_point_at(needle, at), keys, answers))
+        at += _step(needle, at)
+    return out^
+
+
+def _folded_ends(
+    bytes: Span[UInt8, _],
+    at: Int,
+    wanted: Span[UInt32, _],
+    keys: Span[UInt32, _],
+    answers: Span[UInt32, _],
+) -> Int:
+    """Where a folded pattern ends if it starts at an offset, or minus one.
+
+    Returns the byte offset just past the match rather than a flag, because the
+    replace below needs to know how much of the row the match covered and that
+    is not the length of the pattern: a match on `ſ` is two bytes where the same
+    match on `s` is one.
+
+    Args:
+        bytes: The element.
+        at: The offset to try.
+        wanted: The folded pattern.
+        keys: `SEARCHED_FROM`.
+        answers: `SEARCHED_TO`.
+
+    Returns:
+        The offset just past the match, or minus one.
+    """
+    var here = at
+    for j in range(len(wanted)):
+        if here >= len(bytes):
+            return -1
+        if fold_point(_point_at(bytes, here), keys, answers) != wanted[j]:
+            return -1
+        here += _step(bytes, here)
+    return here
+
+
+def find_folded(
+    bytes: Span[UInt8, _],
+    wanted: Span[UInt32, _],
+    keys: Span[UInt32, _],
+    answers: Span[UInt32, _],
+    from_: Int,
+) -> Int:
+    """The first offset at or after `from_` where a folded pattern starts.
+
+    Starts are tried at character boundaries only, which is what makes the walk
+    finite and is also the only reading that can be right: a match beginning in
+    the middle of a character is not a match on the text.
+
+    There is no skip table and no wide scan here, where the exact search a few
+    hundred lines up has both. A skip is a statement about bytes and this search
+    compares code points that the bytes do not hold, so the statement is not
+    available. That is a real cost and it is written down rather than hidden:
+    the case insensitive search is the naive one.
+
+    Args:
+        bytes: The element.
+        wanted: The folded pattern.
+        keys: `SEARCHED_FROM`.
+        answers: `SEARCHED_TO`.
+        from_: The offset to start looking at.
+
+    Returns:
+        The offset the match starts at, or minus one.
+    """
+    var at = from_
+    while at <= len(bytes):
+        if _folded_ends(bytes, at, wanted, keys, answers) >= 0:
+            return at
+        if at >= len(bytes):
+            break
+        at += _step(bytes, at)
+    return -1
+
+
+def text_contains_folded(
+    a: StringArray, needle: Span[UInt8, _]
+) raises -> Array[DType.bool]:
+    """Whether each element holds a pattern, with case ignored.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: If the folded pattern cannot allocate, or what the morsel
+            runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var wanted = fold_pattern(needle, Span(keys), Span(answers))
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var found = (
+                find_folded(
+                    a.unsafe_bytes(i),
+                    Span(wanted),
+                    Span(keys),
+                    Span(answers),
+                    0,
+                )
+                >= 0
+            )
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_starts_with_folded(
+    a: StringArray, prefix: Span[UInt8, _]
+) raises -> Array[DType.bool]:
+    """Whether each element begins with a pattern, with case ignored.
+
+    This is `str.match` with `case=False` once the pattern is known to be
+    literal, for the reason the exact prefix kernel is `str.match` without it:
+    pandas turns the pattern into `^(pat)` and hands it to a search.
+
+    Args:
+        a: The column.
+        prefix: The pattern.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: If the folded pattern cannot allocate, or what the morsel
+            runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var wanted = fold_pattern(prefix, Span(keys), Span(answers))
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var found = (
+                _folded_ends(
+                    a.unsafe_bytes(i),
+                    0,
+                    Span(wanted),
+                    Span(keys),
+                    Span(answers),
+                )
+                >= 0
+            )
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_equals_folded(
+    a: StringArray, other: Span[UInt8, _]
+) raises -> Array[DType.bool]:
+    """Whether each element is a pattern and nothing more, with case ignored.
+
+    The exact form of this question can answer most rows without reading a byte,
+    because two runs of different lengths cannot be equal. That shortcut is not
+    available here and its absence is the clearest illustration of what the
+    search fold costs: `ſ` is two bytes, `s` is one, and a search that ignores
+    case has to call them the same.
+
+    Args:
+        a: The column.
+        other: The pattern.
+
+    Returns:
+        A bool column, null wherever the input is null.
+
+    Raises:
+        Error: If the folded pattern cannot allocate, or what the morsel
+            runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var wanted = fold_pattern(other, Span(keys), Span(answers))
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var bytes = a.unsafe_bytes(i)
+            var ends = _folded_ends(
+                bytes, 0, Span(wanted), Span(keys), Span(answers)
+            )
+            var same = ends == len(bytes)
+            dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_replace_folded(
+    a: StringArray, needle: Span[UInt8, _], repl: Span[UInt8, _], limit: Int
+) raises -> StringArray:
+    """Writes every element out with a pattern swapped for another, case ignored.
+
+    Serial and built into a builder for the reason the exact replace is, which
+    is that the length of a row is not known until the search has run on it.
+    The bytes outside a match are copied across untouched, so a row keeps
+    whatever case it was written in everywhere the pattern did not reach, which
+    is what pandas does and is the only thing that could be meant by replacing
+    a pattern rather than folding a column.
+
+    An empty pattern never reaches here. It has nothing to do with case and the
+    exact kernel already has the rule, which counts characters rather than
+    bytes and is the one place in this file where those two differ.
+
+    Args:
+        a: The column.
+        needle: The pattern.
+        repl: The bytes to put in its place.
+        limit: How many matches in each row, negative for all and zero for
+            none.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var keys = materialize[SEARCHED_FROM]()
+    var answers = materialize[SEARCHED_TO]()
+    var wanted = fold_pattern(needle, Span(keys), Span(answers))
+    if len(wanted) == 0:
+        return text_replace(a, needle, repl, limit)
+
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var scratch = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if limit == 0:
+            built.append(bytes)
+            continue
+
+        scratch.clear()
+        var left = limit
+        var from_ = 0
+        while left != 0 and from_ <= len(bytes):
+            var at = find_folded(
+                bytes, Span(wanted), Span(keys), Span(answers), from_
+            )
+            if at < 0:
+                break
+            var ends = _folded_ends(
+                bytes, at, Span(wanted), Span(keys), Span(answers)
+            )
+            scratch.extend(bytes[from_:at])
+            scratch.extend(repl)
+            from_ = ends
+            if left > 0:
+                left -= 1
+        scratch.extend(bytes[from_ : len(bytes)])
+        built.append(Span(scratch))
+
+    return built^.finish()

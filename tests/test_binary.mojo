@@ -17,6 +17,11 @@ paragraph, because their values are the argument. Every number asserted about
 them was read off a running pandas 3.0 rather than worked out here, and the one
 place the two disagree is written down as a disagreement with pandas' own four
 answers next to it.
+
+The SQL division and its remainder are the same exception with a different
+oracle. Every number asserted about those two came off DuckDB 1.5.1, because
+they exist to answer what a query asked rather than what a frame asked, and the
+pandas answer sits beside each one so that the difference is readable.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -226,6 +231,117 @@ def test_the_remainder_takes_the_sign_of_the_divisor() raises:
     assert_equal(values[1], Int64(1), "7 % 3")
     assert_equal(values[2], Int64(-1), "-7 % -3 is negative")
     assert_equal(values[3], Int64(-2), "7 % -3 is negative")
+
+
+def test_sqls_division_truncates_where_pandas_floors() raises:
+    """The same four pairs through `SQLDIV`, which is what a query gets.
+
+    DuckDB 1.5.1 answers `[-2, 2, 2, -2]`, so the two negative quotients come
+    back one larger than the floor above and the two the other sign are the
+    same. Half the rows agreeing is why this went unnoticed: `7 // 3` is `2`
+    under either rule and most test data is positive. See issue #770."""
+    var got = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]),
+        typed[DType.int64]([3, 3, -3, -3]),
+        BinaryOp.SQLDIV,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(-2), "-7 // 3 rounds towards zero")
+    assert_equal(values[1], Int64(2), "7 // 3")
+    assert_equal(values[2], Int64(2), "-7 // -3")
+    assert_equal(values[3], Int64(-2), "7 // -3 rounds towards zero")
+
+
+def test_sqls_remainder_takes_the_sign_of_the_dividend() raises:
+    """`[-1, 1, -1, 1]` from DuckDB, against `[2, 1, -1, -2]` from pandas next
+    door. The rule is that the remainder goes with the quotient, so truncating
+    the one puts the sign of the numerator on the other."""
+    var got = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]),
+        typed[DType.int64]([3, 3, -3, -3]),
+        BinaryOp.SQLMOD,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(-1), "-7 % 3 is negative")
+    assert_equal(values[1], Int64(1), "7 % 3")
+    assert_equal(values[2], Int64(-1), "-7 % -3")
+    assert_equal(values[3], Int64(1), "7 % -3 is positive")
+
+
+def test_sqls_division_of_two_floats_does_not_round_at_all() raises:
+    """This is the part of the dialect nobody guesses. `-7.5 // 3` is `-2.5` in
+    DuckDB, not `-3.0`, because `//` there is the name of a division that is
+    integral only when its operands are.
+
+    The zero divisor is the second surprise and goes the other way: DuckDB
+    answers `NULL` to `7.5 // 0.0` while `7.5 / 0.0` beside it answers an
+    infinity, both with `ieee_floating_point_ops` on."""
+    var got = binary_any(
+        typed[DType.float64]([-7.5, 7.5, 7.5]),
+        typed[DType.float64]([3.0, -3.0, 0.0]),
+        BinaryOp.SQLDIV,
+    )
+    assert_true(got.type == LogicalType.FLOAT64, "result type")
+    assert_equal(got.null_count(), 1, "only the zero divisor")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(-2.5), "-7.5 // 3.0")
+    assert_equal(values[1], Float64(-2.5), "7.5 // -3.0")
+    assert_true(not got.is_valid(2), "7.5 // 0.0 is a null")
+
+
+def test_sqls_remainder_of_two_floats_is_the_c_library_one() raises:
+    """`fmod` and nothing added, where pandas' `%` corrects the sign afterwards.
+    A zero divisor is a NaN here rather than the null the division gives, which
+    is DuckDB's answer and not a choice made here."""
+    var got = binary_any(
+        typed[DType.float64]([-7.5, 7.5, 7.5]),
+        typed[DType.float64]([3.0, -3.0, 0.0]),
+        BinaryOp.SQLMOD,
+    )
+    assert_equal(got.null_count(), 0, "no nulls")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(-1.5), "-7.5 % 3.0 keeps its own sign")
+    assert_equal(values[1], Float64(1.5), "7.5 % -3.0 keeps its own sign")
+    assert_true(values[2] != values[2], "7.5 % 0.0 is a NaN")
+
+
+def test_the_sql_pair_against_a_constant_either_way_round() raises:
+    """The constant loops are a second copy of the rule and the flipped form is
+    a third, so all four are asserted rather than one standing for the rest.
+    With the column on top the divisor is the constant; flipped, the divisor is
+    the column and a zero in it is a null."""
+    var column = typed[DType.int64]([-7, 7])
+    assert_equal(
+        read[DType.int64](
+            binary_value_any(column, Value(Int64(3)), BinaryOp.SQLDIV)
+        )[0],
+        Int64(-2),
+        "-7 // 3",
+    )
+    assert_equal(
+        read[DType.int64](
+            binary_value_any(column, Value(Int64(3)), BinaryOp.SQLMOD)
+        )[0],
+        Int64(-1),
+        "-7 % 3",
+    )
+
+    var divisors = typed[DType.int64]([3, -3, 0])
+    var flipped = binary_value_any(
+        divisors, Value(Int64(-7)), BinaryOp.SQLDIV, True
+    )
+    var quotients = read[DType.int64](flipped)
+    assert_equal(quotients[0], Int64(-2), "-7 // 3 with the constant on top")
+    assert_equal(quotients[1], Int64(2), "-7 // -3")
+    assert_true(not flipped.is_valid(2), "-7 // 0 is a null")
+
+    var remainders = read[DType.int64](
+        binary_value_any(divisors, Value(Int64(-7)), BinaryOp.SQLMOD, True)
+    )
+    assert_equal(remainders[0], Int64(-1), "-7 % 3 with the constant on top")
+    assert_equal(remainders[1], Int64(-1), "-7 % -3")
 
 
 def test_an_integer_divided_by_zero_is_null_and_stays_an_integer() raises:
@@ -648,6 +764,17 @@ def test_the_bool_result_types_are_the_seven_pandas_answers() raises:
         _ = binary_type(BinaryOp.POW, b, b)
 
 
+def test_the_sql_pair_refuses_two_bools_rather_than_borrowing_an_answer() raises:
+    """`%` on two bools answers an int8 zero here because pandas does, and the
+    SQL pair must not inherit that: DuckDB has no boolean overload for either
+    operator and says so. The refusal is the closer answer of the two."""
+    var b = LogicalType.BOOL
+    with assert_raises(contains="is not defined on"):
+        _ = binary_type(BinaryOp.SQLDIV, b, b)
+    with assert_raises(contains="is not defined on"):
+        _ = binary_type(BinaryOp.SQLMOD, b, b)
+
+
 def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
     assert_equal(String(BinaryOp.ADD), "+", "add")
     assert_equal(String(BinaryOp.SUB), "-", "subtract")
@@ -656,6 +783,12 @@ def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
     assert_equal(String(BinaryOp.FLOORDIV), "//", "floor divide")
     assert_equal(String(BinaryOp.MOD), "%", "remainder")
     assert_equal(String(BinaryOp.POW), "**", "power")
+    # The two SQL operations are spelled with a suffix rather than with the bare
+    # symbol, because `plan/json.mojo` reads an operation back by matching the
+    # symbol and two operations sharing one would silently deserialize into
+    # whichever came first.
+    assert_equal(String(BinaryOp.SQLDIV), "//sql", "sql divide")
+    assert_equal(String(BinaryOp.SQLMOD), "%sql", "sql remainder")
     assert_equal(String(BinaryOp.EQ), "==", "equal")
     assert_equal(String(BinaryOp.NE), "!=", "not equal")
     assert_equal(String(BinaryOp.LT), "<", "less")
@@ -676,6 +809,8 @@ def test_only_the_six_comparisons_say_they_are_comparisons() raises:
     assert_true(not BinaryOp.FLOORDIV.is_comparison(), "floor divide")
     assert_true(not BinaryOp.MOD.is_comparison(), "remainder")
     assert_true(not BinaryOp.POW.is_comparison(), "power")
+    assert_true(not BinaryOp.SQLDIV.is_comparison(), "sql divide")
+    assert_true(not BinaryOp.SQLMOD.is_comparison(), "sql remainder")
     assert_true(BinaryOp.EQ.is_comparison(), "equal")
     assert_true(BinaryOp.NE.is_comparison(), "not equal")
     assert_true(BinaryOp.LT.is_comparison(), "less than")
