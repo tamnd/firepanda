@@ -198,6 +198,8 @@ from .pick import (
 from .reduce import distinct_count, distinct_count_any, reduce_any
 from .select import (
     filter_any,
+    filter_counted,
+    filter_offsets,
     filter_range,
     filter_rows,
     gather_any,

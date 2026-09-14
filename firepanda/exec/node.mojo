@@ -168,6 +168,8 @@ from firepanda.kernel.running import (
 )
 from firepanda.kernel.select import (
     filter_any,
+    filter_counted,
+    filter_offsets,
     gather_any,
     mask_keeps_more_than,
     mask_kept,
@@ -442,6 +444,26 @@ struct Filter(Movable):
         self.op = op
         self.value_on_left = value_on_left
 
+    def _any_fixed_width(self, chunk: Chunk, count: Int) -> Bool:
+        """Whether any column this filter keeps is one the offsets would serve.
+
+        A text column sizes its payload as it counts its rows, so it counts its
+        own mask whatever it is handed, and a filter keeping nothing but text
+        should not pay for a count nobody reads.
+
+        Args:
+            chunk: The chunk being filtered.
+            count: How many columns the filter keeps.
+
+        Returns:
+            True if at least one kept column is fixed width.
+        """
+        for i in range(count):
+            var at = self.keep[i] if self.narrows else i
+            if not chunk.columns[at].is_string():
+                return True
+        return False
+
     def _positions(self, ref chunk: Chunk, spread: Bool) raises -> List[UInt32]:
         """Runs the comparison and returns the rows of the chunk it keeps.
 
@@ -579,10 +601,22 @@ struct Filter(Movable):
                 # loop above hands out one chunk at a time, so on eight chunks
                 # and ten cores there is room underneath it, and a filter is
                 # where the room gets used.
+                # Counted once for the chunk rather than once per column.
+                # Every column is filtered by this mask and the count is a
+                # property of the mask, so the second column onwards was
+                # walking a byte a row to arrive at numbers it had already
+                # been told. A text column counts its own anyway, because it
+                # has a payload to size as well, so the offsets are worth
+                # computing only where a fixed width column will read them.
+                var offsets = List[Int]()
+                if self._any_fixed_width(chunk, count):
+                    offsets = filter_offsets(mask)
                 var copied = List[AnyArray](capacity=count)
                 for i in range(count):
                     var at = self.keep[i] if self.narrows else i
-                    copied.append(filter_any(chunk.columns[at], mask))
+                    copied.append(
+                        filter_counted(chunk.columns[at], mask, Span(offsets))
+                    )
                 # Read off the first column rather than counted, so that the
                 # route which is here because counting was not worth it does not
                 # go and count anyway. Every column was filtered by the same
