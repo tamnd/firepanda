@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the type differential now says how much of its agreement is not a type comparison
+
+The harness reported agreement over 15,001 expressions and zero disagreements, and 932 of those expressions never had their type compared. It prints both numbers now. Issue #780.
+
+A probe agrees in one of two ways. Either both sides bind the call and the types match, which is the claim the harness exists to make, or both sides bind the call and firepanda cannot name a type because the winning signature declares a rule rather than a type, which is 29 names like `abs` and `sum` and `list`. The second is worth checking and it is weaker, since all it says is that the same overload won.
+
+Counting them as one number is worse than losing information. It is a figure that goes up when the binder is taught less, because a function whose return type the binder stops deriving moves from the compared pile to the free pile. So the report now ends with 13,710 compared, 932 compared on the overload alone, and the 29 names printed out, and that list is a list of work rather than a footnote.
+
+Nothing about what the harness checks changed, and it still runs at zero disagreements.
+
 ### Added: a LIKE pattern can hold an underscore, and a run at each end
 
 `word LIKE 'a_p%'` was refused by name and so was `word LIKE 'a%e'`. Both answer now, and there is no pattern left that a query can write and this cannot run. Issue #776.

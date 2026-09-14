@@ -30,6 +30,15 @@ only the choice between binding and refusing is, because substituting a template
 and deriving a decimal's precision are the binder's job and the binder does not
 do them yet.
 
+That second group is counted and named in the report rather than being absorbed
+into the agreement figure, and the reason is that the two claims are not the
+same claim. A probe whose type is compared says the binder gets the type right.
+A probe compared on the overload alone says only that the same signature won,
+which is worth saying and is weaker. Folding them together would give a number
+that goes up when the binder is taught less, so the report prints how many of
+each there are and which names the weaker ones belong to, and the list is the
+work that is left.
+
 The oracle is `tools/semantics.py`, which builds a table with one column per
 type in the matrix and asks DuckDB for `typeof` of each expression over it. The
 columns are what keep DuckDB from folding the expression before it can be read,
@@ -411,6 +420,42 @@ def lattice_probes(types: List[SqlType]) raises -> List[Probe]:
     return out^
 
 
+def called_name(expression: StringSlice) -> String:
+    """The function name a call probe was written for.
+
+    Args:
+        expression: The probe's expression.
+
+    Returns:
+        Everything before the first bracket, or an empty string for a probe
+        that is not a call and so has no name to report.
+    """
+    var text = String(expression)
+    var at = text.find("(")
+    if at <= 0:
+        return String("")
+    return String(text[byte=0:at])
+
+
+def listed(names: List[String], name: StringSlice) -> Bool:
+    """Whether a name has already been collected.
+
+    A walk rather than a set, because the list is the number of names whose
+    return type is a rule and that is tens, not thousands.
+
+    Args:
+        names: What has been collected.
+        name: The name to look for.
+
+    Returns:
+        True if it is already there.
+    """
+    for other in names:
+        if other == name:
+            return True
+    return False
+
+
 def returned(registry: Registry, overload: Overload) -> String:
     """What a signature says its result type is, when it says one.
 
@@ -703,6 +748,8 @@ def main() raises:
     var answers = ask_duckdb(types, probes)
 
     var explained = 0
+    var deferred = 0
+    var deferred_names = List[String]()
     var wrong_type = List[Probe]()
     var wrong_type_answers = List[String]()
     var we_bind = List[Probe]()
@@ -719,7 +766,13 @@ def main() raises:
         if we_refused and they_refused:
             continue
         if not we_refused and not they_refused:
-            if probe.ours == OURS_UNKNOWN or probe.ours == theirs:
+            if probe.ours == OURS_UNKNOWN:
+                deferred += 1
+                var name = called_name(probe.expression)
+                if name != "" and not listed(deferred_names, name):
+                    deferred_names.append(name)
+                continue
+            if probe.ours == theirs:
                 continue
 
         if known(probe, theirs):
@@ -742,8 +795,60 @@ def main() raises:
         len(probes),
         "expressions,",
         explained,
-        "were known cases",
+        "were known cases,",
+        deferred,
+        "were compared on the overload alone",
     )
+
+    if deferred != 0:
+        # Said out loud rather than folded into the agreement number, because a
+        # probe that both sides bind and that this cannot name a type for is
+        # not a comparison of types at all. It is a comparison of which
+        # overload won, which is worth making and is a weaker claim, and an
+        # agreement figure that counts the two the same way is a figure that
+        # improves when the binder learns less.
+        print()
+        print(
+            "   ",
+            deferred,
+            (
+                "of those are calls whose return type is a rule over the"
+                " arguments rather"
+            ),
+        )
+        print(
+            "   ",
+            (
+                "than a type in the catalog, which is a template letter, a bare"
+                " DECIMAL or a"
+            ),
+        )
+        print(
+            "   ",
+            (
+                "container. The binder does not derive them yet, so only the"
+                " choice of overload"
+            ),
+        )
+        print("   ", "is compared.", len(deferred_names), "names are involved:")
+        # Wrapped by hand at 76 bytes, with the comma attached to the name
+        # rather than trailing the line, so that a name landing at the edge
+        # does not leave a space at the end of a line for git to complain
+        # about later.
+        var line = String("    ")
+        for at in range(len(deferred_names)):
+            var piece = deferred_names[at]
+            if at != len(deferred_names) - 1:
+                piece += ","
+            if line == "    ":
+                line += piece
+            elif line.byte_length() + 1 + piece.byte_length() > 76:
+                print(line)
+                line = String("    ") + piece
+            else:
+                line += " " + piece
+        if line != "    ":
+            print(line)
 
     report(
         "these come out a different type:",
