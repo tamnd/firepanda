@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: casefold, the one case method pandas does not answer out of Arrow
+
+`s.str.casefold()`. Folding looks like a third case and is not one. Nobody writes text in it and nobody reads it, and its one promise is that two rows a reader would call the same come out as the same bytes, so `Straße` and `STRASSE` both fold to `strasse` where lowering them says they are different.
+
+The price of that promise is that a folded row can be longer than the row that went in, which is the opposite of the rule `upper` and `lower` shipped with. That is not an inconsistency anybody chose. pyarrow has no casefold kernel, so a pandas text column falls back to Python's own `str.casefold` for this one method while every other case method stays in Arrow, which means both pandas backends agree here and the full mappings are the right answer for this name and the wrong answer for the four beside it. Following Arrow for `upper` and Python for `casefold` is copying what pandas actually answers rather than picking a side.
+
+`firepanda/kernel/casefold.mojo` is the 353 code points that fold to something other than their lower case, 104 of them to more than one and none to more than three. Everything else in Unicode folds to exactly what it lowers to, so this is a difference table rather than a copy of the folding database, and the kernel falls through to the corrected lower case path for every code point that is not in it. There is no byte prefilter on this path and there cannot be one: the lowest code point in the table is the micro sign at U+00B5, whose lead byte is the lowest a non ASCII character can have, so asking whether an element could hold one and asking whether it is not ASCII are the same question. An ASCII row folds by lowering.
+
+Checked against a live pandas over all 1112064 code points on their own and over sixty thousand random words with no row differing, and the generator asserts that folding a row is folding its characters one at a time before it will write a table. `title` is now the only name of the case group still missing and it waits on #748.
+
 ### Fixed: STRLEN counts bytes, which is what DuckDB counts
 
 `strlen` was answering the number of characters and DuckDB answers the number of bytes. `strlen('café')` is 5 there and was 4 here. `length` and `len` count characters in both, so what was wrong was folding all three names into one call when DuckDB documents two different questions under them.

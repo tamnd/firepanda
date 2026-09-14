@@ -1,6 +1,6 @@
-"""The seven `str` methods that are about case, checked against pandas.
+"""The eight `str` methods that are about case, checked against pandas.
 
-Four of them write a row out in some case or other and three of them ask a
+Five of them write a row out in some case or other and three of them ask a
 question about the case a row is already in. They are one group because they all
 rest on the same piece of data, which is the table that says what the other case
 of a character is, and because the interesting rows are the same rows for all
@@ -30,6 +30,14 @@ random words, with no row differing. `title` is the name of this group that is
 not here, because deciding where a word starts means knowing whether a character
 is cased at all, and that is the thousand and more the questions are still wrong
 about.
+
+`casefold` is the exception to everything the paragraph above says about which
+pandas to follow, and it is pandas' exception rather than this library's. pyarrow
+has no casefold kernel, so a pandas text column falls back to Python for that one
+method whatever dtype it is held as, both backends agree, and the full mappings
+are the right answer. It is the only name here that can give back a row longer
+than the row it was given, and the tests for it are the only ones in this file
+that do not have to name a dtype to be meaningful.
 """
 
 from __future__ import annotations
@@ -306,3 +314,91 @@ def test_the_two_new_names_keep_a_missing_row_missing(firepanda: ModuleType) -> 
     """The same rule as the other five, asserted again because it is easy to lose."""
     assert made(firepanda, ["a", None]).str.capitalize().tolist() == ["A", None]
     assert made(firepanda, ["a", None]).str.swapcase().tolist() == ["A", None]
+
+
+@needs_pandas
+def test_casefold_matches_pandas_row_for_row(firepanda: ModuleType) -> None:
+    """All ten rows, and the sharp s in the middle of them is the point."""
+    assert like(made(firepanda).str.casefold().tolist(), theirs().str.casefold().tolist())
+
+
+@needs_pandas
+def test_casefold_is_the_one_name_here_both_pandas_backends_agree_on(
+    firepanda: ModuleType,
+) -> None:
+    """Because neither of them is Arrow. pyarrow has no kernel for this method.
+
+    Every other rewrite in this file answers differently depending on how the
+    column is held, which is what the test above this group is about. This one
+    cannot, since both backends end up in the same Python function, and that is
+    why the full mappings are right here and wrong three names over.
+    """
+    import pandas as pd
+
+    rows = ["stra\u00dfe", "\u0130stanbul", "\ufb01ance"]
+    out = ["strasse", "i\u0307stanbul", "fiance"]
+    assert pd.Series(rows, dtype="str").str.casefold().tolist() == out
+    assert pd.Series(rows, dtype="object").str.casefold().tolist() == out
+    assert made(firepanda, rows).str.casefold().tolist() == out
+
+
+def test_folding_makes_a_row_longer_where_lowering_leaves_it_alone(
+    firepanda: ModuleType,
+) -> None:
+    """The difference between the two names, in one row.
+
+    Lowering a sharp s leaves it as it is, because it is already the lower case
+    one and Arrow has no mapping that would make it anything else. Folding it
+    writes two letters, because the question folding answers is which rows a
+    reader would call the same rather than what the row looks like in lower case.
+    """
+    assert made(firepanda, ["stra\u00dfe"]).str.lower().tolist() == ["stra\u00dfe"]
+    assert made(firepanda, ["stra\u00dfe"]).str.casefold().tolist() == ["strasse"]
+
+
+def test_two_rows_a_reader_calls_equal_fold_to_the_same_bytes(
+    firepanda: ModuleType,
+) -> None:
+    """The whole reason the name exists, and the reason lowering cannot replace it."""
+    folded = made(firepanda, ["Stra\u00dfe", "STRASSE"]).str.casefold().tolist()
+    assert folded[0] == folded[1]
+    lowered = made(firepanda, ["Stra\u00dfe", "STRASSE"]).str.lower().tolist()
+    assert lowered[0] != lowered[1]
+
+
+def test_folding_takes_a_titlecase_character_all_the_way_down(
+    firepanda: ModuleType,
+) -> None:
+    """Where `swapcase` leaves the same character exactly as it found it.
+
+    A titlecase character is in neither case, which is why swapping has nothing
+    to do to it. Folding is not about a case at all, so all three of the letters
+    in that family come out as the same one.
+    """
+    rows = ["\u01c4", "\u01c5", "\u01c6"]
+    assert made(firepanda, rows).str.casefold().tolist() == ["\u01c6"] * 3
+    assert made(firepanda, ["\u01c5"]).str.swapcase().tolist() == ["\u01c5"]
+
+
+@needs_pandas
+def test_folding_corrects_the_code_points_the_lower_case_path_corrects(
+    firepanda: ModuleType,
+) -> None:
+    """The fold table is a difference table, so most characters fall through it.
+
+    A capital sharp s is in the fold table because it folds to two letters. A
+    capital theta symbol is not, because folding it is lowering it, so it is
+    answered by the same corrected lower case path `str.lower` uses, and the
+    standard library underneath gets that particular character wrong on its own.
+    """
+    import pandas as pd
+
+    rows = ["\u1e9e", "\u03f4"]
+    out = ["ss", "\u03b8"]
+    assert pd.Series(rows, dtype="str").str.casefold().tolist() == out
+    assert made(firepanda, rows).str.casefold().tolist() == out
+
+
+def test_casefold_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
+    """The same rule as the other seven, asserted again because it is easy to lose."""
+    assert made(firepanda, ["A", None]).str.casefold().tolist() == ["a", None]

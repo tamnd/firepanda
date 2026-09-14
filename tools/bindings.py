@@ -1019,6 +1019,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="Series",
         ),
         Member(
+            name="casefold",
+            kind="method",
+            signature="",
+            body='self._text("casefold")',
+            doc="Every row folded, which is the form two equal rows agree on.",
+            returns="Series",
+        ),
+        Member(
             name="isspace",
             kind="method",
             signature="",

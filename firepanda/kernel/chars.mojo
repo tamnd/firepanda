@@ -45,7 +45,7 @@ The case kernels below cannot do their own walking, and the walk they borrow doe
 read past the end of a truncated element, which in a text column means into the
 row after it, since the payload is one buffer with the elements end to end. So
 they ask first: an element that is not well formed is copied through unchanged by
-the two that write text and answers False to the three that ask a question. The
+the five that write text and answers False to the three that ask a question. The
 promise is kept, at the cost of a scan.
 
 ### Why this builds its output one row at a time
@@ -89,6 +89,14 @@ the mappings cannot classify, because they are in neither case while both of
 their mappings would move them, and `KEPT_BY_SWAP` is that list. Both rules are
 checked against Arrow over every code point there is by the generator, which
 refuses to write a table if either one stops holding.
+
+`casefold` is the one case kernel here that is not answering Arrow. pyarrow has
+no casefold kernel, so pandas falls back to Python for that one method whatever
+dtype the column is held as, which makes the full mappings right for it and
+wrong for everything else in this file. It is also the only kernel here that can
+give back a row longer in characters than the one it was given, since `ß` folds
+to two letters. `casefold.mojo` is the 353 code points whose fold is not their
+lower case, and everything else falls through to the lower case path.
 """
 
 from std.collections.span import Span
@@ -107,6 +115,7 @@ from .casefix import (
     KEPT_BY_SWAP,
     LOWEST_CORRECTED_LEAD,
 )
+from .casefold import FOLDED_AT, FOLDED_FROM, FOLDED_TO
 from .mask import repair_range
 
 comptime EVERY_SPACE = 0
@@ -1011,6 +1020,73 @@ def text_swapcase(a: StringArray) raises -> StringArray:
             out += _case_one(
                 point, Span(keys), Span(raised), Span(dropped), True
             )
+        built.append(out.as_bytes())
+    return built^.finish()
+
+
+def text_casefold(a: StringArray) raises -> StringArray:
+    """Writes every element in the form two equal rows agree on.
+
+    Folding is the third case operation and it is not a case. Nobody reads a
+    folded row: its one job is that two rows a reader would call the same come
+    out as the same bytes, so `Straße` and `STRASSE` both fold to `strasse`,
+    and the price of that is that a row can come out longer in characters than
+    it went in. `upper` and `lower` here never do, because pandas answers those
+    out of Arrow and Arrow uses the simple mappings.
+
+    This one is different and the difference is pandas', not ours. pyarrow has
+    no casefold kernel, so a pandas text column falls back to Python for this
+    one method whatever dtype it is held as, and both pandas backends give the
+    same answer as a result. So the full mappings are the right answer here and
+    the wrong answer three kernels up, which looks like an inconsistency until
+    you see that each one is copying whatever pandas actually does.
+
+    `casefold.mojo` holds the 353 code points that fold to something other
+    than their lower case, which is what makes this a small table rather than a
+    copy of the whole case database: everything else folds to exactly what it
+    lowers to, corrections and all, so the fold table is asked first and the
+    lower case path answers the rest.
+
+    Args:
+        a: The column.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var keys = materialize[CORRECTED_FROM]()
+    var raised = materialize[CORRECTED_UP]()
+    var dropped = materialize[CORRECTED_DOWN]()
+    var folds = materialize[FOLDED_FROM]()
+    var starts = materialize[FOLDED_AT]()
+    var answers = materialize[FOLDED_TO]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        if not _well_formed(bytes):
+            built.append(bytes)
+            continue
+        var text = StringSlice(unsafe_from_utf8=bytes)
+        if _is_ascii(bytes):
+            var one = text.lower()
+            built.append(one.as_bytes())
+            continue
+        var out = String()
+        for point in text.codepoints():
+            var seat = _listed_at(Span(folds), point.to_u32())
+            if seat < 0:
+                out += _case_one(
+                    point, Span(keys), Span(raised), Span(dropped), False
+                )
+                continue
+            for k in range(Int(starts[seat]), Int(starts[seat + 1])):
+                out += String(Codepoint(unsafe_unchecked_codepoint=answers[k]))
         built.append(out.as_bytes())
     return built^.finish()
 

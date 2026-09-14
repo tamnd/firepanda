@@ -229,7 +229,8 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `len` (M6), which ships as `chars_length` and stays unticked until there is a differential test for it in firepanda-bench, per the rule at the bottom of this document
 - [x] `lower`, `upper` (M6), which follow the simple case mappings an Arrow backed pandas column answers out of rather than the full mappings Python's own string methods use, so a row never changes length in characters, measured in document 64
 - [x] `capitalize`, `swapcase` (M6), which need no case data past the correction table `lower` and `upper` already carry, because capitalising is the first character raised and the rest dropped and swapping is decidable from the mappings themselves plus the thirty one titlecase characters Arrow leaves alone, both measured against pandas over every code point there is
-- [ ] `title`, `casefold` (M6), where `title` waits on knowing whether a character is cased at all and `casefold` is the one name in this group pandas answers out of Python rather than Arrow, so it folds `ß` to `ss` and needs its own table
+- [x] `casefold` (M6), which is the one name of this group pandas answers out of Python rather than Arrow, because pyarrow has no casefold kernel, so it folds `ß` to `ss` and is the only rewrite here that can give back a row longer than the row it was given, measured in document 64
+- [ ] `title` (M6), which waits on knowing whether a character is cased at all, a question the case mappings cannot answer for 1295 code points, tracked as firepanda #748
 - [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
 - [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)
@@ -243,7 +244,7 @@ RE2 semantics throughout: linear time, no backreferences, no lookaround. That is
 - [ ] `encode`, `decode`, `normalize` (M6)
 - [x] `isspace`, `islower`, `isupper` (M6), which answer a missing row with a missing value where pandas holding its own string dtype answers False, registered as `engine/string-predicate-null`
 - [ ] `isalnum`, `isalpha`, `isdigit`, `istitle`, `isnumeric`, `isdecimal` (M6)
-- [ ] `translate`, `casefold` (M6)
+- [ ] `translate` (M6), and `casefold` is ticked above with the rest of the case group
 
 ## 5. The `.dt` accessor
 
