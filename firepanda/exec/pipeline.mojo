@@ -110,6 +110,11 @@ struct Scan(Movable):
     Cutting with `slice` instead was measured too and it is far worse than
     leaving the frame alone, 11.9 milliseconds against 3.46, because a copy of
     the source costs more than the query.
+
+    A frame holding a list or a struct column is left exactly as it arrived,
+    because a nested column is the one shape a window cannot be taken of and
+    cutting the rest would leave the columns chunked differently from each
+    other.
     """
 
     var columns: List[List[AnyArray]]
@@ -128,6 +133,15 @@ struct Scan(Movable):
             If the columns are not chunked the same way.
         """
         var owned = frame^.into_columns()
+        # A nested column is the one shape a window cannot be taken of, and the
+        # decision has to be made for the frame rather than per column, since
+        # cutting the others would leave the frame chunked differently from
+        # column to column and the check below would refuse it.
+        var cut = True
+        for i in range(len(owned)):
+            if owned[i].type.is_nested():
+                cut = False
+                break
         var flipped = List[List[AnyArray]](capacity=len(owned))
         while len(owned) > 0:
             var chunks = owned.pop().into_chunks()
@@ -135,12 +149,11 @@ struct Scan(Movable):
             while len(chunks) > 0:
                 var chunk = chunks.pop()
                 var rows = len(chunk)
-                if rows <= MORSEL_ROWS or chunk.is_nested():
+                if not cut or rows <= MORSEL_ROWS:
                     backwards.append(chunk^)
                     continue
                 # Descending, because this list is in reverse and `next` takes
-                # from the back of it. A nested column is left whole, since it
-                # is the one shape a window cannot be taken of.
+                # from the back of it.
                 var pieces = (rows + MORSEL_ROWS - 1) // MORSEL_ROWS
                 for p in range(pieces - 1, -1, -1):
                     var at = p * MORSEL_ROWS

@@ -15,12 +15,17 @@ sharing copy, so the addresses are compared and not just the contents.
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray
-from firepanda.array.array import Array
+from firepanda.array.array import Array, from_list
+from firepanda.array.data import ColumnData
+from firepanda.array.nested import ITEM, ROOT, NestedNode
 from firepanda.array.strings import StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import ALIGNMENT, Buffer
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.morsel import MORSEL_ROWS
+from firepanda.exec import Node, Pipeline, Project
+from firepanda.frame.frame import DataFrame
 
 
 def test_a_buffer_window_shares_the_allocation() raises:
@@ -220,6 +225,55 @@ def test_a_window_outside_the_column_is_an_error() raises:
     except:
         raised = True
     assert_true(raised)
+
+
+def _lists(rows: Int) raises -> AnyArray:
+    """Builds a list column of `rows` rows, each holding one element."""
+    var offsets = List[Int32](capacity=rows + 1)
+    var items = List[Int64](capacity=rows)
+    for i in range(rows + 1):
+        offsets.append(Int32(i))
+    for i in range(rows):
+        items.append(Int64(i))
+
+    var edges = AnyArray(from_list[DType.int32](offsets))
+    var storage = edges^.into_node(String(ITEM), ROOT).take_data()
+    storage.validity = Bitmap(rows)
+    storage.length = rows
+
+    var nodes = List[NestedNode]()
+    nodes.append(
+        NestedNode(
+            String("col"), LogicalType.list_of(DType.int64), ROOT, storage^
+        )
+    )
+    var leaf = AnyArray(from_list[DType.int64](items))
+    nodes.append(leaf^.into_node(String(ITEM), 0))
+    return AnyArray.nested_from(nodes^)
+
+
+def test_a_frame_holding_a_list_column_is_not_cut_at_all() raises:
+    # The scan cuts a tall chunk into morsels, and a list column is the one
+    # shape it cannot cut. If it cut the other columns anyway the frame would
+    # come out chunked differently from column to column and the scan would
+    # refuse its own work, so a frame with a list in it is left whole.
+    var rows = MORSEL_ROWS + 3
+    var plain = Array[DType.int64](rows)
+    for i in range(rows):
+        plain[i] = Int64(i)
+
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(plain^))
+    columns.append(_lists(rows))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("items", LogicalType.list_of(DType.int64)))
+    var frame = DataFrame(Schema(fields^), columns^)
+
+    var pipeline = Pipeline(frame^)
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    assert_equal(out.rows, rows)
 
 
 def main() raises:
