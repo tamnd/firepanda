@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a correlated subquery that counts, which is the count bug
+
+`SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop = shops.shop) FROM shops` was refused by name, because answering it would have given the wrong number for a shop that sold nothing. It answers now.
+
+The rewrite that makes a correlated subquery run once rather than once per outer row is a group under a left join, and the left join pads an outer row whose group has no rows in it with null. That is what a sum, a minimum and an average over nothing answer in SQL. It is not what a count answers, which is zero. Left alone it is wrong twice over, since the count comes back null and null is a row a filter does not keep, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped.
+
+The zero goes back on above the join, where the expression the subquery was taken out of reads the column, because that is the one place that knows the null is the join padding a row rather than anything the count answered. `count(DISTINCT x)` takes the same reading, being zero over nothing for the same reason.
+
+It is put back only where the count is the whole of the subquery's value. `count(k) + 1` over an empty group is one rather than zero, and the addition happens under the join where the count is not there to be zero yet, so there is no one constant the padding stands for. That shape is refused with a message that says so, rather than answered wrong.
+
 ### Fixed: an average over a column of times answered one thing from SQL and another from the frame
 
 `df.group_by(["k"], [AggSpec("ts", AggKind.MEAN)])` answered a point in time and `SELECT avg(ts) FROM t GROUP BY k` answered a count of seconds over the same column. Neither half was wrong on its own terms, which is why every test of either half passed. The frame path runs the grouped kernel, which reads the pandas table and puts the label back. The SQL path runs the streaming group operator, which keeps a running sum and a running count and divides at the end, and a division of two numbers is a number. Issue #552.

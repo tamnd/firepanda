@@ -3327,12 +3327,66 @@ def test_a_correlated_subquery_may_compute_over_its_fold() raises:
     same(gapped(got, "top"), [31, 41, -1], "top")
 
 
-def test_a_correlated_subquery_that_counts_is_refused_by_name() raises:
-    with assert_raises(contains="a count of nothing is zero"):
+def test_a_correlated_count_answers_zero_for_an_empty_group() raises:
+    # The count bug. Shop three sells nothing, so the left join pads its row,
+    # and the null the padding writes is read as the zero a count of nothing
+    # answers rather than being handed on as a null.
+    var got = run(
+        (
+            "SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop ="
+            " shops.shop) AS n FROM shops"
+        ),
+        session(),
+    )
+    same(read_back(got, "shop"), [1, 2, 3], "shop")
+    same(read_back(got, "n"), [5, 5, 0], "n")
+
+
+def test_a_correlated_count_of_zero_is_a_row_a_filter_keeps() raises:
+    # The wrong answer the reading exists to stop. A null is a row no filter
+    # keeps, so the shop that sold nothing used to be the one row this query
+    # could not find.
+    same(
+        answer(
+            (
+                "SELECT shop FROM shops WHERE (SELECT count(qty) FROM sales"
+                " WHERE sales.shop = shops.shop) = 0"
+            ),
+            "shop",
+        ),
+        [3],
+        "shop",
+    )
+
+
+def test_a_correlated_count_star_counts_rows_and_not_values() raises:
+    var got = run(
+        (
+            "SELECT shop, (SELECT count(*) FROM sales WHERE sales.shop ="
+            " shops.shop AND qty > 10) AS n FROM shops"
+        ),
+        session(),
+    )
+    same(read_back(got, "n"), [3, 3, 0], "n")
+
+
+def test_a_correlated_distinct_count_answers_zero_too() raises:
+    var got = run(
+        (
+            "SELECT shop, (SELECT count(DISTINCT qty) FROM sales WHERE"
+            " sales.shop = shops.shop) AS n FROM shops"
+        ),
+        session(),
+    )
+    same(read_back(got, "n"), [5, 5, 0], "n")
+
+
+def test_a_correlated_count_inside_a_larger_value_is_refused_by_name() raises:
+    with assert_raises(contains="counts inside a larger expression"):
         _ = run(
             (
-                "SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop ="
-                " shops.shop) AS n FROM shops"
+                "SELECT shop, (SELECT count(qty) + 1 FROM sales WHERE"
+                " sales.shop = shops.shop) AS n FROM shops"
             ),
             session(),
         )
