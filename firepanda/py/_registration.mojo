@@ -367,6 +367,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "string_translate",
         docstring="Every row with single characters swapped out of a table.",
     )
+    _ = series.def_method[PySeries.string_partition](
+        "string_partition",
+        docstring="Every row cut at a separator, as three columns.",
+    )
     _ = series.def_method[PySeries.window_agg](
         "window_agg", docstring="One reduction over every window of the column."
     )

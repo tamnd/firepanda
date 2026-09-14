@@ -73,6 +73,19 @@ The underscore stands for one character and not for one byte, which is the thing
 One thing about the reading order is correctness and not speed. A pattern holding an underscore goes straight to the matcher without the five being tried, because they are found by counting the runs between the `%` signs and an underscore inside one of those runs would be compared as an ordinary byte. `%a_b%` would have read as a substring search and quietly answered the wrong rows.
 
 The value differential found this, the same harness that found the division two entries above, and its recorded list is now empty. Five more patterns went into it on the way, including two against text that is not one byte a character, and all seventy five expressions agree.
+### Added: `str.partition` and `str.rpartition`, the first answers wider than a column
+
+Every `str` name written so far hands back one column. These two hand back three: what came before the separator, the separator, and what came after. That makes them the first on this accessor whose answer is a frame, which is why they were picked next out of the fourteen names still missing. Everything else about them is a substring search the library already had, so nothing else confounds the question.
+
+The difference between the two names is not only the one the names suggest. `partition` cutting at the first occurrence and `rpartition` at the last is half of it. The other half is a row the separator is not in at all: the row survives whole, and `partition` puts it in the first column while `rpartition` puts it in the third. That is Python's rule, and an implementation written from the name alone puts it first both times and passes everything else anyone would think to check.
+
+There is no argument here about which backend pandas reads its answer out of, and that is the finding. `pyarrow.compute` has no partition kernel, so both pandas backends loop in Python and call CPython's own `str.partition` on every row. The oracle for this slice is Python, which is the opposite of the last five.
+
+The kernel searches once per row and fills three builders from the one offset, rather than answering one column at a time and running the search three times for a third of the answer each. It gets a door of its own in the accessor layer, and that is the answer shape rule working rather than an exception to it, since three columns is a shape and no existing door carried it.
+
+Two things do not match pandas and both come from pandas doing this a row at a time. The columns are labelled `"0"`, `"1"` and `"2"` where pandas uses the integers 0, 1 and 2, because a frame here holds text labels, and that is registered as a divergence because what closes it is a column label type rather than a different string written in this method. And pandas decides both of its refusals and the width of its answer from the rows: `pd.Series([], dtype="str").str.partition("")` raises nothing and answers a frame with no columns at all, and a column of only missing rows answers one. This library checks the separator once before it starts and always answers three columns, which is what the documentation for the name describes.
+
+`sep=""` and a separator that is not a string are refused with CPython's own two sentences. `expand=False` is refused by name, because it wants one column of three element tuples and there is no column type for one, which is the same wall `split`, `rsplit`, `findall`, `join` and `extractall` are behind.
 
 ### Added: `case=False` on `contains`, `match`, `fullmatch` and `replace`
 

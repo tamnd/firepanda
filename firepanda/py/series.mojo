@@ -50,6 +50,7 @@ from firepanda.py.reduce import reduction
 from firepanda.py.text import flag as text_flag
 from firepanda.py.text import number as text_number
 from firepanda.py.text import text as text_text
+from firepanda.py.text import partition as text_partition
 from firepanda.py.text import translate as text_translate
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
@@ -1354,6 +1355,41 @@ struct PySeries(Movable, Writable):
                 )
             )
         )
+
+    @staticmethod
+    def string_partition(
+        py_self: PythonObject, sep: PythonObject, from_right: PythonObject
+    ) raises -> PythonObject:
+        """Cuts every row at a separator and hands back three columns.
+
+        The one `str` method whose answer is wider than a column. It comes back
+        as a list of three series rather than as a frame because a frame here
+        would have to invent the labels, and the labels pandas puts on them are
+        integers, which this library's frames do not hold. The Python layer is
+        where that is decided and where it is written down.
+
+        Args:
+            py_self: The series.
+            sep: The separator, which the Python layer has already checked is a
+                string and is not empty.
+            from_right: Whether to cut at the last occurrence, which is
+                `rpartition` rather than `partition`.
+
+        Returns:
+            A list of three new series, in the order pandas labels 0, 1 and 2.
+
+        Raises:
+            Error: Tagged `value` if the column is not text.
+        """
+        var parts = text_partition(
+            Self._held(py_self)[].series[],
+            words(sep, "sep"),
+            flag(from_right, "from_right"),
+        )
+        var out = Python.list()
+        for _ in range(3):
+            out.append(PythonObject(alloc=Self(ArcPointer(parts.pop(0)))))
+        return out
 
     @staticmethod
     def window_agg(

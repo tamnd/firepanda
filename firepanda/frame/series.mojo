@@ -109,6 +109,7 @@ from firepanda.kernel.pattern import (
     text_ends_with,
     text_equals,
     text_equals_folded,
+    text_partition,
     text_replace,
     text_replace_folded,
     text_starts_with,
@@ -1787,6 +1788,45 @@ struct Series(Copyable, Movable, Sized, Writable):
                 )
             ),
         )
+
+    def chars_partition(
+        self, sep: StringSlice, from_right: Bool
+    ) raises -> List[Self]:
+        """Returns each row cut at a separator, as three series.
+
+        This is `str.partition` and `str.rpartition`, and it is the first method
+        on a text series whose answer is more than one series. The three come
+        back together rather than one at a time because the search is the work
+        and asking three times would run it three times.
+
+        A row without the separator in it keeps all of itself, in the first
+        series for `partition` and in the third for `rpartition`, which is
+        Python's rule and pandas' answer. An empty separator is refused by the
+        Python layer with pandas' own sentence and never reaches the kernel.
+
+        Args:
+            sep: The separator to cut at.
+            from_right: Whether to cut at the last occurrence rather than the
+                first, which is the difference between the two pandas names.
+
+        Returns:
+            Three text series of the same height, each null wherever this one is
+            null, in the order pandas labels 0, 1 and 2. A list rather than a
+            tuple because the three are moved out of it one at a time on the way
+            to Python and a tuple cannot be taken apart that way.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        var parts = text_partition(
+            self.values.strings(), sep.as_bytes(), from_right
+        )
+        var out = List[Self](capacity=3)
+        for _ in range(3):
+            out.append(
+                self._relabelled(self.name.copy(), AnyArray(parts.pop(0)))
+            )
+        return out^
 
     def chars_translate(self, keys: Self, values: Self) raises -> Self:
         """Returns each row with single characters swapped one for one.

@@ -42,6 +42,15 @@ not a slice of one character: a slice past the end of a short row is the empty
 string and `get` past the end is a null, which is pandas and is worth the
 separate kernel it takes.
 
+### The one answer that is wider than a column
+
+`partition` and `rpartition` hand back three columns rather than one, which is
+the first answer shape on this accessor that no door carried. They get a
+function of their own and that is the rule working rather than an exception to
+it: the doors are picked by the shape of the answer, and three columns is a
+shape. `translate` beside them is the exception, because what makes it separate
+is the shape of its argument.
+
 The thirty odd names this file does not spell do not resolve at all rather than
 resolving and refusing, for the reason document 07 gives: an absent name reads as
 unimplemented on the board and a refusing one reads as a failure, and the second
@@ -360,6 +369,44 @@ def translate(column: Series, keys: Series, values: Series) raises -> Series:
     """
     _text_column(column)
     return column.chars_translate(keys, values)
+
+
+def partition(
+    column: Series, sep: String, from_right: Bool
+) raises -> List[Series]:
+    """Cuts every row at a separator and hands back three columns.
+
+    The second name in this accessor that does not come through the three doors,
+    and unlike `translate` this one is outside them for the reason the rule
+    names. The rule is that the shape of the answer picks the door, and the
+    shape of this answer is three columns rather than one. That is a new shape
+    and not a new argument, so a door for it follows the rule instead of
+    standing beside it.
+
+    It is one call and not three because the search is what this costs. Asking
+    for the head, then the separator, then the tail would run the same search
+    over the same column three times and throw two thirds of each answer away.
+
+    The other half of pandas, `expand=False`, would answer one column of
+    three element tuples, and there is no column type here that can hold one. It
+    is refused in the Python layer rather than approximated.
+
+    Args:
+        column: The column to read.
+        sep: The separator to cut at, which the Python layer has already
+            checked is not empty because pandas refuses that.
+        from_right: Whether to cut at the last occurrence rather than the first,
+            which is `rpartition` rather than `partition`.
+
+    Returns:
+        Three columns, each as tall as the one they read, in the order pandas
+        labels 0, 1 and 2.
+
+    Raises:
+        Error: Tagged `value` if the column is not text.
+    """
+    _text_column(column)
+    return column.chars_partition(sep, from_right)
 
 
 def flag(column: Series, kind: String, arg: String) raises -> Series:
