@@ -85,6 +85,12 @@ of thousand calls and checks it by replaying every one of them.
 already of the right type is free, and a call with no cheapest candidate is
 refused in DuckDB's own words rather than decided.
 
+`result.mojo` is what the winning signature then comes out as. Most of them say
+so and need nothing done, and the ones that write a rule instead of a type get
+it derived: a template letter is the argument it stands for, a bare `DECIMAL`
+is the width its arguments agree on, and `sum` widens that to 38 digits where
+`avg` throws it away for a `DOUBLE`.
+
 `plan.mojo` is where the SQL front end stops being its own thing and becomes a
 caller of the engine. It lowers a bound `SELECT` into the same
 `firepanda.plan.Plan` the dataframe API builds, bottom up in the order the
@@ -194,6 +200,7 @@ from .resolve import (
     resolve,
     score,
 )
+from .result import result_type
 from .run import run
 from .star import (
     NOT_REPLACED,

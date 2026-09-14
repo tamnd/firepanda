@@ -63,6 +63,8 @@ Getting one cost wrong picks a different overload for some argument combination 
 
 A signature is not always the whole rule. `greatest` and `least` are declared over `ANY` with a variadic, and DuckDB then insists the arguments share a common type, refusing a `TINYINT` against a `VARCHAR` with the same sentence `CASE` gives for the same pair. The catalog cannot say that, so `resolve.mojo` says it, and the fuzzer is what found it.
 
+The return side is a second file for the same reason, `result.mojo`. Picking the signature and saying what it comes out as are different questions, because DuckDB answers the second in a bind function per name rather than out of the catalog, and the two disagree: `sum` and `avg` both declare a bare `DECIMAL` and produce a `DECIMAL(38,s)` and a `DOUBLE`. What the file derives is a template letter, which is the type of the argument it stands for and, in the trailing slot of a variadic, the type all of them agree on; and a bare `DECIMAL`, which is the width its arguments were cast to, with `sum`, `avg`, `ceil`, `ceiling`, `floor` and `round` then doing something else with it. `median` widens where the midpoint of two rows is not a row, so ten integer types give a `DOUBLE` and a `DATE` gives a `TIMESTAMP`. `concat` is a `VARCHAR` and says `ANY`. All of it was measured against DuckDB rather than reasoned out, and the fuzzer holds it to that. What is not derived is the containers, `T[]` and `MAP`, which need an element type `SqlType` does not carry.
+
 ## 4. The tiers
 
 **Tier 1, required for TPC-H and for the conformance target.** This is the 1.0 commitment.

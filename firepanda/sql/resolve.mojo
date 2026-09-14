@@ -50,8 +50,12 @@ is the only place DuckDB ever says out loud that two signatures cost the same.
 
 What is not here is what the call's type comes out as. A concrete signature
 says, and `registry.spelling(overload.returns)` is it, but a template says `T`
-and answering that means substituting what `T` bound to, which is the binder's
-job and not the scorer's.
+and answering that means substituting what `T` bound to. That is `result.mojo`,
+next door, because it is a different question: this one is about which signature
+DuckDB would pick and that one is about what DuckDB's bind function for the name
+then does with the arguments, and the two disagree often enough to be worth
+keeping apart. `sum` and `avg` both declare a bare `DECIMAL` and produce
+different types.
 """
 
 from .cast import common_type
