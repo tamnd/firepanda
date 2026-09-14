@@ -2881,6 +2881,51 @@ def test_a_character_count_of_two_things_is_refused_while_it_binds() raises:
         _ = _plan("SELECT strlen(g, g) FROM t")
 
 
+def test_a_case_change_is_the_call_it_was_written_as() raises:
+    assert_equal(
+        _plan("SELECT upper(g) FROM t"),
+        "PROJECT [upper(g) as __expr_0]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT lower(g) FROM t"),
+        "PROJECT [lower(g) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_other_two_names_for_a_case_change_are_the_same_plan() raises:
+    assert_equal(
+        _plan("SELECT ucase(g) FROM t"), _plan("SELECT upper(g) FROM t")
+    )
+    assert_equal(
+        _plan("SELECT lcase(g) FROM t"), _plan("SELECT lower(g) FROM t")
+    )
+
+
+def test_a_case_change_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'upper' rewrites text and argument 0 is"):
+        _ = _plan("SELECT upper(a) FROM t")
+    with assert_raises(contains="'lower' rewrites text and argument 0 is"):
+        _ = _plan("SELECT lower(a) FROM t")
+
+
+def test_a_case_change_of_two_things_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'upper' takes 1 argument and was given 2"):
+        _ = _plan("SELECT upper(g, g) FROM t")
+
+
+def test_a_case_change_nests_inside_another_call() raises:
+    # The two ways round, because a case change is both a thing that reads a
+    # column and a thing that answers one, and neither side knew about it.
+    assert_equal(
+        _plan("SELECT length(upper(g)) FROM t"),
+        "PROJECT [length(upper(g)) as __expr_0]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT lower(trim(g)) FROM t"),
+        "PROJECT [lower(trim(g)) as __expr_0]\n  SCAN t []\n",
+    )
+
+
 def test_a_trim_is_the_call_it_was_written_as() raises:
     assert_equal(
         _plan("SELECT trim(g) FROM t"),
@@ -3182,8 +3227,8 @@ def test_a_period_worked_out_per_row_is_refused() raises:
 
 
 def test_a_function_the_catalog_has_is_a_kernel_that_is_missing() raises:
-    with assert_raises(contains="no kernel for the function upper yet"):
-        _ = _plan("SELECT upper(g) FROM t")
+    with assert_raises(contains="no kernel for the function reverse yet"):
+        _ = _plan("SELECT reverse(g) FROM t")
 
 
 def test_an_aggregate_the_catalog_has_is_a_fold_that_is_missing() raises:
@@ -3228,8 +3273,10 @@ def test_a_fold_the_catalog_does_not_carry_is_still_folded() raises:
 def test_a_function_name_is_read_without_regard_to_case() raises:
     # The name comes back in lower case whatever it was written in, because the
     # arena holds it folded and the catalog is looked up by the folded name.
-    with assert_raises(contains="no kernel for the function upper yet"):
-        _ = _plan("SELECT UPPER(g) FROM t")
+    assert_equal(
+        _plan("SELECT UPPER(g) FROM t"),
+        _plan("SELECT upper(g) FROM t"),
+    )
 
 
 def test_a_coalesce_is_a_call_of_its_own() raises:

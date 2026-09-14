@@ -1660,6 +1660,50 @@ def cuts(sql: StringSlice) raises -> List[String]:
     return out^
 
 
+def test_a_case_change_rewrites_every_row() raises:
+    var up = cuts("SELECT upper(word) AS piece FROM words")
+    assert_equal(len(up), 7, "one answer per row")
+    assert_equal(up[0], "APPLE", "a row was raised")
+    assert_equal(up[4], "", "an empty row stays empty")
+    assert_equal(up[5], "null", "and a null stays a null")
+    var down = cuts("SELECT lower(upper(word)) AS piece FROM words")
+    assert_equal(down[0], "apple", "and lowering it again gives it back")
+
+
+def test_a_case_change_reads_characters_and_not_bytes() raises:
+    # `glyphs` holds a row that is not ASCII and a row that has no case at all,
+    # which are the two a case change written over the payload gets wrong.
+    var up = cuts("SELECT upper(word) AS piece FROM glyphs")
+    assert_equal(up[0], "ABC", "the ASCII row is the easy one")
+    assert_equal(up[1], "HÉLLO", "an accented letter raises to its own capital")
+    assert_equal(up[2], "日本語です", "and a script with no case is left alone")
+    var down = cuts("SELECT lower(word) AS piece FROM glyphs WHERE n = 2")
+    assert_equal(down[0], "héllo", "and it lowers back to what it was")
+
+
+def test_the_other_two_names_for_a_case_change_answer_the_same() raises:
+    var up = cuts("SELECT ucase(word) AS piece FROM words WHERE n = 1")
+    var down = cuts("SELECT lcase(word) AS piece FROM words WHERE n = 1")
+    assert_equal(up[0], "APPLE", "ucase is upper")
+    assert_equal(down[0], "apple", "and lcase is lower")
+
+
+def test_a_case_change_is_a_column_like_any_other() raises:
+    # The answer goes under a `WHERE` and through another function without
+    # either of them knowing what made it, which is the thing a new node has
+    # to earn rather than be given.
+    same(
+        answer("SELECT n FROM words WHERE upper(word) = 'BANANA'", "n"),
+        [3],
+        "n",
+    )
+    same(
+        answer("SELECT length(lower(word)) AS c FROM glyphs WHERE n = 3", "c"),
+        [5],
+        "c",
+    )
+
+
 def test_a_trim_takes_the_spaces_off_both_ends() raises:
     var got = cuts("SELECT trim(word) AS piece FROM padded")
     assert_equal(len(got), 6, "one answer per row")

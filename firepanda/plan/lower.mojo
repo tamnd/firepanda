@@ -255,6 +255,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Apply,
+    Case,
     Cast,
     Choose,
     Compute,
@@ -556,6 +557,10 @@ def _lower_expr(
         return _lower_truncate(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and exprs.nodes[root].name == "length":
         return _lower_length(exprs, root, pipe, base, name, memo)
+    if kind == ExprKind.CALL and (
+        exprs.nodes[root].name == "upper" or exprs.nodes[root].name == "lower"
+    ):
+        return _lower_case(exprs, root, pipe, base, name, memo)
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "trim"
         or exprs.nodes[root].name == "ltrim"
@@ -1056,6 +1061,63 @@ def _lower_length(
         )
     var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
     pipe.add(Node(Length(at, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_case(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers an `UPPER` or a `LOWER`.
+
+    As short as the character count, and for the same reason. Which case to
+    write is the name of the call and not an argument, so there is nothing to
+    read at plan time and the one argument is lowered wherever it lands.
+
+    The case data underneath is the Mojo standard library's, which is an older
+    copy of Unicode than the one DuckDB carries, so a handful of elements come
+    back different. Every ASCII element agrees, and so does every accented
+    Latin letter. The two that a query is most likely to meet are the German
+    sharp s, which raises to `SS` here and to the capital sharp s in DuckDB,
+    and the Turkish capital I with a dot, which lowers to a small i and a
+    separate combining dot here and to a bare small i in DuckDB. Both follow
+    Python's rule, which is the rule the pandas accessor over the same kernel
+    has to follow, and answering two different things to `upper` depending on
+    which door the call came through would be worse than either.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments.
+    """
+    var called = String(exprs.nodes[root].name)
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 1:
+        raise Error(
+            String(
+                "lower: ",
+                called,
+                " reads one column and was given ",
+                len(args),
+                " arguments",
+            )
+        )
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Case(at, called == "upper", name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

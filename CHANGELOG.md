@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: UPPER and LOWER in SQL
+
+`upper(s)` and `lower(s)`, and `ucase` and `lcase`, which are DuckDB's other names for the same two. The kernel behind them is the one the `str` accessor got a release ago, so this is the wiring and not the work: a `Case` operator that appends the rewritten column, one branch in the binder saying it reads text and answers text, and the two aliases folded to the two names DuckDB's catalog documents.
+
+The case data is the Mojo standard library's, which is an older copy of Unicode than the one DuckDB carries, so a few rows disagree. Every ASCII row agrees and so does every accented Latin letter. The two disagreements a query is most likely to meet are the German sharp s, which raises to `SS` here and to the capital sharp s in DuckDB, and the Turkish capital I with a dot, which lowers to a small i and a separate combining dot here and to a bare small i there. Both follow Python's rule, which is the rule the accessor over the same kernel already follows, and answering two different things depending on which door the call came through would be worse than either.
+
 ### Added: the typed literal, so DATE '2020-01-01' is a date
 
 A type name in front of a string is read now, which is the spelling TPC-H writes its date bounds in and the one that says what it means without a column next to it. `DATE '2020-01-01'`, `TIMESTAMP '2020-01-01 06:07:08'` and the three timestamps at other resolutions all parse into a constant where the query is planned.
