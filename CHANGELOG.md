@@ -19,6 +19,7 @@ None of that was needed. Going left, the next character starts at the next byte 
 Measured on the i9-13900K over four million rows, three rounds alternated, every measurement within one per cent of its neighbours. Rows with nothing to trim went from 53.9 milliseconds to 26.4, which is two times. Rows with three spaces on each end went from 135.1 to 28.0, which is 4.8 times, and that row is new because a change that made the common case cheap by making the real work expensive would look like a win without it.
 
 Nothing about the answers moves. The set is still read as a set of characters rather than as a prefix, both whitespace tables stay where they are, and the same characters are tested in the same order.
+
 ### Added: a SQL type carries a list's element, so a call returning a list has a type
 
 The entry below left nine names whose return type the differential could not compare, because a signature returning `T[]` or `MAP` needs an element type and `SqlType` carried none. Eight of the nine are answered now. Issue #780.
