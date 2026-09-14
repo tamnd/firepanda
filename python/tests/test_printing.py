@@ -33,6 +33,18 @@ def labelled(module: ModuleType) -> Any:
     return module.DataFrame(DATA).set_index("k")
 
 
+def listing(column: Any) -> list[str]:
+    """The rows of a rendering, without the name above them or the footer below them.
+
+    Worth having for the text columns only, where the two libraries still spell the dtype
+    differently, `str` there and `string` here, and comparing the whole rendering would be
+    comparing that rather than the layout the test is about.
+    """
+    lines = repr(column).split("\n")
+    head = 1 if column.index.name is not None else 0
+    return lines[head:-1]
+
+
 # ---------------------------------------------------------------------------
 # The labels themselves
 # ---------------------------------------------------------------------------
@@ -143,6 +155,89 @@ def test_an_empty_column_says_nothing_about_its_labels(firepanda: ModuleType) ->
 
 
 # ---------------------------------------------------------------------------
+# The place in front of a value
+# ---------------------------------------------------------------------------
+
+
+def numbers(module: ModuleType, values: list[Any]) -> Any:
+    """A column of `values` under labels 1 and 2, which is the repro from issue 730."""
+    return module.DataFrame({"k": [1, 2], "b": values}).set_index("k")["b"]
+
+
+@needs_pandas
+def test_a_negative_number_is_written_into_the_place_kept_for_it(firepanda: ModuleType) -> None:
+    """The repro from issue 730. The minus sits in the gap rather than beside it."""
+    import pandas as pd
+
+    assert repr(numbers(firepanda, [1.5, -0.5])) == repr(numbers(pd, [1.5, -0.5]))
+
+
+@needs_pandas
+def test_a_column_with_nothing_negative_in_it_sits_one_place_further_right(
+    firepanda: ModuleType,
+) -> None:
+    """The same column without the minus is padded differently, in both libraries the same way."""
+    import pandas as pd
+
+    assert repr(numbers(firepanda, [1.5, 0.5])) == repr(numbers(pd, [1.5, 0.5]))
+    assert repr(numbers(firepanda, [1.5, 0.5])).split("\n")[1] == "1    1.5"
+    assert repr(numbers(firepanda, [1.5, -0.5])).split("\n")[1] == "1    1.5"
+
+
+@needs_pandas
+def test_the_widest_value_decides_the_width_without_its_minus(firepanda: ModuleType) -> None:
+    """A wide positive beside a narrow negative, and the other way round."""
+    import pandas as pd
+
+    assert repr(numbers(firepanda, [100000.0, -0.5])) == repr(numbers(pd, [100000.0, -0.5]))
+    assert repr(numbers(firepanda, [-100000.0, 0.5])) == repr(numbers(pd, [-100000.0, 0.5]))
+
+
+@needs_pandas
+def test_an_integer_column_keeps_the_place_the_same_way(firepanda: ModuleType) -> None:
+    """Nothing about the rule is particular to floats."""
+    import pandas as pd
+
+    assert repr(numbers(firepanda, [1, -20])) == repr(numbers(pd, [1, -20]))
+
+
+@needs_pandas
+def test_a_boolean_column_keeps_a_place_no_boolean_will_ever_use(firepanda: ModuleType) -> None:
+    """pandas counts a boolean as numeric, and this is where that can be seen."""
+    import pandas as pd
+
+    assert repr(numbers(firepanda, [True, False])) == repr(numbers(pd, [True, False]))
+
+
+@needs_pandas
+def test_a_minus_at_the_front_of_a_word_does_not_take_the_place(firepanda: ModuleType) -> None:
+    """The place belongs to the sign of a number, and a word that begins with one is not that."""
+    import pandas as pd
+
+    assert listing(numbers(firepanda, ["one", "-two"])) == listing(numbers(pd, ["one", "-two"]))
+
+
+@needs_pandas
+def test_a_long_column_is_elided_by_the_dots_pandas_uses(firepanda: ModuleType) -> None:
+    """Two dots in a narrow column, three in a wide one, centred and with a blank label."""
+    import pandas as pd
+
+    narrow = {"k": list(range(30)), "b": list(range(30))}
+    wide = {"k": list(range(30)), "b": [float(i) - 5 for i in range(30)]}
+    with pd.option_context("display.max_rows", 10, "display.min_rows", 10):
+        for data in (narrow, wide):
+            made = firepanda.DataFrame(data).set_index("k")["b"]
+            want = pd.DataFrame(data).set_index("k")["b"]
+            assert repr(made) == repr(want)
+
+
+def test_the_footer_says_the_name_before_the_length(firepanda: ModuleType) -> None:
+    """Which is pandas' order, and reads as what it is."""
+    column = firepanda.DataFrame({"k": list(range(30)), "b": list(range(30))}).set_index("k")["b"]
+    assert repr(column).split("\n")[-1] == "Name: b, Length: 30, dtype: int64"
+
+
+# ---------------------------------------------------------------------------
 # Where the two libraries part
 # ---------------------------------------------------------------------------
 
@@ -171,11 +266,11 @@ def test_str_and_repr_are_the_same_rendering(firepanda: ModuleType) -> None:
 
 
 def test_a_long_column_elides_its_middle_and_keeps_its_labels(firepanda: ModuleType) -> None:
-    """The gap stands in for labels and values together, so the two columns stay in step."""
+    """The gap is one row of both columns, with the label left blank the way pandas leaves it."""
     names = [f"r{i}" for i in range(12)]
     column = firepanda.DataFrame({"k": names, "v": list(range(12))}).set_index("k")["v"]
     lines = repr(column).split("\n")
     assert lines[1].startswith("r0")
-    assert lines[6].startswith("...")
+    assert lines[6] == "       .."
     assert lines[7].startswith("r7")
     assert lines[11].startswith("r11")

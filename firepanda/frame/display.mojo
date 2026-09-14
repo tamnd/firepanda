@@ -19,6 +19,17 @@ The labels arrive already rendered as an `IndexCells`, and a caller that passes
 none still gets the positions, which is what every caller got before labels
 existed.
 
+The spacing is pandas' spacing down to the byte. Every value is written one
+place in from the separator and a negative number spends that place on its
+minus, so a column of `1.5` and `-0.5` lines up on the dot and sits one place
+to the left of where a column of `1.5` and `0.5` sits, and a column's name is
+held in by the same place when the column is one pandas calls numeric. The
+elision is three dots, or two in a column of three or fewer, centred on a
+column and right aligned on a frame. None of that is worth arguing about and
+all of it was measured rather than reasoned about, because the point of
+matching is that somebody putting the two outputs side by side sees either
+nothing or something worth reading.
+
 Three decisions in here are ours rather than inherited.
 
 **Nulls print as `<NA>`.** pandas has two spellings depending on whether a column
@@ -46,6 +57,7 @@ what lets `frame.mojo` and `series.mojo` both call it without a cycle.
 
 from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.dtype.lists import ALL
+from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Schema
 from firepanda.kernel.temporal import instant_text
 
@@ -60,6 +72,9 @@ comptime DEFAULT_FLOAT_PRECISION = 6
 
 comptime ELLIPSIS = "..."
 """What stands in for the rows and columns that were not printed."""
+
+comptime SHORT_ELLIPSIS = ".."
+"""What stands in for them in a column too narrow to hold three dots."""
 
 
 struct DisplayOptions(Copyable, Movable):
@@ -139,6 +154,99 @@ def pad_right(text: String, width: Int) -> String:
     while out.byte_length() < width:
         out += " "
     return out^
+
+
+def pad_middle(text: String, width: Int) -> String:
+    """Centres a cell in a column.
+
+    Only the elision on a column is aligned this way, and it is here rather than
+    written out at the one call site because where the odd space goes is not
+    obvious. Python's own `str.center` gives the odd space to the right except
+    when both the padding and the width are odd, where it gives it to the left,
+    and pandas centres the dots by calling exactly that. So a two dot elision in
+    a column three wide prints as ` ..` and not as `.. `, which is a difference
+    a reader would never predict and would see immediately.
+
+    Args:
+        text: The cell.
+        width: The column width in bytes.
+
+    Returns:
+        The padded cell, or the original if it is already wider.
+    """
+    var margin = width - text.byte_length()
+    if margin <= 0:
+        return text
+    var left = margin // 2 + (margin & width & 1)
+    var out = String("")
+    for _ in range(left):
+        out += " "
+    out += text
+    while out.byte_length() < width:
+        out += " "
+    return out^
+
+
+def keeps_a_place(type: LogicalType) -> Bool:
+    """Whether a value is written one place in from the separator.
+
+    pandas writes every value one place in and lets a negative number spend that
+    place on its minus, which is why a column of `1.5` and `-0.5` lines up on
+    the dot and sits one place to the left of where a column of `1.5` and `0.5`
+    sits. Copying it matters more than it sounds, because somebody diffing this
+    library's output against pandas' should see either nothing or something
+    worth reading, and a whitespace difference on every numeric column is
+    neither.
+
+    A timestamp is the exception. pandas formats the temporal types through a
+    path of their own that never keeps the place, and nothing they print could
+    begin with a minus anyway.
+
+    Args:
+        type: The column's type.
+
+    Returns:
+        True for everything but a temporal column.
+    """
+    return not type.is_temporal()
+
+
+def keeps_a_sign(type: LogicalType) -> Bool:
+    """Whether that place belongs to the sign.
+
+    Where it does, a negative value writes its minus into it rather than beside
+    it, and the column's name is written one place in as well so that the name
+    and the values line up. It is true for the types pandas calls numeric, which
+    is the integers, the floats and the booleans, and the boolean being in that
+    list is visible in exactly one thing: a boolean column named `available` is
+    one wider than a text column named the same, because the name is held in by
+    a sign that no boolean will ever print.
+
+    Args:
+        type: The column's type.
+
+    Returns:
+        True for integers, floats and booleans.
+    """
+    return type.is_numeric() or type == LogicalType.BOOL
+
+
+def dots_for(width: Int) -> String:
+    """The elision that fits in a column of the given width.
+
+    pandas drops to two dots in a column of three or fewer, which is how a
+    column of single digits comes to be elided by `..` while the column beside
+    it is elided by `...`. The width it asks is the width the column was already
+    padded to rather than the width of the widest value, so a column made wide
+    by a long name gets three dots even though nothing in it is long.
+
+    Args:
+        width: The column width in bytes.
+
+    Returns:
+        Three dots, or two.
+    """
+    return String(ELLIPSIS) if width > 3 else String(SHORT_ELLIPSIS)
 
 
 struct IndexCells(Copyable, Movable):
@@ -352,6 +460,11 @@ def render_table[
     # and the check costs one comparison.
     var labelled = len(index.cells) == len(shown_rows)
     var named = Bool(index.name)
+    # The elided row is left blank on the way through and filled in at the end,
+    # because how many dots a cell gets and where they sit in it both depend on
+    # how wide the column turned out to be, which is not known yet.
+    var dots_row = -1
+    var dots_column = -1
 
     var grid = List[List[String]]()
 
@@ -361,53 +474,68 @@ def render_table[
         labels.append(index.name.value())
     for i in range(len(shown_rows)):
         if shown_rows[i] < 0:
-            labels.append(String(ELLIPSIS))
+            dots_row = len(labels)
+            labels.append(String(""))
         elif labelled:
             labels.append(index.cells[i])
         else:
             labels.append(String(shown_rows[i]))
+    var height = len(labels)
     grid.append(labels^)
 
     for c in range(len(shown_columns)):
         var at = shown_columns[c]
         var cells = List[String]()
         if at < 0:
-            cells.append(String(ELLIPSIS))
-            if named:
-                cells.append(String(""))
-            for _ in range(len(shown_rows)):
+            # The elided column is three dots in every row including the header
+            # and the name, and it is four wide rather than three, both of which
+            # are what pandas prints.
+            dots_column = len(grid)
+            for _ in range(height):
                 cells.append(String(ELLIPSIS))
             grid.append(cells^)
             continue
-        cells.append(schema[at].name)
+        var type = columns[at][].type
+        var indented = keeps_a_place(type)
+        var signed = keeps_a_sign(type)
+        cells.append(
+            String(" ", schema[at].name) if signed else schema[at].name
+        )
         if named:
             cells.append(String(""))
         for i in range(len(shown_rows)):
             if shown_rows[i] < 0:
-                cells.append(String(ELLIPSIS))
+                cells.append(String(""))
+                continue
+            var value = render_value(columns[at][], shown_rows[i], options)
+            if not indented or (signed and value.startswith("-")):
+                cells.append(value^)
             else:
-                cells.append(
-                    render_value(columns[at][], shown_rows[i], options)
-                )
+                cells.append(String(" ", value))
         grid.append(cells^)
 
     var widths = List[Int]()
     for c in range(len(grid)):
-        var width = 0
+        var width = 4 if c == dots_column else 0
         for r in range(len(grid[c])):
             if grid[c][r].byte_length() > width:
                 width = grid[c][r].byte_length()
         widths.append(width)
 
-    var out = String("")
-    for r in range(len(grid[0])):
+    if dots_row >= 0:
         for c in range(len(grid)):
-            if c > 0:
-                out += "  "
+            grid[c][dots_row] = dots_for(widths[c])
+
+    var out = String("")
+    for r in range(height):
+        for c in range(len(grid)):
             if c == 0:
                 out += pad_right(grid[c][r], widths[c])
             else:
-                out += pad_left(grid[c][r], widths[c])
+                # The separator is one space and the place kept in front of the
+                # value is the other, which is why this pads to one more than
+                # the width rather than writing a gap and then padding.
+                out += pad_left(grid[c][r], widths[c] + 1)
         out += "\n"
 
     out += String("\n[", rows, " rows x ", len(columns), " columns]")
@@ -434,10 +562,12 @@ def render_column(
     """
     var dtype = String(col.type)
     var footer = String("")
-    if len(col) > options.max_rows:
-        footer += String("Length: ", len(col), ", ")
+    # The name comes before the length, which is pandas' order and reads as the
+    # sentence it is: what this column is called, then how much of it there is.
     if name.byte_length() > 0:
         footer += String("Name: ", name, ", ")
+    if len(col) > options.max_rows:
+        footer += String("Length: ", len(col), ", ")
     footer += String("dtype: ", dtype)
 
     if len(col) == 0:
@@ -445,15 +575,25 @@ def render_column(
 
     var shown = visible(len(col), options.max_rows)
     var labelled = len(index.cells) == len(shown)
+    var indented = keeps_a_place(col.type)
+    var signed = keeps_a_sign(col.type)
+    var dots_at = -1
     var labels = List[String]()
     var cells = List[String]()
     for i in range(len(shown)):
         if shown[i] < 0:
-            labels.append(String(ELLIPSIS))
-            cells.append(String(ELLIPSIS))
+            # The label on an elided row is blank on a column, where a frame
+            # puts dots in it. Neither is a decision of ours.
+            dots_at = len(labels)
+            labels.append(String(""))
+            cells.append(String(""))
+            continue
+        labels.append(index.cells[i] if labelled else String(shown[i]))
+        var value = render_value(col, shown[i], options)
+        if not indented or (signed and value.startswith("-")):
+            cells.append(value^)
         else:
-            labels.append(index.cells[i] if labelled else String(shown[i]))
-            cells.append(render_value(col, shown[i], options))
+            cells.append(String(" ", value))
 
     var index_width = 0
     var cell_width = 0
@@ -463,6 +603,11 @@ def render_column(
         if cells[i].byte_length() > cell_width:
             cell_width = cells[i].byte_length()
 
+    # Centred rather than right aligned, which is what pandas does here and not
+    # what it does on a frame.
+    if dots_at >= 0:
+        cells[dots_at] = pad_middle(dots_for(cell_width), cell_width)
+
     # The name goes on a line of its own above the listing and is not padded to
     # the width of the labels under it, which is pandas' layout. On a frame the
     # same name goes inside the table instead, because there is a header row
@@ -470,8 +615,9 @@ def render_column(
     var out = String(index.name.value(), "\n") if index.name else String("")
     for i in range(len(labels)):
         out += pad_right(labels[i], index_width)
-        out += "    "
-        out += pad_left(cells[i], cell_width)
+        # Three spaces and the place kept in front of the value, where a frame
+        # keeps one and the place.
+        out += pad_left(cells[i], cell_width + 3)
         out += "\n"
     out += footer
     return out^
