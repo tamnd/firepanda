@@ -19,6 +19,16 @@ so that every measured difference between the two engines has something to bite
 on: Arabic Indic digits for `\\d`, a vertical tab for `\\s`, a trailing newline
 for `$`.
 
+All of it three times over, once for each of `contains`, `match` and
+`fullmatch`, because upstream answers the last two by rewriting the pattern and
+asking the first, and a rewrite is exactly the kind of thing that is right on
+the patterns somebody thought to write down and wrong on the ones nobody did. A
+pattern opening with a flag group, a pattern already carrying its own anchor, a
+pattern ending in a backslash: each of those goes down a different arm of the
+rewrite, and the corpus produces all three in quantity. The rewrite also moves
+patterns across the line between answered and refused in both directions, so the
+two refusal comparisons are worth as much here as the match comparison is.
+
 The ceiling is zero. A wrong answer here is not a refusal a caller can see, it
 is a column of booleans that looks exactly like a right one.
 
@@ -45,17 +55,18 @@ Usage:
     pixi run differential-regex-match -- --cases 40000 --seed 7
 """
 
+from std.collections.span import Span
 from std.python import Python, PythonObject
 from std.sys import argv
 
-from firepanda.kernel.regex.parse import decoded, parse_pattern
-from firepanda.kernel.regex.pike import runs
-from firepanda.kernel.regex.program import compile_program
-from firepanda.kernel.regex.route import (
-    ENGINE_PYTHON,
-    ENGINE_RE2,
-    holds_unsupported,
+from firepanda.kernel.regex.method import (
+    METHOD_CONTAINS,
+    METHOD_FULLMATCH,
+    METHOD_MATCH,
+    program_for,
 )
+from firepanda.kernel.regex.parse import decoded
+from firepanda.kernel.regex.pike import Machine
 from regex_corpus import corpus, report
 
 comptime CASES = 30000
@@ -71,7 +82,7 @@ comptime SEED = 1
 the report."""
 
 
-def ask_pandas(patterns: List[String]) raises -> List[String]:
+def ask_pandas(patterns: List[String], method: String) raises -> List[String]:
     """What pandas answers for every pattern over every text.
 
     One call across the boundary for the whole batch. The work per pattern is a
@@ -80,6 +91,8 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
 
     Args:
         patterns: The corpus.
+        method: Which accessor method to ask, of the three that ask the engine
+            this question.
 
     Returns:
         One line per pattern, each either a single `x` for a call that raised or
@@ -98,7 +111,7 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
     var helper = Python.import_module("regex_match_oracle")
 
     var out = List[String]()
-    for line in String(helper.answers(batch)).split("\n"):
+    for line in String(helper.answers(batch, PythonObject(method))).split("\n"):
         out.append(String(line))
     if len(out) != len(patterns):
         raise Error(
@@ -150,6 +163,93 @@ def tally(mut reasons: List[String], mut counts: List[Int], reason: String):
     counts.append(1)
 
 
+def sweep(
+    method: UInt8,
+    name: String,
+    patterns: List[String],
+    points: List[List[UInt32]],
+) raises -> Int:
+    """Runs the whole corpus through one of the three methods and reports it.
+
+    The firepanda side goes through `program_for`, which is the same call the
+    accessor makes, so what is compared is the rewrite and the routing order as
+    well as the engine. Reaching past it and compiling the pattern here would
+    leave the rewrite untested, and the rewrite is the only thing that differs
+    between the three sweeps.
+
+    Args:
+        method: Which of the three, as the code the rewrite takes.
+        name: The same one as pandas spells it, for the oracle and the report.
+        patterns: The corpus.
+        points: Every text, already read as code points, since each of them is
+            read once for the whole run rather than once per pattern.
+
+    Returns:
+        How many patterns disagreed, of any of the three kinds.
+
+    Raises:
+        Error: If pandas could not be asked.
+    """
+    var answers = ask_pandas(patterns, name)
+
+    var we_refuse = List[String]()
+    var they_refuse = List[String]()
+    var differ = List[String]()
+    var reasons = List[String]()
+    var counts = List[Int]()
+    var held = 0
+    var compared = 0
+
+    for at in range(len(patterns)):
+        ref pattern = patterns[at]
+        ref answer = answers[at]
+
+        var program = program_for(method, pattern)
+        if not program.ok and program.gap:
+            held += 1
+            tally(reasons, counts, program.problem)
+            continue
+
+        compared += 1
+        var theirs_refuses = answer[byte=0] == "x"
+        if program.ok and theirs_refuses:
+            we_refuse.append(pattern)
+            continue
+        if not program.ok:
+            if not theirs_refuses:
+                they_refuse.append(pattern)
+            continue
+
+        var machine = Machine(program)
+        for which in range(len(points)):
+            var ours = machine.matches(program, Span(points[which]))
+            var theirs = answer[byte=which] == "y"
+            if ours != theirs:
+                differ.append(pattern)
+                break
+
+    var disagreements = len(we_refuse) + len(they_refuse) + len(differ)
+    print()
+    print("str.", name, sep="")
+    print("compared", compared, "patterns")
+    print("held out", held, "patterns firepanda cannot answer yet")
+    for at in range(len(reasons)):
+        print("   ", counts[at], reasons[at])
+
+    report("firepanda answers and pandas raises:", we_refuse, compared)
+    report("pandas answers and firepanda refuses:", they_refuse, compared)
+    report("both answer and the answers differ:", differ, compared)
+
+    print(
+        "agreement",
+        (compared - disagreements) * 10000 // compared,
+        "in ten thousand,",
+        disagreements,
+        "disagreements",
+    )
+    return disagreements
+
+
 def main() raises:
     var cases = CASES
     var seed = UInt64(SEED)
@@ -167,69 +267,25 @@ def main() raises:
         len(patterns),
         "patterns over",
         len(texts),
-        "texts",
+        "texts, three ways",
     )
-    var answers = ask_pandas(patterns)
 
     var points = List[List[UInt32]]()
     for text in texts:
         points.append(decoded(text))
 
-    var we_refuse = List[String]()
-    var they_refuse = List[String]()
-    var differ = List[String]()
-    var reasons = List[String]()
-    var counts = List[Int]()
-    var held = 0
-    var compared = 0
+    var names = List[String]()
+    names.append(String("contains"))
+    names.append(String("match"))
+    names.append(String("fullmatch"))
+    var methods = List[UInt8]()
+    methods.append(METHOD_CONTAINS)
+    methods.append(METHOD_MATCH)
+    methods.append(METHOD_FULLMATCH)
 
-    for at in range(len(patterns)):
-        ref pattern = patterns[at]
-        ref answer = answers[at]
-
-        var tree = parse_pattern(pattern)
-        var engine = ENGINE_PYTHON if holds_unsupported(tree) else ENGINE_RE2
-        var program = compile_program(tree, engine)
-        if not program.ok and program.gap:
-            held += 1
-            tally(reasons, counts, program.problem)
-            continue
-
-        compared += 1
-        var theirs_refuses = answer[byte=0] == "x"
-        if program.ok and theirs_refuses:
-            we_refuse.append(pattern)
-            continue
-        if not program.ok:
-            if not theirs_refuses:
-                they_refuse.append(pattern)
-            continue
-
-        for which in range(len(texts)):
-            var ours = runs(program, points[which])
-            var theirs = answer[byte=which] == "y"
-            if ours != theirs:
-                differ.append(pattern)
-                break
-
-    var disagreements = len(we_refuse) + len(they_refuse) + len(differ)
-    print("compared", compared, "patterns")
-    print("held out", held, "patterns firepanda cannot answer yet")
-    for at in range(len(reasons)):
-        print("   ", counts[at], reasons[at])
-
-    report("firepanda answers and pandas raises:", we_refuse, compared)
-    report("pandas answers and firepanda refuses:", they_refuse, compared)
-    report("both answer and the answers differ:", differ, compared)
-
-    print()
-    print(
-        "agreement",
-        (compared - disagreements) * 10000 // compared,
-        "in ten thousand,",
-        disagreements,
-        "disagreements",
-    )
+    var disagreements = 0
+    for at in range(len(names)):
+        disagreements += sweep(methods[at], names[at], patterns, points)
 
     if disagreements != 0:
         raise Error(

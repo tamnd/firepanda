@@ -27,6 +27,8 @@ from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 from .pattern import fold_point
+from .regex.pike import matches_text
+from .regex.program import Program
 from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
 
@@ -3099,6 +3101,34 @@ def text_contains_folded_scalar(
         out.set_valid(
             i, _bytes_find_scalar(text.as_bytes(), wanted.as_bytes()) >= 0
         )
+    return out^
+
+
+def text_matches_regex_scalar(
+    a: StringArray, program: Program
+) -> Array[DType.bool]:
+    """Whether each element matches a compiled pattern, one row at a time.
+
+    The twin runs the same engine the real kernel does, which makes it a
+    narrower check than the usual one and a check worth having anyway. What it
+    does not share with the kernel is the morsel split, the null repair and the
+    buffers that are reused from one row to the next, and those are where this
+    file's bugs would be. `firepanda/kernel/regex/column.mojo` says so at more
+    length and says what checks the engine.
+
+    Args:
+        a: The column.
+        program: The compiled pattern.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, matches_text(program, a[i]))
     return out^
 
 

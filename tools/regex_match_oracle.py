@@ -6,12 +6,18 @@ what comes back once it has picked, which is a different question with different
 failure modes: a pattern can be routed correctly and then answered wrongly, and
 the only way to see that is to run it on text and compare.
 
-Every call here goes through `Series.str.contains` on pandas' own string dtype
-rather than through `pyarrow.compute` directly. Going through the accessor is
-the point. pandas rewrites a trailing `\\Z` on the way past, decides for itself
+Every call here goes through the accessor on pandas' own string dtype rather
+than through `pyarrow.compute` directly. Going through the accessor is the
+point. pandas rewrites a trailing `\\Z` on the way past, decides for itself
 whether Arrow gets the pattern at all, and turns Arrow's refusal into whatever
 exception it turns it into, and a differential that skipped all that would be
 testing RE2 rather than testing pandas.
+
+Three of the accessor's methods ask the same question and get asked here.
+`contains` is the question itself, and `match` and `fullmatch` are the same
+question with the pattern rewritten and anchored, which is a rewrite pandas does
+in Python and this library has to copy exactly. A pattern can be compiled
+correctly and anchored wrongly, and `match` is where that shows up.
 
 The texts are here rather than in the caller because they have to be the same
 texts on both sides and a list written down twice is a list that drifts.
@@ -66,7 +72,7 @@ def texts() -> list[str]:
     return list(TEXTS)
 
 
-def _row(pattern: str) -> str:
+def _row(pattern: str, method: str) -> str:
     """What pandas answers for one pattern over every text.
 
     Returns:
@@ -76,17 +82,21 @@ def _row(pattern: str) -> str:
     """
     column = pd.Series(TEXTS, dtype="str")
     try:
-        found = column.str.contains(pattern, regex=True)
+        if method == "contains":
+            found = column.str.contains(pattern, regex=True)
+        else:
+            found = getattr(column.str, method)(pattern)
     except Exception:
         return "x"
     return "".join("y" if bool(value) else "n" for value in found)
 
 
-def answers(patterns: list[str]) -> str:
+def answers(patterns: list[str], method: str = "contains") -> str:
     """What pandas answers for every pattern, in order.
 
     Args:
         patterns: The patterns, as the caller would have written them.
+        method: Which of `contains`, `match` and `fullmatch` to ask.
 
     Returns:
         One line per pattern, each either a single `x` or one character per
@@ -100,5 +110,5 @@ def answers(patterns: list[str]) -> str:
         # corpus writing `[[:alpha:]]` and `[a--b]` on purpose.
         warnings.simplefilter("ignore")
         for pattern in patterns:
-            out.append(_row(pattern))
+            out.append(_row(pattern, method))
     return "\n".join(out)

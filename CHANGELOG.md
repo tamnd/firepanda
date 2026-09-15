@@ -14,6 +14,19 @@ The differential job built its programs one after another in a single shell line
 
 The chain moved into `tools/build_differential.sh`, which hands the eight commands to `xargs -P`. The width is the core count capped at four, because a Mojo compile is itself parallel and holds around a gigabyte while it runs, so the limit is memory rather than cores. On a ten core machine the eight programs build in four minutes and nineteen seconds of wall clock against about twelve minutes in sequence. The step's ceiling went to fifteen minutes at the same time, so the next program added does not repeat the same failure.
 
+### Added: `str.contains`, `str.match` and `str.fullmatch` answer a regular expression
+
+The engine from document 77 had nothing calling it. These three now send a pattern with a metacharacter in it to the engine instead of refusing it, so `df["a"].str.contains("^ab.*c$")` answers where it used to raise. Issue #8 M6.
+
+The three are one question upstream. pandas answers `match` and `fullmatch` by rewriting the pattern and asking `contains`, which is why `str.match("a|b")` asks whether a row starts with either letter rather than whether it starts with `a` or holds a `b` anywhere, and the rewrite is copied here character for character rather than reimplemented from its description. A rewrite that is off by one bracket is not an error a caller sees, it is a column of booleans that looks like a right one, so `tests/test_regex_method.mojo` asserts the rewritten pattern as text and not just the answer.
+
+The order of the three steps is the part that costs patterns if it is wrong. pandas picks the engine by reading the pattern the caller wrote, then rewrites a trailing `\Z` into RE2's `\z`, then anchors. Picking the engine from the rewrite sends `(?i)(?=a)` to an engine that has never heard of a lookahead, and rewriting `\Z` after anchoring puts it in the middle of the pattern where RE2 refuses it, which was nine patterns per sweep when the differential caught it.
+
+A pattern opening with a global flag group is the one place this library rewrites differently on purpose, because it parses its own rewrite with Python's grammar and that grammar will not have a flag group anywhere but the front. The group is moved in front, and the anchors the rewrite adds are written `\A` and `\z` so that moving the group cannot change what they mean. `fullmatch("(?m)")` is the case that paid for the care: upstream's added anchors are the ends of the row and not the ends of a line, and a hoist that let the flag reach them answers True for a row the caller's pattern does not match.
+
+A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
+
+`pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
 ### Added: the five TPC-H queries that already answered are now compared
 
 `pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.

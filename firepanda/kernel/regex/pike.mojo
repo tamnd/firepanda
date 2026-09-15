@@ -20,6 +20,14 @@ The stamp holds the position rather than a round number, and a thread queued for
 the next character is stamped with the next position. So when the search reaches
 that position and tries to start a fresh attempt there, the instructions already
 queued are recognised as already present. One array, two lists, no clearing.
+
+A column runs the same program over every row, so the three buffers are a struct
+a caller can keep rather than three allocations a row pays for. The stamp is
+refilled between rows, which is one write per instruction and is next to nothing
+beside the work of a row: a row of twenty characters against a program of thirty
+instructions is six hundred steps and a refill of thirty. A generation counter
+would avoid even that and it would buy a five hundredth of the run in exchange
+for an overflow nobody would ever see fail.
 """
 
 from std.collections.span import Span
@@ -180,14 +188,101 @@ def _queue(
             list.append(pc)
 
 
+struct Machine(Movable):
+    """The three buffers a run needs, kept so that a column allocates once.
+
+    Sized for one program and usable on any text, which is the shape a column
+    wants: compile the pattern, build one of these, and walk the rows. Handing a
+    machine a program of a different size is a bug the stamp will not catch, so
+    the program is passed to both the constructor and the run rather than being
+    remembered here, which keeps the two visibly the same call away from each
+    other.
+    """
+
+    var stamp: List[Int32]
+    """One entry per instruction, holding the position it was last added at."""
+
+    var here: List[Int32]
+    """The threads waiting to read the character at this position."""
+
+    var next: List[Int32]
+    """The threads that have read it and are waiting for the next one."""
+
+    def __init__(out self, program: Program):
+        """Sizes the buffers for a program.
+
+        Args:
+            program: The compiled pattern this machine is going to run.
+        """
+        self.stamp = List[Int32](length=program.sized(), fill=-1)
+        self.here = []
+        self.next = []
+
+    def matches(mut self, program: Program, points: Span[UInt32, _]) -> Bool:
+        """Whether a compiled pattern matches anywhere in the text.
+
+        Unanchored, because that is the only question pandas asks of the engine.
+        `str.match` and `str.fullmatch` are not modes here or upstream: pandas
+        rewrites the pattern into `^(pat)` and `^(pat)$` and asks the same
+        question, which is a decision worth copying rather than improving on,
+        since the rewrite is visible in what the pattern does and not only in
+        the answer.
+
+        Args:
+            program: The compiled pattern.
+            points: The text, as code points.
+
+        Returns:
+            True when some part of the text matches.
+        """
+        if not program.ok:
+            return False
+        for i in range(len(self.stamp)):
+            self.stamp[i] = -1
+        self.here.clear()
+        self.next.clear()
+        var length = len(points)
+        var position = 0
+        while position <= length:
+            _queue(
+                program.code,
+                self.here,
+                self.stamp,
+                Int32(position),
+                0,
+                points,
+                position,
+            )
+            var i = 0
+            while i < len(self.here):
+                var pc = self.here[i]
+                var instruction = program.code[Int(pc)]
+                if instruction.op == IN_MATCH:
+                    return True
+                if position < length and _accepts(
+                    instruction, program.ranges, points[position]
+                ):
+                    _queue(
+                        program.code,
+                        self.next,
+                        self.stamp,
+                        Int32(position + 1),
+                        pc + 1,
+                        points,
+                        position + 1,
+                    )
+                i += 1
+            swap(self.here, self.next)
+            self.next.clear()
+            position += 1
+        return False
+
+
 def runs(program: Program, points: Span[UInt32, _]) -> Bool:
     """Whether a compiled pattern matches anywhere in the text.
 
-    Unanchored, because that is the only question pandas asks of the engine.
-    `str.match` and `str.fullmatch` are not modes here or upstream: pandas
-    rewrites the pattern into `^(pat)` and `^(pat)$` and asks the same question,
-    which is a decision worth copying rather than improving on, since the
-    rewrite is visible in what the pattern does and not only in the answer.
+    The one shot form, which builds a machine, uses it once and drops it. A
+    caller with a column to walk wants `Machine` instead.
 
     Args:
         program: The compiled pattern.
@@ -196,46 +291,8 @@ def runs(program: Program, points: Span[UInt32, _]) -> Bool:
     Returns:
         True when some part of the text matches.
     """
-    if not program.ok:
-        return False
-    var length = len(points)
-    var stamp = List[Int32](length=len(program.code), fill=-1)
-    var here = List[Int32]()
-    var next = List[Int32]()
-    var position = 0
-    while position <= length:
-        _queue(
-            program.code,
-            here,
-            stamp,
-            Int32(position),
-            0,
-            points,
-            position,
-        )
-        var i = 0
-        while i < len(here):
-            var pc = here[i]
-            var instruction = program.code[Int(pc)]
-            if instruction.op == IN_MATCH:
-                return True
-            if position < length and _accepts(
-                instruction, program.ranges, points[position]
-            ):
-                _queue(
-                    program.code,
-                    next,
-                    stamp,
-                    Int32(position + 1),
-                    pc + 1,
-                    points,
-                    position + 1,
-                )
-            i += 1
-        here = next^
-        next = List[Int32]()
-        position += 1
-    return False
+    var machine = Machine(program)
+    return machine.matches(program, points)
 
 
 def matches_text(program: Program, text: StringSlice) -> Bool:
