@@ -19,6 +19,15 @@ It searches where `match` and `fullmatch` anchor, because upstream runs `regex.s
 The group labels come off the compiled program rather than out of a second parse. The parser already knew which names belong to which groups and kept them as two lists as long as however many groups were named, and the compiler turns that into one entry per group in the order they were opened. A named group is labelled with its name and an unnamed one with its own position counted from zero, which pandas writes as an integer and this library writes as text, and that is the column label divergence `partition` already carries rather than a new one.
 
 `expand=False` with one group answers a column instead of a frame. If the group has a name the column takes it, which is the one place on this accessor the answer is not named after the column it was called on, and if the group has no name the column keeps the name it already had rather than losing it. `expand` is checked before the pattern is looked at and the group count after it is compiled, which is upstream's order and is the only thing that decides which of two errors a caller who got both wrong sees. Document 82 has the rest.
+### Added: a comma FROM is reordered so that no pair of relations is left crossed
+
+A comma between two tables in a `FROM` is a join with no condition and the clause nests left, so the order the relations are written in is the order they are joined in. A relation whose equalities are all with something further along the list leaves a product in the middle of the chain, and a product of two real tables is refused rather than slow, so the query does not run at all. `FROM a, b, c WHERE a.x = c.x AND b.y = c.y` is that query and `FROM a, c, b` is the same query written in an order that works. Issue #309.
+
+The new pass keeps the first relation where the query put it and then repeatedly takes the first one left that has an equality with something already taken. It changes nothing at all if that ever fails, because a relation tied to nothing already taken is a product the query really did ask for and leaving it as written is what keeps this from turning one refusal into a different one. An equality counts when both sides are a plain column and each of them is handed out by exactly one relation, which is the same test predicate pushdown uses to decide whether an equality can become a join key.
+
+There is no cost model in it and no cardinality estimate. Among the orders with no product in them it takes the first one it finds, which is the one closest to what the query wrote, and `docs/specs/planner/03-join-ordering.md` says when choosing between them is worth writing.
+
+TPC-H q8 and q9 are why this is here. Both write the table every one of their equalities is against third in a list of six or eight, so the first join in the chain paired every part with every supplier and nothing after it ever ran. Both agree with DuckDB now, over 2 rows and 173 rows, and `pixi run tpch` covers fourteen of the twenty two queries.
 
 ### Added: `REGEXP_MATCHES` and `REGEXP_REPLACE` in SQL, which is the last ClickBench query
 

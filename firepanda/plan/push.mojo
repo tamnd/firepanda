@@ -99,7 +99,7 @@ join, so a search by name finds the name on both and can only answer that it
 does not know, and a query that qualified every mention of it gets nothing
 pushed anywhere. The qualifier is not lost, though. The binder writes the
 relation it picked onto the reference and binding writes the relation each
-column came from onto the node, so `_provides` compares the two and places
+column came from onto the node, so `Bound.provides` compares the two and places
 `n1.n_nationkey` on the side it was written about. A column that no single
 relation produced stays a maybe, which is what keeps this no stricter than the
 search by name it replaced.
@@ -694,48 +694,13 @@ def _owner(
     if plan.exprs.nodes[at].kind != ExprKind.COLUMN:
         return _NEITHER
     ref node = plan.exprs.nodes[at]
-    var here = _provides(bound[left], node.name, node.table)
-    var there = _provides(bound[right], node.name, node.table)
+    var here = bound[left].provides(node.name, node.table)
+    var there = bound[right].provides(node.name, node.table)
     if here and not there:
         return _LEFT
     if there and not here:
         return _RIGHT
     return _NEITHER
-
-
-def _provides(one: Bound, name: String, table: Int) -> Bool:
-    """Whether a node hands out the column a reference was written about.
-
-    By name, unless the reference says which relation it meant and the column
-    says which relation it came from. `FROM nation n1, nation n2` puts one
-    `n_nationkey` on each side of a join, and a search by name finds the name
-    on both and can only answer that it does not know. The qualifier the query
-    wrote is not lost, though: the binder puts the relation it picked on the
-    reference and binding puts the relation each column came from on the node,
-    so the two can be compared and `n1.n_nationkey` placed where it belongs.
-
-    A column that no single relation produced is a maybe rather than a no. That
-    is what keeps this no stricter than a search by name: a name that one side
-    has and the other does not is answered by the name alone, and the relation
-    number only ever decides between two sides that both have it and both know
-    where theirs came from.
-
-    Args:
-        one: What the node produces.
-        name: The name the reference was written with.
-        table: The relation the reference was qualified to, or `UNBOUND`.
-
-    Returns:
-        True when this side could be the one the reference meant.
-    """
-    for i in range(len(one.schema)):
-        if one.schema[i].name != name:
-            continue
-        if table == UNBOUND or one.origin[i] == UNBOUND:
-            return True
-        if one.origin[i] == table:
-            return True
-    return False
 
 
 def _reads(exprs: Expressions, root: Int, mut found: List[Int]) raises:
