@@ -27,8 +27,8 @@ here rather than something Python refuses too, and the reasons are tallied so
 that setting a pattern aside is a number somebody watches. The reasons are
 shorter than the RE2 ones and every one of them is this library falling short of
 an engine that reads the pattern: a lookaround, a backreference, a conditional,
-an atomic group, a possessive quantifier, a named character, case folding, a
-scoped flag group, and the verbose and ascii flag letters.
+an atomic group, a possessive quantifier, a named character, a scoped flag
+group, and the verbose and ascii flag letters.
 
 Usage:
     pixi run differential-regex-python

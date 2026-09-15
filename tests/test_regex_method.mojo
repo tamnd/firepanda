@@ -160,14 +160,15 @@ def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
     rewrite would send it to an engine that has never heard of a lookahead and
     report the wrong reason for refusing it.
 
-    Both halves of this pattern are shortfalls here and the flag is the one the
-    compiler meets first, so the refusal names the folding rather than the
-    lookahead. Either sentence would be right and the flag beside it is what
-    this case is about."""
+    The flag used to be a refusal of its own and used to be the one the
+    compiler met first, so this case used to answer with the folding sentence.
+    Document 83 spent the flag while the pattern is being compiled, so the
+    lookahead is now the only shortfall left in this pattern and the refusal is
+    the one the caller can act on."""
     var program = program_for(METHOD_FULLMATCH, "(?i)(?=a)")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "case folding is not written yet")
+    assert_equal(program.problem, "this engine has no lookaround yet")
 
 
 def test_a_pattern_re2_refuses_is_refused_rather_than_held_out() raises:

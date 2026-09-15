@@ -41,14 +41,17 @@ would also hold out the ones where `(?i)` failed to parse and the pattern was
 therefore an ordinary RE2 pattern, and it would have to be kept in step with the
 compiler by hand.
 
-The reasons are six. Python's grammar cannot read it, which is `\\p{L}` and
+The reasons are five. Python's grammar cannot read it, which is `\\p{L}` and
 everything else that is RE2 syntax and not Python syntax, and which document 77
 section 8 has as the largest single gap in the component. It routes to Python's
 `re`, whose engine is not written. It reads a character class or a count the way
 Python does and RE2 reads the same text differently. It names a character and
-the Unicode name table is missing. It folds case and the folding table is
-missing. It asks for `\\B`, which RE2 answers between bytes rather than between
-characters.
+the Unicode name table is missing. It asks for `\\B`, which RE2 answers between
+bytes rather than between characters.
+
+Case folding used to be the sixth. Document 83 wrote the table, so a pattern
+holding `(?i)` is compared here now rather than held out, which is the largest
+single piece this harness has been handed since it was built.
 
 Usage:
     pixi run differential-regex-match

@@ -6,13 +6,16 @@ choice is the same reason RE2 made it: a pattern is written by a caller and run
 against a column, and an engine that can take exponential time on a pattern like
 `(a+)+b` is a denial of service with a friendly API in front of it.
 
-Both engines are compiled here and the difference between them is three lines.
+Both engines are compiled here and the difference between them is four things.
 Python reads the three Perl classes as Unicode where RE2 reads them as ASCII,
-Python asks the word boundary question against its own wider class, and Python's
-dollar sign matches before a newline that ends the text where RE2's does not.
-All three are settled while the pattern is being compiled, so the machine that
-runs the program never learns which engine asked for it. Document 81 is where
-the three were measured and says which methods take which engine.
+Python asks the word boundary question against its own wider class, Python's
+dollar sign matches before a newline that ends the text where RE2's does not,
+and Python folds the dotted and dotless Turkish I onto the plain one under
+`(?i)` where RE2 leaves both of them alone. All four are settled while the
+pattern is being compiled, so the machine that runs the program never learns
+which engine asked for it. Document 81 is where the first three were measured
+and says which methods take which engine, and document 83 is where the fourth
+was.
 
 What is still RE2 only is the constructs. Python has a lookaround, a
 backreference, a conditional, an atomic group and a possessive quantifier and
@@ -34,6 +37,12 @@ from firepanda.kernel.regex.classdata import (
     DIGIT_RANGES,
     SPACE_RANGES,
     WORD_RANGES,
+)
+from firepanda.kernel.regex.folddata import (
+    FOLD_DELTA,
+    FOLD_EVEN_ODD,
+    FOLD_HIGH,
+    FOLD_LOW,
 )
 from firepanda.kernel.regex.parse import Parsed
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
@@ -223,8 +232,8 @@ struct Program(Movable):
     lookaround, a backreference, a conditional, an atomic group, a possessive
     quantifier and four of the seven inline flag letters, and pandas hands it
     those patterns anyway, so refusing them here is agreement rather than a
-    shortfall. Refusing `(?i)` because no case folding table has been written is
-    a shortfall.
+    shortfall. Refusing a scoped flag group because the parser drops the letters
+    is a shortfall.
 
     A caller deciding what to do next needs the two told apart, and so does the
     differential, which compares the first kind against pandas' own refusal and
@@ -546,6 +555,176 @@ def _category_ranges(which: Int32, python: Bool) -> List[Int32]:
     return out^
 
 
+comptime LATIN_I: Int32 = 0x0049
+"""The capital I, which both engines fold onto the small one."""
+
+comptime LATIN_SMALL_I: Int32 = 0x0069
+"""The small i, which both engines fold onto the capital one."""
+
+comptime LATIN_I_DOTTED: Int32 = 0x0130
+"""The Turkish capital I with a dot, which Python folds onto the other three
+and RE2 leaves alone."""
+
+comptime LATIN_I_DOTLESS: Int32 = 0x0131
+"""The Turkish small dotless i, which Python folds onto the other three and RE2
+leaves alone."""
+
+
+def _re2_unfolds(point: Int32, other: Int32) -> Bool:
+    """Whether the table pairs two code points and RE2 does not.
+
+    The whole of the difference between the two engines' folding, measured over
+    every code point either of them considers cased. Python reads these four as
+    one letter, so `(?i)i` matches all four of them. RE2 reads the two plain
+    ones as one letter and the two Turkish ones as a letter each, so `(?i)i`
+    matches two and `(?i)` on either Turkish one matches only itself.
+
+    Nothing outside this family is touched, which is checked by the generator
+    rather than assumed here: a code point outside it takes the early return and
+    keeps whatever group the table gave it.
+
+    Args:
+        point: The code point the group was looked up by.
+        other: A member of that group.
+
+    Returns:
+        True when Python folds the two together and RE2 does not.
+    """
+    if point == other:
+        return False
+    var family = (
+        point == LATIN_I
+        or point == LATIN_SMALL_I
+        or point == LATIN_I_DOTTED
+        or point == LATIN_I_DOTLESS
+    )
+    if not family:
+        return False
+    var both_plain = (point == LATIN_I or point == LATIN_SMALL_I) and (
+        other == LATIN_I or other == LATIN_SMALL_I
+    )
+    return not both_plain
+
+
+def _fold_successor(
+    lows: Span[Int32, _],
+    highs: Span[Int32, _],
+    deltas: Span[Int32, _],
+    point: Int32,
+) -> Int32:
+    """The next code point in this one's group, or the code point itself.
+
+    The table is a cycle rather than a list of groups, so a caller reads a whole
+    group by starting at a code point and calling this until it comes back to
+    where it started. A code point with no other case is its own successor and
+    the walk stops at once.
+
+    Args:
+        lows: Where each run starts.
+        highs: Where each run ends.
+        deltas: What to add, or `FOLD_EVEN_ODD`.
+        point: The code point.
+
+    Returns:
+        The successor, which is the code point itself when it is not cased.
+    """
+    var at = 0
+    var stop = len(lows)
+    while at < stop:
+        var middle = (at + stop) // 2
+        if highs[middle] < point:
+            at = middle + 1
+        else:
+            stop = middle
+    if at >= len(lows) or lows[at] > point:
+        return point
+    var delta = deltas[at]
+    if delta == FOLD_EVEN_ODD:
+        return point + 1 if (point & 1) == 0 else point - 1
+    return point + delta
+
+
+def _fold_one(
+    mut out: List[Int32],
+    lows: Span[Int32, _],
+    highs: Span[Int32, _],
+    deltas: Span[Int32, _],
+    point: Int32,
+    python: Bool,
+):
+    """Adds the other cases of one code point to a set being built.
+
+    The walk stops when the cycle comes back to where it started, which is at
+    once for a code point with no other case. RE2's four code point exception is
+    spent here rather than in the table, and it is spent on the member rather
+    than on the walk: a member RE2 does not fold is stepped over and the walk
+    carries on, so the plain `I` and `i` still find each other through a group
+    that holds two code points RE2 wants nothing to do with.
+
+    Args:
+        out: The set being built, as low and high pairs.
+        lows: Where each run starts.
+        highs: Where each run ends.
+        deltas: What to add, or `FOLD_EVEN_ODD`.
+        point: The code point whose other cases are wanted.
+        python: Whether this is Python's engine, which folds all four.
+    """
+    var other = _fold_successor(lows, highs, deltas, point)
+    while other != point:
+        if python or not _re2_unfolds(point, other):
+            out.append(other)
+            out.append(other)
+        other = _fold_successor(lows, highs, deltas, other)
+
+
+def _folded(var ranges: List[Int32], python: Bool) -> List[Int32]:
+    """The same set of code points with every letter's other cases added.
+
+    This is where `(?i)` is spent. A set that has been through here answers the
+    same question with the flag as the original answered without it, so the
+    machine that runs the program is never told a flag was set and never pays
+    for one. The cost is a walk over the cased code points a class covers, once,
+    while the pattern is being compiled.
+
+    The walk is over the table rather than over the set, which matters for
+    `(?i)[\\w]`: the class covers 138558 code points and only 2927 of them have
+    another case, so the cost is the table's length rather than the class's.
+
+    Args:
+        ranges: The set as sorted, merged low and high pairs, consumed.
+        python: Whether the program is being compiled for Python's engine, which
+            is the one place the two disagree.
+
+    Returns:
+        The set with the folds added, sorted and merged again.
+    """
+    var table_lows = materialize[FOLD_LOW]()
+    var table_highs = materialize[FOLD_HIGH]()
+    var table_deltas = materialize[FOLD_DELTA]()
+    var lows = Span(table_lows)
+    var highs = Span(table_highs)
+    var deltas = Span(table_deltas)
+    var out = ranges.copy()
+    for i in range(len(ranges) // 2):
+        var low = ranges[i * 2]
+        var high = ranges[i * 2 + 1]
+        var at = 0
+        var stop = len(lows)
+        while at < stop:
+            var middle = (at + stop) // 2
+            if highs[middle] < low:
+                at = middle + 1
+            else:
+                stop = middle
+        while at < len(lows) and lows[at] <= high:
+            var first = lows[at] if lows[at] > low else low
+            var last = highs[at] if highs[at] < high else high
+            for step in range(Int(first), Int(last) + 1):
+                _fold_one(out, lows, highs, deltas, Int32(step), python)
+            at += 1
+    return _sorted_merged(out^)
+
+
 def _category_is_negated(which: Int32) -> Bool:
     """Whether a category is one of the three capital letters.
 
@@ -597,6 +776,15 @@ def _class_ranges(
     `[^\\W]` comes out as a word character. Python's own parser does the same
     thing for the same reason.
 
+    Under `(?i)` each item is folded as it arrives rather than the union being
+    folded once at the end, and a negated category is folded and then negated
+    rather than the other way round. Both of those are RE2's arrangement and
+    neither is an optimisation. `(?i)[\\W]` on RE2 does not match a `k`, and
+    folding the complement of an ASCII word class would add one, because the
+    Kelvin sign is outside that class and folds onto a letter that is inside
+    it. RE2 says as much in a comment where it does this, and a class whose
+    items are folded one at a time is the only reading that agrees.
+
     Args:
         b: The builder, told about anything that cannot be compiled.
         nodes: The arena.
@@ -606,20 +794,24 @@ def _class_ranges(
     Returns:
         The ranges the class covers, sorted and merged, before negation.
     """
+    var folding = (b.flags & FLAG_IGNORECASE) != 0
     var gathered = List[Int32]()
     var child = nodes[Int(node)].first
     while child >= 0:
         var it = nodes[Int(child)]
         if it.op == OP_NEGATE:
             negated = True
-        elif it.op == OP_LITERAL:
-            gathered.append(it.a)
-            gathered.append(it.a)
-        elif it.op == OP_RANGE:
-            gathered.append(it.a)
-            gathered.append(it.b)
+        elif it.op == OP_LITERAL or it.op == OP_RANGE:
+            var high = it.b if it.op == OP_RANGE else it.a
+            var span: List[Int32] = [it.a, high]
+            if folding:
+                span = _folded(span^, b.python)
+            for i in range(len(span)):
+                gathered.append(span[i])
         elif it.op == OP_CATEGORY:
             var pieces = _category_ranges(it.a, b.python)
+            if folding:
+                pieces = _folded(pieces^, b.python)
             if _category_is_negated(it.a):
                 pieces = _complemented(_sorted_merged(pieces^))
             for i in range(len(pieces)):
@@ -685,11 +877,24 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         return
     var it = nodes[Int(node)]
 
+    var folding = (b.flags & FLAG_IGNORECASE) != 0
+
     if it.op == OP_LITERAL:
+        if folding:
+            var one: List[Int32] = [it.a, it.a]
+            var group = _folded(one^, b.python)
+            # A letter with no other case is still one code point after
+            # folding, and emitting it as a set of one would make the
+            # commonest instruction in the program a binary search.
+            if len(group) > 2 or group[0] != group[1]:
+                b.add_set(group, False)
+                return
         _ = b.emit(IN_CHAR, it.a, 0)
         return
     if it.op == OP_NOT_LITERAL:
         var one: List[Int32] = [it.a, it.a]
+        if folding:
+            one = _folded(one^, b.python)
         b.add_set(one, True)
         return
     if it.op == OP_ANY:
@@ -702,11 +907,25 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         _ = b.emit(IN_AT, _at_value(b, it.a), 0)
         return
     if it.op == OP_CATEGORY:
-        var pieces = _sorted_merged(_category_ranges(it.a, b.python))
-        b.add_set(pieces, _category_is_negated(it.a))
+        # Folded before the negation is applied and not after it, and folded at
+        # all because RE2's three classes are ASCII and an ASCII class is not
+        # closed under folding: the Kelvin sign and the long s are outside
+        # `[0-9A-Za-z_]` and fold onto letters that are inside it, so `(?i)\\w`
+        # matches both on RE2 and `(?i)\\W` matches neither. Python's three are
+        # Unicode and are closed, so the same two lines are a no change there
+        # and are still worth running rather than branching on the engine.
+        var pieces = _category_ranges(it.a, b.python)
+        if folding:
+            pieces = _folded(pieces^, b.python)
+        b.add_set(_sorted_merged(pieces^), _category_is_negated(it.a))
         return
     if it.op == OP_IN:
         var negated = False
+        # Each item inside the brackets was folded as it arrived, so what is
+        # left here is the caret. It is applied last, which is the only order
+        # that answers `(?i)[^a]` on a capital A the way both engines do.
+        # Folding the complement instead would add the small a back in through
+        # the other case of every letter that is not the one written down.
         var pieces = _class_ranges(b, nodes, node, negated)
         if b.failed:
             return
@@ -972,10 +1191,8 @@ def _refused_flags(flags: Int32) -> String:
     asks for exactly the classes RE2 already uses and RE2 will not take the
     request, and `(?u)` asks for what Python does anyway.
 
-    `(?i)` is refused here and not by RE2, which does have it. Folding needs a
-    table of which code points fold onto which, that table is not in this
-    repository, and a pattern that silently did not fold would be a wrong
-    answer rather than a missing feature.
+    `(?i)` is not here, because RE2 has it and so does this. What RE2 folds is
+    in `folddata.mojo` and is spent while the pattern is being compiled.
 
     The same four letters are refused in either form, which is why this takes a
     bitmask rather than the parse: the caller asks it once about the global
@@ -995,8 +1212,6 @@ def _refused_flags(flags: Int32) -> String:
         return String("invalid perl operator: (?a")
     if (flags & FLAG_UNICODE) != 0:
         return String("invalid perl operator: (?u")
-    if (flags & FLAG_IGNORECASE) != 0:
-        return String("case folding is not written yet")
     return String("")
 
 
@@ -1029,8 +1244,6 @@ def _refused_flags_python(flags: Int32) -> String:
         return String("verbose mode is not read yet")
     if (flags & FLAG_ASCII) != 0:
         return String("the ascii flag is not carried yet")
-    if (flags & FLAG_IGNORECASE) != 0:
-        return String("case folding is not written yet")
     return String("")
 
 
