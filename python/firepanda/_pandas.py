@@ -8559,10 +8559,26 @@ Python's own `re.escape` is the authority for this and it escapes more than
 twelve, because it escapes anything that is not a word character so that the
 answer stays right across versions. Twelve is the list that actually changes a
 match, and being exact here matters in the one direction: a character wrongly
-left out of this set turns a refusal into a wrong answer, and a character
-wrongly put in turns a right answer into a refusal, which is a complaint rather
-than a bug.
+left out of this set sends a pattern to the byte search that does not mean what
+the byte search would say.
+
+A character wrongly put in used to be a refusal and is now a pattern sent to the
+engine, which answers it correctly and more slowly. That is the cheaper mistake
+of the two and it was the cheaper one before as well, which is why this set has
+never been the exact list `re.escape` uses.
 """
+
+
+def _needs_an_engine(pat: Any, regex: bool) -> bool:
+    """Whether a pattern has to be compiled rather than searched for.
+
+    A pattern that is not a string answers False so that the type refusal stays
+    where it was, in `_literal`, which gives the message pandas gives and gives
+    it before anything decides which engine would have taken the pattern.
+    """
+    if not regex or not isinstance(pat, str):
+        return False
+    return any(character in _REGEX_CHARACTERS for character in pat)
 
 
 class StringMixin:
@@ -8825,17 +8841,23 @@ class StringMixin:
     def _literal(self, pat: Any, regex: bool, name: str) -> str:
         """Reads a pattern, and refuses one that needs an engine we do not have.
 
-        pandas reads the argument to `contains`, `match`, `fullmatch` and `count`
-        as a regular expression. There is no regular expression engine here yet.
-        What makes the four worth writing anyway is that a pattern holding none
-        of the twelve metacharacters means the same thing to an engine as it does
-        to a byte search, so those patterns are answered exactly and the rest are
-        refused by name rather than answered approximately.
+        pandas reads the argument to `contains`, `match`, `fullmatch`, `count`
+        and `replace` as a regular expression. A pattern holding none of the
+        twelve metacharacters means the same thing to an engine as it does to a
+        byte search, so this is the check that says a pattern can take the byte
+        search, which is the faster of the two and is what every pattern nobody
+        wrote a metacharacter in should get.
+
+        `contains`, `match` and `fullmatch` no longer come here for a pattern
+        that fails the check, because there is an engine for those three now.
+        `count` and `replace` still do, because both of them need where a match
+        starts and ends rather than whether there is one, and the engine answers
+        the second question only.
 
         The refusal names the character it tripped on, because a caller who wrote
-        `contains(".")` meaning a full stop is one keyword away from the answer
-        they want and a caller who wrote `contains("^a")` is not, and the message
-        should let them tell which of the two they are.
+        `count(".")` meaning a full stop is one keyword away from the answer they
+        want and a caller who wrote `count("^a")` is not, and the message should
+        let them tell which of the two they are.
         """
         if not isinstance(pat, str):
             raise DTypeError("firepanda:dtype: first argument must be string or compiled pattern")
@@ -8878,17 +8900,49 @@ class StringMixin:
         return "" if case is None or case else "_folded"
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
-        """Whether a literal pattern is in every row, at the front, or the whole row.
+        """Whether a pattern is in every row, at the front, or the whole row.
 
         The three share everything except which kernel they reach, including the
         `na` filling, which is the same list walk `_begins` does and is here for
         the same reason: a column has no `fillna` yet.
+
+        Which kernel they reach is now two questions rather than one. A pattern
+        with no metacharacter in it goes to the byte search, which is what these
+        three have always done and is the faster path by a long way. Anything
+        else goes to the engine, which compiles the pattern once and walks the
+        column, and which refuses what it cannot do rather than answering it.
         """
         fold = self._fold_word(case, flags, kind)
-        answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
+        if _needs_an_engine(pat, regex):
+            answer = self._matched(kind, pat, case)
+        else:
+            answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
+
+    def _matched(self, kind: str, pat: str, case: Any) -> Series:
+        """Runs a pattern through the regular expression engine.
+
+        `case=False` is the one argument that stops here rather than reaching
+        the engine. pandas serves it by handing RE2 its own ignore case flag,
+        which folds the pattern and the text against a table this library has
+        not written, and the refusal is a gap of the same kind the engine itself
+        reports rather than something this layer invented.
+
+        The pattern crosses as the caller wrote it. `match` and `fullmatch` are
+        a `contains` with the pattern anchored, both here and upstream, and the
+        rewrite happens on the other side because upstream decides which engine
+        a pattern goes to before rewriting it and the rewrite can change that
+        decision. `firepanda/py/text.mojo` has which pattern and why.
+        """
+        if case is not None and not case:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{kind} with case=False reads its pattern"
+                " with case folded, the regular expression engine has no folding table"
+                " yet, and folding is not something that can be left out of an answer"
+            )
+        return self._flag(f"{kind}_regex", pat)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
         """How many times a literal pattern appears in every row.

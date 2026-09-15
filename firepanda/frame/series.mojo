@@ -120,6 +120,8 @@ from firepanda.kernel.pattern import (
     text_starts_with_folded,
 )
 from firepanda.kernel.pick import pick_any
+from firepanda.kernel.regex.column import text_matches_regex
+from firepanda.kernel.regex.program import Program
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.shift import shift_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
@@ -1714,6 +1716,33 @@ struct Series(Copyable, Movable, Sized, Writable):
                     limit,
                 )
             ),
+        )
+
+    def chars_matches_regex(self, program: Program) raises -> Self:
+        """Returns whether each row matches a compiled pattern anywhere in it.
+
+        This is the regular expression form of `chars_contains`, and it takes a
+        compiled program rather than a pattern because compiling is where a
+        pattern is refused and a caller has to be told which of the two kinds of
+        refusal it was. `firepanda/kernel/regex/column.mojo` has the argument.
+
+        The question is unanchored. `str.match` and `str.fullmatch` are the same
+        call with the pattern rewritten, which is what pandas does with them and
+        is a rewrite that belongs to the layer holding the call.
+
+        Args:
+            program: The pattern, already compiled for the engine that is to run
+                it.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_matches_regex(self.values.strings(), program)),
         )
 
     def chars_contains_folded(self, pattern: StringSlice) raises -> Self:
