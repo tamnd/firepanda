@@ -278,7 +278,9 @@ from firepanda.exec.node import (
     Presence,
     Project,
     Reduce,
+    Search,
     Sort,
+    Substitute,
     Trim,
     Truncate,
     Unique,
@@ -293,6 +295,10 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
+from firepanda.kernel.regex.parse import parse_pattern
+from firepanda.kernel.regex.program import compile_program
+from firepanda.kernel.regex.replace import parse_rewrite
+from firepanda.kernel.regex.route import ENGINE_RE2
 from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
@@ -567,6 +573,12 @@ def _lower_expr(
 
     if kind == ExprKind.CALL and exprs.nodes[root].name == "like":
         return _lower_like(exprs, root, pipe, base, name, memo)
+
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "regexp_matches":
+        return _lower_search(exprs, root, pipe, base, name, memo)
+
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "regexp_replace":
+        return _lower_substitute(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and exprs.nodes[root].name == "substring":
         return _lower_cut(exprs, root, pipe, base, name, memo)
@@ -1047,6 +1059,229 @@ def _lower_like(
         )
     else:
         pipe.add(Node(Match(at, pattern, name)))
+
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_constant_text(
+    exprs: Expressions, args: List[Int], which: Int, called: String
+) raises -> String:
+    """Reads one argument of a regular expression call that has to be written
+    out in the query.
+
+    The same three refusals for every such argument, in one place, because a
+    pattern that is an expression and a pattern that is null fail for different
+    reasons and both of them have to say which argument they mean.
+
+    Args:
+        exprs: The arena.
+        args: The call's arguments.
+        which: Which of them to read.
+        called: The name of the call, for the message.
+
+    Returns:
+        What the argument holds.
+
+    Raises:
+        Error: If the argument is not a literal or if it is null.
+    """
+    if exprs.nodes[args[which]].kind != ExprKind.LITERAL:
+        raise Error(
+            String(
+                "lower: the pattern and the other constants of a ",
+                called,
+                " all have to be written out, and argument ",
+                which,
+                (
+                    " is an expression, which would mean compiling a new"
+                    " program for every row and there is no kernel that does"
+                    " that"
+                ),
+            )
+        )
+    if exprs.nodes[args[which]].value.is_null():
+        raise Error(
+            String(
+                "lower: a ",
+                called,
+                (
+                    " against a null argument is null for every row, and there"
+                    " is no operator that answers a column of nulls yet"
+                ),
+            )
+        )
+    return exprs.nodes[args[which]].value.as_string()
+
+
+def _lower_search(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `REGEXP_MATCHES`.
+
+    The pattern is compiled here and not per row, for the reason the pattern of
+    a `LIKE` is read here: what the engine has to run does not change from row
+    to row, and a program is much the more expensive of the two to build. A
+    pattern that will not compile is refused here too, so a query carrying a bad
+    one says so before a single row moves.
+
+    The grammar the pattern is read with is Python's, which is the only reader
+    this library has. RE2 has syntax Python does not, `\\p{L}` being the one
+    anybody meets, so a pattern DuckDB takes can be refused here. That is a
+    stated gap rather than a wrong answer: the refusal names the pattern.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, if the pattern is
+            not a constant, if it is null, or if it will not compile.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 2:
+        # DuckDB reads an options string here as well. Nothing in it changes
+        # whether a row matches except the flags this library has no way to
+        # compile, so the argument is refused rather than taken and ignored.
+        raise Error(
+            String(
+                "lower: regexp_matches reads two arguments and was given ",
+                len(args),
+            )
+        )
+
+    var pattern = _lower_constant_text(exprs, args, 1, "regexp_matches")
+    var program = compile_program(parse_pattern(pattern), ENGINE_RE2)
+    if not program.ok:
+        raise Error(
+            String(
+                "lower: regexp_matches cannot run the pattern '",
+                pattern,
+                "', ",
+                program.problem,
+            )
+        )
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Search(at, program^, name)))
+
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_substitute(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `REGEXP_REPLACE`.
+
+    The pattern is compiled here and not per row, for the reason the pattern of
+    a `LIKE` is read here: what the engine has to run does not change from row
+    to row, and a program is much the more expensive of the two to build. The
+    replacement is read here too, into the parts a rewrite is made of, and both
+    of them are refused here if they cannot be, so a query with a bad pattern
+    in it says so before a single row moves.
+
+    The grammar the pattern is read with is Python's, which is the only reader
+    this library has. RE2 has syntax Python does not, `\\p{L}` being the one
+    anybody meets, so a pattern DuckDB takes can be refused here. That is a
+    stated gap rather than a wrong answer: the refusal names the pattern.
+
+    The fourth argument is DuckDB's options string and the only flag answered
+    is `g`. Without it one match is replaced, which is DuckDB's default and is
+    not what `str.replace` does with the same kernel, and with it every match
+    is. Any other flag is refused by name rather than dropped, because a query
+    that asked for a case insensitive match and got a case sensitive one is
+    wrong with nothing anywhere to say so.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, if the pattern or
+            the replacement or the options are not constants, if any of them is
+            null, if the pattern will not compile, if the replacement will not
+            read, or if the options hold a flag other than `g`.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 3 and len(args) != 4:
+        raise Error(
+            String(
+                (
+                    "lower: regexp_replace reads three arguments or four and"
+                    " was given "
+                ),
+                len(args),
+            )
+        )
+
+    var limit = 1
+    if len(args) == 4:
+        var options = _lower_constant_text(exprs, args, 3, "regexp_replace")
+        for i in range(options.byte_length()):
+            if options.as_bytes()[i] == UInt8(ord("g")):
+                limit = -1
+                continue
+            raise Error(
+                String(
+                    "lower: regexp_replace was given the option '",
+                    StringSlice(unsafe_from_utf8=options.as_bytes()[i : i + 1]),
+                    "', and the only one answered is 'g'",
+                )
+            )
+
+    var pattern = _lower_constant_text(exprs, args, 1, "regexp_replace")
+    var program = compile_program(
+        parse_pattern(pattern), ENGINE_RE2, captures=True
+    )
+    if not program.ok:
+        raise Error(
+            String(
+                "lower: regexp_replace cannot run the pattern '",
+                pattern,
+                "', ",
+                program.problem,
+            )
+        )
+
+    var replacement = _lower_constant_text(exprs, args, 2, "regexp_replace")
+    var rewrite = parse_rewrite(replacement, program.groups)
+    if not rewrite.ok:
+        raise Error(
+            String(
+                "lower: regexp_replace cannot read the replacement '",
+                replacement,
+                "', ",
+                rewrite.problem,
+            )
+        )
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Substitute(at, program^, rewrite^, limit, name)))
 
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1

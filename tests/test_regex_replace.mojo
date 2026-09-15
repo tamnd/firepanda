@@ -24,13 +24,17 @@ The replacement is RE2's rewrite string rather than Python's, which is a
 narrower grammar: `\\0` and `\\1` through `\\9` and `\\\\` and nothing else.
 """
 
+from std.collections.span import Span
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.method import METHOD_REPLACE, program_for
+from firepanda.kernel.regex.parse import decode_into
+from firepanda.kernel.regex.pike import Machine
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import (
     Rewrite,
     parse_rewrite,
+    replaced,
     replaced_text,
 )
 
@@ -256,6 +260,87 @@ def test_a_row_that_matches_nothing_comes_back_as_it_was() raises:
     )
     assert_equal(swapped("q+", "#", ""), "", "an empty row")
     assert_equal(swapped("[0-9]", "#", "héllo"), "héllo", "a row of letters")
+
+
+def bounded(
+    pattern: StringSlice, repl: StringSlice, text: StringSlice, limit: Int
+) raises -> String:
+    """The text with the first `limit` matches replaced.
+
+    The same as `swapped` with a count on it, written out here because
+    `replaced_text` does not take one and the scan is what is being asked
+    about.
+
+    Args:
+        pattern: The pattern.
+        repl: The replacement.
+        text: The text.
+        limit: How many matches to replace.
+
+    Returns:
+        The answer.
+
+    Raises:
+        Error: If the pattern or the replacement could not be read.
+    """
+    var program = compiled(String(pattern))
+    var rewrite = parse_rewrite(String(repl), program.groups)
+    if not rewrite.ok:
+        raise Error(
+            String("replacement ", repl, " was refused: ", rewrite.problem)
+        )
+    var points = List[UInt32]()
+    var bytes = text.as_bytes()
+    decode_into(bytes, points)
+    var machine = Machine(program)
+    var offsets = List[Int]()
+    var found = List[Int32]()
+    var out = List[UInt8]()
+    replaced(
+        program,
+        rewrite,
+        bytes,
+        Span(points),
+        machine,
+        offsets,
+        found,
+        out,
+        limit,
+    )
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def test_a_limit_stops_the_scan_and_the_rest_of_the_row_is_copied() raises:
+    """What SQL's `REGEXP_REPLACE` asks for, which no `str` caller ever does.
+
+    The tail is the part worth asserting. A scan that stopped and returned what
+    it had would drop everything after the last match it made, which is a wrong
+    answer on every row that matched fewer times than it holds.
+    """
+    assert_equal(bounded("a", "Z", "aaaa", 1), "Zaaa", "one of four")
+    assert_equal(bounded("a", "Z", "aaaa", 2), "ZZaa", "two of four")
+    assert_equal(bounded("a", "Z", "aaaa", 9), "ZZZZ", "more than there are")
+    assert_equal(bounded("a", "Z", "aaaa", -1), "ZZZZ", "and all of them")
+    assert_equal(bounded("a", "Z", "  a  ", 1), "  Z  ", "the ends are kept")
+    assert_equal(bounded("q", "Z", "abc", 1), "abc", "a row with no match")
+
+
+def test_a_limit_of_zero_writes_the_row_out_as_it_arrived() raises:
+    """The edge nobody writes on purpose and every off by one lands on."""
+    assert_equal(bounded("a", "Z", "aaaa", 0), "aaaa", "nothing was replaced")
+    assert_equal(bounded("a", "Z", "", 0), "", "and an empty row is empty")
+
+
+def test_a_limit_counts_matches_and_not_the_characters_stepped_over() raises:
+    """An empty match that is thrown away is not one of the replacements.
+
+    `a*` on `abc` gives `#b#c#` with no limit. The `a` is one match, the empty
+    match after it is refused and the `b` is copied across without counting, so
+    a limit of two reaches the marker before the `c` and stops there.
+    """
+    assert_equal(bounded("a*", "#", "abc", 1), "#bc", "the run of a is one")
+    assert_equal(bounded("a*", "#", "abc", 2), "#b#c", "and the next is two")
+    assert_equal(bounded("a*", "#", "abc", 3), "#b#c#", "and three is all")
 
 
 def main() raises:

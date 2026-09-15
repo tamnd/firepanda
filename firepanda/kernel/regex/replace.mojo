@@ -177,8 +177,9 @@ def replaced(
     mut offsets: List[Int],
     mut found: List[Int32],
     mut out: List[UInt8],
+    limit: Int = -1,
 ):
-    """Replaces every match in one row, appending the result to a buffer.
+    """Replaces the first `limit` matches in one row, or all of them.
 
     The three rules this loop follows are on the module, and the one worth
     repeating beside the code is the last: an empty match that lands where the
@@ -193,6 +194,15 @@ def replaced(
     that a column pays for it once rather than once per row, and so are the
     machine, the slots and the output.
 
+    The limit is not the bounded replace the module says is not here. That one
+    is Arrow's `n`, which finds a match and then replaces inside the text it
+    found, and copying it would put wrong answers where a refusal puts a gap.
+    This is the same scan with a counter on it, which is what SQL's
+    `regexp_replace` wants: the first match and then the rest of the row
+    untouched, unless the call asked for `g`. Stopping early is the only
+    difference, so a limit of one and a pattern that can only match once give
+    exactly what no limit gives.
+
     Args:
         program: The pattern, compiled with captures.
         rewrite: The replacement, already read.
@@ -202,6 +212,8 @@ def replaced(
         offsets: Scratch, refilled here.
         found: Scratch for the slots of a match, refilled by every search.
         out: Where the answer goes. Emptied first.
+        limit: How many matches to replace, or a negative number for all of
+            them. Zero writes the row out unchanged.
     """
     out.clear()
     offsets.clear()
@@ -214,7 +226,8 @@ def replaced(
     var n = len(points)
     var p = 0
     var lastend = -1
-    while p <= n:
+    var done = 0
+    while p <= n and (limit < 0 or done < limit):
         var end = machine.search(program, points, p, found)
         if end < 0:
             break
@@ -242,8 +255,11 @@ def replaced(
                         out.append(bytes[k])
         p = end
         lastend = p
+        done += 1
     # A cursor that walked off the end of the row has nothing left to copy, and
-    # it gets there by refusing an empty match at the last position.
+    # it gets there by refusing an empty match at the last position. A cursor
+    # stopped by the limit is inside the row, and the same copy is what carries
+    # the rest of it across untouched.
     if p <= n:
         for k in range(offsets[p], len(bytes)):
             out.append(bytes[k])
