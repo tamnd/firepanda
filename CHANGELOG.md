@@ -21,6 +21,43 @@ A nested column is the one shape a window cannot be taken of, so a chunk that ho
 On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
 
 The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+### Changed: the differential programs are built several at a time
+
+The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
+
+The chain moved into `tools/build_differential.sh`, which hands the eight commands to `xargs -P`. The width is the core count capped at four, because a Mojo compile is itself parallel and holds around a gigabyte while it runs, so the limit is memory rather than cores. On a ten core machine the eight programs build in four minutes and nineteen seconds of wall clock against about twelve minutes in sequence. The step's ceiling went to fifteen minutes at the same time, so the next program added does not repeat the same failure.
+
+### Added: `str.contains`, `str.match` and `str.fullmatch` answer a regular expression
+
+The engine from document 77 had nothing calling it. These three now send a pattern with a metacharacter in it to the engine instead of refusing it, so `df["a"].str.contains("^ab.*c$")` answers where it used to raise. Issue #8 M6.
+
+The three are one question upstream. pandas answers `match` and `fullmatch` by rewriting the pattern and asking `contains`, which is why `str.match("a|b")` asks whether a row starts with either letter rather than whether it starts with `a` or holds a `b` anywhere, and the rewrite is copied here character for character rather than reimplemented from its description. A rewrite that is off by one bracket is not an error a caller sees, it is a column of booleans that looks like a right one, so `tests/test_regex_method.mojo` asserts the rewritten pattern as text and not just the answer.
+
+The order of the three steps is the part that costs patterns if it is wrong. pandas picks the engine by reading the pattern the caller wrote, then rewrites a trailing `\Z` into RE2's `\z`, then anchors. Picking the engine from the rewrite sends `(?i)(?=a)` to an engine that has never heard of a lookahead, and rewriting `\Z` after anchoring puts it in the middle of the pattern where RE2 refuses it, which was nine patterns per sweep when the differential caught it.
+
+A pattern opening with a global flag group is the one place this library rewrites differently on purpose, because it parses its own rewrite with Python's grammar and that grammar will not have a flag group anywhere but the front. The group is moved in front, and the anchors the rewrite adds are written `\A` and `\z` so that moving the group cannot change what they mean. `fullmatch("(?m)")` is the case that paid for the care: upstream's added anchors are the ends of the row and not the ends of a line, and a hoist that let the flag reach them answers True for a row the caller's pattern does not match.
+
+A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
+
+`pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
+### Added: the five TPC-H queries that already answered are now compared
+
+`pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
+
+A query that answers and is not compared is worse than a query that does not run. Nothing notices when it starts answering something else, and the reason it was left out is the reason a harness exists: it had not been checked, so it went on the list of things to check rather than into the thing that checks.
+
+The data is prepared against two markers now rather than one. The Parquet goes stale when the scale changes and nothing else, and at scale 1 it is a quarter of a gigabyte to regenerate. The reference answers go stale when a query is added to the list too, since only the queries in the list get an answer written. One marker for both meant either regenerating the data every time a query was added, or adding a query and leaving it with no answer to be compared against, which is what happened the first time this was run.
+
+### Changed: a predicate is sent past every join that keeps its left rows
+
+Predicate pushdown used to move a predicate into the side of an inner join that provides every column it reads, and to leave everything alone at every other kind of join. It now sends a predicate into the left side of a left, semi, anti, mark or cross join as well, which is the same rule the inner join already had, applied on the one side where it holds. Issue #309.
+
+The argument is about what happens to a row the predicate drops. All five of those kinds hand out left rows, so one output row reads one left row, and a left row dropped below the join drops exactly the output rows the predicate would have dropped above it. The other direction is the one that does not hold: a right row dropped below a left join does not drop the left row it matched, it null extends it instead, and a null is not what the predicate answered about. So the right side of those joins is still left alone, and a right or a full outer join still passes nothing in either direction.
+
+A cross join is the one where the reason is about firepanda rather than about SQL. Both sides would be sound, since a cross join is an inner join with nothing asked of the pair, and the right side is still left alone because the lowering pairs a whole frame against a right side of a single row, and a predicate pushed into that side can leave it holding no row at all.
+
+The two halves compose, and that is what this is worth. A predicate that gets past a mark join reaches the cross join under it, and the pass then turns that cross join into a pairing because the predicate is an equality over its two sides. TPC-H q16 is exactly that shape, a product under a mark join under a filter, and it did not run at all before this: the equality that pairs `partsupp` with `part` could not reach the product it belonged on. It now answers what DuckDB answers and has joined `pixi run tpch`, which covers five of the twenty two queries.
 
 ### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
@@ -29,6 +66,32 @@ A frame that arrives in one chunk runs a filtering line about 1.65 times slower 
 `exec/pipeline_line_two_chunks` and `exec/pipeline_line_eight_chunks` run the same line over chunks of two million and five hundred thousand rows. Both are as far past every level of cache as the four million row chunk is, so if the cost were the size of the intermediates they would sit with the one chunk row. They sit with the morsel sized row instead. On the i9-13900K at four million rows with the machine idle, one chunk is 3.46 milliseconds, two is 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is 2.26. The whole of the cost is the step from one chunk to two, which is where the driver stops running the line on the calling thread and starts handing the prefix out, so what a one chunk frame is missing is the batched prefix and not a cache.
 
 `exec/pipeline_line_one_chunk_split` cuts the one chunk frame into morsels inside the timing and then runs the line, which is what a scan that re-chunked its input would cost today. It is 11.9 milliseconds against 3.46 for leaving the frame alone, because slicing a column allocates and a copy of the source costs more than the whole query. A scan that re-chunks has to slice without allocating, and that is the work the issue describes.
+
+### Added: a compiler and a matching engine for the RE2 side of the string accessor
+
+Document 76 read a pattern with Python's grammar and worked out which of the two engines pandas would hand it to. This turns one of those parsed patterns into instructions and runs them, for the RE2 side, which is the side that answers the common case. Issue #8 M6.
+
+The program is Thompson's shape, so every place the pattern could be after reading the same number of characters is held at once and the text is read once. `(a+)+b` against sixty letters is sixty steps here and is the textbook way to make a backtracking engine take longer than anyone will wait, which matters because the pattern comes from a caller and the text comes from a column.
+
+A refusal carries a flag saying whose it is. Either RE2 refuses the pattern too, in which case refusing is agreement and the caller gets the same Arrow error out of pandas today, or firepanda cannot answer it yet, in which case it is a gap with a name. That one bit puts every decision about what can be answered in the compiler, next to the facts about RE2, instead of leaving it as a guess about the pattern text somewhere further out.
+
+Six of the constructs RE2 refuses were already known and the rest were measured here. Two of them look like nothing at all: a backslash in front of a character outside ASCII is an ordinary way to write that character to Python and an error to RE2, and `[\1]` is the character with code one to Python and an error to RE2, which will not read a nonzero octal escape of fewer than two digits. A third is a budget rather than a construct, since RE2 will not repeat anything more than a thousand times and counts the whole way down, so `(a{11}){91}` is refused for asking for 1001 copies written as two numbers neither of which is over the limit.
+
+`pixi run differential-regex-match` runs thirty thousand generated patterns against sixteen pieces of text through both this engine and pandas, and compares the refusals and the answers. It agrees on every pattern it compares across five seeds, with the held out patterns counted by reason so that setting one aside is a number somebody watches rather than a silence. The first run disagreed about 66 patterns in three families and every one was a fact about RE2 that had not been measured, which is the same thing the routing corpus did and the reason it was written before the hand written tests.
+
+Nothing is wired to the string accessor yet, and captures, case folding and the Python engine are named in document 77 section 8 rather than half done.
+
+### Changed: a column the query did not name is named after what it was written as
+
+`SELECT sum(x) FROM t` used to come back with a column called `__expr_0`. It comes back with one called `sum(x)` now, which is what DuckDB calls it, and `SELECT 1` comes back with a column called `1`.
+
+The name is printed by the printer that already prints an AST back to SQL, which is the same arrangement DuckDB has, and it is why the two agree on as much of this as they do without either side aiming at the other. Both normalize rather than copying the text, so `SUM( x  )` is `sum(x)` in both. Both parenthesize every operand of an operator, so `x * 2 + 1` is `((x * 2) + 1)` in both. Neither makes a duplicate name unique, so two columns written the same way come back with the same name in both.
+
+Five shapes are still named differently and all five are the printer disagreeing rather than the rule disagreeing. DuckDB names `count(*)` as `count_star()`, negation as `-(x)`, a cast by the type it resolved to rather than by the type text that was written, a `CASE` with the `ELSE` it filled in, and a call to a function whose name is a keyword with the schema it found the function in. Four of the five would not read back as themselves, so closing them means a printer that prints for a name rather than for a reparse.
+
+This is a change to what queries answer, not only to what `EXPLAIN` prints. A caller reading a column back by the name firepanda gave it has to read it back by the new name, and a caller that wrote an alias is unaffected. TPC-H q18 agrees with DuckDB because of it, and it was the only thing standing between that query and agreement.
+
+The lowering takes the grammar now, because the printer needs the keyword table to know when a name has to be quoted. `lower` has one more argument and so does everything between it and the select list.
 
 ### Changed: a filter counts its mask once for the chunk and not once per column
 
@@ -40,6 +103,24 @@ The dense half of the count also stopped being a byte at a time. It adds a regis
 
 Measured on the i9-13900K, six alternated rounds with the machine idle. Four million rows read as one chunk with a filter keeping two columns went from 4.52 milliseconds to 3.70, which is 1.22 times. The same line in chunks of a hundred and thirty one thousand rows went from 2.11 to 2.01, which is five per cent, since a smaller chunk has less mask in it to begin with. A filter over one column does not move at all, which is the row that says where the saving comes from.
 
+### Added: TPC-H, asked of firepanda and DuckDB over the same bytes
+
+`pixi run tpch` runs whole TPC-H queries through both engines and compares the answers row for row. The four comparisons already here ask about one expression at a time, which is the right size for a kernel and the wrong size for a query: a join that drops a row, a group that keys on the wrong column and a sort that is not stable all go through them untouched.
+
+The data is DuckDB's own generator, exported to Parquet, and both engines read the same files. Two generators seeded the same way is a claim about two programs, and a claim about two programs is what a comparison like this exists to stop making. The queries are DuckDB's own `tpch_queries()`, written out beside the data, so there is no second copy of the text to drift from the first.
+
+q1 and q3 agree with DuckDB at scale factor 1, over six million lineitem rows, in about nine seconds. q6 is refused for the decimal literals in `l_discount BETWEEN 0.05 AND 0.07` and the refusal is recorded with that reason, which is the shape the other comparisons already use: a refusal with nothing written against it fails the run, and so does a query that answers where a refusal was recorded.
+
+Eight TPC-H columns are `DECIMAL(15,2)` and firepanda has no decimal type, so they are exported as `DOUBLE` and DuckDB is asked the same question over the same doubles. That keeps the comparison exact and makes it a comparison against DuckDB over this data rather than against the published answer set. The published answers come back when there is a decimal type.
+
+The scale factor is `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is three megabytes and a few seconds.
+
+### Fixed: reading Parquet and calling Python in one program did not build
+
+A binary that used both `read_parquet` and `std.python` failed to link with "existing function with conflicting signature" on `dlopen`. firepanda declared `dlopen` and `dlsym` itself, returning an optional pointer to a byte, and the standard library declares them too, returning an optional pointer to nothing, and those two go back to the caller differently. One C function declared twice with two return types is a program that does not build.
+
+Neither declaration was wrong on its own, which is why this went unnoticed until the TPC-H comparison wanted to read Parquet and ask Python for the data in one program. The loader now calls the standard library's declarations, since using the one declaration is the only way to be sure there is one. Everything else in that file still declares what is in duckdb.h.
+
 ### Fixed: a correlated subquery that counts, which is the count bug
 
 `SELECT shop, (SELECT count(qty) FROM sales WHERE sales.shop = shops.shop) FROM shops` was refused by name, because answering it would have given the wrong number for a shop that sold nothing. It answers now.
@@ -49,6 +130,18 @@ The rewrite that makes a correlated subquery run once rather than once per outer
 The zero goes back on above the join, where the expression the subquery was taken out of reads the column, because that is the one place that knows the null is the join padding a row rather than anything the count answered. `count(DISTINCT x)` takes the same reading, being zero over nothing for the same reason.
 
 It is put back only where the count is the whole of the subquery's value. `count(k) + 1` over an empty group is one rather than zero, and the addition happens under the join where the count is not there to be zero yet, so there is no one constant the padding stands for. That shape is refused with a message that says so, rather than answered wrong.
+
+### Added: the parser that decides which regular expression engine answers a call
+
+pandas runs two regular expression engines and picks between them per call, by handing the pattern to Python's own `re._parser` and walking what comes back: a lookaround or a backreference sends the call to Python, and everything else goes to Arrow, which is RE2. Document 73 measured that the choice is visible in answers rather than only in refusals. This is the front end both engines will share and the decision itself, with no matching behind it yet and nothing on the string accessor wired to it. Issue #158, document 76.
+
+The grammar is Python's rather than RE2's, which matters more than it sounds. A pattern Python cannot read is not an error in pandas, it is a pattern Arrow gets, so `\p{L}` works there today for the reason that it failed to parse. Every refusal in the new parser is therefore a routing decision, and a refusal that Python does not make would send a working pattern to an engine that will not run it.
+
+The router copies two upstream mistakes on purpose. pandas walks into two of the seven node kinds that can hold another node, so a lookaround under a quantifier, an atomic group or a conditional is invisible to it: `(?=a)` is answered by Python and `(?=a)?` goes to RE2 and raises an Arrow error naming a library the caller did not call. And `(?!)` collapses to a node that never matches, so it routes to RE2 and raises, while `(?=)` on the same line keeps its node and is answered. Reproducing both is a decision rather than an accident, and the argument is in document 76 section 6.
+
+`tests/differential/regex.mojo` asks both questions of thirty thousand generated patterns against a live pandas, through `pixi run differential-regex`, with a ceiling of zero disagreements. Its first run disagreed on eighty nine patterns and every one traced to a rule in Python's grammar that had to be read rather than reasoned about, including what a quantifier repeats when a comment is in the way and when a backslash and some digits are an octal number instead of a backreference. None of the seven would have been in a hand written test file.
+
+Two patterns are counted and held out rather than compared, and the counts are printed. `(?a)(?u)` makes Python's parser raise a `ValueError` that pandas does not catch, so there is no routing decision to agree with and the whole `str.contains` call dies upstream. `\N{NAME}` needs the Unicode name table, which is not carried yet, so the braces are read and the name is not, and the parse says so through `Parsed.approximate` rather than leaving a pattern that quietly matches the replacement character.
 
 ### Fixed: an average over a column of times answered one thing from SQL and another from the frame
 

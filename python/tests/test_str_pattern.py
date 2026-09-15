@@ -2,19 +2,23 @@
 
 `contains`, `match`, `fullmatch` and `count` are four questions about where a
 pattern sits in a row: anywhere, at the front, the whole row, and how many
-times. pandas reads the pattern as a regular expression in all four, and there
-is no regular expression engine here yet, so what this file checks is a smaller
-promise than pandas makes.
+times. pandas reads the pattern as a regular expression in all four, and this
+file is about the patterns where that reading and a byte search are the same
+thing.
 
-The smaller promise is that a pattern holding none of the twelve regular
-expression metacharacters means exactly the same thing to an engine as it does
-to a byte search. `contains("bc")` is the same question either way and every
-test below is on a pattern like that, so the answers are pandas' answers and not
-an approximation of them. A pattern holding a metacharacter is refused by name
-rather than searched for literally, which is the one thing a compatibility layer
-must not get wrong in the other direction: answering `contains(".")` as a search
-for a full stop would be wrong on every row of a column pandas matches
-everywhere.
+They are the same thing whenever the pattern holds none of the twelve regular
+expression metacharacters, and the byte search is a great deal faster, so that
+is the path all four take for a pattern like the ones below. The answers are
+therefore pandas' answers rather than an approximation of them, and what is
+being checked is that the fast path is the same question and not a cheaper one.
+
+Where the two part company is a pattern with a metacharacter in it. Three of the
+four send one to the regular expression engine now, and `test_str_regex.py` is
+where that is checked. `count` does not, because counting needs where each match
+ends and the engine answers whether there is one, so a metacharacter is still
+refused there by name. The refusal is the one thing a compatibility layer must
+not get wrong in the other direction: answering `count(".")` as a search for a
+full stop would be wrong on every row of a column pandas counts everywhere.
 
 Two things about the group are worth knowing before reading the assertions.
 
@@ -165,22 +169,26 @@ def test_an_empty_pattern_is_in_every_row_and_is_only_the_empty_row(
 
 
 @needs_pandas
-def test_a_pattern_with_a_metacharacter_is_refused_rather_than_searched_for(
+def test_count_refuses_a_pattern_with_a_metacharacter_rather_than_searching(
     firepanda: ModuleType,
 ) -> None:
     """And the refusal names the character, so a caller can tell which mistake it was.
 
-    pandas answers all four of these, so every one of them is a gap and not a
+    pandas answers all of these, so every one of them is a gap and not a
     difference of opinion. The refusal is the honest shape of a gap: the board
     reads it as unimplemented and a caller reads a sentence saying what is
     missing, where a literal search would have read as a wrong answer.
+
+    The other three used to be here and answer these patterns now. What keeps
+    `count` out is that it needs where each match ends in order to start looking
+    for the next one, and the engine answers whether there is a match rather
+    than where it is.
     """
     mine = made(firepanda)
     for pattern in ("a.c", "^a", "a+", "a|b", "[ab]", "a*", "a?", r"a\b", "(a)", "a{2}"):
-        for name in ("contains", "match", "fullmatch", "count"):
-            with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-                getattr(mine.str, name)(pattern)
-            assert "regular expression" in str(caught.value), (name, pattern)
+        with pytest.raises(firepanda.errors.UnsupportedError) as caught:
+            mine.str.count(pattern)
+        assert "regular expression" in str(caught.value), pattern
 
 
 @needs_pandas
@@ -201,8 +209,10 @@ def test_flags_are_refused_rather_than_ignored(
     """An ignored argument is the one failure mode a compatibility layer must not have.
 
     `case=False` used to be refused here beside this and is answered now, which
-    `test_str_case_insensitive.py` covers. Every flag is a statement about a
-    regular expression and there is still no engine, so this one stays.
+    `test_str_case_insensitive.py` covers. A flag is a statement about how the
+    engine is to read the pattern, and the engine reads none of them yet, so
+    this one stays. pandas refuses `flags` out of Arrow as well and answers it
+    out of its other engine.
     """
     mine = made(firepanda)
     for name in ("contains", "match", "fullmatch", "count"):

@@ -6,6 +6,13 @@ up as a missing line rather than as a field in an arena nobody looks at. The
 indentation is the tree, so the order the nodes come out in is the order the
 query runs in, and that order is most of what this stage decides.
 
+A test that asserts two spellings of one function build the same plan writes an
+alias on the column. An output column the query does not name is named after the
+text it was written as, so `SELECT ucase(g)` and `SELECT upper(g)` produce the
+same call under two different column names, and comparing the two plans without
+an alias would be comparing the names rather than the call. The alias is what
+keeps those tests about the thing they were written about.
+
 The last two are the ones worth having. One asserts that the plan a query
 produces is the plan the equivalent dataframe calls produce, which is the rule
 in docs/specs/sql/08-plan-and-optimizer.md section 6 written as something that
@@ -122,7 +129,7 @@ def _plan(sql: StringSlice) raises -> String:
     var rules = Transform(grammar)
     var ast = Ast()
     var node = rules.parse_statement(sql, grammar, ast)
-    var out = lower(ast, node, _catalog())
+    var out = lower(ast, node, _catalog(), grammar)
     _ = bind(out.plan, out.root, out.sources)
     return explain(out.plan, out.root)
 
@@ -293,7 +300,7 @@ def test_a_group_by_puts_the_keys_and_the_folds_in_one_node() raises:
     assert_equal(
         _plan("SELECT g, sum(a) FROM t GROUP BY g"),
         (
-            "PROJECT [g, __agg_0 as __expr_1]\n"
+            "PROJECT [g, __agg_0 as sum(a)]\n"
             "  AGGREGATE [g] -> [sum(a)]\n"
             "    SCAN t []\n"
         ),
@@ -341,7 +348,7 @@ def test_a_group_by_may_name_an_alias_the_select_list_wrote() raises:
     assert_equal(
         _plan("SELECT a + 1 AS k, count(*) FROM t GROUP BY k"),
         (
-            "PROJECT [k, __agg_0 as __expr_1]\n"
+            "PROJECT [k, __agg_0 as count(*)]\n"
             "  AGGREGATE [a + 1] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -357,7 +364,7 @@ def test_an_alias_of_a_plain_column_as_a_key_is_the_column() raises:
     assert_equal(
         _plan("SELECT g AS k, count(*) FROM t GROUP BY k"),
         (
-            "PROJECT [g as k, __agg_0 as __expr_1]\n"
+            "PROJECT [g as k, __agg_0 as count(*)]\n"
             "  AGGREGATE [g] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -407,7 +414,7 @@ def test_a_group_by_may_write_the_expression_the_select_list_writes() raises:
     assert_equal(
         _plan("SELECT a + 1, count(*) FROM t GROUP BY a + 1"),
         (
-            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
+            "PROJECT [(a + 1), __agg_0 as count(*)]\n"
             "  AGGREGATE [a + 1] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -420,7 +427,7 @@ def test_the_key_written_out_twice_is_read_back_twice() raises:
     assert_equal(
         _plan("SELECT a + 1, a + 1, count(*) FROM t GROUP BY a + 1"),
         (
-            "PROJECT [__expr_0, __expr_0 as __expr_1, __agg_0 as __expr_2]\n"
+            "PROJECT [(a + 1), (a + 1), __agg_0 as count(*)]\n"
             "  AGGREGATE [a + 1] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -433,7 +440,7 @@ def test_a_key_written_inside_a_larger_item_is_read_where_it_sits() raises:
     assert_equal(
         _plan("SELECT (a + 1) * 2 AS m, count(*) FROM t GROUP BY a + 1"),
         (
-            "PROJECT [__expr_0 * 2 as m, __agg_0 as __expr_1]\n"
+            "PROJECT [(a + 1) * 2 as m, __agg_0 as count(*)]\n"
             "  AGGREGATE [a + 1] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -444,8 +451,8 @@ def test_a_having_that_writes_the_key_out_reads_the_key() raises:
     assert_equal(
         _plan("SELECT a + 1, count(*) FROM t GROUP BY a + 1 HAVING a + 1 > 2"),
         (
-            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
-            "  FILTER __expr_0 > 2\n"
+            "PROJECT [(a + 1), __agg_0 as count(*)]\n"
+            "  FILTER (a + 1) > 2\n"
             "    AGGREGATE [a + 1] -> [count(1)]\n"
             "      SCAN t []\n"
         ),
@@ -462,7 +469,7 @@ def test_an_order_by_that_writes_the_key_out_sorts_on_the_item() raises:
         ),
         (
             "SORT [m asc nulls last]\n"
-            "  PROJECT [__expr_0 as m, __agg_0 as __expr_1]\n"
+            "  PROJECT [(a + 1) as m, __agg_0 as count(*)]\n"
             "    AGGREGATE [a + 1] -> [count(1)]\n"
             "      SCAN t []\n"
         ),
@@ -479,7 +486,7 @@ def test_a_group_by_of_a_date_trunc_is_the_shape_q42_writes() raises:
         ),
         (
             "SORT [m asc nulls last]\n"
-            "  PROJECT [__expr_0 as m, __agg_0 as c]\n"
+            "  PROJECT [date_trunc('minute', ts) as m, __agg_0 as c]\n"
             "    AGGREGATE [date_trunc(minute, ts)] -> [count(1)]\n"
             "      SCAN w []\n"
         ),
@@ -493,7 +500,7 @@ def test_a_group_by_of_an_extract_is_the_shape_q18_writes() raises:
             " extract(minute FROM ts)"
         ),
         (
-            "PROJECT [__expr_0 as m, __agg_0 as __expr_1]\n"
+            "PROJECT [date_part('minute', ts) as m, __agg_0 as count(*)]\n"
             "  AGGREGATE [date_part(minute, ts)] -> [count(1)]\n"
             "    SCAN w []\n"
         ),
@@ -564,7 +571,7 @@ def test_a_group_by_of_a_position_is_the_item_it_counts_to() raises:
     assert_equal(
         _plan("SELECT a + 1, count(*) FROM t GROUP BY 1"),
         (
-            "PROJECT [__expr_0, __agg_0 as __expr_1]\n"
+            "PROJECT [(a + 1), __agg_0 as count(*)]\n"
             "  AGGREGATE [a + 1] -> [count(1)]\n"
             "    SCAN t []\n"
         ),
@@ -656,9 +663,9 @@ def test_an_order_by_may_sort_on_a_fold_the_query_returns() raises:
     assert_equal(
         _plan("SELECT g, sum(a) FROM t GROUP BY g ORDER BY sum(a) DESC"),
         (
-            "PROJECT [g, __expr_1]\n"
+            "PROJECT [g, sum(a)]\n"
             "  SORT [__agg_0 desc]\n"
-            "    PROJECT [g, __agg_0 as __expr_1, __agg_0]\n"
+            "    PROJECT [g, __agg_0 as sum(a), __agg_0]\n"
             "      AGGREGATE [g] -> [sum(a)]\n"
             "        SCAN t []\n"
         ),
@@ -825,7 +832,7 @@ def test_an_aggregate_with_no_group_by_still_aggregates() raises:
     assert_equal(
         _plan("SELECT sum(a) FROM t"),
         (
-            "PROJECT [__agg_0 as __expr_0]\n"
+            "PROJECT [__agg_0 as sum(a)]\n"
             "  AGGREGATE [] -> [sum(a)]\n"
             "    SCAN t []\n"
         ),
@@ -876,7 +883,7 @@ def test_two_folds_that_differ_are_two_slots() raises:
     assert_equal(
         _plan("SELECT g, sum(a), sum(b) FROM t GROUP BY g"),
         (
-            "PROJECT [g, __agg_0 as __expr_1, __agg_1 as __expr_2]\n"
+            "PROJECT [g, __agg_0 as sum(a), __agg_1 as sum(b)]\n"
             "  AGGREGATE [g] -> [sum(a), sum(b)]\n"
             "    SCAN t []\n"
         ),
@@ -965,7 +972,7 @@ def test_a_values_column_is_the_type_that_holds_every_row() raises:
     var rules = Transform(grammar)
     var ast = Ast()
     var node = rules.parse_statement("VALUES (1), (NULL)", grammar, ast)
-    var out = lower(ast, node, _catalog())
+    var out = lower(ast, node, _catalog(), grammar)
     var schema = bind(out.plan, out.root, out.sources)
     assert_equal(len(schema), 1, "one column")
     assert_equal(schema[0].name, "col0", "named the way DuckDB names it")
@@ -1037,7 +1044,7 @@ def test_the_two_arms_of_a_set_operation_bind_against_their_own_tables() raises:
     var node = rules.parse_statement(
         "SELECT a FROM t UNION SELECT b FROM t", grammar, ast
     )
-    var out = lower(ast, node, _catalog())
+    var out = lower(ast, node, _catalog(), grammar)
     assert_equal(len(out.sources), 2, "one schema for each arm")
     var schema = bind(out.plan, out.root, out.sources)
     assert_equal(len(schema), 1, "one column out")
@@ -2290,8 +2297,8 @@ def test_a_subquery_that_answers_one_value_is_a_cross_join() raises:
             "  FILTER a > __sub_0\n"
             "    JOIN cross []\n"
             "      SCAN t []\n"
-            "      PROJECT [__expr_0 as __sub_0]\n"
-            "        PROJECT [__agg_0 as __expr_0]\n"
+            "      PROJECT [max(b) as __sub_0]\n"
+            "        PROJECT [__agg_0 as max(b)]\n"
             "          AGGREGATE [] -> [max(b)]\n"
             "            SCAN u []\n"
         ),
@@ -2305,8 +2312,8 @@ def test_a_subquery_in_a_select_list_is_the_same_join() raises:
             "PROJECT [a, __sub_0 as top]\n"
             "  JOIN cross []\n"
             "    SCAN t []\n"
-            "    PROJECT [__expr_0 as __sub_0]\n"
-            "      PROJECT [__agg_0 as __expr_0]\n"
+            "    PROJECT [max(b) as __sub_0]\n"
+            "      PROJECT [__agg_0 as max(b)]\n"
             "        AGGREGATE [] -> [max(b)]\n"
             "          SCAN u []\n"
         ),
@@ -2321,8 +2328,8 @@ def test_a_subquery_over_no_table_is_one_row_too() raises:
             "  FILTER a > __sub_0\n"
             "    JOIN cross []\n"
             "      SCAN t []\n"
-            "      PROJECT [__expr_0 as __sub_0]\n"
-            "        PROJECT [1 as __expr_0]\n"
+            "      PROJECT [1 as __sub_0]\n"
+            "        PROJECT [1]\n"
             "          VALUES [__row] (0)\n"
         ),
     )
@@ -2576,7 +2583,7 @@ def test_an_exists_that_reads_no_outer_column_is_counted() raises:
             "      SCAN t []\n"
             "      PROJECT [__rows > 0 as __has_0]\n"
             "        AGGREGATE [] -> [count(1)]\n"
-            "          PROJECT [1 as __expr_0]\n"
+            "          PROJECT [1]\n"
             "            FILTER k > 3\n"
             "              SCAN u []\n"
         ),
@@ -2607,7 +2614,7 @@ def test_an_exists_over_an_aggregate_runs_when_it_reads_no_outer_column() raises
             "      SCAN t []\n"
             "      PROJECT [__rows > 0 as __has_0]\n"
             "        AGGREGATE [] -> [count(1)]\n"
-            "          PROJECT [__agg_0 as __expr_0]\n"
+            "          PROJECT [__agg_0 as sum(k)]\n"
             "            AGGREGATE [] -> [sum(k)]\n"
             "              SCAN u []\n"
         ),
@@ -2743,14 +2750,14 @@ def test_an_in_of_one_is_one_comparison() raises:
 
 def test_a_minus_in_front_of_a_column_is_a_unary() raises:
     assert_equal(
-        _plan("SELECT -a FROM t"), "PROJECT [-a as __expr_0]\n  SCAN t []\n"
+        _plan("SELECT -a FROM t"), "PROJECT [-a as (-a)]\n  SCAN t []\n"
     )
 
 
 def test_a_minus_in_front_of_an_expression_wraps_it() raises:
     assert_equal(
         _plan("SELECT -(a + 1) FROM t"),
-        "PROJECT [-(a + 1) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [-(a + 1) as (-(a + 1))]\n  SCAN t []\n",
     )
 
 
@@ -2767,7 +2774,7 @@ def test_a_minus_in_front_of_a_number_is_a_unary_until_it_is_folded() raises:
 
 def test_a_plus_in_front_of_a_column_is_a_unary_too() raises:
     assert_equal(
-        _plan("SELECT +a FROM t"), "PROJECT [+a as __expr_0]\n  SCAN t []\n"
+        _plan("SELECT +a FROM t"), "PROJECT [+a as (+a)]\n  SCAN t []\n"
     )
 
 
@@ -2880,27 +2887,27 @@ def test_an_is_not_false_keeps_the_value_half_as_it_was_written() raises:
 def test_a_substring_is_a_call_with_its_two_numbers_on_it() raises:
     assert_equal(
         _plan("SELECT substring(g, 2, 3) FROM t"),
-        "PROJECT [substring(g, 2, 3) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [substring(g, 2, 3)]\n  SCAN t []\n",
     )
 
 
 def test_the_three_spellings_of_a_substring_build_the_same_plan() raises:
-    var want = _plan("SELECT substring(g, 2, 3) FROM t")
-    assert_equal(_plan("SELECT substr(g, 2, 3) FROM t"), want)
-    assert_equal(_plan("SELECT SUBSTRING(g FROM 2 FOR 3) FROM t"), want)
+    var want = _plan("SELECT substring(g, 2, 3) AS x FROM t")
+    assert_equal(_plan("SELECT substr(g, 2, 3) AS x FROM t"), want)
+    assert_equal(_plan("SELECT SUBSTRING(g FROM 2 FOR 3) AS x FROM t"), want)
 
 
 def test_a_substring_written_with_only_a_for_starts_at_one() raises:
     assert_equal(
-        _plan("SELECT SUBSTRING(g FOR 3) FROM t"),
-        _plan("SELECT substring(g, 1, 3) FROM t"),
+        _plan("SELECT SUBSTRING(g FOR 3) AS x FROM t"),
+        _plan("SELECT substring(g, 1, 3) AS x FROM t"),
     )
 
 
 def test_a_substring_with_no_length_keeps_the_one_number() raises:
     assert_equal(
         _plan("SELECT substring(g, 2) FROM t"),
-        "PROJECT [substring(g, 2) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [substring(g, 2)]\n  SCAN t []\n",
     )
 
 
@@ -2912,14 +2919,14 @@ def test_a_substring_of_a_number_is_refused_while_it_binds() raises:
 def test_a_character_count_is_the_one_call_whatever_it_was_written_as() raises:
     assert_equal(
         _plan("SELECT length(g) FROM t"),
-        "PROJECT [length(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [length(g)]\n  SCAN t []\n",
     )
 
 
 def test_the_two_names_for_a_character_count_build_the_same_plan() raises:
-    var want = _plan("SELECT length(g) FROM t")
-    assert_equal(_plan("SELECT len(g) FROM t"), want)
-    assert_equal(_plan("SELECT LENGTH(g) FROM t"), want)
+    var want = _plan("SELECT length(g) AS x FROM t")
+    assert_equal(_plan("SELECT len(g) AS x FROM t"), want)
+    assert_equal(_plan("SELECT LENGTH(g) AS x FROM t"), want)
 
 
 def test_a_byte_count_is_a_call_of_its_own_and_not_a_character_count() raises:
@@ -2928,7 +2935,7 @@ def test_a_byte_count_is_a_call_of_its_own_and_not_a_character_count() raises:
     # one into the other.
     assert_equal(
         _plan("SELECT strlen(g) FROM t"),
-        "PROJECT [strlen(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [strlen(g)]\n  SCAN t []\n",
     )
     assert_equal(
         _plan("SELECT STRLEN(g) FROM t"), _plan("SELECT strlen(g) FROM t")
@@ -2952,20 +2959,22 @@ def test_a_length_of_two_things_is_refused_while_it_binds() raises:
 def test_a_case_change_is_the_call_it_was_written_as() raises:
     assert_equal(
         _plan("SELECT upper(g) FROM t"),
-        "PROJECT [upper(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [upper(g)]\n  SCAN t []\n",
     )
     assert_equal(
         _plan("SELECT lower(g) FROM t"),
-        "PROJECT [lower(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [lower(g)]\n  SCAN t []\n",
     )
 
 
 def test_the_other_two_names_for_a_case_change_are_the_same_plan() raises:
     assert_equal(
-        _plan("SELECT ucase(g) FROM t"), _plan("SELECT upper(g) FROM t")
+        _plan("SELECT ucase(g) AS x FROM t"),
+        _plan("SELECT upper(g) AS x FROM t"),
     )
     assert_equal(
-        _plan("SELECT lcase(g) FROM t"), _plan("SELECT lower(g) FROM t")
+        _plan("SELECT lcase(g) AS x FROM t"),
+        _plan("SELECT lower(g) AS x FROM t"),
     )
 
 
@@ -2986,36 +2995,36 @@ def test_a_case_change_nests_inside_another_call() raises:
     # column and a thing that answers one, and neither side knew about it.
     assert_equal(
         _plan("SELECT length(upper(g)) FROM t"),
-        "PROJECT [length(upper(g)) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [length(upper(g))]\n  SCAN t []\n",
     )
     assert_equal(
         _plan("SELECT lower(trim(g)) FROM t"),
-        "PROJECT [lower(trim(g)) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [lower(trim(g))]\n  SCAN t []\n",
     )
 
 
 def test_a_trim_is_the_call_it_was_written_as() raises:
     assert_equal(
         _plan("SELECT trim(g) FROM t"),
-        "PROJECT [trim(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [trim(g)]\n  SCAN t []\n",
     )
 
 
 def test_the_one_sided_trims_are_calls_of_their_own() raises:
     assert_equal(
         _plan("SELECT ltrim(g) FROM t"),
-        "PROJECT [ltrim(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [ltrim(g)]\n  SCAN t []\n",
     )
     assert_equal(
         _plan("SELECT rtrim(g) FROM t"),
-        "PROJECT [rtrim(g) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [rtrim(g)]\n  SCAN t []\n",
     )
 
 
 def test_a_trim_carries_the_characters_it_was_asked_to_take_off() raises:
     assert_equal(
         _plan("SELECT trim(g, 'ab') FROM t"),
-        "PROJECT [trim(g, ab) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [trim(g, ab) as trim(g, 'ab')]\n  SCAN t []\n",
     )
 
 
@@ -3077,22 +3086,22 @@ def test_a_keyword_trim_that_says_the_set_twice_is_refused() raises:
 def test_a_search_is_the_one_call_whatever_it_was_written_as() raises:
     assert_equal(
         _plan("SELECT strpos(g, 'a') FROM t"),
-        "PROJECT [instr(g, a) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [instr(g, a) as strpos(g, 'a')]\n  SCAN t []\n",
     )
 
 
 def test_the_names_for_a_search_build_the_same_plan() raises:
-    var want = _plan("SELECT strpos(g, 'a') FROM t")
-    assert_equal(_plan("SELECT instr(g, 'a') FROM t"), want)
-    assert_equal(_plan("SELECT STRPOS(g, 'a') FROM t"), want)
+    var want = _plan("SELECT strpos(g, 'a') AS x FROM t")
+    assert_equal(_plan("SELECT instr(g, 'a') AS x FROM t"), want)
+    assert_equal(_plan("SELECT STRPOS(g, 'a') AS x FROM t"), want)
 
 
 def test_the_keyword_spelling_of_a_search_reads_the_other_way() raises:
     # `POSITION(x IN y)` looks for x in y, and the call takes the haystack
     # first, so the two are the same search written in opposite orders.
     assert_equal(
-        _plan("SELECT POSITION('a' IN g) FROM t"),
-        _plan("SELECT strpos(g, 'a') FROM t"),
+        _plan("SELECT POSITION('a' IN g) AS x FROM t"),
+        _plan("SELECT strpos(g, 'a') AS x FROM t"),
     )
 
 
@@ -3148,7 +3157,7 @@ def test_a_date_literal_stands_on_its_own_without_a_column() raises:
     # a bare string with no column next to it is text and stays text.
     assert_equal(
         _plan("SELECT DATE '2020-01-01' FROM w"),
-        "PROJECT [2020-01-01 as __expr_0]\n  SCAN w []\n",
+        "PROJECT [2020-01-01 as CAST('2020-01-01' AS DATE)]\n  SCAN w []\n",
     )
 
 
@@ -3193,26 +3202,26 @@ def test_a_typed_literal_over_a_type_that_is_not_temporal_is_a_cast() raises:
 def test_an_extract_is_the_date_part_call_duckdb_says_it_is() raises:
     assert_equal(
         _plan("SELECT EXTRACT(YEAR FROM d) FROM w"),
-        "PROJECT [date_part(year, d) as __expr_0]\n  SCAN w []\n",
+        "PROJECT [date_part(year, d) as date_part('year', d)]\n  SCAN w []\n",
     )
 
 
 def test_the_three_spellings_of_a_field_build_the_same_plan() raises:
-    var want = _plan("SELECT EXTRACT(YEAR FROM d) FROM w")
-    assert_equal(_plan("SELECT date_part('year', d) FROM w"), want)
-    assert_equal(_plan("SELECT datepart('year', d) FROM w"), want)
+    var want = _plan("SELECT EXTRACT(YEAR FROM d) AS x FROM w")
+    assert_equal(_plan("SELECT date_part('year', d) AS x FROM w"), want)
+    assert_equal(_plan("SELECT datepart('year', d) AS x FROM w"), want)
 
 
 def test_the_field_is_folded_down_the_way_a_name_is() raises:
-    var want = _plan("SELECT EXTRACT(YEAR FROM d) FROM w")
-    assert_equal(_plan("SELECT extract(Year FROM d) FROM w"), want)
-    assert_equal(_plan("SELECT extract('YEAR' FROM d) FROM w"), want)
+    var want = _plan("SELECT EXTRACT(YEAR FROM d) AS x FROM w")
+    assert_equal(_plan("SELECT extract(Year FROM d) AS x FROM w"), want)
+    assert_equal(_plan("SELECT extract('YEAR' FROM d) AS x FROM w"), want)
 
     # The function spelling does not go through the rule that folds the keyword
     # one, so the fold has to happen again where the call is lowered. Without
     # it the field reaches the operator as it was typed and is looked up in a
     # table that holds it in lower case only.
-    assert_equal(_plan("SELECT date_part('YEAR', d) FROM w"), want)
+    assert_equal(_plan("SELECT date_part('YEAR', d) AS x FROM w"), want)
 
 
 def test_a_day_of_week_is_written_as_the_iso_day_read_modulo_seven() raises:
@@ -3221,18 +3230,21 @@ def test_a_day_of_week_is_written_as_the_iso_day_read_modulo_seven() raises:
     # asks for the ISO day, which both agree on, and moves it.
     assert_equal(
         _plan("SELECT EXTRACT(DOW FROM d) FROM w"),
-        "PROJECT [(date_part(isodow, d)) % 7 as __expr_0]\n  SCAN w []\n",
+        (
+            "PROJECT [(date_part(isodow, d)) % 7 as date_part('dow', d)]\n "
+            " SCAN w []\n"
+        ),
     )
     assert_equal(
-        _plan("SELECT EXTRACT(DAYOFWEEK FROM d) FROM w"),
-        _plan("SELECT EXTRACT(DOW FROM d) FROM w"),
+        _plan("SELECT EXTRACT(DAYOFWEEK FROM d) AS x FROM w"),
+        _plan("SELECT EXTRACT(DOW FROM d) AS x FROM w"),
     )
 
 
 def test_a_field_read_off_a_timestamp_is_the_same_call() raises:
     assert_equal(
         _plan("SELECT EXTRACT(HOUR FROM ts) FROM w"),
-        "PROJECT [date_part(hour, ts) as __expr_0]\n  SCAN w []\n",
+        "PROJECT [date_part(hour, ts) as date_part('hour', ts)]\n  SCAN w []\n",
     )
 
 
@@ -3259,19 +3271,22 @@ def test_a_field_worked_out_per_row_is_refused() raises:
 def test_a_date_trunc_is_a_call_of_its_own() raises:
     assert_equal(
         _plan("SELECT date_trunc('month', d) FROM w"),
-        "PROJECT [date_trunc(month, d) as __expr_0]\n  SCAN w []\n",
+        (
+            "PROJECT [date_trunc(month, d) as date_trunc('month', d)]\n  SCAN w"
+            " []\n"
+        ),
     )
 
 
 def test_the_two_spellings_of_a_truncation_build_the_same_plan() raises:
-    var want = _plan("SELECT date_trunc('month', d) FROM w")
-    assert_equal(_plan("SELECT datetrunc('month', d) FROM w"), want)
+    var want = _plan("SELECT date_trunc('month', d) AS x FROM w")
+    assert_equal(_plan("SELECT datetrunc('month', d) AS x FROM w"), want)
 
 
 def test_the_unit_is_folded_down_the_way_a_field_is() raises:
-    var want = _plan("SELECT date_trunc('month', d) FROM w")
-    assert_equal(_plan("SELECT date_trunc('MONTH', d) FROM w"), want)
-    assert_equal(_plan("SELECT DATE_TRUNC('Month', d) FROM w"), want)
+    var want = _plan("SELECT date_trunc('month', d) AS x FROM w")
+    assert_equal(_plan("SELECT date_trunc('MONTH', d) AS x FROM w"), want)
+    assert_equal(_plan("SELECT DATE_TRUNC('Month', d) AS x FROM w"), want)
 
 
 def test_a_truncation_of_a_number_is_refused_while_it_binds() raises:
@@ -3333,8 +3348,8 @@ def test_a_fold_the_catalog_does_not_carry_is_still_folded() raises:
     # `mean` is not in the tier 1 table and DuckDB runs it, so the catalog
     # check has to let it past rather than read absence as a missing name.
     assert_equal(
-        _plan("SELECT mean(a) FROM t"),
-        _plan("SELECT avg(a) FROM t"),
+        _plan("SELECT mean(a) AS x FROM t"),
+        _plan("SELECT avg(a) AS x FROM t"),
     )
 
 
@@ -3350,14 +3365,14 @@ def test_a_function_name_is_read_without_regard_to_case() raises:
 def test_a_coalesce_is_a_call_of_its_own() raises:
     assert_equal(
         _plan("SELECT coalesce(a, b) FROM t"),
-        "PROJECT [coalesce(a, b) as __expr_0]\n  SCAN t []\n",
+        "PROJECT [coalesce(a, b)]\n  SCAN t []\n",
     )
 
 
 def test_an_ifnull_is_the_two_argument_coalesce_under_another_name() raises:
     assert_equal(
-        _plan("SELECT ifnull(a, b) FROM t"),
-        _plan("SELECT coalesce(a, b) FROM t"),
+        _plan("SELECT ifnull(a, b) AS x FROM t"),
+        _plan("SELECT coalesce(a, b) AS x FROM t"),
     )
 
 
@@ -3372,7 +3387,7 @@ def test_a_nullif_is_the_conditional_the_standard_defines_it_as() raises:
     # without anything here arranging for it.
     assert_equal(
         _plan("SELECT nullif(a, b) FROM t"),
-        "PROJECT [if a == b then null else a as __expr_0]\n  SCAN t []\n",
+        "PROJECT [if a == b then null else a as nullif(a, b)]\n  SCAN t []\n",
     )
 
 
@@ -3397,7 +3412,7 @@ def test_a_window_is_a_node_of_its_own_under_the_projection() raises:
     assert_equal(
         _plan("SELECT a, sum(b) OVER () FROM t"),
         (
-            "PROJECT [a, __win_0 as __expr_1]\n"
+            "PROJECT [a, __win_0 as sum(b) OVER ()]\n"
             "  WINDOW [sum(b) over () as __win_0]\n"
             "    SCAN t []\n"
         ),
@@ -3408,7 +3423,7 @@ def test_a_window_partitions_by_what_the_over_was_given() raises:
     assert_equal(
         _plan("SELECT a, sum(b) OVER (PARTITION BY g) FROM t"),
         (
-            "PROJECT [a, __win_0 as __expr_1]\n"
+            "PROJECT [a, __win_0 as sum(b) OVER (PARTITION BY g)]\n"
             "  WINDOW [sum(b) over (partition g) as __win_0]\n"
             "    SCAN t []\n"
         ),
@@ -3424,10 +3439,10 @@ def test_two_windows_over_the_same_keys_are_one_node() raises:
             " g) FROM t"
         ),
         (
-            "PROJECT [__win_0 as __expr_0, __win_1 as __expr_1]\n"
-            "  WINDOW [sum(b) over (partition g) as __win_0, count(1) over"
-            " (partition g) as __win_1]\n"
-            "    SCAN t []\n"
+            "PROJECT [__win_0 as sum(b) OVER (PARTITION BY g), __win_1 as"
+            " count(*) OVER (PARTITION BY g)]\n  WINDOW [sum(b) over (partition"
+            " g) as __win_0, count(1) over (partition g) as __win_1]\n    SCAN"
+            " t []\n"
         ),
     )
 
@@ -3439,10 +3454,9 @@ def test_two_windows_over_different_keys_are_a_node_each() raises:
     assert_equal(
         _plan("SELECT sum(b) OVER (PARTITION BY g), sum(b) OVER () FROM t"),
         (
-            "PROJECT [__win_0 as __expr_0, __win_1 as __expr_1]\n"
-            "  WINDOW [sum(b) over () as __win_1]\n"
-            "    WINDOW [sum(b) over (partition g) as __win_0]\n"
-            "      SCAN t []\n"
+            "PROJECT [__win_0 as sum(b) OVER (PARTITION BY g), __win_1 as"
+            " sum(b) OVER ()]\n  WINDOW [sum(b) over () as __win_1]\n    WINDOW"
+            " [sum(b) over (partition g) as __win_0]\n      SCAN t []\n"
         ),
     )
 
@@ -3455,7 +3469,7 @@ def test_a_window_sits_above_the_aggregate_whose_answer_it_reads() raises:
     assert_equal(
         _plan("SELECT g, sum(b), sum(sum(b)) OVER () FROM t GROUP BY g"),
         (
-            "PROJECT [g, __agg_0 as __expr_1, __win_0 as __expr_2]\n"
+            "PROJECT [g, __agg_0 as sum(b), __win_0 as sum(sum(b)) OVER ()]\n"
             "  WINDOW [sum(__agg_0) over () as __win_0]\n"
             "    AGGREGATE [g] -> [sum(b)]\n"
             "      SCAN t []\n"
@@ -3471,7 +3485,7 @@ def test_a_window_is_not_what_makes_a_query_aggregate() raises:
     assert_equal(
         _plan("SELECT a, count(*) OVER () FROM t"),
         (
-            "PROJECT [a, __win_0 as __expr_1]\n"
+            "PROJECT [a, __win_0 as count(*) OVER ()]\n"
             "  WINDOW [count(1) over () as __win_0]\n"
             "    SCAN t []\n"
         ),
@@ -3496,7 +3510,7 @@ def test_a_where_still_runs_under_the_window() raises:
     assert_equal(
         _plan("SELECT sum(b) OVER () FROM t WHERE a > 1"),
         (
-            "PROJECT [__win_0 as __expr_0]\n"
+            "PROJECT [__win_0 as sum(b) OVER ()]\n"
             "  WINDOW [sum(b) over () as __win_0]\n"
             "    FILTER a > 1\n"
             "      SCAN t []\n"

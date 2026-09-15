@@ -99,7 +99,21 @@ The third arrived with the double literals. `CAST(2.6 AS BIGINT)` was 3 in DuckD
 
 The recorded list is empty as of that fix and the ceiling of zero is doing the work on its own. The list stays in the harness for the next disagreement that is a decision rather than a patch.
 
-## 7. The plan equality test
+## 7. The query differential harness
+
+Everything above asks about one expression at a time, which is the right size for a kernel and the wrong size for a query. A query has a plan in it, and a plan has a join order, a group, a sort and a limit in it, and every one of those is a place an answer can go wrong in a way no expression comparison reaches. A join that drops a row, a group that keys on the wrong column, a sort that is not stable where the query needed it to be: all four harnesses above pass while any of those is true. This one asks whole TPC-H queries. It is `tests/differential/tpch.mojo` and `pixi run tpch`.
+
+The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines then read the same files. Reading the same bytes is the whole point. Two generators seeded the same way is a claim about two programs, and a claim about two programs is what a differential harness exists to stop making. The queries come from DuckDB's `tpch_queries()` for the same reason, written out beside the data rather than checked in, so there is no second copy of the query text to drift from the first.
+
+One thing here is not the reference data and has to be said plainly. TPC-H declares eight columns as `DECIMAL(15,2)` and firepanda has no decimal type, so those columns are cast to `DOUBLE` on the way out. DuckDB is then asked the same question over the same doubles, which keeps the comparison exact, but it is a comparison against DuckDB over this data rather than against the published answer set: a sum of doubles is not a sum of decimals and the last digits differ. The published answers come back when there is a decimal type. Within that, a double is compared with a relative tolerance and everything else exactly, because neither engine adds a column of doubles in the same order as the other and an exact comparison would be a test of the summation order rather than of the answer.
+
+A query firepanda refuses is reported rather than failed when the refusal has a reason written down beside it, which is the same recorded list the two harnesses above keep and for the same reason. A refusal with nothing written against it fails, so a query that stops running is noticed the run after it stops. A query that answers where a refusal was recorded fails too, because a stale record is how a gap that has closed goes on looking open.
+
+The scale factor is `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is about sixty thousand lineitem rows and three megabytes and takes a few seconds, so it is cheap enough to run on a push. The exit criterion for stage S4 is written at scale 1, which is a hundred times that in both, and is a number to run by hand or nightly.
+
+Ten of the twenty two queries are in the list today. q1, q3, q4, q5, q10, q12, q15, q16 and q18 agree with DuckDB row for row, and q6 is refused for the decimal literals in `l_discount BETWEEN 0.05 AND 0.07`. The other twelve want a decimal, a join order, a cross product, a dependent join or a name resolved across a self join, and each one goes in the list the day it runs rather than sitting there as a pending failure.
+
+## 8. The plan equality test
 
 The single most valuable test in this specification, and it is not about compatibility at all.
 
@@ -109,23 +123,23 @@ One expression is allowed to print differently on the two sides and it is the ca
 
 It costs almost nothing, because the plans already print and round trip per document 08, and it is what enforces document 02's rule that SQL and dataframes are one engine. Without it, the SQL path grows its own lowering for one operator, then another, and a year later there are two engines with different bugs and different performance, which is precisely the outcome that issue #13's line about parsing into the same logical plan so the optimizer is shared exists to prevent.
 
-## 8. The optimizer equivalence test
+## 9. The optimizer equivalence test
 
 From document 08, restated because it belongs to conformance as much as to the optimizer: every query in the corpus runs twice, once with all optimizer passes disabled and once with all enabled, and the results must be identical including order.
 
 This is the test that catches a filter pushed through a node that does not preserve its meaning, a join reordered across an outer join that is not reorderable, or a decorrelation that changed null semantics. Those bugs produce plausible wrong answers on real queries and are nearly impossible to find any other way.
 
-## 9. What runs when
+## 10. What runs when
 
-**Every commit:** the parse differential over the full corpus, the semantics cases, unit tests, and the pathological input ceilings. Minutes.
+**Every commit:** the parse differential over the full corpus, the semantics cases, the value cases, the query comparison at scale 0.01, unit tests, and the pathological input ceilings. Minutes.
 
 **Every commit:** the execution harness over the target directories with a pass rate floor that ratchets, so the number may go up and a commit that lowers it fails. Ratcheting rather than a fixed threshold is what stops the number quietly sliding while everyone is busy.
 
-**Nightly:** the full 4,796 files with the classification report, all four fuzzers with a time budget, optimizer equivalence, plan equality, and the benchmark suite with peak memory.
+**Nightly:** the full 4,796 files with the classification report, all four fuzzers with a time budget, optimizer equivalence, plan equality, the query comparison at scale 1, and the benchmark suite with peak memory.
 
 **Weekly:** the grammar bump check from document 03 against the latest upstream tag.
 
-## 10. What the corpus does not cover
+## 11. What the corpus does not cover
 
 Stated so that the published number is read correctly.
 

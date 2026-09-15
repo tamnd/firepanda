@@ -415,10 +415,14 @@ jobs:
         with:
           environment: differential
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
-      # This one builds all three programs before it runs the first, so it carries
-      # the compile time for the two steps below it.
+      # This one builds every differential program before it runs the first, so it
+      # carries the compile time for all the steps below it.
+      # The ceiling is fifteen rather than eight because the number of programs
+      # grows with the comparison and eight of them is already past what eight
+      # minutes covered. tools/build_differential.sh builds four at a time, which
+      # is what the runner has cores for, so the compile is about two rounds.
       - run: pixi run differential
-        timeout-minutes: 8
+        timeout-minutes: 15
 
       # The function catalog is read off a live DuckDB, so it belongs in the one
       # job that has DuckDB installed. It is checked in for the same reason the
@@ -478,6 +482,16 @@ jobs:
       - name: Expression values, through both engines
         run: pixi run differential-answers
         timeout-minutes: 15
+
+      # Every step above asks about one expression. A join that drops a row, a
+      # group that keys on the wrong column and a sort that is not stable all go
+      # through them untouched, and this is the one that asks whole queries.
+      # Scale 0.01 here, which is three megabytes and a few seconds; the S4 exit
+      # criterion is scale 1 and is run by hand.
+      # docs/specs/sql/11-conformance.md section 7.
+      - name: TPC-H answers, through both engines
+        run: pixi run tpch
+        timeout-minutes: 10
 
   required:
     name: CI

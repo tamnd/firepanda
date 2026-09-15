@@ -127,7 +127,11 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the steps below from compiling everything
 # once per step. Each of them depends on this task, and without a cache key pixi
 # would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics && mojo build -I . tests/differential/answers.mojo -o build/differential/answers", default-environment = "differential", inputs = [
+#
+# The builds themselves are in a script rather than in a chain of && here,
+# because there are eight of them now and one after another took longer than the
+# job is allowed. The script says what it does with them.
+differential-build = { cmd = "bash tools/build_differential.sh", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
@@ -136,6 +140,9 @@ differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tes
   "build/differential/generated",
   "build/differential/semantics",
   "build/differential/answers",
+  "build/differential/regex",
+  "build/differential/regex-match",
+  "build/differential/tpch",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -168,6 +175,34 @@ differential-answers = { cmd = "./build/differential/answers", default-environme
 # needs no corpus so it is cheap to run anywhere.
 # See docs/specs/sql/11-conformance.md section 4.
 differential-sql-generated = { cmd = "./build/differential/generated", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The same idea one layer down, about regular expressions rather than SQL. pandas
+# parses every pattern with Python's parser and routes the call to Python or to
+# Arrow on what comes back, so the parse is the thing that decides which engine
+# answers, and a front end that reads one pattern differently sends that pattern
+# to the other engine. This builds patterns out of the grammar and compares both
+# decisions against pandas' own predicate. It needs no corpus.
+# See docs/specs/76-two-engines-and-the-parser-that-picks-one.md section 6.
+differential-regex = { cmd = "./build/differential/regex", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The question after that one. Routing agreement is one bit per pattern and says
+# nothing about what the engine then answers, so this runs the same corpus
+# against sixteen pieces of text through firepanda's own matching engine and
+# through pandas' `str.contains`, and compares both the refusals and the
+# answers. RE2 refuses a good deal of what Python reads, so the refusals are
+# half the specification rather than a gap. It needs no corpus.
+# See docs/specs/77-the-machine-that-runs-a-pattern-once.md section 7.
+differential-regex-match = { cmd = "./build/differential/regex-match", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The same comparison one size up. Everything above asks about an expression,
+# and an expression comparison cannot reach a join order, a group, a sort or a
+# limit. This asks whole TPC-H queries, over data DuckDB's own generator wrote
+# out to Parquet so that both engines read the same bytes. The scale factor is
+# `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is three megabytes and a
+# few seconds; the S4 exit criterion is written at 1, which is a hundred times
+# that and is a number to run by hand.
+# See docs/specs/sql/11-conformance.md section 7.
+tpch = { cmd = "./build/differential/tpch", default-environment = "differential", depends-on = ["differential-build"] }
 
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"

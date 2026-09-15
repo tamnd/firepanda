@@ -1186,11 +1186,10 @@ def test_a_values_written_where_a_table_goes_is_a_derived_table() raises:
 
 def test_a_query_with_no_from_answers_a_constant() raises:
     # A statement with no FROM lowers to a literal table of one row, and the
-    # projection above it needs a column for the constant to land in.
-    # DuckDB calls this column `1`, after the text it was written as. firepanda
-    # names an expression the query did not name after its position instead,
-    # which is the gap `_name_of` describes and is not this change.
-    same(answer("SELECT 1", "__expr_0"), [1], "the constant")
+    # projection above it needs a column for the constant to land in. The column
+    # is called `1`, after the text it was written as, which is what DuckDB
+    # calls it too.
+    same(answer("SELECT 1", "1"), [1], "the constant")
 
 
 def test_a_constant_query_folds_before_it_is_a_column() raises:

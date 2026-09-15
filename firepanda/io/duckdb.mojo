@@ -18,6 +18,21 @@ from `read_parquet` naming the package to install and nothing else changes. The
 alternative, linking it, would make every firepanda binary carry sixty megabytes
 so that some of them can read Parquet.
 
+`dlopen` and `dlsym` come from `std.sys._libc` rather than being declared here
+with `external_call`, which is what everything else in this file does. That is
+worth the private import. The standard library declares both of them too, and
+opens libpython through its declaration, and one C function declared twice with
+two return types is a program that does not build. The compiler says so: a
+binary importing both `std.python` and this module failed to link with "existing
+function with conflicting signature" on `dlopen`, because the declaration here
+returned an `Optional` holding a pointer to a byte and the one over there
+returns an `Optional` holding a pointer to nothing, and those go back to the
+caller differently. Nothing was wrong with either declaration on its own, which
+is why this went unnoticed until the TPC-H harness wanted to read Parquet and
+ask Python for the data in one program. Using the one declaration is the only
+way to be sure there is one, so the rest of the file declares what is in
+duckdb.h and the two loader calls do not.
+
 Every entry point is a function pointer resolved by name once and reinterpreted
 the way `arrow_c` reinterprets a release callback. The signatures are transcribed
 from duckdb.h and each one is written above its declaration, because a wrong
@@ -43,7 +58,8 @@ front.
 Reference: https://duckdb.org/docs/stable/clients/c/overview
 """
 
-from std.ffi import c_char, external_call
+from std.ffi import c_char, c_int, external_call
+from std.sys._libc import dlopen, dlsym
 
 from .arrow_c import ArrowArray, ArrowSchema, CString
 
@@ -57,6 +73,13 @@ ones that carry no error end."""
 
 comptime MaybeText = Optional[CString]
 """A `const char*` that may be null."""
+
+comptime CName = Pointer[c_char, ImmUntrackedOrigin]
+"""A name handed to `dlopen` or `dlsym`, in the spelling they are declared with.
+
+The origin is the untracked one because the C function is what holds the pointer
+for the length of the call and the compiler cannot see that it gives it back.
+"""
 
 comptime SUCCESS: Int32 = 0
 """`DuckDBSuccess`. Every other value is a failure."""
@@ -483,6 +506,21 @@ struct Library(Movable):
         raise Error(message)
 
 
+def _named(bytes: List[UInt8]) -> CName:
+    """Points at a name that has already been terminated, for the loader.
+
+    Args:
+        bytes: What `terminated` built. The caller keeps it alive across the
+            call, which is what the untracked origin is standing in for.
+
+    Returns:
+        The address of its first byte, typed the way the loader wants it.
+    """
+    return CName(
+        unsafe_from_address=Int(bytes.unsafe_ptr().unsafe_bitcast[c_char]())
+    )
+
+
 def _open_library() raises -> Handle:
     """Finds and opens libduckdb.
 
@@ -510,12 +548,10 @@ def _open_library() raises -> Handle:
 
     for name in names:
         var bytes = terminated(name)
-        var opened = external_call["dlopen", MaybeHandle](
-            bytes.unsafe_ptr(), RTLD_NOW
-        )
+        var opened = dlopen(Optional(_named(bytes)), c_int(RTLD_NOW))
         _ = bytes^
         if opened:
-            return opened.value()
+            return opened.value().unsafe_bitcast[UInt8]()
 
     var tried = String()
     for i in range(len(names)):
@@ -549,7 +585,9 @@ def _symbol(handle: Handle, name: StringSlice) raises -> Handle:
             older than the C Arrow interface this uses.
     """
     var bytes = terminated(name)
-    var found = external_call["dlsym", MaybeHandle](handle, bytes.unsafe_ptr())
+    var found = dlsym(
+        Optional(handle.unsafe_bitcast[NoneType]()), _named(bytes)
+    )
     _ = bytes^
     if not found:
         raise Error(
@@ -562,4 +600,4 @@ def _symbol(handle: Handle, name: StringSlice) raises -> Handle:
                 ),
             )
         )
-    return found.value()
+    return found.value().unsafe_bitcast[UInt8]()

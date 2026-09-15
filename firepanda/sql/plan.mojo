@@ -517,6 +517,7 @@ from .catalog import NOT_FOUND, Catalog, KIND_FRAME, fold
 from .generated.functions import KIND_AGGREGATE
 from .registry import Registry
 from .cte import NOT_A_CTE, aliased, read_ctes
+from .printer import print_expr
 from .star import (
     NOT_REPLACED,
     Renaming,
@@ -526,6 +527,7 @@ from .star import (
     empty_select_list,
     not_in_from,
 )
+from .table import Grammar
 from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 
 
@@ -3355,6 +3357,7 @@ def _table(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3366,6 +3369,8 @@ def _table(
         ast: The arenas.
         at: The `REF_TABLE`.
         catalog: What the name is resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the node goes.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
@@ -3396,7 +3401,9 @@ def _table(
     # registered frame of the same name rather than collide with one.
     var bound = ctes.find(name)
     if bound != NOT_A_CTE:
-        return _cte(ast, bound, called^, catalog, plan, sources, scope, ctes)
+        return _cte(
+            ast, bound, called^, catalog, grammar, plan, sources, scope, ctes
+        )
 
     var found = catalog.find(name)
     if found < 0:
@@ -3504,6 +3511,7 @@ def _subquery(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3540,6 +3548,8 @@ def _subquery(
         ast: The arenas.
         at: The `REF_SUBQUERY`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
@@ -3562,7 +3572,9 @@ def _subquery(
     var named = ast.length(source.payload)
 
     var inner = _Scope()
-    var root = _statement(ast, source.a, catalog, plan, sources, inner, ctes)
+    var root = _statement(
+        ast, source.a, catalog, grammar, plan, sources, inner, ctes
+    )
 
     # A subquery with no alias on it still produces columns and they are still
     # in reach, so the only thing the missing name costs is the ability to
@@ -3606,6 +3618,7 @@ def _cte(
     at: Int,
     var called: String,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3627,6 +3640,8 @@ def _cte(
         at: Which binding it is.
         called: The name the reference is known by, its alias when it has one.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
@@ -3642,7 +3657,14 @@ def _cte(
     # it, which is the rule that makes a forward reference a missing table.
     var inner = _Scope()
     var root = _statement(
-        ast, ctes.stmts[at], catalog, plan, sources, inner, ctes.upto(at)
+        ast,
+        ctes.stmts[at],
+        catalog,
+        grammar,
+        plan,
+        sources,
+        inner,
+        ctes.upto(at),
     )
 
     # The alias list renames columns rather than the thing they came out of, so
@@ -3694,6 +3716,7 @@ def _joined(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3720,6 +3743,8 @@ def _joined(
         ast: The arenas.
         at: The `REF_JOIN` or `REF_JOIN_USING`.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
@@ -3733,10 +3758,14 @@ def _joined(
     """
     var node = ast.refs[Int(at)]
     var kind = _join_kind(ast.text(node.payload))
-    var left = _source(ast, node.a, catalog, plan, sources, scope, ctes)
+    var left = _source(
+        ast, node.a, catalog, grammar, plan, sources, scope, ctes
+    )
     var reach = len(scope.names)
     var pairs = len(scope.merged)
-    var right = _source(ast, node.b, catalog, plan, sources, scope, ctes)
+    var right = _source(
+        ast, node.b, catalog, grammar, plan, sources, scope, ctes
+    )
 
     # A SEMI or an ANTI join keeps left rows and no right column, so the right
     # side goes back out of reach once it has been lowered. Writing its name in
@@ -3851,6 +3880,7 @@ def _source(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3862,6 +3892,8 @@ def _source(
         ast: The arenas.
         at: The reference.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
@@ -3875,9 +3907,9 @@ def _source(
     """
     var source = ast.refs[Int(at)]
     if source.kind == REF_TABLE:
-        return _table(ast, at, catalog, plan, sources, scope, ctes)
+        return _table(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_JOIN:
-        return _joined(ast, at, catalog, plan, sources, scope, ctes)
+        return _joined(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_PARENS:
         if ast.length(source.payload) != 0:
             raise Error(
@@ -3885,11 +3917,13 @@ def _source(
                 " reference yet, which gives a whole join one name and so takes"
                 " the names written inside it back out of reach"
             )
-        return _source(ast, source.a, catalog, plan, sources, scope, ctes)
+        return _source(
+            ast, source.a, catalog, grammar, plan, sources, scope, ctes
+        )
     if source.kind == REF_JOIN_USING:
-        return _joined(ast, at, catalog, plan, sources, scope, ctes)
+        return _joined(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_SUBQUERY:
-        return _subquery(ast, at, catalog, plan, sources, scope, ctes)
+        return _subquery(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_FUNCTION:
         return _function(ast, at, plan)
     raise Error(
@@ -3901,6 +3935,7 @@ def _from(
     ast: Ast,
     clause: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3919,6 +3954,8 @@ def _from(
         ast: The arenas.
         clause: The `FROM` clause slot.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM puts in reach, filled in.
@@ -3933,14 +3970,20 @@ def _from(
     var refs = ast.items(clause)
     if len(refs) == 0:
         raise Error("a FROM with nothing in it")
-    var out = _source(ast, refs[0], catalog, plan, sources, scope, ctes)
+    var out = _source(
+        ast, refs[0], catalog, grammar, plan, sources, scope, ctes
+    )
     for i in range(1, len(refs)):
-        var more = _source(ast, refs[i], catalog, plan, sources, scope, ctes)
+        var more = _source(
+            ast, refs[i], catalog, grammar, plan, sources, scope, ctes
+        )
         out = _pair(plan, out, more, List[Int](), List[Int](), JoinKind.CROSS)
     return out^
 
 
-def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
+def lower(
+    ast: Ast, statement: UInt32, catalog: Catalog, grammar: Grammar
+) raises -> Lowered:
     """Lowers a `SELECT` into a logical plan.
 
     The plan comes back unbound, meaning every column reference in it is a name
@@ -3953,6 +3996,8 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
         ast: The arenas the statement lives in.
         statement: The `STMT_SELECT` node.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
 
     Returns:
         The plan, its root and the schemas the scans read.
@@ -3966,7 +4011,7 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
     var sources = List[Schema]()
     var scope = _Scope()
     var at = _statement(
-        ast, statement, catalog, plan, sources, scope, _Bindings()
+        ast, statement, catalog, grammar, plan, sources, scope, _Bindings()
     )
     return Lowered(plan^, at, sources^)
 
@@ -3975,6 +4020,7 @@ def _statement(
     ast: Ast,
     statement: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -3990,6 +4036,8 @@ def _statement(
         ast: The arenas.
         statement: The `STMT_SELECT`.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
         scope: Filled in with what the statement's own FROM put in reach.
@@ -4050,6 +4098,7 @@ def _statement(
         ast,
         top.a,
         catalog,
+        grammar,
         plan,
         sources,
         scope,
@@ -4221,6 +4270,7 @@ def _combine(
     ast: Ast,
     body: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -4240,6 +4290,8 @@ def _combine(
         ast: The arenas.
         body: The `STMT_QUERY`, `STMT_VALUES` or `STMT_SET_OPERATION`.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
         scope: Filled in with what a single block's FROM put in reach, and left
@@ -4277,6 +4329,7 @@ def _combine(
             ast,
             node.a,
             catalog,
+            grammar,
             plan,
             sources,
             arm,
@@ -4291,6 +4344,7 @@ def _combine(
             ast,
             node.b,
             catalog,
+            grammar,
             plan,
             sources,
             arm,
@@ -4307,7 +4361,17 @@ def _combine(
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
     return _block(
-        ast, body, catalog, plan, sources, scope, ctes, defer, orders, ordered
+        ast,
+        body,
+        catalog,
+        grammar,
+        plan,
+        sources,
+        scope,
+        ctes,
+        defer,
+        orders,
+        ordered,
     )
 
 
@@ -4562,6 +4626,7 @@ def _in_join(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -4589,6 +4654,8 @@ def _in_join(
         ast: The arenas.
         at: The `EXPR_IN_SUBQUERY`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the outer `FROM` put in reach, which the left side reads.
@@ -4616,7 +4683,9 @@ def _in_join(
     var key = _lower_expr(ast, node.a, plan, walk, scope, False)
 
     var inner = _Scope()
-    var root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+    var root = _statement(
+        ast, node.b, catalog, grammar, plan, sources, inner, ctes
+    )
     var names = _produces(plan, root)
     if len(names) != 1:
         raise Error(
@@ -4937,6 +5006,7 @@ def _scalar_join(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     ctes: _Bindings,
@@ -4968,6 +5038,8 @@ def _scalar_join(
         ast: The arenas.
         at: The `EXPR_SUBQUERY`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         ctes: The CTE names in reach.
@@ -5021,7 +5093,9 @@ def _scalar_join(
             )
 
     var inner = _Scope()
-    var root = _statement(ast, node.a, catalog, plan, sources, inner, ctes)
+    var root = _statement(
+        ast, node.a, catalog, grammar, plan, sources, inner, ctes
+    )
     var names = _produces(plan, root)
     if len(names) != 1:
         raise Error(
@@ -5054,6 +5128,7 @@ def _folded_join(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     ctes: _Bindings,
@@ -5100,6 +5175,8 @@ def _folded_join(
         ast: The arenas.
         at: The `EXPR_SUBQUERY`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         ctes: The CTE names in reach.
@@ -5189,7 +5266,9 @@ def _folded_join(
     # that reads both sides can only be written where both sides are in reach.
     var reach = len(scope.names)
     var merged = len(scope.merged)
-    var right = _from(ast, from_clause, catalog, plan, sources, scope, ctes)
+    var right = _from(
+        ast, from_clause, catalog, grammar, plan, sources, scope, ctes
+    )
 
     var conjuncts = List[UInt32]()
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
@@ -5334,6 +5413,7 @@ def _mark_join(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     ctes: _Bindings,
@@ -5366,6 +5446,8 @@ def _mark_join(
         ast: The arenas.
         at: The `EXPR_IN_SUBQUERY`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         ctes: The CTE names in reach.
@@ -5386,7 +5468,9 @@ def _mark_join(
     var key = _lower_expr(ast, node.a, plan, walk, scope, False)
 
     var inner = _Scope()
-    var root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+    var root = _statement(
+        ast, node.b, catalog, grammar, plan, sources, inner, ctes
+    )
     var names = _produces(plan, root)
     if len(names) != 1:
         raise Error(
@@ -5414,6 +5498,7 @@ def _exists_value(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     ctes: _Bindings,
@@ -5451,6 +5536,8 @@ def _exists_value(
         ast: The arenas.
         at: The `EXPR_EXISTS`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         ctes: The CTE names in reach.
@@ -5469,7 +5556,9 @@ def _exists_value(
     var inner = _Scope()
     var root: Int
     try:
-        root = _statement(ast, node.a, catalog, plan, sources, inner, ctes)
+        root = _statement(
+            ast, node.a, catalog, grammar, plan, sources, inner, ctes
+        )
     except failed:
         # The scope is the refusal a correlated one gets, and a name nothing in
         # the subquery has is what that looks like from in here. Saying so
@@ -5529,6 +5618,7 @@ def _quantified_value(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     ctes: _Bindings,
@@ -5566,6 +5656,8 @@ def _quantified_value(
         ast: The arenas.
         at: The `EXPR_QUANTIFIED`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         ctes: The CTE names in reach.
@@ -5584,7 +5676,9 @@ def _quantified_value(
     var inner = _Scope()
     var root: Int
     try:
-        root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+        root = _statement(
+            ast, node.b, catalog, grammar, plan, sources, inner, ctes
+        )
     except failed:
         raise Error(
             String(
@@ -5771,6 +5865,7 @@ def _exists_join(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -5807,6 +5902,8 @@ def _exists_join(
         ast: The arenas.
         at: The `EXPR_EXISTS`.
         catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the outer `FROM` put in reach, added to and put back.
@@ -5889,7 +5986,9 @@ def _exists_join(
     # that reads both sides can only be written where both sides are in reach.
     var reach = len(scope.names)
     var merged = len(scope.merged)
-    var right = _from(ast, from_clause, catalog, plan, sources, scope, ctes)
+    var right = _from(
+        ast, from_clause, catalog, grammar, plan, sources, scope, ctes
+    )
 
     var conjuncts = List[UInt32]()
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
@@ -5973,6 +6072,7 @@ def _block(
     ast: Ast,
     body: UInt32,
     catalog: Catalog,
+    grammar: Grammar,
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
@@ -5991,6 +6091,8 @@ def _block(
         ast: The arenas.
         body: The `STMT_QUERY`.
         catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
         scope: Filled in with what the block's FROM put in reach, so that an
@@ -6052,7 +6154,7 @@ def _block(
         at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
     else:
         var source = _from(
-            ast, from_clause, catalog, plan, sources, scope, ctes
+            ast, from_clause, catalog, grammar, plan, sources, scope, ctes
         )
         at = source.at
         schema = Schema(copy=source.schema)
@@ -6083,6 +6185,7 @@ def _block(
                 ast,
                 found[i],
                 catalog,
+                grammar,
                 plan,
                 sources,
                 ctes,
@@ -6091,7 +6194,9 @@ def _block(
                 source^,
             )
             continue
-        at = _scalar_join(ast, found[i], catalog, plan, sources, ctes, walk, at)
+        at = _scalar_join(
+            ast, found[i], catalog, grammar, plan, sources, ctes, walk, at
+        )
 
     # An `IN` over a subquery goes the same way, as a mark join rather than a
     # cross join. The ones the `WHERE` is the `AND` of are left alone, because
@@ -6110,7 +6215,16 @@ def _block(
             _marks(ast, ast.stmts[Int(one)].a, asking)
     for i in range(len(asking)):
         at = _mark_join(
-            ast, asking[i], catalog, plan, sources, ctes, walk, scope, at
+            ast,
+            asking[i],
+            catalog,
+            grammar,
+            plan,
+            sources,
+            ctes,
+            walk,
+            scope,
+            at,
         )
 
     # An `EXISTS` written as a value goes the same way again, and back to the
@@ -6130,7 +6244,7 @@ def _block(
             _askings(ast, ast.stmts[Int(one)].a, wanting)
     for i in range(len(wanting)):
         at = _exists_value(
-            ast, wanting[i], catalog, plan, sources, ctes, walk, at
+            ast, wanting[i], catalog, grammar, plan, sources, ctes, walk, at
         )
 
     # A quantified comparison other than the two that are an `IN` goes to the
@@ -6150,7 +6264,7 @@ def _block(
             _comparisons(ast, ast.stmts[Int(one)].a, ranged)
     for i in range(len(ranged)):
         at = _quantified_value(
-            ast, ranged[i], catalog, plan, sources, ctes, walk, at
+            ast, ranged[i], catalog, grammar, plan, sources, ctes, walk, at
         )
 
     if restriction != NO_NODE:
@@ -6197,6 +6311,7 @@ def _block(
                         ast,
                         asked[i],
                         catalog,
+                        grammar,
                         plan,
                         sources,
                         scope,
@@ -6209,6 +6324,7 @@ def _block(
                     ast,
                     asked[i],
                     catalog,
+                    grammar,
                     plan,
                     sources,
                     scope,
@@ -6238,6 +6354,7 @@ def _block(
                 # aggregate in it groups by its whole row.
                 _group_by_all(
                     ast,
+                    grammar,
                     items,
                     from_clause,
                     schema,
@@ -6322,11 +6439,13 @@ def _block(
                     # any other expression in a select list is named.
                     var name: String
                     if ast.exprs[Int(item.a)].kind == EXPR_COLUMN:
-                        name = _name_of(ast, item.a, len(key_names), scope)
+                        name = _name_of(
+                            ast, grammar, item.a, len(key_names), scope
+                        )
                     elif item.payload != NO_NODE:
                         name = String(ast.text(item.payload))
                     else:
-                        name = _name_of(ast, item.a, named, scope)
+                        name = _name_of(ast, grammar, item.a, named, scope)
                     keys.append(
                         _lower_expr(ast, item.a, plan, walk, scope, False)
                     )
@@ -6334,7 +6453,9 @@ def _block(
                     reads[named] = len(keys) - 1
                 continue
             keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
-            key_names.append(_name_of(ast, group.a, len(key_names), scope))
+            key_names.append(
+                _name_of(ast, grammar, group.a, len(key_names), scope)
+            )
 
     # The shape of each key that is worth looking for again higher up, and the
     # name the aggregate puts that key out under. A key that is a plain column
@@ -6391,7 +6512,7 @@ def _block(
             if item.payload != NO_NODE:
                 called = String(ast.text(item.payload))
             else:
-                called = _name_of(ast, item.a, i, scope)
+                called = _name_of(ast, grammar, item.a, i, scope)
             outputs.append(plan.exprs.column(key_names[reads[i]].copy()))
             names.append(called.copy())
             # The item was never lowered, so the shape an ORDER BY would have
@@ -6406,7 +6527,7 @@ def _block(
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
-            names.append(_name_of(ast, item.a, i, scope))
+            names.append(_name_of(ast, grammar, item.a, i, scope))
         var kind = plan.exprs.nodes[lowered].kind
         if kind != ExprKind.COLUMN and kind != ExprKind.LITERAL:
             item_shapes.append(_agg_shape(plan.exprs, lowered))
@@ -6560,16 +6681,42 @@ def _windows(mut plan: Plan, at: Int, walk: _Walk) raises -> Int:
     return out
 
 
-def _name_of(ast: Ast, at: UInt32, place: Int, scope: _Scope) raises -> String:
+def _name_of(
+    ast: Ast, grammar: Grammar, at: UInt32, place: Int, scope: _Scope
+) raises -> String:
     """What an output column is called when the query did not say.
 
     A bare column keeps its own name, which is what makes `SELECT a FROM t` come
     back with a column called `a`, and a qualified one keeps the last part of
     it, so `SELECT t.a FROM t` comes back with a column called `a` too and not
-    one called `t.a`. Anything else gets a name from its position,
-    because DuckDB's own default names an expression after the text it was
-    written as and reproducing that needs the printer over the original tokens,
-    which is a thing to do once rather than here.
+    one called `t.a`. Anything else is printed, so `SELECT sum(x) FROM t` comes
+    back with a column called `sum(x)` and `SELECT x + 1 FROM t` with one called
+    `(x + 1)`.
+
+    Printing it is what DuckDB does too, and with the same printer it parses
+    with, which is why the two agree on so much of this without either side
+    aiming at the other. Both normalize: `SUM( x  )` is named `sum(x)` by both,
+    because the name is made from the tree and not from the text. Both
+    parenthesize every operand of an operator, so `x * 2 + 1` is named
+    `((x * 2) + 1)` by both. And neither makes a duplicate name unique, so
+    `SELECT x + 1, x + 1 FROM t` gives two columns of the same name in DuckDB
+    and gives two here.
+
+    Five shapes are still named differently, and all five are the printer
+    disagreeing rather than this rule disagreeing. DuckDB names `count(*)` as
+    `count_star()`, negation as `-(x)` where this prints `(-x)`, a cast by the
+    type it resolved to rather than by the type text that was written, so
+    `x::int` is `CAST(x AS INTEGER)` and not `CAST(x AS INT)`, a `CASE` with an
+    `ELSE` it filled in and a set of parentheses this does not write, and a call
+    to a function whose name is a keyword with the schema it found the function
+    in, so `substring(g, 1, 2)` is `main."substring"(g, 1, 2)`. Closing those
+    means a printer that prints for a name rather than for a reparse, since four
+    of the five would not read back as themselves.
+
+    A name is still made from the position when the printer has no case for the
+    expression. That costs a name nobody would have chosen and it is better than
+    a query that ran refusing to hand back its answer over what to call a
+    column.
 
     The name a column keeps is the schema's and not the query's. `SELECT
     advengineid FROM hits` comes back with a column called `AdvEngineID`,
@@ -6580,6 +6727,8 @@ def _name_of(ast: Ast, at: UInt32, place: Int, scope: _Scope) raises -> String:
 
     Args:
         ast: The arenas.
+        grammar: A loaded grammar, for the keyword table the printer's quoting
+            rule consults.
         at: The expression.
         place: Where it sits in the list, counting from zero.
         scope: What the FROM put in reach, for the spelling.
@@ -6601,7 +6750,10 @@ def _name_of(ast: Ast, at: UInt32, place: Int, scope: _Scope) raises -> String:
             if found != NOT_IN_REACH and found != DERIVED:
                 return scope.spelled_at(found, written)
         return scope.spelled(written)
-    return String("__expr_", place)
+    try:
+        return print_expr(ast, at, grammar)
+    except:
+        return String("__expr_", place)
 
 
 def _aliased_key(
@@ -6665,6 +6817,7 @@ def _aliased_key(
 
 def _group_by_all(
     ast: Ast,
+    grammar: Grammar,
     items: List[UInt32],
     from_clause: UInt32,
     schema: Schema,
@@ -6695,6 +6848,8 @@ def _group_by_all(
 
     Args:
         ast: The arenas.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
         items: The select list.
         from_clause: The FROM, for the star's refusal when there is none.
         schema: What the FROM produces, for a star.
@@ -6732,7 +6887,7 @@ def _group_by_all(
         if _has_aggregate(ast, item.a):
             continue
         keys.append(_lower_expr(ast, item.a, plan, walk, scope, False))
-        key_names.append(_name_of(ast, item.a, len(key_names), scope))
+        key_names.append(_name_of(ast, grammar, item.a, len(key_names), scope))
 
 
 def _expand(
