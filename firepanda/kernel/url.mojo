@@ -1,22 +1,27 @@
-"""The hostname out of a URL, by hand, because the regex engine is not here yet.
+"""The hostname out of a URL, by hand, as one pattern written out in Mojo.
 
 ClickBench q28 groups by `REGEXP_REPLACE(Referer,
 '^https?://(?:www\\.)?([^/]+)/.*$', '\\1')`, which is a hostname extractor
 written as a regular expression. It is the only query in the suite whose group
-by key is a computed expression rather than a column, and the expression
-happens to need the one thing this library does not have: an anchored
-alternation with an optional group, a negated class and a back reference into a
-capture. `pattern.mojo` says in its own first paragraph that four named kernels
-are not a pattern compiler, and it is right.
+by key is a computed expression rather than a column, and when this file was
+written the expression needed the one thing this library did not have.
 
-So this is the extractor and not the engine. The point of writing it is that
-everything else q28 needs, the group by on a computed key, the average length,
-the count, the smallest string per group, the having and the ordered limit, can
-be built and tested now, and the day RE2 lands q28 becomes one substitution
-rather than a new query. What this file must not do is be approximately the
-regex, since then the substitution would change answers. So the rule below is
-the regex read byte by byte, including the two parts of it that are easy to get
-wrong.
+It has it now. `REGEXP_REPLACE` runs that pattern through the engine, so this
+file is no longer the only way to answer q28 and is not the way a benchmark
+should answer it: a driver that reaches for this kernel is measuring a kernel
+written for one query rather than measuring the engine, and the suite in
+tamnd/firepanda-bench runs the published statement for that reason.
+
+What it is now is a fast path that this library keeps rather than a gap it
+fills. The engine builds one row at a time into a serial builder because a row's
+length is not known until the scan has run, and this knows the length before any
+byte moves, so it sizes and copies in two parallel passes with nothing shared.
+That is worth having on a column of a hundred million URLs, and it is the same
+trade `pattern.mojo` makes for the five searches a `LIKE` reads as.
+
+A fast path that is approximately the pattern is worse than no fast path, since
+the two would disagree on rows nobody looks at. So the rule below is the regex
+read byte by byte, including the two parts of it that are easy to get wrong.
 
 The first is the optional `www.`. A regex prefers to take an optional group and
 backtracks only when what follows fails, so on `http://www./x` the preferred

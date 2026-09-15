@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `REGEXP_MATCHES` and `REGEXP_REPLACE` in SQL, which is the last ClickBench query
+
+The two names were in the catalog and reached no kernel, so a query holding either was refused by name. They run now, over the RE2 engine that landed in 0.8.5, and ClickBench q28 is the reason: it is a `REGEXP_REPLACE` pulling the host out of a URL and it was the one query of the 43 that firepanda could not be asked at all.
+
+Two operators, one pattern each, compiled while the plan is lowered rather than per row. `Search` answers whether a pattern is found somewhere in a row, which is DuckDB's reading of the name and not Python's `re.match`, so `regexp_matches('abc', 'b')` is true and a caller wanting the whole row writes the anchors. `Substitute` writes the row out with matches swapped and the replacement is RE2's rewrite string, so `\0` is the whole match and `\1` through `\9` are the groups.
+
+The count is the part worth reading before using it. `REGEXP_REPLACE` replaces the first match and nothing else unless the call's fourth argument holds `g`, which is what DuckDB does and is not what `.str.replace()` on the same engine does, and the kernel underneath now carries a limit so that both callers get their own answer. Anything anchored at both ends can only match once and cannot tell the difference, which is exactly why this would have been easy to ship wrong: q28 gives the same answer either way.
+
+Everything that cannot be answered is refused by name and none of it is dropped quietly. A pattern or a replacement that is not written out in the query is refused, since a pattern that changes per row means compiling a program per row and there is no kernel for that. A pattern this library's parser cannot read is refused with the pattern in the message, and so is one RE2 itself refuses, a backreference being the one anybody meets. An option other than `g` is refused rather than ignored, because a query that asked for a case insensitive match and got a case sensitive one is wrong with nothing anywhere to say so.
+
+The grammar is the stated gap. The only pattern reader here is Python's, so `\p{L}` is a pattern DuckDB takes and this refuses. That is a refusal and not a wrong answer, and an RE2 front end is what closes it.
+
+`text_hostname` stays, and it is a fast path now rather than a stand in. It is q28's pattern written out in Mojo, so it knows how long a row comes out before any byte moves and sizes and copies in two parallel passes, where the engine builds one row at a time into a serial builder because it cannot know. Every case its tests were written for was read off the pattern by hand when there was nothing to ask, and those 21 rows now go through both and are compared, which is what says the fast path is the pattern rather than approximately the pattern.
+
 ### Added: the second regular expression engine, which reads a different alphabet
 
 `pandas.Series(["café"]).str.count(r"\w")` is 3 and `pandas.Series(["café"]).str.findall(r"\w")` is four characters long, from one accessor with one pattern, and neither number is wrong. Six of the accessor's pattern methods go to Arrow and get RE2's reading, where `\w` is 63 characters of ASCII. The other three never reach Arrow at all: pandas compiles the pattern with `re` and loops in Python, where `\w` is 138558 code points. Document 76 built a router that picks between two engines and only one of them was ever written. This is the other one. Issue #8 M6.
@@ -582,7 +596,6 @@ On the filter side, a comparison against a constant is now one operator rather t
 
 The rest is SQL surface. `DATE '2020-01-01'` and the four timestamp spellings parse now, which is how TPC-H writes its date bounds, and `EXPLAIN` prints a temporal constant as the day it names rather than as the count underneath it.
 
-
 ### Added: `title`, `istitle` and `isascii`, the three names that needed a rule rather than a table
 
 `str.title` raises the first character of every word and drops the rest, `str.istitle` asks whether a row is already written that way, and `str.isascii` asks whether a row is made of ASCII and nothing else. All three are exact against pandas on every code point in Unicode, and the first two are exact on every arrangement of four characters drawn from the seven the word rule treats differently.
@@ -682,7 +695,6 @@ The comparison is not remembered in the memo, so two conjuncts holding the same 
 Most ClickBench predicates are this shape. q1 and q19 are one integer comparison against a constant and go straight down the fused path. q36 through q42 are five or six constant comparisons anded together, which is the shape the operator entry measured at 23 to 25 percent, because every conjunct after the first used to gather its operand out of a chunk an earlier one had already narrowed. The text and date comparisons in those predicates and in q10 through q14 are one operator now rather than two, but the filter still builds a mask inside itself for them, since the fused kernel covers the fixed width types and hands everything else back. A conjunct that is not a comparison against a constant, `LIKE` among them, lowers the way it always did.
 
 Part of #521.
-
 
 ## [0.8.1] - 2026-09-14
 

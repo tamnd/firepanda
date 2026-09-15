@@ -55,6 +55,7 @@ from .node import (
 from .node import Join, Limit, Match, Materialize, Node, NodeStatus, Project
 from .node import Case, Cut, Fill, Length, Locate, Member, Part, Presence
 from .node import Reduce
+from .node import Search, Substitute
 from .node import Trim, Truncate
 from .node import Sort, Unique, Window
 from .node import node_apply, node_bind, node_computes_per_row
