@@ -33,7 +33,7 @@ fi
 
 mkdir -p build/differential
 
-# The two regex programs read a table from the directory they live in, so they
+# The three regex programs read a table from the directory they live in, so they
 # need that directory on the import path as well as the repository root.
 printf '%s\0' \
   "mojo build -I . tests/differential/main.mojo -o build/differential/frames" \
@@ -43,5 +43,6 @@ printf '%s\0' \
   "mojo build -I . tests/differential/answers.mojo -o build/differential/answers" \
   "mojo build -I . -I tests/differential tests/differential/regex.mojo -o build/differential/regex" \
   "mojo build -I . -I tests/differential tests/differential/regex_match.mojo -o build/differential/regex-match" \
+  "mojo build -I . -I tests/differential tests/differential/regex_count.mojo -o build/differential/regex-count" \
   "mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch" |
   xargs -0 -P "$jobs" -I COMMAND bash -c COMMAND

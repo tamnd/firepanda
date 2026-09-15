@@ -27,7 +27,7 @@ from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 from .pattern import fold_point
-from .regex.pike import matches_text
+from .regex.pike import counts_text, matches_text
 from .regex.program import Program
 from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
@@ -3129,6 +3129,31 @@ def text_matches_regex_scalar(
             out.set_null(i)
             continue
         out.set_valid(i, matches_text(program, a[i]))
+    return out^
+
+
+def text_count_regex_scalar(
+    a: StringArray, program: Program
+) -> Array[DType.int64]:
+    """How many times a compiled pattern matches in each element, one at a time.
+
+    The twin of the counting kernel and the same narrow check the one above is,
+    for the same reason: the scan it runs is the engine's own and is not written
+    twice.
+
+    Args:
+        a: The column.
+        program: The compiled pattern.
+
+    Returns:
+        An int64 column, null where the column is null.
+    """
+    var out = Array[DType.int64](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, Int64(counts_text(program, a[i])))
     return out^
 
 

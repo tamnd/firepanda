@@ -8848,16 +8848,17 @@ class StringMixin:
         search, which is the faster of the two and is what every pattern nobody
         wrote a metacharacter in should get.
 
-        `contains`, `match` and `fullmatch` no longer come here for a pattern
-        that fails the check, because there is an engine for those three now.
-        `count` and `replace` still do, because both of them need where a match
-        starts and ends rather than whether there is one, and the engine answers
-        the second question only.
+        `contains`, `match`, `fullmatch` and `count` no longer come here for a
+        pattern that fails the check, because there is an engine for those four
+        now. `replace` still does, because it needs the text a match covered and
+        not only where the match ended, and because the scan it runs over a row
+        is not the scan `count` runs, which document 79 measured and is why the
+        two did not arrive together.
 
         The refusal names the character it tripped on, because a caller who wrote
-        `count(".")` meaning a full stop is one keyword away from the answer they
-        want and a caller who wrote `count("^a")` is not, and the message should
-        let them tell which of the two they are.
+        `replace(".", "-")` meaning a full stop is one keyword away from the
+        answer they want and a caller who wrote `replace("^a", "-")` is not, and
+        the message should let them tell which of the two they are.
         """
         if not isinstance(pat, str):
             raise DTypeError("firepanda:dtype: first argument must be string or compiled pattern")
@@ -8945,13 +8946,24 @@ class StringMixin:
         return self._flag(f"{kind}_regex", pat)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
-        """How many times a literal pattern appears in every row.
+        """How many times a pattern matches in every row.
 
         `count` has no `case` argument, which is the one place the four disagree
         about their own signature, so it passes `None` and the check falls
-        through.
+        through. Upstream has no case argument here either, so there is no fold
+        to pick and the word the byte search gets is the bare one.
+
+        The split is the one `_searched` makes and is made for the same reason,
+        but what happens after it is not the same, because counting is not
+        asking four times. The engine runs the pattern again from after each
+        match, and where it starts again, and what the rest of the row looks
+        like when it does, are three rules that came out of measuring pandas
+        rather than out of reading either engine. `firepanda/kernel/regex/pike.mojo`
+        has them and document 79 has where they were measured.
         """
         self._fold_word(None, flags, "count")
+        if _needs_an_engine(pat, True):
+            return self._number("count_regex", pat)
         return self._number("count", self._literal(pat, True, "count"))
 
     def _replaced(self, pat: Any, repl: Any, n: Any, case: Any, flags: Any, regex: Any) -> Series:

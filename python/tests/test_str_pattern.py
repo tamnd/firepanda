@@ -12,13 +12,15 @@ is the path all four take for a pattern like the ones below. The answers are
 therefore pandas' answers rather than an approximation of them, and what is
 being checked is that the fast path is the same question and not a cheaper one.
 
-Where the two part company is a pattern with a metacharacter in it. Three of the
-four send one to the regular expression engine now, and `test_str_regex.py` is
-where that is checked. `count` does not, because counting needs where each match
-ends and the engine answers whether there is one, so a metacharacter is still
-refused there by name. The refusal is the one thing a compatibility layer must
-not get wrong in the other direction: answering `count(".")` as a search for a
-full stop would be wrong on every row of a column pandas counts everywhere.
+Where the two part company is a pattern with a metacharacter in it. All four
+send one to the regular expression engine now. `test_str_regex.py` is where the
+first three are checked and `test_str_count_regex.py` is where `count` is, and
+they are two files because `count` runs a loop around the engine that the other
+three have no use for. `replace` is the one left that refuses a metacharacter,
+and it is refused there by name. The refusal is the one thing a compatibility
+layer must not get wrong in the other direction: answering `replace(".", "-")`
+as a swap of a full stop would be wrong on every row of a column pandas rewrites
+entirely.
 
 Two things about the group are worth knowing before reading the assertions.
 
@@ -169,7 +171,7 @@ def test_an_empty_pattern_is_in_every_row_and_is_only_the_empty_row(
 
 
 @needs_pandas
-def test_count_refuses_a_pattern_with_a_metacharacter_rather_than_searching(
+def test_replace_refuses_a_pattern_with_a_metacharacter_rather_than_searching(
     firepanda: ModuleType,
 ) -> None:
     """And the refusal names the character, so a caller can tell which mistake it was.
@@ -179,15 +181,15 @@ def test_count_refuses_a_pattern_with_a_metacharacter_rather_than_searching(
     reads it as unimplemented and a caller reads a sentence saying what is
     missing, where a literal search would have read as a wrong answer.
 
-    The other three used to be here and answer these patterns now. What keeps
-    `count` out is that it needs where each match ends in order to start looking
-    for the next one, and the engine answers whether there is a match rather
-    than where it is.
+    The other four used to be here and answer these patterns now. What keeps
+    `replace` out is that it needs the text each match covered rather than where
+    it ended, and that the loop it runs over a row is not the loop `count` runs,
+    which is a second set of measurements nobody has taken yet.
     """
     mine = made(firepanda)
     for pattern in ("a.c", "^a", "a+", "a|b", "[ab]", "a*", "a?", r"a\b", "(a)", "a{2}"):
         with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-            mine.str.count(pattern)
+            mine.str.replace(pattern, "-", regex=True)
         assert "regular expression" in str(caught.value), pattern
 
 

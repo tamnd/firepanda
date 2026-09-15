@@ -129,7 +129,7 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # would honour that literally.
 #
 # The builds themselves are in a script rather than in a chain of && here,
-# because there are eight of them now and one after another took longer than the
+# because there are nine of them now and one after another took longer than the
 # job is allowed. The script says what it does with them.
 differential-build = { cmd = "bash tools/build_differential.sh", default-environment = "differential", inputs = [
   "firepanda/**",
@@ -142,6 +142,7 @@ differential-build = { cmd = "bash tools/build_differential.sh", default-environ
   "build/differential/answers",
   "build/differential/regex",
   "build/differential/regex-match",
+  "build/differential/regex-count",
   "build/differential/tpch",
 ] }
 
@@ -193,6 +194,18 @@ differential-regex = { cmd = "./build/differential/regex", default-environment =
 # half the specification rather than a gap. It needs no corpus.
 # See docs/specs/77-the-machine-that-runs-a-pattern-once.md section 7.
 differential-regex-match = { cmd = "./build/differential/regex-match", default-environment = "differential", depends-on = ["differential-build"] }
+
+# And the question after that one, which is not the same question asked again.
+# Whether a pattern matches is a bit and stops at the first match. How many
+# times it matches is a loop, the loop belongs to Arrow rather than to either
+# engine, and the three rules it follows are none of them what a reader would
+# guess: the rest of the row becomes the text after every match, the scan moves
+# in bytes, and a match of no width found ahead of the scan is counted where it
+# was found and again from there. This runs the same corpus over the same
+# sixteen texts through `str.count` on both sides and compares the numbers. It
+# needs no corpus.
+# See docs/specs/79-counting-is-not-asking-four-times.md section 7.
+differential-regex-count = { cmd = "./build/differential/regex-count", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a
