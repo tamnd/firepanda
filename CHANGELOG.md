@@ -35,6 +35,7 @@ The flag lives in the aggregate's operator field beside the fold's own code, whi
 Only a fold over no rows at all is decided here. A group that saw rows and found every one of them null is the same disagreement and still answers zero, which is issue #836, because telling that group apart from one whose values summed to zero costs a count of the non null values per group and this case costs nothing.
 
 TPC-H q17 is the query that found it. It divides a sum by a constant, and at scale 0.01 the rows it sums are none, so it answered zero where DuckDB answers null.
+
 ### Added: a `flags` argument on `str.contains` and `str.fullmatch`, answered by the other engine
 
 `Series.str.contains("^b", flags=re.MULTILINE)` used to be refused. It is answered now, and so is the same argument on `fullmatch`, out of Python's engine rather than out of Arrow's, which is the engine upstream sends a flagged call to. Four of the seven flag letters go through and mean what they mean: ignore case, multiline, dotall and unicode. Issue #8 M6.
