@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the TPC-H comparison asks all twenty two queries
+
+`pixi run tpch` asked the ten that answer, on the grounds that a query with nothing to compare against is not a comparison. The ten were the wrong ten to ask for. The other twelve are refused rather than wrong, and a refusal is a fact about this engine worth writing down and checking, which is what the harness already does for every refusal it does know about. So it asks all twenty two and prints how many agree, which is nine, and nine of twenty two is the number this exists to move where nine of ten was not.
+
+The thirteen refusals come from five places rather than thirteen, and that is the useful thing the run now says. A decimal literal stops q6, q14, q17, q20 and q22, and in all five the literal meets a double that DuckDB casts it to, so the refusal is wider than the risk it names. A cross join with more than one row on the right stops q7, q8, q9 and q19, and three of those four have equalities a join order would use while q19 hides its equality inside every branch of an `OR`. A name that does not resolve into the query around it stops q2. A scalar subquery written in a `HAVING`, which is above the aggregate where the lowering puts one below the `FROM`, stops q11. A join condition that is not an equality stops q13 and q21.
+
+Each of the thirteen carries its own recorded reason, so the day one of them closes the harness fails on the stale record rather than going on looking open. Issue #816 has the five written out with the refusal text each one comes back with.
+
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
 The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
