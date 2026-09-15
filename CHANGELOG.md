@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `str.count` answers a regular expression
+
+The fourth of the five pattern methods, and the first that is not a yes or no question. `df["a"].str.count(r"\w+")` answers where it used to raise. Issue #8 M6.
+
+Counting is not asking four times. `str.count` runs the pattern, counts the match, cuts the text and runs the pattern again on what is left, and the loop that does that belongs to Arrow rather than to either engine. Three of its rules are not what anybody would guess and all three change answers on patterns people write. The rest of the row becomes the text after every match, so `str.count("^a")` on a row of three letters is three where Python's `re` says one. The cut moves in bytes rather than characters, so a pattern that can match nothing counts the bytes of a row and one more, which is seven for `héllo`. And the cut lands on where the match ended unless the match ended where the scan already was, so a zero width match found further along is counted where it was found and again from there, which is why `str.count("\\b")` on a word with a space on each side is two and `str.count("$")` is two for every row.
+
+All three were measured out of pandas before anything was written, and the two simpler rules that were tried first each fit most of the numbers and failed on one pattern. `tests/test_regex_count.mojo` holds each rule with the case that pins it, and every number in that file was read off pandas rather than worked out from the rules.
+
+The engine gained one thing, which is where a match ends rather than whether there is one. Where it ends is leftmost first, so `count("a|aa")` on two letters is two and `count("aa|a")` is one, and the answer to both halves of that turned out to be the order the thread list was already in: stop starting fresh attempts once a match is recorded, and let a thread that matches cut the threads behind it while leaving the ones in front running. The machine also learned to be handed a text that starts in the middle of a character, since a scan that moves in bytes can stop there, and those bytes now read as a character nothing matches and which is not a word character, which is what RE2 sees.
+
+`pixi run differential-regex-count` is new and compares the same thirty thousand generated patterns over the same sixteen texts as the other two regular expression differentials. It compares 7668 patterns, which is 122688 counts, and disagrees with pandas on none of them.
+
+`replace` is the one left refusing a metacharacter. It needs the text a match covered rather than where it ended, and `replace_substring_regex` turns out not to share this loop at all, so it is its own slice with its own measurements. Document 79 has all of it.
+
 ### Added: `str.contains`, `str.match` and `str.fullmatch` answer a regular expression
 
 The engine from document 77 had nothing calling it. These three now send a pattern with a metacharacter in it to the engine instead of refusing it, so `df["a"].str.contains("^ab.*c$")` answers where it used to raise. Issue #8 M6.

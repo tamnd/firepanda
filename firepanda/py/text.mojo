@@ -87,6 +87,7 @@ from firepanda.frame.series import Series
 from firepanda.kernel.chars import character_count
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
+    METHOD_COUNT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
     program_for,
@@ -189,7 +190,13 @@ def _number_name(name: String) raises -> String:
     Raises:
         Error: Tagged `value` if it is not one of them.
     """
-    if name == "len" or name == "find" or name == "rfind" or name == "count":
+    if (
+        name == "len"
+        or name == "find"
+        or name == "rfind"
+        or name == "count"
+        or name == "count_regex"
+    ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a number"))
 
@@ -294,7 +301,7 @@ def _compiled(kind: String, pattern: String) raises -> Program:
     refusal in kind is what matters rather than reproducing it to the letter.
 
     Args:
-        kind: The word the Python layer sent, which is one of the three that end
+        kind: The word the Python layer sent, which is one of the four that end
             in `_regex`.
         pattern: The pattern as the caller wrote it.
 
@@ -310,6 +317,8 @@ def _compiled(kind: String, pattern: String) raises -> Program:
         method = METHOD_MATCH
     elif kind == "fullmatch_regex":
         method = METHOD_FULLMATCH
+    elif kind == "count_regex":
+        method = METHOD_COUNT
     var program = program_for(method, pattern)
     if program.ok:
         return program^
@@ -700,4 +709,10 @@ def number(
         return column.chars_length()
     if wanted == "count":
         return column.chars_count(arg)
+    # The one name in this door that reaches the engine, and it reaches it
+    # through the same call the three in the door above do, because what a
+    # refusal becomes in Python is a fact about the binding rather than about
+    # the question being asked.
+    if wanted == "count_regex":
+        return column.chars_count_regex(_compiled(wanted, arg))
     return column.chars_find(arg, start, stop, wanted == "rfind")

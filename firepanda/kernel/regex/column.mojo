@@ -25,12 +25,13 @@ end of each morsel clears the rows where the input was missing.
 
 ### What the twin checks, and what checks the engine
 
-`text_matches_regex_scalar` is the slow twin, and it is honest about being a
-narrower check than the usual one. It runs the same engine, so it cannot catch
-the engine being wrong. What it checks is everything around the engine: the
-morsel split, the null repair, the reused buffers. Those are the parts of this
-file that are not the engine, and reusing a stamp array across rows is exactly
-the kind of change that works on one row and fails on the second.
+`text_matches_regex_scalar` and `text_count_regex_scalar` are the slow twins,
+and they are honest about being a narrower check than the usual one. They run
+the same engine, so they cannot catch the engine being wrong. What they check is
+everything around the engine: the morsel split, the null repair, the reused
+buffers. Those are the parts of this file that are not the engine, and reusing a
+stamp array across rows is exactly the kind of change that works on one row and
+fails on the second.
 
 What checks the engine is `tests/differential/regex_match.mojo`, which asks
 pandas about thirty thousand generated patterns. A twin that was a second engine
@@ -82,6 +83,52 @@ def text_matches_regex(
             decode_into(a.unsafe_bytes(i), points)
             var found = machine.matches(program, Span(points))
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
+    return out^
+
+
+def text_count_regex(
+    a: StringArray, program: Program
+) raises -> Array[DType.int64]:
+    """How many times a compiled pattern matches in each element.
+
+    The same shape as the kernel above and the same reasons for it, with one
+    difference that is worth knowing before reading either: this one runs the
+    pattern over a row as many times as the row has matches, plus once more to
+    find out that there are no more, where the one above stops at the first.
+    So a row that matches nothing costs the same in both and a row full of
+    matches costs this one a pass per match. That is what Arrow does as well,
+    since RE2 is asked again from after each match, and it is why an empty
+    pattern against a long row is the expensive case in both libraries.
+
+    Args:
+        a: The column.
+        program: The pattern, already compiled. A program that did not compile
+            answers zero everywhere, which no caller should ever see, for the
+            reason above.
+
+    Returns:
+        An int64 column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        var machine = Machine(program)
+        var points = List[UInt32]()
+        for i in range(start, stop):
+            decode_into(a.unsafe_bytes(i), points)
+            var seen = machine.counts(program, Span(points))
+            dst.unsafe_offset(i).unsafe_write(Int64(seen))
         repair_range(out, validity, start, stop)
 
     parallel_morsels(compute, n)

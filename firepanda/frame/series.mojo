@@ -120,7 +120,7 @@ from firepanda.kernel.pattern import (
     text_starts_with_folded,
 )
 from firepanda.kernel.pick import pick_any
-from firepanda.kernel.regex.column import text_matches_regex
+from firepanda.kernel.regex.column import text_count_regex, text_matches_regex
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.shift import shift_any
@@ -1743,6 +1743,36 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_matches_regex(self.values.strings(), program)),
+        )
+
+    def chars_count_regex(self, program: Program) raises -> Self:
+        """Returns how many times a compiled pattern matches in each row.
+
+        This is the regular expression form of `chars_count` and it takes a
+        compiled program for the same reason `chars_matches_regex` does.
+
+        The counting rule is Arrow's rather than Python's, because pandas
+        answers `str.count` out of Arrow. Three things follow from that and all
+        three are visible in ordinary answers: the rest of the row becomes the
+        text after every match, so `^` matches again; the cursor moves in bytes,
+        so an empty pattern counts the bytes of a row and not its characters;
+        and a match of no width found further along the row is counted once
+        where it was found and once more from there.
+        `firepanda/kernel/regex/pike.mojo` has the measurements.
+
+        Args:
+            program: The pattern, already compiled for the engine that is to run
+                it.
+
+        Returns:
+            An int64 series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(text_count_regex(self.values.strings(), program)),
         )
 
     def chars_contains_folded(self, pattern: StringSlice) raises -> Self:
