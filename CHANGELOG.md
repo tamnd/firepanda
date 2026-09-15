@@ -19,6 +19,7 @@ The part that needed care is arithmetic between literals. TPC-H q6 writes its bo
 Addition, subtraction, multiplication and unary minus fold. Division does not, because DuckDB answers a double for it anyway. The cases where DuckDB saturates at thirty eight digits and quietly drops the carry it asked for do not fold either, and those fall back to double arithmetic, which is no more lossy than what it replaces.
 
 Six more expressions went into `pixi run differential-answers`, which asks firepanda and DuckDB the same expression over the same column and compares the answers. Three of them write arithmetic between literals, which is the case that has a wrong answer waiting in it.
+
 ### Added: the second regular expression engine, which reads a different alphabet
 
 `pandas.Series(["café"]).str.count(r"\w")` is 3 and `pandas.Series(["café"]).str.findall(r"\w")` is four characters long, from one accessor with one pattern, and neither number is wrong. Six of the accessor's pattern methods go to Arrow and get RE2's reading, where `\w` is 63 characters of ASCII. The other three never reach Arrow at all: pandas compiles the pattern with `re` and loops in Python, where `\w` is 138558 code points. Document 76 built a router that picks between two engines and only one of them was ever written. This is the other one. Issue #8 M6.
