@@ -234,9 +234,9 @@ def text_extract_regex(
 
 
 def text_replace_regex(
-    a: StringArray, program: Program, rewrite: Rewrite
+    a: StringArray, program: Program, rewrite: Rewrite, limit: Int = -1
 ) raises -> StringArray:
-    """Writes every element out with every match of a compiled pattern swapped.
+    """Writes every element out with matches of a compiled pattern swapped.
 
     The third kernel here and the first whose answer is text, which is what
     makes it the odd one of the three. How long a row comes out is not known
@@ -259,6 +259,9 @@ def text_replace_regex(
             because the layer holding the call raises on a refusal before
             reaching here.
         rewrite: The replacement, already read, and refused the same way.
+        limit: How many matches to replace in each element, or a negative
+            number for all of them. `str.replace` asks for all of them and
+            SQL's `regexp_replace` asks for one unless the call said `g`.
 
     Returns:
         A text column of the same height, null wherever the input is null.
@@ -288,6 +291,7 @@ def text_replace_regex(
             offsets,
             found,
             out,
+            limit,
         )
         built.append(Span(out))
     return built^.finish()

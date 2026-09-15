@@ -1137,6 +1137,8 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "is_null" or name == "is_not_null" or name == "like":
         return True
+    if name == "regexp_matches" or name == "regexp_replace":
+        return True
     return name == "and" or name == "or" or name == "not"
 
 

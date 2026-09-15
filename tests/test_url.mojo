@@ -1,19 +1,27 @@
 """Tests for the hand written hostname extractor and for the query it is for.
 
-The extractor stands in for a regular expression nobody has written yet, so the
-tests are mostly the cases where a reasonable person would write something
-simpler than the regex and get a different answer: a `www.` that is the whole
-hostname, a URL with no path at all, an uppercase scheme, a newline in the path
-and a newline in the host. Each of those is a place where stripping a prefix and
-cutting at the first slash diverges from what `regexp_replace` does, and each of
-them is a row that would quietly change group when RE2 lands.
+The extractor is one pattern written out in Mojo, so the tests are mostly the
+cases where a reasonable person would write something simpler than the regex and
+get a different answer: a `www.` that is the whole hostname, a URL with no path
+at all, an uppercase scheme, a newline in the path and a newline in the host.
+Each of those is a place where stripping a prefix and cutting at the first slash
+diverges from what `regexp_replace` does.
 
-The last test is q28 itself, without the regex. It is the only query in
-ClickBench whose group by key is computed rather than read, and the point of
-writing it now is that the shape underneath it, a group by on a derived text
-column with an average, a count and a smallest string, a having on the count and
-an ordered limit over the result, is the part that can be wrong. The extractor is
-one call inside it and the day there is a regex engine it is a different call.
+Those cases were read off the pattern by hand, because when they were written
+there was no engine to ask. There are two now, so
+`test_the_extractor_the_engine_and_duckdb_all_answer_the_same` runs every row
+the rest of the file cares about through this kernel and through the engine and
+compares both against what DuckDB answers for the same pattern. That is the
+test that keeps this file honest, and the ones above it are what say which rows
+are worth putting in it.
+
+The last test is q28 itself, built out of the extractor. It is the only query in
+ClickBench whose group by key is computed rather than read, and the shape
+underneath it, a group by on a derived text column with an average, a count and
+a smallest string, a having on the count and an ordered limit over the result,
+is the part that can be wrong. The benchmark suite runs the published statement
+through SQL rather than reaching for the extractor, and this is the frame API
+saying the same answer comes out.
 """
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
@@ -30,8 +38,17 @@ from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.kernel.binary import BinaryOp, binary_value_any
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.regex.column import text_replace_regex
+from firepanda.kernel.regex.parse import parse_pattern
+from firepanda.kernel.regex.program import compile_program
+from firepanda.kernel.regex.replace import parse_rewrite
+from firepanda.kernel.regex.route import ENGINE_RE2
 from firepanda.kernel.substr import text_byte_length
 from firepanda.kernel.url import text_hostname
+
+
+comptime Q28_PATTERN = String("^https?://(?:www\\.)?([^/]+)/.*$")
+"""The pattern this file is written out from, as ClickBench publishes it."""
 
 
 def hosts(values: List[String]) raises -> List[String]:
@@ -140,6 +157,111 @@ def test_a_null_stays_null_and_an_empty_column_answers_nothing() raises:
     assert_equal(got[2], "")
 
     assert_equal(len(text_hostname(strings_from_list(List[String]()))), 0)
+
+
+def through_the_engine(values: List[String]) raises -> List[String]:
+    """Runs the same rows through the pattern this file is written out from.
+
+    Args:
+        values: The elements of the column to build.
+
+    Returns:
+        One answer per input, in order.
+
+    Raises:
+        Error: If the pattern or the replacement will not read, which in this
+            file is a mistake in the test rather than an answer.
+    """
+    var program = compile_program(
+        parse_pattern(Q28_PATTERN), ENGINE_RE2, captures=True
+    )
+    if not program.ok:
+        raise Error(
+            String("the q28 pattern did not compile: ", program.problem)
+        )
+    var rewrite = parse_rewrite(String("\\1"), program.groups)
+    if not rewrite.ok:
+        raise Error(String("the replacement was refused: ", rewrite.problem))
+    var got = text_replace_regex(strings_from_list(values), program, rewrite, 1)
+    var out = List[String](capacity=len(got))
+    for i in range(len(got)):
+        out.append(got[i])
+    return out^
+
+
+def test_the_extractor_the_engine_and_duckdb_all_answer_the_same() raises:
+    """The claim the module docstring makes, asserted rather than reasoned.
+
+    This file used to stand in for an engine that did not exist, so every case
+    above was read off the pattern by hand. The engine is here now, so the two
+    are run over the same rows and compared, and every row that any test above
+    cares about is in this list. A fast path that is approximately the pattern
+    is worse than no fast path, and this is what says it is not one.
+
+    DuckDB is the third answer and it is the one that makes the other two worth
+    something. The kernel and the engine were both written here, so the two of
+    them agreeing rules out one kind of mistake and not the kind where this
+    library has read the pattern wrong in the same way twice. The third column
+    was read off DuckDB rather than reasoned about, the same way the counting
+    and replacing tests were read off pandas.
+    """
+    var rows: List[String] = [
+        String("http://example.com/"),
+        String("https://example.com/path/deeper?q=1"),
+        String("http://www.example.com/a"),
+        String("https://www.example.com/"),
+        String(""),
+        String("not a url at all"),
+        String("ftp://example.com/a"),
+        String("http://example.com"),
+        String("HTTP://EXAMPLE.COM/a"),
+        String("http://"),
+        String("http:/example.com/a"),
+        String("http://www./x"),
+        String("http://www.www./y"),
+        String("http://www/z"),
+        String("http://example.com/a\nb"),
+        String("http://example.com/a\n"),
+        String("http://ex\nample.com/a"),
+        String("http://www.a.very.long.hostname.example.com/path"),
+        String("https://héllo.example.com/ünicode"),
+        String("http://example.com//"),
+        String("http://example.com/?"),
+    ]
+    # Read off DuckDB 1.5.5, one `REGEXP_REPLACE` per row over the published
+    # pattern, rather than worked out from the rules here. Two engines and a
+    # kernel agreeing is worth more than either of the pairs.
+    var duckdb: List[String] = [
+        String("example.com"),
+        String("example.com"),
+        String("example.com"),
+        String("example.com"),
+        String(""),
+        String("not a url at all"),
+        String("ftp://example.com/a"),
+        String("http://example.com"),
+        String("HTTP://EXAMPLE.COM/a"),
+        String("http://"),
+        String("http:/example.com/a"),
+        String("www."),
+        String("www."),
+        String("www"),
+        String("http://example.com/a\nb"),
+        String("http://example.com/a\n"),
+        String("ex\nample.com"),
+        String("a.very.long.hostname.example.com"),
+        String("héllo.example.com"),
+        String("example.com"),
+        String("example.com"),
+    ]
+    var by_hand = hosts(rows)
+    var by_engine = through_the_engine(rows)
+    assert_equal(len(by_hand), len(rows), "one answer per row by hand")
+    assert_equal(len(by_engine), len(rows), "one answer per row by engine")
+    assert_equal(len(duckdb), len(rows), "and one read off DuckDB")
+    for i in range(len(rows)):
+        assert_equal(by_hand[i], by_engine[i], rows[i])
+        assert_equal(by_engine[i], duckdb[i], rows[i])
 
 
 def test_a_hostname_too_long_for_a_view_goes_through_the_payload() raises:
