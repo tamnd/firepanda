@@ -532,6 +532,13 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def extract(self, pat: Any, flags: Any = 0, expand: Any = True) -> DataFrame | Series:
+        """What each group of the first match held, one column per group."""
+        try:
+            return self._extracted(pat, flags, expand)
+        except Exception as error:
+            raise translate(error) from None
+
     def cat(
         self, others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = "left"
     ) -> str:

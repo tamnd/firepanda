@@ -9198,6 +9198,59 @@ class StringMixin:
             )
         return self._text("normalize", form)
 
+    def _extracted(self, pat: Any, flags: Any, expand: Any) -> DataFrame | Series:
+        """What each group of the first match held, one column per group.
+
+        The third answer shape on this accessor that no door carries, after the
+        three columns of `partition` and the however many of `get_dummies`, and
+        the first whose width is read off the pattern rather than off the data.
+        A pattern with two groups answers two columns whatever the column holds,
+        including a column where nothing matched at all, which is why this takes
+        one call across rather than the two `get_dummies` takes.
+
+        `expand` is the argument that decides whether the answer is a frame or a
+        column, and it decides it together with how many groups there are. Two
+        or more groups is always a frame, because there is nowhere else to put
+        the second one. One group is a frame when `expand` is True, which is the
+        default, and a column when it is False. pandas checks that the argument
+        is a bool before it looks at the pattern, with a sentence of its own, and
+        that order is reproduced because a caller who wrote `expand=None` should
+        be told about `expand` rather than about their pattern.
+
+        The labels are the one place this reads a rule rather than a value. A
+        named group is labelled with its name and an unnamed one is labelled
+        with its own position counted from zero, so `(?P<letter>[a-z])(\\d)`
+        answers `letter` and `1`. pandas writes that second one as the integer 1
+        and a frame here holds text labels, so it comes back as `"1"`, which is
+        the divergence `partition` already carries rather than a new one. A name
+        can never collide with a position, because a group name has to be a
+        Python identifier and a position is digits.
+
+        When the answer is a column rather than a frame and the group had a
+        name, the column is named after the group. That is the one place on this
+        accessor where the answer is not named after the column that was read,
+        and it is worth the extra step because a caller who named a group asked
+        for that name. A group with no name leaves the name alone rather than
+        clearing it, which is upstream and is the reason this renames only when
+        there is something to rename to.
+        """
+        from ._frame import DataFrame, Series
+
+        if not isinstance(expand, bool):
+            raise InvalidArgumentError("firepanda:value: expand must be True or False")
+        self._fold_word(None, flags, "extract")
+        try:
+            names, columns = self._series._inner.string_extract(pat)
+        except Exception as error:
+            raise translate(error) from None
+        labels = [name if name else str(i) for i, name in enumerate(names)]
+        if len(labels) == 1 and not expand:
+            only = Series._wrap(columns[0])
+            return only.rename(names[0]) if names[0] else only
+        return DataFrame(
+            {label: Series._wrap(column) for label, column in zip(labels, columns, strict=True)}
+        )
+
     def _dummies(self, sep: Any, dtype: Any) -> DataFrame:
         """One column per distinct token, flagging the rows that hold it.
 
