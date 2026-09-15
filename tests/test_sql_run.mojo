@@ -1917,6 +1917,175 @@ def test_a_case_change_is_a_column_like_any_other() raises:
     )
 
 
+def test_a_regexp_matches_looks_anywhere_in_the_row() raises:
+    # The name says matches and the answer is found somewhere in the row, which
+    # is DuckDB's reading. Written as a Python `re.match` this would keep only
+    # the rows that start with the pattern.
+    same(
+        answer("SELECT n FROM words WHERE regexp_matches(word, 'an')", "n"),
+        [3],
+        "n",
+    )
+    same(
+        answer("SELECT n FROM words WHERE regexp_matches(word, 'ap')", "n"),
+        [1, 2, 4, 7],
+        "n",
+    )
+
+
+def test_a_regexp_matches_leaves_the_anchors_to_the_caller() raises:
+    same(
+        answer("SELECT n FROM words WHERE regexp_matches(word, '^ap')", "n"),
+        [1, 2],
+        "n",
+    )
+    same(
+        answer("SELECT n FROM words WHERE regexp_matches(word, '^ap$')", "n"),
+        [],
+        "n",
+    )
+
+
+def test_a_regexp_matches_reads_the_syntax_a_like_has_no_way_to_write() raises:
+    # A count, a class and an alternation, none of which a `LIKE` can say, and
+    # all three of which are the reason this function is worth having.
+    same(
+        answer("SELECT n FROM words WHERE regexp_matches(word, 'p{2}')", "n"),
+        [1, 7],
+        "n",
+    )
+    same(
+        answer(
+            "SELECT n FROM words WHERE regexp_matches(word, '^(gr|ba)')", "n"
+        ),
+        [3, 4],
+        "n",
+    )
+
+
+def test_a_regexp_matches_answers_every_row_and_a_null_for_the_null() raises:
+    same(
+        truths(
+            run(
+                "SELECT regexp_matches(word, 'e$') AS hit FROM words",
+                session(),
+            ),
+            "hit",
+        ),
+        [1, 0, 0, 1, 0, -1, 1],
+        "hit",
+    )
+
+
+def test_a_regexp_replace_swaps_the_first_match_and_stops() raises:
+    # DuckDB replaces one match without `g` and this is the only test in the
+    # file that can tell the difference, every other pattern here matching at
+    # most once anyway.
+    var got = cuts("SELECT regexp_replace(word, 'p', 'P') AS piece FROM words")
+    assert_equal(len(got), 7, "one answer per row")
+    assert_equal(got[0], "aPple", "the first p went and the second stayed")
+    assert_equal(got[6], "Pineapple", "and the same on a row with three")
+
+
+def test_a_regexp_replace_with_g_swaps_every_match() raises:
+    var got = cuts(
+        "SELECT regexp_replace(word, 'p', 'P', 'g') AS piece FROM words"
+    )
+    assert_equal(got[0], "aPPle", "both of them this time")
+    assert_equal(got[6], "PineaPPle", "and all three of them")
+
+
+def test_a_regexp_replace_writes_the_groups_the_replacement_names() raises:
+    # The shape ClickBench q28 is written in, which is the query this went in
+    # for: pull the host out of a URL and keep nothing else.
+    var got = cuts(
+        "SELECT regexp_replace('http://www.example.com/a/b',"
+        " '^https?://(?:www\\.)?([^/]+)/.*$', '\\1') AS piece FROM words"
+        " WHERE n = 1"
+    )
+    assert_equal(got[0], "example.com", "the group is what came out")
+    var two = cuts(
+        "SELECT regexp_replace(word, '^(.)(.)', '\\2\\1') AS piece FROM words"
+        " WHERE n = 3"
+    )
+    assert_equal(two[0], "abnana", "and two groups come out in the order asked")
+
+
+def test_a_regexp_replace_leaves_a_row_with_no_match_as_it_was() raises:
+    var got = cuts("SELECT regexp_replace(word, 'zz', '!') AS piece FROM words")
+    assert_equal(got[0], "apple", "a row with no match is handed back")
+    assert_equal(got[4], "", "an empty row stays empty")
+    assert_equal(got[5], "null", "and a null stays a null")
+
+
+def test_a_regexp_replace_is_a_column_like_any_other() raises:
+    same(
+        answer(
+            (
+                "SELECT n FROM words WHERE regexp_replace(word, 'a', 'o') ="
+                " 'opple'"
+            ),
+            "n",
+        ),
+        [1],
+        "n",
+    )
+
+
+def test_a_regular_expression_against_a_column_is_refused() raises:
+    with assert_raises(contains="have to be written out"):
+        _ = run(
+            "SELECT n FROM words WHERE regexp_matches(word, word)", session()
+        )
+    with assert_raises(contains="have to be written out"):
+        _ = run(
+            "SELECT regexp_replace(word, 'a', word) AS piece FROM words",
+            session(),
+        )
+
+
+def test_a_pattern_this_library_cannot_read_is_refused_by_name() raises:
+    with assert_raises(contains="cannot run the pattern"):
+        _ = run(
+            "SELECT n FROM words WHERE regexp_matches(word, '(')", session()
+        )
+    # A backreference is Python's syntax and not RE2's, and SQL is RE2 here, so
+    # this one is refused for being wrong rather than for being missing.
+    with assert_raises(contains="RE2 has no backreference"):
+        _ = run(
+            "SELECT n FROM words WHERE regexp_matches(word, '(a)\\1')",
+            session(),
+        )
+
+
+def test_a_replacement_the_pattern_cannot_fill_is_refused() raises:
+    with assert_raises(contains="cannot read the replacement"):
+        _ = run(
+            "SELECT regexp_replace(word, 'a', '\\1') AS piece FROM words",
+            session(),
+        )
+
+
+def test_an_option_other_than_g_is_refused_rather_than_dropped() raises:
+    # Reading `i` and answering a case sensitive match would be wrong with
+    # nothing anywhere to say so, which is the whole reason for the refusal.
+    with assert_raises(contains="the only one answered is 'g'"):
+        _ = run(
+            "SELECT regexp_replace(word, 'a', 'o', 'i') AS piece FROM words",
+            session(),
+        )
+
+
+def test_a_regular_expression_over_a_number_says_so() raises:
+    with assert_raises(contains="'regexp_matches' reads text"):
+        _ = run("SELECT n FROM words WHERE regexp_matches(n, 'a')", session())
+    with assert_raises(contains="'regexp_replace' takes three arguments"):
+        _ = run(
+            "SELECT regexp_replace(word, 'a') AS piece FROM words",
+            session(),
+        )
+
+
 def test_a_trim_takes_the_spaces_off_both_ends() raises:
     var got = cuts("SELECT trim(word) AS piece FROM padded")
     assert_equal(len(got), 6, "one answer per row")

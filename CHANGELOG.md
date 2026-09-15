@@ -23,6 +23,19 @@ Six more expressions went into `pixi run differential-answers`, which asks firep
 One of the six disagrees and is recorded rather than removed, because it is the one place where reading a decimal constant as a double is visibly not what DuckDB has. `CAST(n * 2.50 AS BIGINT)` with `n` at five is `CAST(DECIMAL(13,2) 12.50 AS BIGINT)` to DuckDB, and a decimal cast to an integer rounds away from zero, so DuckDB answers 13. firepanda holds the double 12.5 by then and rounds it to even, which is 12, and 12 is also what DuckDB itself answers for `CAST(12.5e0 AS BIGINT)`. The rule is right and the type underneath it is not: a cast to `BIGINT` is a boundary where the far side is an integer rather than a double, so DuckDB never makes a double at all. The two only part on a tie, and only a real decimal type closes it, which is issue #309.
 
 `pixi run tpch` asks all twenty two queries now rather than the eleven that answered, because a refusal is a fact about this engine worth checking and a list of only the ones that work cannot say how far there is to go. Each refused query carries a written reason beside it, a refusal with no reason fails the run, and so does a query that answers where a reason is recorded, which is how a gap that closes stops looking open. Fourteen of the twenty two agree with DuckDB row for row today, up from ten, and q6, q14 and q22 are three of the four that moved. The eight that are left are refused in four places rather than eight: a cross join with more than one row on the right, a name the inner query reads from the query around it, a scalar subquery in a HAVING, and a join condition that is not an equality. Issue #816 has the four written out.
+### Added: `REGEXP_MATCHES` and `REGEXP_REPLACE` in SQL, which is the last ClickBench query
+
+The two names were in the catalog and reached no kernel, so a query holding either was refused by name. They run now, over the RE2 engine that landed in 0.8.5, and ClickBench q28 is the reason: it is a `REGEXP_REPLACE` pulling the host out of a URL and it was the one query of the 43 that firepanda could not be asked at all.
+
+Two operators, one pattern each, compiled while the plan is lowered rather than per row. `Search` answers whether a pattern is found somewhere in a row, which is DuckDB's reading of the name and not Python's `re.match`, so `regexp_matches('abc', 'b')` is true and a caller wanting the whole row writes the anchors. `Substitute` writes the row out with matches swapped and the replacement is RE2's rewrite string, so `\0` is the whole match and `\1` through `\9` are the groups.
+
+The count is the part worth reading before using it. `REGEXP_REPLACE` replaces the first match and nothing else unless the call's fourth argument holds `g`, which is what DuckDB does and is not what `.str.replace()` on the same engine does, and the kernel underneath now carries a limit so that both callers get their own answer. Anything anchored at both ends can only match once and cannot tell the difference, which is exactly why this would have been easy to ship wrong: q28 gives the same answer either way.
+
+Everything that cannot be answered is refused by name and none of it is dropped quietly. A pattern or a replacement that is not written out in the query is refused, since a pattern that changes per row means compiling a program per row and there is no kernel for that. A pattern this library's parser cannot read is refused with the pattern in the message, and so is one RE2 itself refuses, a backreference being the one anybody meets. An option other than `g` is refused rather than ignored, because a query that asked for a case insensitive match and got a case sensitive one is wrong with nothing anywhere to say so.
+
+The grammar is the stated gap. The only pattern reader here is Python's, so `\p{L}` is a pattern DuckDB takes and this refuses. That is a refusal and not a wrong answer, and an RE2 front end is what closes it.
+
+`text_hostname` stays, and it is a fast path now rather than a stand in. It is q28's pattern written out in Mojo, so it knows how long a row comes out before any byte moves and sizes and copies in two parallel passes, where the engine builds one row at a time into a serial builder because it cannot know. Every case its tests were written for was read off the pattern by hand when there was nothing to ask, and those 21 rows now go through the kernel, through the engine and through DuckDB 1.5.5, and all three agree. Two of those three were written here, so the third is the one that rules out reading the pattern wrong the same way twice.
 
 ### Added: the second regular expression engine, which reads a different alphabet
 
@@ -52,6 +65,38 @@ Measured here over a million elements of thirty two ASCII bytes, alternating the
 
 Nothing about the Unicode answers moves. An element with a byte at or above 0x80 is refused by the pass and takes the path it took before, so the 353 folds, the corrections and the bytes that are not UTF-8 all come out as they did.
 
+### Changed: a predicate is placed by the relation the query named, not only by a column name
+
+Predicate pushdown decided which side of a join could answer a predicate by looking each column name up in the two schemas. `FROM nation n1, nation n2` puts an `n_nationkey` on each side, so the search found the name on both and could only answer that it did not know, and a query that qualified every mention of it got nothing pushed anywhere. Issue #309.
+
+The qualifier was never lost. The binder writes the relation it picked onto the reference and binding writes the relation each column came from onto the node, so the two can be compared and `n1.n_nationkey` placed on the side it was written about. A column that no single relation produced stays a maybe, which is what keeps the new answer no stricter than the old one: a name one side has and the other does not is still answered by the name alone, and the relation number only decides between two sides that both have it and both know where theirs came from.
+
+TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
+
+q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
+
+## [0.8.6] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release about regular expressions, in two halves that are not the same work. SQL learned to run them and the accessor gained the second engine it was always routed at, so between the two of them there is now one library where there used to be a refusal and half an engine.
+
+The SQL half is the one with a benchmark behind it. `regexp_matches` and `regexp_replace` were rows in the generated function table with a signature and nothing underneath, so a query naming either was refused by the catalog check. They run now, over two operators that compile their pattern once while the plan is lowered rather than once per row. That closes ClickBench q28, which is a `REGEXP_REPLACE` pulling the host out of a URL and was the one query of the 43 that firepanda could not be asked at all.
+
+The count is the part of it worth reading before using it. `REGEXP_REPLACE` replaces the first match and nothing else unless the call's fourth argument holds `g`, and `.str.replace()` on the same kernel replaces every match. Those are two different answers from one kernel, so the kernel carries a limit now and each caller asks for its own. Anything anchored at both ends can only match once and cannot tell the difference, which is why this would have been easy to ship wrong and pass the benchmark anyway.
+
+Nothing that cannot be answered is dropped quietly. A pattern or a replacement that is not written out in the query is refused, since a pattern that changes per row means compiling a program per row. So is a pattern the parser cannot read and one RE2 itself refuses, each saying which of the two it is. An option other than `g` is refused rather than ignored, because a query that asked for a case insensitive match and got a case sensitive one is wrong with nothing anywhere to say so.
+
+`text_hostname` stays and is stated to be a fast path rather than a stand in for a missing engine. It is q28's pattern written out in Mojo, so it knows how long a row comes out before any byte moves and sizes and copies in two parallel passes, where the engine has to build one row at a time into a serial builder. The 21 rows its tests were written for now go through the kernel, through the engine and through DuckDB 1.5.5, and all three agree. Two of those three were written here, so the third is the one that rules out reading the pattern wrong the same way twice.
+
+The accessor half is the second engine. `pandas.Series(["café"]).str.count(r"\w")` is 3 and `str.findall(r"\w")` on the same series is four characters long, from one accessor with one pattern, because six of the pattern methods go to Arrow and get RE2's alphabet and three never reach Arrow at all. Document 76 built a router that picks between two engines and only one of them had been written. The other one is here: a category node that reads Unicode ranges, a dollar sign that matches before a trailing newline, and a word boundary asked against the wider class. All three classes were generated out of the running CPython rather than out of the Unicode data files, because pandas answers these methods by compiling the pattern with that exact module. `pixi run differential-regex-python` compares 26608 generated patterns through `str.findall` and disagrees on none of them.
+
+Every refusal also gained an owner. A lookaround used to say RE2 has no lookaround whichever engine was asking, and now says that for RE2 and says this engine has no lookaround yet for Python, because the first is agreement with upstream and the second is a shortfall here.
+
+Two more things landed. A predicate is now placed by the relation the query named rather than by a column name alone, so `FROM nation n1, nation n2` no longer defeats pushdown and TPC-H q7 runs and agrees with DuckDB, which takes `pixi run tpch` to twelve of the twenty two queries. And `casefold` over ASCII text stopped walking an element three times and allocating a `String` to throw away, which took a million ASCII elements from 5.668 seconds to 16.605 milliseconds, of which 16.145 is the copy underneath it.
+
+The stated gap is the grammar, and it is the same one on both halves. The only pattern reader here is Python's, so `\p{L}` is a pattern DuckDB takes and this refuses. That is a refusal rather than a wrong answer, and an RE2 front end is what closes it.
+
 ## [0.8.5] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -73,16 +118,6 @@ On the planner side, a predicate is now sent past every join that keeps its left
 Five wrong answers are fixed and three of them were queries that raised rather than queries that lied. A correlated subquery that counts answered null over an empty group where SQL says zero, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped. A mean over a column of times answered a point in time from the frame and a count of seconds from SQL, and both halves passed every test of themselves, because two paths read two different tables about what a reduction produces. Which side of a `JOIN` a table was written on decided whether the query ran, since the build side was read with a borrow that only a column of exactly one chunk has. A binary that used both `read_parquet` and `std.python` did not link, because one C function was declared twice with two return types. And a column the reader could not name is now named.
 
 The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
-
-### Changed: a predicate is placed by the relation the query named, not only by a column name
-
-Predicate pushdown decided which side of a join could answer a predicate by looking each column name up in the two schemas. `FROM nation n1, nation n2` puts an `n_nationkey` on each side, so the search found the name on both and could only answer that it did not know, and a query that qualified every mention of it got nothing pushed anywhere. Issue #309.
-
-The qualifier was never lost. The binder writes the relation it picked onto the reference and binding writes the relation each column came from onto the node, so the two can be compared and `n1.n_nationkey` placed on the side it was written about. A column that no single relation produced stays a maybe, which is what keeps the new answer no stricter than the old one: a name one side has and the other does not is still answered by the name alone, and the relation number only decides between two sides that both have it and both know where theirs came from.
-
-TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
-
-q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
 
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
@@ -598,7 +633,6 @@ On the filter side, a comparison against a constant is now one operator rather t
 
 The rest is SQL surface. `DATE '2020-01-01'` and the four timestamp spellings parse now, which is how TPC-H writes its date bounds, and `EXPLAIN` prints a temporal constant as the day it names rather than as the count underneath it.
 
-
 ### Added: `title`, `istitle` and `isascii`, the three names that needed a rule rather than a table
 
 `str.title` raises the first character of every word and drops the rest, `str.istitle` asks whether a row is already written that way, and `str.isascii` asks whether a row is made of ASCII and nothing else. All three are exact against pandas on every code point in Unicode, and the first two are exact on every arrangement of four characters drawn from the seven the word rule treats differently.
@@ -698,7 +732,6 @@ The comparison is not remembered in the memo, so two conjuncts holding the same 
 Most ClickBench predicates are this shape. q1 and q19 are one integer comparison against a constant and go straight down the fused path. q36 through q42 are five or six constant comparisons anded together, which is the shape the operator entry measured at 23 to 25 percent, because every conjunct after the first used to gather its operand out of a chunk an earlier one had already narrowed. The text and date comparisons in those predicates and in q10 through q14 are one operator now rather than two, but the filter still builds a mask inside itself for them, since the fused kernel covers the fixed width types and hands everything else back. A conjunct that is not a comparison against a constant, `LIKE` among them, lowers the way it always did.
 
 Part of #521.
-
 
 ## [0.8.1] - 2026-09-14
 
@@ -7550,7 +7583,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/tamnd/firepanda/releases/tag/v0.8.6
 [0.8.5]: https://github.com/tamnd/firepanda/releases/tag/v0.8.5
 [0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3

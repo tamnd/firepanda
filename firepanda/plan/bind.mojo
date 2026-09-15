@@ -457,6 +457,42 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 )
             )
         return LogicalType.STRING
+    if name == "regexp_matches" or name == "regexp_replace":
+        # Two for a match, three for a replacement and a fourth for its options.
+        # The lowering is the one that knows which, and it is also the one that
+        # reads the constants, so all this decides is what comes out.
+        if name == "regexp_matches" and len(args) != 2:
+            raise Error(
+                String(
+                    "'regexp_matches' takes 2 arguments and was given ",
+                    len(args),
+                )
+            )
+        if name == "regexp_replace" and (len(args) < 3 or len(args) > 4):
+            raise Error(
+                String(
+                    (
+                        "'regexp_replace' takes three arguments or four and was"
+                        " given "
+                    ),
+                    len(args),
+                )
+            )
+        for i in range(len(args)):
+            if args[i] != LogicalType.STRING and args[i] != LogicalType.NULL:
+                raise Error(
+                    String(
+                        "'",
+                        name,
+                        "' reads text and argument ",
+                        i,
+                        " is ",
+                        args[i],
+                    )
+                )
+        if name == "regexp_matches":
+            return LogicalType.BOOL
+        return LogicalType.STRING
     if name == "trim" or name == "ltrim" or name == "rtrim":
         if len(args) != 1 and len(args) != 2:
             raise Error(
