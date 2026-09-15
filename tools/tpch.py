@@ -2,8 +2,8 @@
 
 The other harnesses in this directory ask about one expression at a time. This
 one asks about a whole query, which is the question a benchmark asks and the
-one an exit criterion is written in: does firepanda answer TPC-H q1, q3 and q6
-the way DuckDB answers them over the same rows.
+one an exit criterion is written in: does firepanda answer a TPC-H query the
+way DuckDB answers it over the same rows. `QUERIES` says which ones it asks.
 
 The data comes from DuckDB's own `tpch` extension, which is the reference
 generator rather than something written here, and it is exported to Parquet so
@@ -57,13 +57,13 @@ TABLES = (
 )
 """The eight tables TPC-H defines, in the order the schema declares them."""
 
-QUERIES = (1, 3, 6, 18)
+QUERIES = (1, 3, 4, 5, 6, 10, 12, 15, 16, 18)
 """Which queries the harness covers.
 
-The three S4 names as its exit criteria, and q18, which answered what DuckDB
-answers as soon as the two agreed on what to call a column the query did not
-name. The other eighteen want a dependent join, a decimal, or both, and each one
-goes in here the day it runs rather than being listed as a pending failure.
+The three S4 names as its exit criteria, and every query that answers what
+DuckDB answers. The rest want a decimal, a join order, a cross product, a
+dependent join or a name resolved across a self join, and each one goes in here
+the day it runs rather than being listed as a pending failure.
 """
 
 BETWEEN = "\x1f"
@@ -125,13 +125,37 @@ def _rendered(value):
     return str(value)
 
 
+def _stamped(marker, stamp):
+    """Whether a marker file exists and already says this.
+
+    Args:
+        marker: The path.
+        stamp: What it has to hold for the work behind it to be skipped.
+
+    Returns:
+        True when the file is there and holds exactly that.
+    """
+    if not os.path.exists(marker):
+        return False
+    with open(marker, encoding="utf-8") as handle:
+        return handle.read().strip() == stamp
+
+
 def prepare_here(scale, directory):
     """Builds the data and the reference answers, in this process.
 
-    Does nothing when the directory already holds data at the same scale, which
-    is what makes the harness cheap to run twice. The marker is written last, so
-    an interrupted run leaves a directory that gets built again rather than one
-    that looks finished.
+    Does nothing when the directory already holds both at the same scale, which
+    is what makes the harness cheap to run twice. Each marker is written after
+    what it stands for, so an interrupted run leaves a directory that gets built
+    again rather than one that looks finished.
+
+    There are two markers because the two halves go stale for different
+    reasons. The data goes stale when the scale changes and nothing else, and
+    at scale 1 it is a quarter of a gigabyte to regenerate. The answers go stale
+    when a query is added to `QUERIES` too, since only the queries in it get an
+    answer written, and one marker for both would either regenerate the data
+    every time a query was added or leave the new query with no answer to be
+    compared against.
 
     Call this from a plain Python process. `prepare` is what an embedded
     interpreter should call, and it runs this in a child.
@@ -144,21 +168,24 @@ def prepare_here(scale, directory):
     import duckdb
 
     marker = os.path.join(directory, "ready")
-    if os.path.exists(marker):
-        with open(marker, encoding="utf-8") as handle:
-            if handle.read().strip() == str(scale):
-                return
+    stamp = str(scale) + " " + " ".join(str(number) for number in QUERIES)
+    if _stamped(marker, stamp):
+        return
 
+    built = os.path.join(directory, "generated")
     os.makedirs(directory, exist_ok=True)
     connection = duckdb.connect()
-    connection.execute(f"call dbgen(sf={scale})")
-    for table in TABLES:
-        path = os.path.join(directory, f"{table}.parquet")
-        selected = _exported(connection, table)
-        connection.execute(
-            f"copy (select {selected} from {table}) to '{path}'"
-            " (format parquet)"
-        )
+    if not _stamped(built, str(scale)):
+        connection.execute(f"call dbgen(sf={scale})")
+        for table in TABLES:
+            path = os.path.join(directory, f"{table}.parquet")
+            selected = _exported(connection, table)
+            connection.execute(
+                f"copy (select {selected} from {table}) to '{path}'"
+                " (format parquet)"
+            )
+        with open(built, "w", encoding="utf-8") as handle:
+            handle.write(str(scale) + "\n")
     written = dict(connection.execute("select * from tpch_queries()").fetchall())
     connection.close()
 
@@ -190,7 +217,7 @@ def prepare_here(scale, directory):
     reading.close()
 
     with open(marker, "w", encoding="utf-8") as handle:
-        handle.write(str(scale) + "\n")
+        handle.write(stamp + "\n")
 
 
 def prepare(scale, directory) -> str:

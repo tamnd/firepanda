@@ -272,7 +272,7 @@ def test_a_filter_reading_both_sides_of_a_join_stays_above_it() raises:
     assert_equal(_under(plan, at), "JOIN", "the filter stayed on top")
 
 
-def test_a_filter_below_an_outer_join_is_left_where_it_is() raises:
+def test_a_filter_on_the_left_of_a_left_join_moves_below_it() raises:
     var plan = Plan()
     var left = plan.scan("part", List[String](), 0)
     var right = plan.scan("lineitem", List[String](), 1)
@@ -285,8 +285,87 @@ def test_a_filter_below_an_outer_join_is_left_where_it_is() raises:
     )
     var root = plan.filter(joined, _small(plan, "p_size", 15))
     var at = push(plan, root, [_part(), _lineitem()])
-    # Only inner joins for now, and the pass would rather do nothing than
-    # guess at what an invented null row does to a predicate.
+    # A left join hands out left rows, one output row reads one left row, and
+    # a left row dropped below drops exactly the output rows the predicate
+    # would have dropped above.
+    var printed = explain(plan, at)
+    assert_true(
+        printed.find("FILTER") > printed.find("JOIN"),
+        "the filter is below the join now",
+    )
+    assert_equal(_filters(plan, at), 1, "and there is only the one of it")
+
+
+def test_a_filter_on_the_right_of_a_left_join_is_left_where_it_is() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left,
+        right,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("l_partkey")],
+        JoinKind.LEFT,
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.binary(
+            BinaryOp.LT,
+            plan.exprs.column("l_quantity"),
+            plan.exprs.literal(Value(Float64(30.0))),
+        ),
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # The other direction is the one that does not hold. A right row dropped
+    # below does not drop the left row it matched, it null extends it, and a
+    # null is not what the predicate answered about.
+    assert_equal(_under(plan, at), "JOIN", "the filter stayed on top")
+
+
+def test_a_filter_on_the_left_of_a_mark_join_moves_below_it() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left,
+        right,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("l_partkey")],
+        JoinKind.MARK,
+        String("__mark_0"),
+    )
+    var root = plan.filter(joined, _small(plan, "p_size", 15))
+    var at = push(plan, root, [_part(), _lineitem()])
+    # The same argument as the left join, and it is the one that makes TPC-H
+    # q16 run: the equality under this filter reaches the product below.
+    var printed = explain(plan, at)
+    assert_true(
+        printed.find("FILTER") > printed.find("JOIN"),
+        "the filter is below the join now",
+    )
+
+
+def test_a_filter_on_a_mark_column_stays_above_the_mark_join() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left,
+        right,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("l_partkey")],
+        JoinKind.MARK,
+        String("__mark_0"),
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.call(
+            String("not"), [plan.exprs.column("__mark_0")], rowwise=True
+        ),
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # The mark is a column neither side has, so it is held above by the rule
+    # that a predicate goes into the side providing every column it reads.
     assert_equal(_under(plan, at), "JOIN", "the filter stayed on top")
 
 
@@ -416,7 +495,7 @@ def test_a_comma_join_and_a_written_join_reach_the_same_plan() raises:
     assert_equal(comma, written, "the same query either way round")
 
 
-def test_a_cross_join_with_nothing_to_pair_on_keeps_its_filter_above() raises:
+def test_a_cross_join_with_nothing_to_pair_on_filters_its_left_side() raises:
     var plan = Plan()
     var left = plan.scan("part", List[String](), 0)
     var right = plan.scan("lineitem", List[String](), 1)
@@ -424,6 +503,30 @@ def test_a_cross_join_with_nothing_to_pair_on_keeps_its_filter_above() raises:
         left, right, List[Int](), List[Int](), JoinKind.CROSS
     )
     var root = plan.filter(joined, _small(plan, "p_size", 15))
+    var at = push(plan, root, [_part(), _lineitem()])
+    var printed = explain(plan, at)
+    assert_true("JOIN cross" in printed, "it is still a product")
+    assert_true(
+        printed.find("FILTER") > printed.find("JOIN"),
+        "with its left side filtered first",
+    )
+
+
+def test_a_cross_join_keeps_a_predicate_on_its_right_side_above_it() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.binary(
+            BinaryOp.LT,
+            plan.exprs.column("l_quantity"),
+            plan.exprs.literal(Value(Float64(30.0))),
+        ),
+    )
     var at = push(plan, root, [_part(), _lineitem()])
     # Sound to move and still not moved. The operator behind a cross join pairs
     # a frame against a single row, and a predicate pushed into that side can

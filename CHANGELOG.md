@@ -13,6 +13,25 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
 
 The chain moved into `tools/build_differential.sh`, which hands the eight commands to `xargs -P`. The width is the core count capped at four, because a Mojo compile is itself parallel and holds around a gigabyte while it runs, so the limit is memory rather than cores. On a ten core machine the eight programs build in four minutes and nineteen seconds of wall clock against about twelve minutes in sequence. The step's ceiling went to fifteen minutes at the same time, so the next program added does not repeat the same failure.
+### Added: the five TPC-H queries that already answered are now compared
+
+`pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
+
+A query that answers and is not compared is worse than a query that does not run. Nothing notices when it starts answering something else, and the reason it was left out is the reason a harness exists: it had not been checked, so it went on the list of things to check rather than into the thing that checks.
+
+The data is prepared against two markers now rather than one. The Parquet goes stale when the scale changes and nothing else, and at scale 1 it is a quarter of a gigabyte to regenerate. The reference answers go stale when a query is added to the list too, since only the queries in the list get an answer written. One marker for both meant either regenerating the data every time a query was added, or adding a query and leaving it with no answer to be compared against, which is what happened the first time this was run.
+
+### Changed: a predicate is sent past every join that keeps its left rows
+
+Predicate pushdown used to move a predicate into the side of an inner join that provides every column it reads, and to leave everything alone at every other kind of join. It now sends a predicate into the left side of a left, semi, anti, mark or cross join as well, which is the same rule the inner join already had, applied on the one side where it holds. Issue #309.
+
+The argument is about what happens to a row the predicate drops. All five of those kinds hand out left rows, so one output row reads one left row, and a left row dropped below the join drops exactly the output rows the predicate would have dropped above it. The other direction is the one that does not hold: a right row dropped below a left join does not drop the left row it matched, it null extends it instead, and a null is not what the predicate answered about. So the right side of those joins is still left alone, and a right or a full outer join still passes nothing in either direction.
+
+A cross join is the one where the reason is about firepanda rather than about SQL. Both sides would be sound, since a cross join is an inner join with nothing asked of the pair, and the right side is still left alone because the lowering pairs a whole frame against a right side of a single row, and a predicate pushed into that side can leave it holding no row at all.
+
+The two halves compose, and that is what this is worth. A predicate that gets past a mark join reaches the cross join under it, and the pass then turns that cross join into a pairing because the predicate is an equality over its two sides. TPC-H q16 is exactly that shape, a product under a mark join under a filter, and it did not run at all before this: the equality that pairs `partsupp` with `part` could not reach the product it belonged on. It now answers what DuckDB answers and has joined `pixi run tpch`, which covers five of the twenty two queries.
+
+### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
 A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.
 
