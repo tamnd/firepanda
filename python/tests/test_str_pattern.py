@@ -171,26 +171,26 @@ def test_an_empty_pattern_is_in_every_row_and_is_only_the_empty_row(
 
 
 @needs_pandas
-def test_replace_refuses_a_pattern_with_a_metacharacter_rather_than_searching(
+def test_replace_answers_a_pattern_the_way_pandas_answers_it(
     firepanda: ModuleType,
 ) -> None:
-    """And the refusal names the character, so a caller can tell which mistake it was.
+    """The fifth and last of these names to be given an engine.
 
-    pandas answers all of these, so every one of them is a gap and not a
-    difference of opinion. The refusal is the honest shape of a gap: the board
-    reads it as unimplemented and a caller reads a sentence saying what is
-    missing, where a literal search would have read as a wrong answer.
+    It was the last because it needed two things the other four did not. It has
+    to know the text each match covered rather than only where the pattern
+    ended, which is a program carrying a save instruction around every group.
+    And the loop Arrow runs down a row to replace is not the loop it runs to
+    count, in three separate ways, which took a second set of measurements.
 
-    The other four used to be here and answer these patterns now. What keeps
-    `replace` out is that it needs the text each match covered rather than where
-    it ended, and that the loop it runs over a row is not the loop `count` runs,
-    which is a second set of measurements nobody has taken yet.
+    `test_str_replace_regex.py` is where those three ways are asserted one at a
+    time. What is checked here is only that the ten patterns this file used to
+    watch this name refuse are answered the way pandas answers them.
     """
-    mine = made(firepanda)
+    mine, them = made(firepanda), theirs()
     for pattern in ("a.c", "^a", "a+", "a|b", "[ab]", "a*", "a?", r"a\b", "(a)", "a{2}"):
-        with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-            mine.str.replace(pattern, "-", regex=True)
-        assert "regular expression" in str(caught.value), pattern
+        got = without_the_missing(mine.str.replace(pattern, "-", regex=True).tolist())
+        want = without_the_missing(them.str.replace(pattern, "-", regex=True).tolist())
+        assert got == want, pattern
 
 
 @needs_pandas

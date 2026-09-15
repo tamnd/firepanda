@@ -418,7 +418,7 @@ jobs:
       # This one builds every differential program before it runs the first, so it
       # carries the compile time for all the steps below it.
       # The ceiling is fifteen rather than eight because the number of programs
-      # grows with the comparison and nine of them is already past what eight
+      # grows with the comparison and ten of them is already past what eight
       # minutes covered. tools/build_differential.sh builds four at a time, which
       # is what the runner has cores for, so the compile is about two rounds.
       - run: pixi run differential

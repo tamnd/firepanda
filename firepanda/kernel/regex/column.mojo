@@ -19,9 +19,12 @@ this library's own is a feature that is missing, and those are two different
 exceptions in Python. Handing the kernel a compiled program keeps that decision
 out of the kernel and in the one place that can make it.
 
-Comparison against a null is null, the same as every other kernel here, and it is
-handled the same way: the loop writes whatever falls out and the repair at the
-end of each morsel clears the rows where the input was missing.
+Comparison against a null is null, the same as every other kernel here. The two
+that answer a number or a flag handle it the usual way, which is to write
+whatever falls out and let the repair at the end of each morsel clear the rows
+where the input was missing. The one that answers text writes the null itself,
+because a builder has to be told what a row is before it can be told what the
+next one is.
 
 ### What the twin checks, and what checks the engine
 
@@ -42,13 +45,14 @@ have in the repository at all.
 from std.collections.span import Span
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine
 from firepanda.kernel.regex.program import Program
+from firepanda.kernel.regex.replace import Rewrite, replaced
 
 
 def text_matches_regex(
@@ -135,3 +139,63 @@ def text_count_regex(
 
     out.data.validity = validity^
     return out^
+
+
+def text_replace_regex(
+    a: StringArray, program: Program, rewrite: Rewrite
+) raises -> StringArray:
+    """Writes every element out with every match of a compiled pattern swapped.
+
+    The third kernel here and the first whose answer is text, which is what
+    makes it the odd one of the three. How long a row comes out is not known
+    until the scan has run, so the rows go into a builder one at a time rather
+    than into a column allocated up front, and that is also why this one is not
+    split into morsels: a builder is one buffer with one cursor, and handing
+    four threads a share of it is a different design rather than a flag. The
+    literal `text_replace` is serial for the same reason and document 80 has
+    the note about what closes it, which is a builder per morsel and a join.
+
+    Everything the row costs is still paid once per column rather than once per
+    row. The pattern is compiled before the first row, the replacement is read
+    before the first row, and the machine, the offsets, the slots and the
+    output buffer are made here and handed to every row.
+
+    Args:
+        a: The column.
+        program: The pattern, already compiled with captures. A program that did
+            not compile replaces nothing, which no caller should ever see,
+            because the layer holding the call raises on a refusal before
+            reaching here.
+        rewrite: The replacement, already read, and refused the same way.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    var machine = Machine(program)
+    var points = List[UInt32]()
+    var offsets = List[Int]()
+    var found = List[Int32]()
+    var out = List[UInt8]()
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        decode_into(bytes, points)
+        replaced(
+            program,
+            rewrite,
+            bytes,
+            Span(points),
+            machine,
+            offsets,
+            found,
+            out,
+        )
+        built.append(Span(out))
+    return built^.finish()
