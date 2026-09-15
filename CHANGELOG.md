@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a comma FROM is reordered so that no pair of relations is left crossed
+
+A comma between two tables in a `FROM` is a join with no condition and the clause nests left, so the order the relations are written in is the order they are joined in. A relation whose equalities are all with something further along the list leaves a product in the middle of the chain, and a product of two real tables is refused rather than slow, so the query does not run at all. `FROM a, b, c WHERE a.x = c.x AND b.y = c.y` is that query and `FROM a, c, b` is the same query written in an order that works. Issue #309.
+
+The new pass keeps the first relation where the query put it and then repeatedly takes the first one left that has an equality with something already taken. It changes nothing at all if that ever fails, because a relation tied to nothing already taken is a product the query really did ask for and leaving it as written is what keeps this from turning one refusal into a different one. An equality counts when both sides are a plain column and each of them is handed out by exactly one relation, which is the same test predicate pushdown uses to decide whether an equality can become a join key.
+
+There is no cost model in it and no cardinality estimate. Among the orders with no product in them it takes the first one it finds, which is the one closest to what the query wrote, and `docs/specs/planner/03-join-ordering.md` says when choosing between them is worth writing.
+
+TPC-H q8 and q9 are why this is here. Both write the table every one of their equalities is against third in a list of six or eight, so the first join in the chain paired every part with every supplier and nothing after it ever ran. Both agree with DuckDB now, over 2 rows and 173 rows, and `pixi run tpch` covers fourteen of the twenty two queries.
+
 ### Added: `REGEXP_MATCHES` and `REGEXP_REPLACE` in SQL, which is the last ClickBench query
 
 The two names were in the catalog and reached no kernel, so a query holding either was refused by name. They run now, over the RE2 engine that landed in 0.8.5, and ClickBench q28 is the reason: it is a `REGEXP_REPLACE` pulling the host out of a URL and it was the one query of the 43 that firepanda could not be asked at all.
