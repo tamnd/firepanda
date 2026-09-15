@@ -3,7 +3,7 @@
 # install rather than against this file; see docs/specs/01-research-2026.md.
 [workspace]
 name = "firepanda"
-version = "0.8.4"
+version = "0.8.5"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
@@ -129,7 +129,7 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # would honour that literally.
 #
 # The builds themselves are in a script rather than in a chain of && here,
-# because there are nine of them now and one after another took longer than the
+# because there are ten of them now and one after another took longer than the
 # job is allowed. The script says what it does with them.
 differential-build = { cmd = "bash tools/build_differential.sh", default-environment = "differential", inputs = [
   "firepanda/**",
@@ -143,6 +143,7 @@ differential-build = { cmd = "bash tools/build_differential.sh", default-environ
   "build/differential/regex",
   "build/differential/regex-match",
   "build/differential/regex-count",
+  "build/differential/regex-replace",
   "build/differential/tpch",
 ] }
 
@@ -206,6 +207,18 @@ differential-regex-match = { cmd = "./build/differential/regex-match", default-e
 # needs no corpus.
 # See docs/specs/79-counting-is-not-asking-four-times.md section 7.
 differential-regex-count = { cmd = "./build/differential/regex-count", default-environment = "differential", depends-on = ["differential-build"] }
+
+# And the question after that one, which is the first whose answer is text. A
+# replacement runs a third loop, and it is not the loop that counts even though
+# it lives in the same library and reads the same pattern: it does not cut the
+# row, it moves in characters rather than bytes, and it copies a character
+# across where the count simply steps. It is also the first thing here that asks
+# the engine where each group matched rather than only whether the pattern
+# ended, because a replacement can name a group. This runs the same corpus over
+# the same sixteen texts with three replacements and compares the rows. It needs
+# no corpus.
+# See docs/specs/80-replacing-is-a-third-loop.md section 7.
+differential-regex-replace = { cmd = "./build/differential/regex-replace", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a

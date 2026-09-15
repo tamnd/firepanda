@@ -19,6 +19,27 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+## [0.8.5] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with one behaviour change that callers have to read, a regular expression engine where there was a refusal, whole TPC-H queries compared against DuckDB for the first time, and two pieces of the execution engine doing less work for the same answer.
+
+The behaviour change first, because it is the one that can break a program that works today. A column the query did not name used to come back as `__expr_0` and now comes back named after what was written, so `SELECT sum(x) FROM t` gives a column called `sum(x)`. That is what DuckDB does and the name is produced by the printer that already prints an AST back to SQL, which is why the two agree on as much of it as they do without either aiming at the other. A caller reading a result column back by the name firepanda invented has to read it back by the new name, and a caller that wrote an alias is unaffected. It is also what made TPC-H q18 agree with DuckDB, which was the only thing left between that query and agreement.
+
+The regular expression work is a whole front end and a whole engine in one release. Last release the five pattern methods on the `str` accessor answered a literal exactly and refused anything with a metacharacter in it, by name, rather than searching for a `.` literally and saying nothing. Now there is a parser that reads Python's grammar and decides which engine answers a call, a compiler and a matching engine for the RE2 side, and `contains`, `match`, `fullmatch` and `count` wired to them. The parser copies pandas rather than improving on it, including two places where pandas walks into only two of the seven node kinds that can hold another node, because a router that disagrees with pandas sends a working pattern to an engine that will not run it. It is checked by asking both questions of thirty thousand generated patterns against a live pandas with a ceiling of zero disagreements, and its first run found eighty nine, every one of them a rule in Python's grammar that had to be read rather than reasoned about.
+
+TPC-H is now asked of both engines over the same bytes. `pixi run tpch` runs whole queries through firepanda and through DuckDB and compares the answers row for row, over DuckDB's own generated data exported to Parquet and DuckDB's own query text, so there is no second copy of either to drift from the first. The four comparisons that were already here ask about one expression at a time, which is the right size for a kernel and the wrong size for a query, since a join that drops a row and a sort that is not stable both go through them untouched. Five queries agree at scale factor 1 as of this release. The eight `DECIMAL(15,2)` columns are exported as `DOUBLE`, because there is no decimal type here yet, so this is a comparison against DuckDB over this data rather than against the published answer set.
+
+Two pieces of the engine got faster and both were found by measuring rather than by guessing. Every reader produces a frame in one chunk, and a frame in one chunk ran a filtering line about 1.65 times slower than the same rows in chunks, so every query anyone runs over a file started on the slow side of that. New benchmark rows ruled out the cache answer and left the batched prefix, which the driver only runs once there is more than one chunk to hand out. `Buffer` carries an offset into its allocation now, so a window is the same allocation seen from further in, and `Scan` cuts any chunk taller than a morsel into morsel sized windows that cost nothing to make. On a quiet i9-13900K at four million rows, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 against 2.00 for the same rows already in chunks, so the row that was two and a half times slower sits inside the other row's spread. Separately, a filter that keeps several columns counted the same mask once per column to find out where each morsel's output starts; it counts once for the chunk now, which is 1.22 times on four million rows in one chunk and does not move a filter over a single column at all, which is the row that says where the saving comes from.
+
+The offset is not free and the measurement is worth recording. `Buffer` went from three machine words to four and the packaged Python extension's text grew by 516,480 bytes, past the size budget the extension tests keep. Building the same commit four ways says 461,792 of those bytes come from the field existing at all, since one unused `Int` added to `Buffer` and read nowhere costs almost the same, and that none of it comes from the window methods or from the scan. The budget went from ten mebibytes to eleven with the measurement written next to it, and issue #811 has what to try to get it back.
+
+On the planner side, a predicate is now sent past every join that keeps its left rows, which is the pushdown that a left join blocked before.
+
+Five wrong answers are fixed and three of them were queries that raised rather than queries that lied. A correlated subquery that counts answered null over an empty group where SQL says zero, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped. A mean over a column of times answered a point in time from the frame and a count of seconds from SQL, and both halves passed every test of themselves, because two paths read two different tables about what a reduction produces. Which side of a `JOIN` a table was written on decided whether the query ran, since the build side was read with a borrow that only a column of exactly one chunk has. A binary that used both `read_parquet` and `std.python` did not link, because one C function was declared twice with two return types. And a column the reader could not name is now named.
+
+The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
 
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
@@ -33,6 +54,20 @@ A nested column is the one shape a window cannot be taken of, so a chunk that ho
 On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
 
 The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+
+### Added: `str.replace` answers a regular expression
+
+The last of the five pattern methods, and the first whose answer is text rather than a bit or a number. `df["a"].str.replace(r"(\w+)@(\w+)", r"\2 at \1", regex=True)` answers where it used to raise. Issue #8 M6.
+
+Replacing is a third loop. It is not the loop that counts, even though it lives in the same Arrow library and reads the same pattern, and it differs in three ways that all change answers. It does not cut the row, so `str.replace("^a", "#")` on a row of four letters replaces once where `str.count("^a")` on the same row is four. It moves a character at a time rather than a byte at a time, so a pattern that can match nothing puts six markers in `héllo` where the count of the same pattern is seven. And when it refuses an empty match that lands where the last one ended it copies a character across rather than simply stepping, which is why `str.replace("a*", "#", regex=True)` on `abc` is `#b#c#` where Python's own `re.sub` writes `##b#c#`.
+
+The replacement has a grammar of its own, which is RE2's and not Python's. `\0` is the whole match, `\1` through `\9` are the groups, two backslashes are one, `\10` is group one followed by a zero rather than group ten, and anything else after a backslash is a `ValueError` with the message pandas gives. This is why `regex=True` now reaches the engine even for a pattern holding no metacharacter: `str.replace("a", "\\\\", regex=True)` writes one backslash and the same call with `regex=False` writes two, on the same one letter pattern, so the replacement decides the path as much as the pattern does.
+
+The engine gained captures. A program can be compiled with a save instruction on either side of every group, and a machine running one carries a copy of the slots per thread, so the four methods that only need a yes or no keep exactly the program and the loop they had. The thread walk became recursive to do it, because a save has to write a slot, walk on, and put the slot back for the thread behind it. `findall`, `extract` and `extractall` were waiting on this as much as this method was.
+
+Two shapes are refused rather than answered. A count with a pattern, because Arrow answers that out of a fourth loop which has neither the empty match rule nor a cursor, so `str.replace("a*", "#", n=5)` puts five markers at the front of a row it then leaves alone and `str.replace("\\b", "#", n=1)` raises on every row. The refusal is narrowed to the calls that would have reached the engine, so a count with an ordinary pattern still works exactly as it did. And an empty pattern with a backslash in the replacement, because pandas sends an empty pattern to Python's `re.sub` instead and the two grammars only agree while there is no backslash to disagree about.
+
+`pixi run differential-regex-replace` is new and runs the same thirty thousand generated patterns over the same sixteen texts as the other three regular expression differentials, with three replacements each: a plain marker for the scan, a marker holding the whole match for the ends, and a bare group reference for the capture slots. It compares 7668 patterns and disagrees with pandas on none of them. Document 80 has all of it.
 
 ### Added: `str.count` answers a regular expression
 
@@ -67,6 +102,20 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
+### Changed: a condition written into every branch of an OR is carried out of it
+
+Predicate pushdown splits a filter at its `and` nodes, which reaches nothing when the filter is one `or`. It now also reads a disjunction and carries out of it any condition every branch holds, as a conjunct of its own that can then be pushed like any other. `(a AND b) OR (a AND c)` carries `a`. Issue #309.
+
+Three valued logic needs no exception. A filter keeps a row when its predicate is true, and if a disjunction is true then one of its branches is, and if that branch is true then every conjunct in it is true. So the condition is true wherever the `or` is, and asking it as well changes nothing about which rows survive.
+
+The `or` is left exactly as it was rather than having the condition taken out of it. The copy left behind runs on rows the pushed condition has already thinned, and taking it out means deciding what a branch with nothing left in it means. Adding a condition and not removing one is the smaller change and the same rows come out.
+
+TPC-H q19 is why this is here. Its whole `WHERE` is one disjunction of three branches, and each branch writes out `p_partkey = l_partkey` for itself rather than the query stating it once outside them. Nothing could reach the product under the filter, so the query did not run at all. It now answers what DuckDB answers over 1 row, and eleven of the twenty two queries are in `pixi run tpch`.
+
+### Added: an expression can be copied rather than shared
+
+`Expressions.duplicate` returns a second copy of a whole expression tree, sharing no index with the first. Handing one index to two plan nodes looks free and is not: binding writes a column's position into the node it resolved, two plan nodes have two schemas, and the second one to be bound overwrites what the first one needs. A pass that wants to put an expression somewhere it already is has to copy it, and this is the copy. Issue #309.
 
 ### Added: the five TPC-H queries that already answered are now compared
 
@@ -7458,7 +7507,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/tamnd/firepanda/releases/tag/v0.8.5
 [0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
