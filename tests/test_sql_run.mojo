@@ -3646,6 +3646,56 @@ def test_a_bare_correlation_over_a_derived_table_is_not_claimed_yet() raises:
         )
 
 
+def test_a_table_named_on_both_sides_of_a_correlation_shadows() raises:
+    # TPC-H q17's shape. The subquery's FROM is lowered into the caller's
+    # scope, because a condition reading both sides of the correlation can only
+    # be written where both sides are in reach, so there are two `sales` in one
+    # scope here. SQL says the inner one shadows the outer, which makes `qty`
+    # and `price` under the subquery its own copy's.
+    #
+    # Read the other way the subquery would fold over every row the outer
+    # `sales` handed it, which is 246 for every band rather than 7, 2 and 1 for
+    # bands 3, 20 and 40, and no band would be kept at all.
+    same(
+        answer(
+            (
+                "SELECT band FROM sales, tiers WHERE qty = band AND rate >"
+                " (SELECT sum(price) * 100 FROM sales WHERE qty = band)"
+            ),
+            "band",
+        ),
+        [40],
+        "band",
+    )
+
+
+def test_the_shadowed_table_is_back_under_its_own_name_after() raises:
+    # The line between the two queries goes back where it was once the
+    # subquery is lowered, so `sales` written in the rest of the WHERE is the
+    # outer one again and means what it meant before the subquery was written.
+    same(
+        answer(
+            (
+                "SELECT band FROM sales, tiers WHERE rate > (SELECT sum(price)"
+                " * 100 FROM sales WHERE qty = band) AND sales.qty = band"
+            ),
+            "band",
+        ),
+        [40],
+        "band",
+    )
+
+
+def test_the_same_table_twice_in_one_from_is_still_refused() raises:
+    # Shadowing is across the line and not within it. Two relations of the same
+    # name in one FROM is a query that cannot say which it means, and letting
+    # the second shadow the first there would answer half of it silently.
+    with assert_raises(
+        contains="'sales' is the name of more than one table in this FROM"
+    ):
+        _ = run("SELECT qty FROM sales, sales", session())
+
+
 def test_a_subquery_over_no_table_runs() raises:
     same(
         answer(

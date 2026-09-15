@@ -7,11 +7,15 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Sixteen agree today. The other six are refused rather than wrong, and they are
-refused in four places rather than six: a table named on both sides of a
-correlation, a left join on two key pairs, a scalar subquery in a HAVING, and a
-join condition that is not an equality. `recorded` below carries one reason per
-query and issue #816 has the four written out.
+Sixteen agree today. Five are refused rather than wrong, and they are refused in
+four places rather than five: a cross join with more than one row on the right,
+a left join on two key pairs, a scalar subquery in a HAVING, and a join
+condition that is not an equality. `recorded` below carries one reason per query
+and issue #816 has the four written out.
+
+The twenty second is q17, which runs and answers something DuckDB does not, on a
+sum over no rows being null in SQL and zero here. That is the worse kind of gap
+and `disagreed` below is the shorter list it goes on. Issue #838.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -120,7 +124,7 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Six entries and four reasons between them, which is the useful thing the
+    Five entries and four reasons between them, which is the useful thing the
     list says. Issue #816 has the four written out with the refusal each one
     comes back with.
 
@@ -130,13 +134,11 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 2 or number == 17:
+    if number == 2:
         return String(
-            "a table named on both sides of a correlation. The subquery's FROM"
-            " is lowered into the caller's scope, because a condition reading"
-            " both sides can only be written where both are in reach, and two"
-            " relations of the same name in one scope is the thing that scope"
-            " refuses. Inner shadows outer is the rule it wants. Issue #816"
+            "a cross join whose right side is more than one row, which is the"
+            " whole frame join rather than a column added as each chunk goes"
+            " past. Issue #816"
         )
     if number == 20:
         return String(
@@ -152,6 +154,35 @@ def recorded(number: Int) -> String:
         return String(
             "a join condition that is not an equality, which q13 writes in a"
             " LEFT JOIN ON and q21 correlates an EXISTS through. Issue #816"
+        )
+    return String()
+
+
+def disagreed(number: Int) -> String:
+    """Why a query that answers differently from DuckDB is allowed to.
+
+    A refusal is a query this engine does not run and is what `recorded` above
+    covers. This is the other kind of gap, which is worse and so is kept
+    shorter: a query that runs, answers, and answers something DuckDB does not.
+    The expression differential next door carries one of these for the same
+    reason. Leaving the query out of the list hides it, and failing the run on
+    it stops every other query from being checked, so it is written down with
+    the issue that closes it and printed beside the difference every run.
+
+    One entry. A query that agrees where one of these is written is stale and
+    fails, the same way a refusal that stops being a refusal does.
+
+    Args:
+        number: The query number.
+
+    Returns:
+        The reason, or the empty string if a difference is not expected.
+    """
+    if number == 17:
+        return String(
+            "sum over no rows, which is null in SQL and zero here. No row"
+            " survives q17's correlated filter at this scale, so the whole"
+            " answer is the one value the two engines part on. Issue #838"
         )
     return String()
 
@@ -253,10 +284,21 @@ def test_the_queries_answer_what_duckdb_answers() raises:
                 PythonObject(written[1]),
             )
         )
+        var parting = disagreed(number)
         if differs:
-            print(String("q", number, " differs: ", differs))
+            if parting:
+                print(String("q", number, " differs, for a written reason:"))
+                print("   ", differs)
+                print("    because", parting)
+            else:
+                print(String("q", number, " differs: ", differs))
+                wrong.append(number)
             print()
-            wrong.append(number)
+        elif parting:
+            print(String("q", number, " agrees, and this says it does not:"))
+            print("   ", parting)
+            print()
+            stale.append(number)
         else:
             print(String("q", number, " agrees, over ", len(answer), " rows"))
             agreed += 1
@@ -296,8 +338,9 @@ def test_the_queries_answer_what_duckdb_answers() raises:
             String(
                 len(stale),
                 (
-                    " TPC-H queries answer where a refusal is recorded, so the"
-                    " record is stale and `recorded` has to drop them"
+                    " TPC-H queries answer, or agree, where a refusal or a"
+                    " difference is recorded, so the record is stale and"
+                    " `recorded` or `disagreed` has to drop them"
                 ),
             )
         )

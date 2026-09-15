@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a table named on both sides of a correlation shadows rather than collides
+
+`SELECT band FROM sales, tiers WHERE qty = band AND rate > (SELECT sum(price) * 100 FROM sales WHERE qty = band)` came back with `'sales' is the name of more than one table in this FROM`, and the query it was refusing is ordinary SQL. TPC-H q17 is written that way, over `lineitem`, and so is q2 over `partsupp`. Issue #816.
+
+A correlated subquery is lowered into the scope the query around it is using rather than a scope of its own, because a condition that reads both sides of the correlation can only be written where both sides are in reach. That is what puts two queries' table names in one list, and two relations of the same name in one list is exactly what that list refuses. It is right to refuse it within one query, where a column written in front of the name cannot say which relation it means, and wrong to refuse it across a correlation, where SQL says the inner one shadows the outer.
+
+So the scope draws a line marking where the innermost query's names begin. A repeat is refused above the line and allowed across it. A relation name is looked up from the end, so the innermost query answers first. That only decides anything while a correlated subquery is being lowered, since a repeat within one query is still refused, and there it decides the right way.
+
+A bare column is the part that needed more than a lookup. `qty` in the query above is a column of both copies of `sales`, and handing the name to binding gets an ambiguity refused for a query that does not have one, because binding sees one list of columns and cannot tell a name two queries have from a name one query has twice. Under the line the name now goes to the innermost relation in reach that has it, pinned to that relation rather than left to be found. Two relations within the same query having it is a real ambiguity and is still binding's to report. So is a derived table, which has no relation number to pin to, for the same reason the qualified path leaves one alone.
+
+The line is saved and put back beside how far reach went, so a correlated subquery inside a correlated subquery nests rather than flattens.
+
+TPC-H q17 runs now, where it used to refuse, and running it found the next thing. No row survives its correlated filter at scale 0.01, so its whole answer is one sum over no rows, and a sum over no rows is null in SQL and zero here. `pixi run tpch` grew a second and shorter list for that, `disagreed`, which is the same device the expression differential already uses: a query that runs and answers something DuckDB does not is a worse gap than one that refuses, so it is written down with the issue that closes it and printed beside the difference every run rather than left out of the list or allowed to stop the run. Issue #838 is that one.
+
+q2 and q20 are both past the names as well and stop on operator limits instead, q2 on a cross join whose right side is more than one row and q20 on a left join with two key pairs. Sixteen of the twenty two agree, five are refused in four places, and q17 is the one on the second list.
+
 ### Added: a correlated subquery may write its correlation without a qualifier in front of it
 
 `SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM sales WHERE qty = band)` is a correlated subquery, because `band` is a column of `tiers` and not one of `sales`. Written that way it was refused with `there is no column named 'band' here`, and the same query with `tiers.band` in place of `band` ran. Nothing but the spelling was different. Issue #309.
@@ -18,7 +34,7 @@ It is asked before anything is lowered, because the shape has to be picked befor
 
 A bare name the subquery does have is still the subquery's own, which is the same rule read the other way and is why `FROM sales WHERE shop = 1` next to a `shops` in the outer query stays uncorrelated.
 
-None of the three TPC-H queries written this way answers yet, and the gap list now says where each one really stops instead of pointing at this. q2 and q17 stop at a table named on both sides of the correlation: the subquery's `FROM` is lowered into the caller's scope, so that a condition reading both sides has somewhere to be written, and two relations of the same name in one scope is the thing that scope refuses. Inner shadows outer is the rule it wants, and it wants a scope that knows which level each name arrived at. q20 is past that and stops on a left join with two key pairs, which is an operator limit and nothing to do with names. `pixi run tpch` is sixteen of twenty two either way, and the six left are refused in four places rather than three.
+None of the three TPC-H queries written this way answered on this alone, and the gap list was redrawn to say where each one really stopped instead of pointing at this. q2 and q17 stopped at a table named on both sides of the correlation, which is the entry above and is fixed. q20 was past that already and stops on a left join with two key pairs, which is an operator limit and nothing to do with names.
 
 ### Added: a decimal literal written against a column is read as a double
 
@@ -34,7 +50,7 @@ Six more expressions went into `pixi run differential-answers`, which asks firep
 
 One of the six disagrees and is recorded rather than removed, because it is the one place where reading a decimal constant as a double is visibly not what DuckDB has. `CAST(n * 2.50 AS BIGINT)` with `n` at five is `CAST(DECIMAL(13,2) 12.50 AS BIGINT)` to DuckDB, and a decimal cast to an integer rounds away from zero, so DuckDB answers 13. firepanda holds the double 12.5 by then and rounds it to even, which is 12, and 12 is also what DuckDB itself answers for `CAST(12.5e0 AS BIGINT)`. The rule is right and the type underneath it is not: a cast to `BIGINT` is a boundary where the far side is an integer rather than a double, so DuckDB never makes a double at all. The two only part on a tie, and only a real decimal type closes it, which is issue #309.
 
-`pixi run tpch` asks all twenty two queries now rather than the eleven that answered, because a refusal is a fact about this engine worth checking and a list of only the ones that work cannot say how far there is to go. Each refused query carries a written reason beside it, a refusal with no reason fails the run, and so does a query that answers where a reason is recorded, which is how a gap that closes stops looking open. Sixteen of the twenty two agree with DuckDB row for row today, and q6, q14 and q22 are three of the ones that moved, each of them on the decimal literals above. The six that are left are refused in three places rather than six: a name the inner query reads from the query around it, a scalar subquery in a HAVING, and a join condition that is not an equality. Issue #816 has the three written out.
+`pixi run tpch` asks all twenty two queries now rather than the eleven that answered, because a refusal is a fact about this engine worth checking and a list of only the ones that work cannot say how far there is to go. Each refused query carries a written reason beside it, a refusal with no reason fails the run, and so does a query that answers where a reason is recorded, which is how a gap that closes stops looking open. q6, q14 and q22 moved on the decimal literals above. Issue #816 carries the running list of what is still refused and where each one stops.
 
 ### Added: a Parquet file with money in it can be read
 
@@ -47,6 +63,7 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+
 ### Added: `(?i)` inside a pattern, spent before the first row is read
 
 `pandas.Series(["ABC"]).str.contains("(?i)abc")` is True, and so is every other method of the `str` accessor that reads a pattern. The flag is the last of the seven inline letters both engines have and this compiler refused, and it was the largest single family of patterns the match differential was holding out. Issue #8 M6.
