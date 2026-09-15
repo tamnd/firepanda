@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a Parquet file with money in it can be read
+
+`read_parquet` on TPC-H's `lineitem` failed with `arrow: unsupported format string 'd:15,2,128'`, which is Arrow's decimal128 with precision 15 and scale 2, and is what the specification says `l_quantity`, `l_extendedprice`, `l_discount` and `l_tax` are. Four of the sixteen columns of the table every TPC-H query starts from could not be read, and the read failed outright rather than skipping them. It is not only TPC-H either, since a decimal is the ordinary type for money in a warehouse. Issue #812.
+
+firepanda has no decimal column, so reading one means dividing an exact integer by a power of ten, and a hundred is not a power of two. Money that was exact stops being exact and a sum over six million rows of it depends on the order they were added in. That is the whole reason somebody wrote a decimal, so it does not happen without being asked: `ParquetOptions` has a `decimals_as_double` flag, it is off, and off is the refusal. This is the same decision the date64 refusal next to it already makes, that a conversion nobody asked for is worse than an error because an error gets read.
+
+The refusal says what to do now. It names the type as a decimal, says why there is no column for it, and names both ways out, which is the flag or a `CAST(column AS DOUBLE)` written into the query. An Arrow format string on its own names nothing a caller would recognise.
+
+With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
+
+sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+
 ### Added: `str.extract`, whose answer is as wide as the pattern says
 
 `pandas.Series(["ab1"]).str.extract(r"([a-z])(\d)")` answers a frame of two columns and `.str.extract(r"([a-z])\d")` answers a frame of one, for the same column. This is the first name on the `str` accessor whose width varies per call and is still known before a single row is read, and the first of the three methods document 81 left unwired. Issue #8 M6.
