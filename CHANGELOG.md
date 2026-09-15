@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a decimal literal written against a column is read as a double
+
+`SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07` used to come back with a refusal, because `0.05` is a `DECIMAL(3,2)` to DuckDB and a plan has no decimal column. That refusal covered more than it needed to. The literal in that query never stays a decimal: it meets `l_discount`, which is a double here, and DuckDB casts it to one before the comparison happens. So there was a right answer available and the engine was not giving it.
+
+Now a decimal literal written underneath anything else lowers to the double DuckDB casts it to, and only a decimal literal that would be the answer's own type is refused. `SELECT 1.1` is still refused and so is `SELECT 1.1 + 2.2`, because there the column handed back would have to be a decimal.
+
+The part that needed care is arithmetic between literals. TPC-H q6 writes its bounds as `l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01`, and the two ways of reading that are not the same query. DuckDB subtracts decimals and gets exactly five hundredths. Lowering each literal to a double first and subtracting gets 0.049999999999999996, and the upper bound lands just under seven hundredths rather than on it, which silently drops every row with a discount of seven hundredths. So the literals are folded first, in the scaled integers a decimal really is, and the fold is converted once, at the same boundary DuckDB converts at. `0.1 + 0.2 = 0.3` answers true here for the same reason it answers true in DuckDB.
+
+Addition, subtraction, multiplication and unary minus fold. Division does not, because DuckDB answers a double for it anyway. The cases where DuckDB saturates at thirty eight digits and quietly drops the carry it asked for do not fold either, and those fall back to double arithmetic, which is no more lossy than what it replaces.
+
+Six more expressions went into `pixi run differential-answers`, which asks firepanda and DuckDB the same expression over the same column and compares the answers. Three of them write arithmetic between literals, which is the case that has a wrong answer waiting in it.
+
 ## [0.8.5] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).

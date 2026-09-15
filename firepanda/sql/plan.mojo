@@ -428,20 +428,28 @@ computed carries no table to tell the two apart. Each is a refusal by
 name rather than a silence, so `pixi run sql-support` lists them and the
 conformance harness can tell a missing feature from a crash.
 
-A decimal literal is refused too, and that one is not about effort. The engine's
-`LogicalType` has no decimal and no 128 bit integer, which is the whole reason
-`firepanda/sql/types.mojo` exists as a second type set. Lowering `1.1` to a
-double would make `1.1 + 2.2` come back `3.3000000000000003` where DuckDB
-answers exactly `3.3`, and a wrong answer with no error attached is the one
-failure this front end is not allowed to have. A refusal is visible and a double
-is not, so the refusal stands until the plan can carry an exact decimal.
+A decimal literal is a case of its own, and where it is written decides it. The
+engine's `LogicalType` has no decimal and no 128 bit integer, which is the whole
+reason `firepanda/sql/types.mojo` exists as a second type set, so an answer
+whose own type would be a decimal has nowhere to go and is refused. That is
+`SELECT 1.1` and it is `SELECT 1.1 + 2.2`, and the refusal is what stops the
+second one coming back `3.3000000000000003`.
+
+Underneath something else it does have somewhere to go, because whatever it
+meets there is not a decimal either and DuckDB casts it to a double at that
+same boundary. So `_lower_operand` folds the literals around it first, exactly,
+in the scaled integers a decimal really is, and converts the fold once. That is
+the difference between `l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01` keeping
+the rows with a discount of seven hundredths and quietly dropping them, since
+the same subtraction done in doubles lands at 0.049999999999999996 and the same
+addition lands below the bound rather than on it.
 
 Which numbers that covers is DuckDB's rule and worth reading off `_number`
 rather than guessing at. A number written with an exponent is a `DOUBLE` to
 DuckDB whatever its digits say, and so is one written with more than 38 digits,
 so both of those lower and hold exactly what DuckDB holds. An integer past a
-`BIGINT` is a `HUGEINT` and is refused by name for the same reason the decimal
-is.
+`BIGINT` is a `HUGEINT` and is refused by name, and that one has no way around
+it at all.
 """
 
 from firepanda.dtype.logical import LogicalType
@@ -604,6 +612,215 @@ def _one_name(ast: Ast, run: UInt32, what: StringSlice) raises -> String:
     return ast.text(ast.at(run, 0))
 
 
+@fieldwise_init
+struct _Exact(Copyable, ImplicitlyCopyable, Movable):
+    """A decimal constant, held the way SQL means it rather than as a double.
+
+    `unscaled` times ten to the minus `scale`, so `0.06` is six and two, and
+    `1.10` is a hundred and ten and two. The reason to hold it this way is that
+    the arithmetic in `_exact_of` is then exact: `0.06 - 0.01` comes out as five
+    hundredths, where the same subtraction in doubles comes out at
+    0.049999999999999996 and moves a `BETWEEN` bound off the value it was
+    written to sit on.
+
+    `ok` is false for every expression that is not a decimal constant, which is
+    most of them.
+    """
+
+    var unscaled: Int128
+    var scale: Int
+    var ok: Bool
+
+
+def _no_exact() -> _Exact:
+    """Says an expression is not a decimal constant.
+
+    Returns:
+        An `_Exact` with `ok` false.
+    """
+    return _Exact(0, 0, False)
+
+
+def _exact_number(text: StringSlice) -> _Exact:
+    """Reads one number literal as an exact decimal, if it is one.
+
+    Only the plain forms. A literal with an exponent is a `DOUBLE` to DuckDB
+    whatever its digits say, and one written with more than
+    `DECIMAL_MAX_WIDTH` digits has run past the widest decimal there is, so
+    neither of those is a decimal constant and neither is folded here.
+
+    An integer comes back with a scale of zero. It is not a decimal on its own,
+    and the caller checks the scale before using the fold, but it has to be
+    read because `0.06 * 2` is a decimal and its right operand is an integer.
+
+    Args:
+        text: The literal as it was written.
+
+    Returns:
+        The constant, or `ok` false.
+    """
+    var unscaled = Int128(0)
+    var digits = 0
+    var after = 0
+    var point = False
+    for i in range(text.byte_length()):
+        var c = text[byte=i]
+        if c == "e" or c == "E":
+            return _no_exact()
+        if c == ".":
+            if point:
+                return _no_exact()
+            point = True
+            continue
+        if c < "0" or c > "9":
+            return _no_exact()
+        digits += 1
+        if digits > Int(DECIMAL_MAX_WIDTH):
+            return _no_exact()
+        unscaled = unscaled * 10 + Int128(Int(ord(c) - ord("0")))
+        if point:
+            after += 1
+    if digits == 0:
+        return _no_exact()
+    return _Exact(unscaled, after, True)
+
+
+def _exact_of(ast: Ast, at: UInt32) -> _Exact:
+    """Works out what an expression of number literals is worth, exactly.
+
+    This is the piece that lets a decimal literal be lowered at all. The plan
+    has no decimal column, so a decimal literal has to become a double
+    somewhere, and where it becomes one decides whether the answer is right.
+    DuckDB does the decimal arithmetic in decimals and casts the result once,
+    at the point the result meets something that is not a decimal. Doing the
+    same here means folding the literals first and converting the fold, rather
+    than converting each literal and adding doubles.
+
+    `0.06 - 0.01` is the case that matters, out of TPC-H q6. Exactly it is five
+    hundredths and the double nearest five hundredths is what DuckDB compares
+    against. In doubles it is 0.049999999999999996, which is a different
+    number, and the same query run the other way loses every row with a
+    discount of seven hundredths.
+
+    Addition and subtraction take the wider scale and multiplication adds the
+    two, which is DuckDB's rule and the one `arith.mojo` derives types by.
+    Division is not folded, because DuckDB answers a `DOUBLE` for it and double
+    division is what the plan does anyway. Neither are the cases where DuckDB
+    saturates at thirty eight digits and quietly drops the carry it asked for:
+    those give back `ok` false, the operands are lowered as doubles and the
+    arithmetic happens in doubles, which is no more lossy than what it replaces.
+
+    Args:
+        ast: The arenas the expression lives in.
+        at: The expression.
+
+    Returns:
+        The value and its scale, or `ok` false when the expression is anything
+        other than number literals under `+`, `-` and `*`.
+    """
+    if at == NO_NODE:
+        return _no_exact()
+    var node = ast.exprs[Int(at)]
+
+    if node.kind == EXPR_LITERAL:
+        if node.b != LITERAL_NUMBER:
+            return _no_exact()
+        return _exact_number(ast.text(node.payload))
+
+    if node.kind == EXPR_UNARY:
+        var over = _exact_of(ast, node.a)
+        if not over.ok:
+            return _no_exact()
+        var op = ast.text(node.payload)
+        if op == "-":
+            return _Exact(-over.unscaled, over.scale, True)
+        if op == "+":
+            return over
+        return _no_exact()
+
+    if node.kind != EXPR_BINARY:
+        return _no_exact()
+    var op = ast.text(node.payload)
+    if op != "+" and op != "-" and op != "*":
+        return _no_exact()
+    var left = _exact_of(ast, node.a)
+    if not left.ok:
+        return _no_exact()
+    var right = _exact_of(ast, node.b)
+    if not right.ok:
+        return _no_exact()
+
+    if op == "*":
+        var scale = left.scale + right.scale
+        if scale > Int(DECIMAL_MAX_WIDTH):
+            return _no_exact()
+        return _fitted(left.unscaled * right.unscaled, scale)
+
+    var wider = max(left.scale, right.scale)
+    var a = _raised(left, wider)
+    var b = _raised(right, wider)
+    if not a.ok or not b.ok:
+        return _no_exact()
+    if op == "+":
+        return _fitted(a.unscaled + b.unscaled, wider)
+    return _fitted(a.unscaled - b.unscaled, wider)
+
+
+def _raised(value: _Exact, scale: Int) -> _Exact:
+    """The same number written with more digits after the point.
+
+    Args:
+        value: The constant.
+        scale: The scale to write it at, which is at least its own.
+
+    Returns:
+        The constant at that scale, or `ok` false when it no longer fits
+        thirty eight digits.
+    """
+    var out = value.unscaled
+    for _ in range(scale - value.scale):
+        out *= 10
+    return _fitted(out, scale)
+
+
+def _fitted(unscaled: Int128, scale: Int) -> _Exact:
+    """A result, if it still fits the widest decimal there is.
+
+    Args:
+        unscaled: The value, times ten to the `scale`.
+        scale: How many digits sit after the point.
+
+    Returns:
+        The constant, or `ok` false when it wants more than
+        `DECIMAL_MAX_WIDTH` digits, which is where DuckDB saturates and this
+        gives up instead.
+    """
+    var size = unscaled if unscaled >= 0 else -unscaled
+    var limit = Int128(1)
+    for _ in range(Int(DECIMAL_MAX_WIDTH)):
+        limit *= 10
+    if size >= limit:
+        return _no_exact()
+    return _Exact(unscaled, scale, True)
+
+
+def _as_double(value: _Exact) -> Float64:
+    """The double DuckDB would get by casting this decimal to one.
+
+    Args:
+        value: The constant.
+
+    Returns:
+        The unscaled value divided by ten to the scale, both of which are exact
+        up to fifteen digits, so the division rounds once and lands where
+        DuckDB lands.
+    """
+    var ten = 1.0
+    for _ in range(value.scale):
+        ten *= 10.0
+    return Float64(value.unscaled) / ten
+
+
 def _number(text: String) raises -> Value:
     """Turns the text of a number literal into a constant.
 
@@ -629,9 +846,13 @@ def _number(text: String) raises -> Value:
     as written, leading and trailing zeros included, which is why
     `1.5000000000000000000000000000000000000000` is a double and `1.5` is not.
 
-    The fourth is the decimal literal that does fit, and that one is refused for
-    the reason in the module docstring: the plan has no exact decimal and a
-    double in its place is a wrong answer nobody is told about.
+    The fourth is the decimal literal that does fit, and that one depends on
+    where it was written. Inside a larger expression it never reaches here:
+    `_lower_operand` folds the literals around it exactly and converts the fold
+    to a double, which is what DuckDB does and lands on the same number. What
+    reaches here is a decimal literal that is a whole expression on its own,
+    where the answer's own type would be the decimal, and that is refused
+    because the plan has no decimal column to put it in.
 
     Args:
         text: The literal as it was written, already decoded.
@@ -670,9 +891,11 @@ def _number(text: String) raises -> Value:
                 "firepanda does not lower the decimal literal ",
                 text,
                 (
-                    " yet, because a plan cannot hold an exact decimal and a"
-                    " double in its place would answer 1.1 + 2.2 with"
-                    " 3.3000000000000003"
+                    " on its own, because the answer's type would be the"
+                    " decimal and a plan has no decimal column. Written inside"
+                    " a larger expression it is folded exactly and read as a"
+                    " double, the way DuckDB casts one. Write it over a column,"
+                    " or as 1.1e0 to ask for the double"
                 ),
             )
         )
@@ -1970,6 +2193,49 @@ def _read_keys(
     return exprs.rebuild(root, grown^)
 
 
+def _lower_operand(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Lowers a piece of a larger expression.
+
+    The same as `_lower_expr` except for one shape, which is a decimal constant:
+    a number literal with a point in it, or an expression of number literals
+    with a point somewhere in it. `_lower_expr` refuses that, because on its own
+    the answer's type is the decimal and the plan has no decimal column.
+    Underneath something else it has one, because whatever it meets is not a
+    decimal either, and DuckDB casts it to a double at exactly this boundary.
+    So this folds it exactly and hands over the double.
+
+    Which is why every place that lowers a child of an expression calls this
+    and every place that lowers a whole clause calls `_lower_expr`. Calling the
+    wrong one of the two gives a refusal rather than a wrong answer, which is
+    the direction a mistake here should fall.
+
+    Args:
+        ast: The arenas the SQL expression lives in.
+        at: The expression.
+        plan: Where the lowered expressions go.
+        walk: The aggregates found so far.
+        scope: What the FROM put in reach, for a qualified name.
+        grouped: Whether the query aggregates.
+
+    Returns:
+        The index in the plan's expression arena.
+
+    Raises:
+        If the expression is a shape this does not lower yet.
+    """
+    var exact = _exact_of(ast, at)
+    if exact.ok and exact.scale > 0:
+        return plan.exprs.literal(Value(_as_double(exact)))
+    return _lower_expr(ast, at, plan, walk, scope, grouped)
+
+
 def _lower_expr(
     ast: Ast,
     at: UInt32,
@@ -2003,6 +2269,21 @@ def _lower_expr(
     if at == NO_NODE:
         raise Error("an expression that is not there")
     var node = ast.exprs[Int(at)]
+
+    # An expression of number literals with a point in it, reached here rather
+    # than through `_lower_operand`, which means nothing above it will turn it
+    # into anything else. Its own type is the decimal, so it is refused for the
+    # same reason a bare decimal literal is. A bare one falls through to
+    # `_number` below, which says it in its own words.
+    if node.kind != EXPR_LITERAL:
+        var whole = _exact_of(ast, at)
+        if whole.ok and whole.scale > 0:
+            raise Error(
+                "firepanda does not lower an expression of decimal literals on"
+                " its own, because the answer's type would be the decimal and a"
+                " plan has no decimal column. Written against a column it is"
+                " folded exactly and read as a double, the way DuckDB casts one"
+            )
 
     if node.kind == EXPR_LITERAL:
         var tag = node.b
@@ -2076,7 +2357,7 @@ def _lower_expr(
 
     if node.kind == EXPR_UNARY:
         var op = ast.text(node.payload)
-        var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+        var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
         if op == "-":
             return plan.exprs.unary(UnaryOp.NEG, over)
         if op == "+":
@@ -2089,8 +2370,8 @@ def _lower_expr(
 
     if node.kind == EXPR_BINARY:
         var op = ast.text(node.payload)
-        var left = _lower_expr(ast, node.a, plan, walk, scope, grouped)
-        var right = _lower_expr(ast, node.b, plan, walk, scope, grouped)
+        var left = _lower_operand(ast, node.a, plan, walk, scope, grouped)
+        var right = _lower_operand(ast, node.b, plan, walk, scope, grouped)
         if op == "AND":
             return plan.exprs.call("and", [left, right], True)
         if op == "OR":
@@ -2160,7 +2441,7 @@ def _lower_expr(
         if node.b == NO_NODE:
             built = plan.exprs.literal(Value(null=LogicalType.NULL))
         else:
-            built = _lower_expr(ast, node.b, plan, walk, scope, grouped)
+            built = _lower_operand(ast, node.b, plan, walk, scope, grouped)
         # Right to left, because each arm's else side is the arm below it and
         # the last one's is the ELSE. A chain is nested conditionals rather
         # than a list, so the first WHEN that holds is the one that answers
@@ -2174,13 +2455,13 @@ def _lower_expr(
         var simple = node.a != NO_NODE
         var subject = 0
         if simple:
-            subject = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+            subject = _lower_operand(ast, node.a, plan, walk, scope, grouped)
         var i = len(arms) - 2
         while i >= 0:
-            var when = _lower_expr(ast, arms[i], plan, walk, scope, grouped)
+            var when = _lower_operand(ast, arms[i], plan, walk, scope, grouped)
             if simple:
                 when = plan.exprs.binary(BinaryOp.EQ, subject, when)
-            var then = _lower_expr(ast, arms[i + 1], plan, walk, scope, grouped)
+            var then = _lower_operand(ast, arms[i + 1], plan, walk, scope, grouped)
             built = plan.exprs.conditional(when, then, built)
             i -= 2
         return built
@@ -2212,7 +2493,7 @@ def _lower_expr(
                     )
                 over = plan.exprs.literal(Value(Int64(1)))
             elif len(args) == 1:
-                over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
+                over = _lower_operand(ast, args[0], plan, walk, scope, grouped)
             else:
                 raise Error(
                     String(
@@ -2230,7 +2511,7 @@ def _lower_expr(
         var lowered = List[Int]()
         for i in range(len(args)):
             lowered.append(
-                _lower_expr(ast, args[i], plan, walk, scope, grouped)
+                _lower_operand(ast, args[i], plan, walk, scope, grouped)
             )
         if name == "ifnull":
             # The two argument `COALESCE` under another name, which is what
@@ -2311,7 +2592,7 @@ def _lower_expr(
                         ast.text(inner.payload).as_bytes(), instant_type(want)
                     )
                 )
-        var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+        var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
         var target = engine_type(want)
         # DuckDB rounds a fraction away on the way to an integer and `astype`
         # truncates it, and both are right for the caller that asks, so the flag
@@ -2452,9 +2733,9 @@ def _lower_between(
                 len(bounds),
             )
         )
-    var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
-    var low = _lower_expr(ast, bounds[0], plan, walk, scope, grouped)
-    var high = _lower_expr(ast, bounds[1], plan, walk, scope, grouped)
+    var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
+    var low = _lower_operand(ast, bounds[0], plan, walk, scope, grouped)
+    var high = _lower_operand(ast, bounds[1], plan, walk, scope, grouped)
     var within = plan.exprs.call(
         "and",
         [
@@ -2510,14 +2791,14 @@ def _lower_in(
     var candidates = ast.items(node.children)
     if len(candidates) == 0:
         raise Error("an IN with nothing in the list to be in")
-    var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+    var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
     var arms = List[Int](capacity=len(candidates))
     for i in range(len(candidates)):
         arms.append(
             plan.exprs.binary(
                 BinaryOp.EQ,
                 over,
-                _lower_expr(ast, candidates[i], plan, walk, scope, grouped),
+                _lower_operand(ast, candidates[i], plan, walk, scope, grouped),
             )
         )
     # One disjunction over every member rather than a left fold of pairs. The
@@ -2628,7 +2909,7 @@ def _lower_over(
             )
         over = plan.exprs.literal(Value(Int64(1)))
     elif len(args) == 1:
-        over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
+        over = _lower_operand(ast, args[0], plan, walk, scope, grouped)
     else:
         raise Error(
             String(
@@ -2642,7 +2923,7 @@ def _lower_over(
     var partition = List[Int]()
     var key = String()
     for entry in ast.items(window.children):
-        partition.append(_lower_expr(ast, entry, plan, walk, scope, grouped))
+        partition.append(_lower_operand(ast, entry, plan, walk, scope, grouped))
         key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
 
     var built = plan.exprs.window(
@@ -3497,7 +3778,7 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
     var written = ast.items(source.children)
     var args = List[Int](capacity=len(written))
     for i in range(len(written)):
-        args.append(_lower_expr(ast, written[i], plan, walk, nothing, False))
+        args.append(_lower_operand(ast, written[i], plan, walk, nothing, False))
 
     var schema = Schema()
     schema.append(Field(name, LogicalType.INT64, False))
@@ -3815,8 +4096,8 @@ def _joined(
     for i in range(len(conjuncts)):
         var one = ast.exprs[Int(conjuncts[i])]
         if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
-            var a = _lower_expr(ast, one.a, plan, walk, scope, False)
-            var b = _lower_expr(ast, one.b, plan, walk, scope, False)
+            var a = _lower_operand(ast, one.a, plan, walk, scope, False)
+            var b = _lower_operand(ast, one.b, plan, walk, scope, False)
             var first = _side(plan, a, left, right)
             var second = _side(plan, b, left, right)
             if first == _LEFT and second == _RIGHT:
@@ -4680,7 +4961,7 @@ def _in_join(
         raise Error(
             "a NOT IN reached the semi join, and a NOT IN is a mark join"
         )
-    var key = _lower_expr(ast, node.a, plan, walk, scope, False)
+    var key = _lower_operand(ast, node.a, plan, walk, scope, False)
 
     var inner = _Scope()
     var root = _statement(
@@ -5282,8 +5563,8 @@ def _folded_join(
     for i in range(len(conjuncts)):
         var one = ast.exprs[Int(conjuncts[i])]
         if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
-            var a = _lower_expr(ast, one.a, plan, split, scope, False)
-            var b = _lower_expr(ast, one.b, plan, split, scope, False)
+            var a = _lower_operand(ast, one.a, plan, split, scope, False)
+            var b = _lower_operand(ast, one.b, plan, split, scope, False)
             var first = _side(plan, a, left, right)
             var second = _side(plan, b, left, right)
             if first == _LEFT and second == _RIGHT:
@@ -5465,7 +5746,7 @@ def _mark_join(
         does not lower.
     """
     var node = ast.exprs[Int(at)]
-    var key = _lower_expr(ast, node.a, plan, walk, scope, False)
+    var key = _lower_operand(ast, node.a, plan, walk, scope, False)
 
     var inner = _Scope()
     var root = _statement(
@@ -5820,7 +6101,7 @@ def _quantified_read(
     var node = ast.exprs[Int(at)]
     var every = node.children == 1
     var written = ast.text(node.payload)
-    var value = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+    var value = _lower_operand(ast, node.a, plan, walk, scope, grouped)
     var low = plan.exprs.column(String("__low_", place))
     var high = plan.exprs.column(String("__high_", place))
 
@@ -6002,8 +6283,8 @@ def _exists_join(
     for i in range(len(conjuncts)):
         var one = ast.exprs[Int(conjuncts[i])]
         if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
-            var a = _lower_expr(ast, one.a, plan, walk, scope, False)
-            var b = _lower_expr(ast, one.b, plan, walk, scope, False)
+            var a = _lower_operand(ast, one.a, plan, walk, scope, False)
+            var b = _lower_operand(ast, one.b, plan, walk, scope, False)
             var first = _side(plan, a, left, right)
             var second = _side(plan, b, left, right)
             if first == _LEFT and second == _RIGHT:

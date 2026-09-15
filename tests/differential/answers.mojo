@@ -363,12 +363,24 @@ def expressions() -> List[String]:
     # The number literals that are doubles to DuckDB, over a column so that
     # neither engine folds the expression before it is run. Read back as a
     # whole number or a yes and no, because this compares three types and a
-    # double is not one of them. The decimal literal that fits a decimal is not
-    # here, because firepanda refuses it.
+    # double is not one of them.
     out.append("CAST(n * 1e3 AS BIGINT)")
     out.append("CAST(n + 1.5e3 AS BIGINT)")
     out.append("n * 1.1e-2 < 1")
     out.append("CAST(n * 1.5000000000000000000000000000000000000000 AS BIGINT)")
+
+    # And the decimal literals, which are not doubles to DuckDB. Against a
+    # column both engines cast them to one, and the question these ask is
+    # whether they cast at the same point. The last three write arithmetic
+    # between literals, which DuckDB does in decimals and firepanda folds in
+    # the scaled integers a decimal really is, and a bound written as
+    # `0.06 - 0.01` lands a row either side of itself depending on which.
+    out.append("n * 0.5 > 1")
+    out.append("CAST(n * 2.50 AS BIGINT)")
+    out.append("n + 0.25 < 3")
+    out.append("n * (0.06 - 0.01) < 0.05")
+    out.append("n > 0.06 - 0.01")
+    out.append("CAST(n AS DOUBLE) BETWEEN 0.06 - 0.01 AND 2.50 * 2")
 
     # Nested, because a kernel that is right on a column can still be wrong on
     # what another kernel just built.
