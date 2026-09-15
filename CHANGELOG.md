@@ -27,6 +27,7 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
 ### Added: the five TPC-H queries that already answered are now compared
 
 `pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
