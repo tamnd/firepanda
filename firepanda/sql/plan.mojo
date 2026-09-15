@@ -1582,6 +1582,21 @@ struct _Scope(Movable):
     the join, so a search for it finds two columns and would be refused, and
     the join is what decides which of the two the query gets."""
 
+    var floor: Int
+    """Where the innermost query's own names start.
+
+    A correlated subquery is lowered into the scope the query around it is
+    using, so that a condition reading both can be written where both are in
+    reach. That puts two queries' names in one list, and SQL says the inner
+    query's win: `FROM partsupp` inside a subquery means that `partsupp` even
+    when the query around it named one too, and the outer one is not reachable
+    from in there at all.
+
+    So the list is one query's names above this mark and the queries around it
+    below, and every lookup reads it as two levels rather than one. Zero, which
+    it is for an ordinary query, makes every lookup exactly what it was.
+    """
+
     def __init__(out self):
         """Starts with nothing in reach, which is what a query with no FROM has.
         """
@@ -1591,6 +1606,7 @@ struct _Scope(Movable):
         self.spellings = List[List[String]]()
         self.merged = List[String]()
         self.pinned = List[Int]()
+        self.floor = 0
 
     def add(mut self, var name: String, table: Int) raises:
         """Puts one name in reach.
@@ -1600,9 +1616,10 @@ struct _Scope(Movable):
             table: Which relation it is.
 
         Raises:
-            If something is already called that.
+            If something in the same query is already called that. A name the
+            query around it used is shadowed rather than refused.
         """
-        for i in range(len(self.names)):
+        for i in range(self.floor, len(self.names)):
             if self.names[i] == name:
                 raise Error(
                     String(
@@ -1810,16 +1827,69 @@ struct _Scope(Movable):
     def find(self, name: StringSlice) -> Int:
         """Which relation a name is, or minus one when nothing is called that.
 
+        Searched from the end, so that a name the innermost query used is the
+        one that answers. There is only ever one of any name within a level, so
+        this is the same search it was for a query with nothing around it.
+
         Args:
             name: What was written in front of the column.
 
         Returns:
             The relation, `DERIVED` for a subquery, or `NOT_IN_REACH`.
         """
-        for i in range(len(self.names)):
+        for i in range(len(self.names) - 1, -1, -1):
             if self.names[i] == name:
                 return self.tables[i]
         return NOT_IN_REACH
+
+    def owner(self, name: StringSlice) -> Int:
+        """Which relation a bare column belongs to, when saying so is needed.
+
+        A bare column is normally left for binding to resolve against the
+        schema under it, which is one search in one place and gives the better
+        message when the name means nothing or means two things. That stops
+        working when two levels are in reach at once, because a name both of
+        them have is then two columns of the schema and binding has no way to
+        know that SQL says the inner one wins.
+
+        So this answers only when there is something to say: the name is in
+        reach more than once, and exactly one of the relations at the innermost
+        level has it. Anything else is left alone. A name in reach once is what
+        it always was. A name the innermost level has twice is an ambiguity
+        inside one query, and is refused where an ambiguity inside one query was
+        always refused.
+
+        Args:
+            name: The column name as the query wrote it.
+
+        Returns:
+            The relation to write onto the column, or `NOT_IN_REACH` to leave
+            it as it was.
+        """
+        var key = fold(name)
+        var seen = 0
+        var here = 0
+        var found = NOT_IN_REACH
+        for i in range(len(self.spellings)):
+            var has = False
+            for j in range(len(self.spellings[i])):
+                if fold(self.spellings[i][j]) == key:
+                    has = True
+                    break
+            for j in range(len(self.columns[i])):
+                if fold(self.columns[i][j]) == key:
+                    has = True
+                    break
+            if not has:
+                continue
+            seen += 1
+            if i < self.floor:
+                continue
+            here += 1
+            found = self.tables[i]
+        if seen < 2 or here != 1 or found == DERIVED:
+            return NOT_IN_REACH
+        return found
 
     def written(self) -> String:
         """The names in reach, for a message that has to list them.
@@ -2320,6 +2390,15 @@ def _lower_expr(
             if whose != NOT_IN_REACH:
                 return plan.exprs.column_of(
                     whose, scope.spelled_at(whose, bare)
+                )
+            # A correlated subquery puts its own names and the outer query's in
+            # reach at once, and a name both have is the inner one in SQL. The
+            # schema under the join has both columns and no way to know that, so
+            # the relation is written on here when there is something to say.
+            var innermost = scope.owner(bare)
+            if innermost != NOT_IN_REACH:
+                return plan.exprs.column_of(
+                    innermost, scope.spelled_at(innermost, bare)
                 )
             return plan.exprs.column(scope.spelled(bare))
         if parts == 2:
@@ -5561,14 +5640,16 @@ def _folded_join(
     sides in reach at once, and its `WHERE` is split the way a join condition
     is.
 
-    One scope for both is also where this stops. A subquery whose `FROM` names a
-    table the outer query already named is refused for having two tables of one
-    name, and in SQL the inner one shadows the outer one rather than clashing
-    with it. TPC-H q2 is that query, repeating `partsupp`, `supplier`, `nation`
-    and `region` under an outer `FROM` that has all four. Shadowing wants a
-    scope that knows which level each name was added at, and a bare column
-    written under one that has to be pinned to the innermost relation holding
-    it rather than left for binding to find on both sides. A part with one side out and one side in is a key pair and becomes a
+    One scope for both is not one query's names, and the subquery's `FROM` is
+    lowered as a level of its own for that reason. A table the subquery names is
+    the subquery's even when the query around it named one too, which is SQL's
+    rule and is what TPC-H q2 needs, repeating `partsupp`, `supplier`, `nation`
+    and `region` under an outer `FROM` that has all four. The scope reads a
+    qualifier from the innermost level down, and a bare column a level above
+    also has is written out carrying the relation it means, since the schema
+    under the join holds both columns and nothing else would say which.
+
+    A part with one side out and one side in is a key pair and becomes a
     group key. A part that reads the subquery's own tables and nothing else is
     a filter under the aggregate, where it runs once rather than once per outer
     row. A part that reads the outer query any other way is refused, since it is
@@ -5682,8 +5763,13 @@ def _folded_join(
     # Lowered into the caller's scope rather than a scope of its own, which is
     # the whole difference between this and the uncorrelated case: a condition
     # that reads both sides can only be written where both sides are in reach.
+    # Marked as a level of its own on the way in, because one list of names is
+    # not one query's names: a table the subquery names is the subquery's even
+    # when the query around it named one too.
     var reach = len(scope.names)
     var merged = len(scope.merged)
+    var level = scope.floor
+    scope.floor = reach
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -5820,6 +5906,7 @@ def _folded_join(
 
     # Back out of reach, for the reason a semi join's right side goes out of
     # reach: nothing the join hands out is called what the subquery called it.
+    scope.floor = level
     scope.hide(reach, merged)
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
@@ -6402,8 +6489,13 @@ def _exists_join(
     # Lowered into the caller's scope rather than a scope of its own, which is
     # the whole difference between this and the uncorrelated case: a condition
     # that reads both sides can only be written where both sides are in reach.
+    # Marked as a level of its own on the way in, because one list of names is
+    # not one query's names: a table the subquery names is the subquery's even
+    # when the query around it named one too.
     var reach = len(scope.names)
     var merged = len(scope.merged)
+    var level = scope.floor
+    scope.floor = reach
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -6462,6 +6554,7 @@ def _exists_join(
 
     # Back out of reach, for the reason a written out semi join's right side
     # goes out of reach: the join hands out no column of it.
+    scope.floor = level
     scope.hide(reach, merged)
 
     if len(left_keys) == 0:

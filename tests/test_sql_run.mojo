@@ -3632,6 +3632,60 @@ def test_a_bare_name_neither_query_has_is_refused_as_a_missing_column() raises:
         )
 
 
+def test_a_subquery_may_name_a_table_the_outer_query_named() raises:
+    # Both queries read `sales`, which used to be two tables of one name and
+    # is a table each in SQL. The pairing keeps one sales row per band, the
+    # subquery averages that band's price over its own sales, and the two are
+    # the same number, so every band the pairing kept comes out.
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers, sales WHERE qty = band AND price >="
+                " (SELECT avg(price) FROM sales WHERE qty = band)"
+            ),
+            "band",
+        ),
+        [3, 20, 40],
+        "band",
+    )
+
+
+def test_a_qualifier_inside_a_subquery_means_the_subquerys_own_table() raises:
+    # `sales.qty` is written where two tables are called `sales`, and the one
+    # it means is the subquery's, so this reads the same as the bare spelling.
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers, sales WHERE qty = band AND price >="
+                " (SELECT avg(price) FROM sales WHERE sales.qty = band)"
+            ),
+            "band",
+        ),
+        [3, 20, 40],
+        "band",
+    )
+
+
+def test_two_tables_of_one_name_in_one_query_are_still_refused() raises:
+    with assert_raises(contains="is the name of more than one table in this"):
+        _ = run("SELECT qty FROM sales, sales", session())
+
+
+def test_a_name_two_of_the_subquerys_tables_have_is_ambiguous() raises:
+    # `shop` is on both tables the subquery reads, so there is no innermost
+    # one to pick and the ambiguity is the subquery's own rather than one the
+    # query around it caused.
+    with assert_raises(contains="is the name of a column on both sides"):
+        _ = run(
+            (
+                "SELECT band FROM tiers, sales WHERE qty = band AND price >="
+                " (SELECT avg(price) FROM sales, shops WHERE shop = 1 AND qty"
+                " = band)"
+            ),
+            session(),
+        )
+
+
 def test_a_bare_correlation_over_a_derived_table_is_not_claimed_yet() raises:
     # The columns a subquery in a FROM hands out are decided by lowering it,
     # and this question is asked before anything is lowered, so a bare name is

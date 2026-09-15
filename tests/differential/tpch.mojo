@@ -120,7 +120,7 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Six entries and four reasons between them, which is the useful thing the
+    Five entries and four reasons between them, which is the useful thing the
     list says. Issue #816 has the four written out with the refusal each one
     comes back with.
 
@@ -130,13 +130,11 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 2 or number == 17:
+    if number == 2:
         return String(
-            "a table named on both sides of a correlation. The subquery's FROM"
-            " is lowered into the caller's scope, because a condition reading"
-            " both sides can only be written where both are in reach, and two"
-            " relations of the same name in one scope is the thing that scope"
-            " refuses. Inner shadows outer is the rule it wants. Issue #816"
+            "a cross join of two real tables, which the lowering has no"
+            " operator for and which no rewrite took out of this plan."
+            " Issue #816"
         )
     if number == 20:
         return String(

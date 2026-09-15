@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a subquery may name a table the query around it named
+
+`SELECT ... FROM partsupp WHERE ps_supplycost = (SELECT min(ps_supplycost) FROM partsupp WHERE ...)` was refused for having two tables of one name. In SQL the subquery's `partsupp` is the subquery's, the outer one is not reachable from inside it at all, and there is no clash to refuse. TPC-H q2 and q17 are both that query and both were refused for it. Issue #816.
+
+A correlated subquery is lowered into the scope the query around it is using, because a condition that reads both sides can only be written where both sides are in reach. That puts two queries' names in one list, and the list had no idea where one query ended and the next began. It now carries a mark saying where the innermost query's own names start, the subquery's `FROM` moves the mark up before lowering and puts it back after, and every lookup reads the list as two levels rather than one. A new name clashes only against names at its own level, and a qualifier is searched from the innermost level down. An ordinary query has the mark at zero and every lookup is exactly what it was.
+
+A bare column is the other half of it. One is normally left for binding to resolve against the schema under the join, which is one search in one place and gives the better message when the name means nothing or means two things. With two levels in reach a name both of them have is two columns of that schema, and binding has no way to know that SQL says the inner one wins, so the lowering now writes the relation onto the column itself. It does that only when there is something to say, which is when the name is in reach more than once and exactly one relation at the innermost level has it. A name in reach once is what it always was, and a name the innermost level has twice is an ambiguity inside one query, which is refused where an ambiguity inside one query was always refused.
+
+TPC-H q17 answers now, and q2 gets as far as the cross join it writes, which is a different gap. The recorded list of refusals is down to five queries with four reasons between them.
+
 ### Fixed: a SQL sum over no rows answers null rather than zero
 
 `SELECT sum(x) FROM t WHERE false` answered zero. DuckDB answers null, and so does every other SQL engine, because a total of nothing is not a total. pandas answers zero, because zero is what adding no numbers gives, and firepanda was answering pandas' answer to a SQL question. Issue #836.
