@@ -23,6 +23,7 @@ Every refusal also gained an owner. A lookaround used to say RE2 has no lookarou
 `pixi run differential-regex-python` is new and runs the same thirty thousand generated patterns over the same sixteen texts as the other three, through `str.findall`. It compares 26608 patterns and disagrees on none of them, against 7668 compared on the RE2 side of the identical corpus, because the parser is Python's grammar and so a pattern it cannot read is a pattern Python cannot read either. The 3444 it holds out are eleven reasons and every one of them is this library falling short of an engine that reads the pattern. Document 81 has all of it.
 
 The three methods are not wired yet. `findall` wants a list column, `extract` wants a frame and `extractall` wants a frame with a MultiIndex, so the doors above the engine are the next slice.
+
 ### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
 
 The ASCII fast path that went out in 0.8.4 went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
