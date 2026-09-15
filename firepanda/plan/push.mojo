@@ -91,8 +91,18 @@ filtered afterwards can empty a group that filtering beforehand would have kept
 a different row of.
 
 A join passes a predicate into the side that provides every column it reads, and
-only when the other side provides none of them, so the pass never has to decide
-which of two columns of one name was meant.
+only when the other side provides none of them.
+
+Which side provides a column is a question about the column and not only about
+its name. `FROM nation n1, nation n2` puts an `n_nationkey` on each side of a
+join, so a search by name finds the name on both and can only answer that it
+does not know, and a query that qualified every mention of it gets nothing
+pushed anywhere. The qualifier is not lost, though. The binder writes the
+relation it picked onto the reference and binding writes the relation each
+column came from onto the node, so `_provides` compares the two and places
+`n1.n_nationkey` on the side it was written about. A column that no single
+relation produced stays a maybe, which is what keeps this no stricter than the
+search by name it replaced.
 
 Which sides it may pass into depends on the kind, and the argument is about what
 happens to a row the predicate drops. An inner join passes into both. A row
@@ -562,30 +572,26 @@ def _join(
         if not leftwards:
             here.append(carried[i])
             continue
-        var names = plan.exprs.names(carried[i])
+        var reads = List[Int]()
+        _reads(plan.exprs, carried[i], reads)
         var all_left = True
         var all_right = True
-        var any_left = False
-        var any_right = False
-        for j in range(len(names)):
-            if bound[left].schema.has(names[j]):
-                any_left = True
-            else:
+        for j in range(len(reads)):
+            var whose = _owner(plan, reads[j], bound, left, right)
+            if whose != _LEFT:
                 all_left = False
-            if bound[right].schema.has(names[j]):
-                any_right = True
-            else:
+            if whose != _RIGHT:
                 all_right = False
-        if all_left and not any_right:
+        if all_left:
             to_left.append(carried[i])
-        elif inner and all_right and not any_left:
+        elif inner and all_right:
             to_right.append(carried[i])
         else:
             # Either it reads both sides, which makes it a join condition
-            # rather than a filter on one of them, or it reads a name both
-            # sides have, and that is the ambiguity this pass refuses, or it
-            # reads the right side of a join that only lets the left side's
-            # predicates past.
+            # rather than a filter on one of them, or it reads a column this
+            # cannot place on one side, and that is the ambiguity the pass
+            # refuses, or it reads the right side of a join that only lets the
+            # left side's predicates past.
             here.append(carried[i])
 
     var new_left = _rebuild(plan, left, bound, to_left^, into)
@@ -672,7 +678,7 @@ def _condition(
 def _owner(
     plan: Plan, at: Int, bound: List[Bound], left: Int, right: Int
 ) -> Int:
-    """Which side of a join one half of an equality reads.
+    """Which side of a join one column reference reads.
 
     Args:
         plan: The plan.
@@ -687,14 +693,74 @@ def _owner(
     """
     if plan.exprs.nodes[at].kind != ExprKind.COLUMN:
         return _NEITHER
-    ref name = plan.exprs.nodes[at].name
-    var here = bound[left].schema.has(name)
-    var there = bound[right].schema.has(name)
+    ref node = plan.exprs.nodes[at]
+    var here = _provides(bound[left], node.name, node.table)
+    var there = _provides(bound[right], node.name, node.table)
     if here and not there:
         return _LEFT
     if there and not here:
         return _RIGHT
     return _NEITHER
+
+
+def _provides(one: Bound, name: String, table: Int) -> Bool:
+    """Whether a node hands out the column a reference was written about.
+
+    By name, unless the reference says which relation it meant and the column
+    says which relation it came from. `FROM nation n1, nation n2` puts one
+    `n_nationkey` on each side of a join, and a search by name finds the name
+    on both and can only answer that it does not know. The qualifier the query
+    wrote is not lost, though: the binder puts the relation it picked on the
+    reference and binding puts the relation each column came from on the node,
+    so the two can be compared and `n1.n_nationkey` placed where it belongs.
+
+    A column that no single relation produced is a maybe rather than a no. That
+    is what keeps this no stricter than a search by name: a name that one side
+    has and the other does not is answered by the name alone, and the relation
+    number only ever decides between two sides that both have it and both know
+    where theirs came from.
+
+    Args:
+        one: What the node produces.
+        name: The name the reference was written with.
+        table: The relation the reference was qualified to, or `UNBOUND`.
+
+    Returns:
+        True when this side could be the one the reference meant.
+    """
+    for i in range(len(one.schema)):
+        if one.schema[i].name != name:
+            continue
+        if table == UNBOUND or one.origin[i] == UNBOUND:
+            return True
+        if one.origin[i] == table:
+            return True
+    return False
+
+
+def _reads(exprs: Expressions, root: Int, mut found: List[Int]) raises:
+    """Collects every column an expression reads, one entry per mention.
+
+    `Expressions.names` answers with a set of names and that is the wrong shape
+    for the routing. Two mentions of one name can be two columns, since a self
+    join has both `n1.n_nationkey` and `n2.n_nationkey` in it, and a name cannot
+    tell them apart where the node they are on can.
+
+    Args:
+        exprs: The arena.
+        root: The expression.
+        found: The column nodes, appended to in the order they were written.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    if exprs.nodes[root].kind == ExprKind.COLUMN:
+        found.append(root)
+        return
+    var kids = exprs.nodes[root].children.copy()
+    for i in range(len(kids)):
+        _reads(exprs, kids[i], found)
 
 
 def _union(
