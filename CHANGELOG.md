@@ -19,6 +19,7 @@ The part that needed care is arithmetic between literals. TPC-H q6 writes its bo
 Addition, subtraction, multiplication and unary minus fold. Division does not, because DuckDB answers a double for it anyway. The cases where DuckDB saturates at thirty eight digits and quietly drops the carry it asked for do not fold either, and those fall back to double arithmetic, which is no more lossy than what it replaces.
 
 Six more expressions went into `pixi run differential-answers`, which asks firepanda and DuckDB the same expression over the same column and compares the answers. Three of them write arithmetic between literals, which is the case that has a wrong answer waiting in it.
+
 ### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
 
 The ASCII fast path that went out in 0.8.4 went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
