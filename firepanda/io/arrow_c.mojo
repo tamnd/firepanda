@@ -609,7 +609,38 @@ def type_for_format(format: StringSlice) raises -> LogicalType:
         return LogicalType.STRING
     if format == "vz":
         return LogicalType.BINARY
+    if format.startswith("d:"):
+        raise _decimal_refusal(format)
     raise Error(String("arrow: unsupported format string '", format, "'"))
+
+
+def _decimal_refusal(format: StringSlice) -> Error:
+    """Says what a decimal column is and what the caller can do about it.
+
+    Worth its own function because `d:15,2,128` is the type of every money column
+    in TPC-H and of most money columns anywhere, so this is the refusal a reader
+    is most likely to meet, and the format string on its own names nothing a
+    caller would recognise.
+
+    Args:
+        format: The format string, which begins `d:`.
+
+    Returns:
+        The error to raise.
+    """
+    return Error(
+        String(
+            "arrow: format '",
+            format,
+            (
+                "' is a decimal, and firepanda has no decimal column. Reading"
+                " one means dividing an exact integer by a power of ten, which"
+                " is the one thing a decimal exists to avoid, so it is not done"
+                " without being asked. Pass decimals_as_double to"
+                " ParquetOptions, or write CAST(column AS DOUBLE) in the query."
+            ),
+        )
+    )
 
 
 def _timestamp_for_format(format: StringSlice) raises -> LogicalType:
