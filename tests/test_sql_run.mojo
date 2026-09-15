@@ -3459,6 +3459,47 @@ def test_a_correlated_subquery_folds_per_outer_row() raises:
     )
 
 
+def test_a_correlated_subquery_correlates_on_a_bare_name() raises:
+    # The same shape with nothing written in front of `band`. The sales frame
+    # has no column of that name, so the name is the tiers frame's and the
+    # subquery reads the query around it, which is the way TPC-H q17 and q20
+    # write their correlation. Band 3 is paired with the one sale of 3, which
+    # cost 7, band 20 with the one that cost 2 and band 40 with the one that
+    # cost 1. Band 99 pairs with nothing, its sum is a null, and a comparison
+    # against a null keeps no row.
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers WHERE rate > (SELECT sum(price) FROM"
+                " sales WHERE qty = band)"
+            ),
+            "band",
+        ),
+        [3, 20, 40],
+        "band",
+    )
+
+
+def test_a_bare_name_the_subquery_has_itself_is_still_its_own() raises:
+    # The other half of the rule, and the reason this cannot be read off the
+    # text alone. `shop` is written bare inside a subquery whose own frame has
+    # a column of that name, so it is the sales frame's column and the
+    # subquery is not correlated at all. It folds once, over shop one, and
+    # answers 75 for every row of the query around it, which every floor is
+    # under.
+    same(
+        answer(
+            (
+                "SELECT shop FROM shops WHERE floor < (SELECT sum(qty) FROM"
+                " sales WHERE shop = 1)"
+            ),
+            "shop",
+        ),
+        [1, 2, 3],
+        "shop",
+    )
+
+
 def test_a_correlated_subquery_in_a_select_list_runs() raises:
     var got = run(
         (

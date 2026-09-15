@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a subquery correlates on a name with nothing written in front of it
+
+`SELECT p_partkey FROM part WHERE p_size < (SELECT avg(l_quantity) FROM lineitem WHERE l_partkey = p_partkey)` used to come back with `there is no column named 'p_partkey' here. Did you mean 'l_partkey'?`, which is the binder saying the subquery was lowered as though it stood on its own. It is the ordinary way to write a correlated subquery and it is how TPC-H q2, q17 and q20 write theirs.
+
+Whether a subquery reads the query around it has to be decided before anything under it is lowered, because the answer picks which of two shapes to build. Until now it was decided off the text alone: a name written in front of a column is a relation name, the relation names on both sides are written down, and a qualifier that is not the subquery's own is correlation. That reading is right as far as it goes and it cannot see a bare name at all.
+
+The argument for ignoring a bare name was that SQL resolves one inside first and only then outside, so a name both queries have is the inner one. True, and it settles only the case where the inner query has the name. A name the inner query does not have is the other case and it is the common one.
+
+So the question a bare name asks is what the subquery's own `FROM` produces, which is a catalog lookup rather than a reading of the text. A named table registered as a frame answers it, and a join of them answers it a side at a time. A CTE, a subquery and a table function come back saying the columns are not known here, and a bare name under one of those is left alone, which keeps the shape that was built before any of this could ask. A bare name the inner `FROM` does have is still the inner query's own column and still not correlation.
+
+Three TPC-H queries move past this refusal and none of them answers yet, which is worth saying plainly. q2 and q17 now stop at a table named on both sides of the correlation, where the subquery's `FROM` is lowered into the caller's scope and the two collide rather than the inner one shadowing the outer. q20 stops at a left join on two key pairs. Both are written up on issue #816, and both were hidden behind this one until now.
+
 ### Added: a decimal literal written against a column is read as a double
 
 `SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07` used to come back with a refusal, because `0.05` is a `DECIMAL(3,2)` to DuckDB and a plan has no decimal column. That refusal covered more than it needed to. The literal in that query never stays a decimal: it meets `l_discount`, which is a double here, and DuckDB casts it to one before the comparison happens. So there was a right answer available and the engine was not giving it.
