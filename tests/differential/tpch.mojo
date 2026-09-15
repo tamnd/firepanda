@@ -7,11 +7,11 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Fourteen agree today. The other eight are refused rather than wrong, and they
-are refused in four places rather than eight: a cross join with more than one
-row on the right, a name that does not resolve across a subquery, a scalar
-subquery in a HAVING, and a join condition that is not an equality. `recorded`
-below carries one reason per query and issue #816 has the four written out.
+Sixteen agree today. The other six are refused rather than wrong, and they are
+refused in three places rather than six: a name that does not resolve across a
+subquery, a scalar subquery in a HAVING, and a join condition that is not an
+equality. `recorded` below carries one reason per query and issue #816 has the
+three written out.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -95,8 +95,8 @@ def queries() -> List[Int]:
     was the wrong list to ask for: the rest are refused rather than wrong, a
     refusal is a fact about this engine worth checking, and `recorded` below is
     where each one says why. Asking all of them is also what makes the printed
-    count mean anything, since fourteen of twenty two is the number this exists
-    to move and fourteen of fourteen is not.
+    count mean anything, since sixteen of twenty two is the number this exists
+    to move and sixteen of sixteen is not.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
     because the Python side is what writes an answer out and the Mojo side is
@@ -120,8 +120,8 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Eight entries and four reasons between them, which is the useful thing the
-    list says. Issue #816 has the four written out with the refusal each one
+    Six entries and three reasons between them, which is the useful thing the
+    list says. Issue #816 has the three written out with the refusal each one
     comes back with.
 
     Args:
