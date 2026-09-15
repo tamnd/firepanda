@@ -111,7 +111,7 @@ A query firepanda refuses is reported rather than failed when the refusal has a 
 
 The scale factor is `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is about sixty thousand lineitem rows and three megabytes and takes a few seconds, so it is cheap enough to run on a push. The exit criterion for stage S4 is written at scale 1, which is a hundred times that in both, and is a number to run by hand or nightly.
 
-All twenty two are asked. Sixteen agree with DuckDB row for row today, which is q1, q3, q4, q5, q6, q7, q8, q9, q10, q12, q14, q15, q16, q18, q19 and q22. The other six are refused in three places rather than six: q2, q17 and q20 want a name the inner query reads from the query around it, q11 wants a scalar subquery in a HAVING, and q13 and q21 want a join condition that is not an equality. Issue #816 has the three written out with the refusal each one comes back with.
+All twenty two are asked. Sixteen agree with DuckDB row for row today, which is q1, q3, q4, q5, q6, q7, q8, q9, q10, q12, q14, q15, q16, q18, q19 and q22. The other six are refused in four places rather than six: q2 and q17 name the same table on both sides of a correlation, where the inner one has to shadow the outer rather than collide with it, q20 wants a left join on two key pairs, q11 wants a scalar subquery in a HAVING, and q13 and q21 want a join condition that is not an equality. Issue #816 has the four written out with the refusal each one comes back with.
 
 ## 8. The plan equality test
 
