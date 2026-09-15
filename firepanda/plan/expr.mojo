@@ -992,6 +992,33 @@ struct Expressions(Movable, Sized):
             self.nodes[at].type = type
         return at
 
+    def duplicate(mut self, root: Int) raises -> Int:
+        """Returns a second copy of a whole expression tree, sharing nothing.
+
+        Handing the same index to two plan nodes looks free and is not. Binding
+        writes a column's position into the node it resolved, and two plan nodes
+        have two schemas, so the second one to be bound overwrites what the
+        first one needs and the shared node ends up holding a position that is
+        right for one reader and wrong or out of range for the other. A pass
+        that wants to put an expression somewhere it already is has to copy it.
+
+        Args:
+            root: The expression to copy.
+
+        Returns:
+            The root of the copy, which is a new index and so is everything
+            under it.
+
+        Raises:
+            If the expression is not in the arena.
+        """
+        self.check(root)
+        var kids = self.nodes[root].children.copy()
+        var made = List[Int](capacity=len(kids))
+        for i in range(len(kids)):
+            made.append(self.duplicate(kids[i]))
+        return self.rebuild(root, made^)
+
     def conjuncts(self, root: Int, mut out: List[Int]) raises:
         """Splits a predicate at its `and` nodes into the pieces under them.
 

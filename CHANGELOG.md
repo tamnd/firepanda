@@ -23,6 +23,49 @@ Every refusal also gained an owner. A lookaround used to say RE2 has no lookarou
 `pixi run differential-regex-python` is new and runs the same thirty thousand generated patterns over the same sixteen texts as the other three, through `str.findall`. It compares 26608 patterns and disagrees on none of them, against 7668 compared on the RE2 side of the identical corpus, because the parser is Python's grammar and so a pattern it cannot read is a pattern Python cannot read either. The 3444 it holds out are eleven reasons and every one of them is this library falling short of an engine that reads the pattern. Document 81 has all of it.
 
 The three methods are not wired yet. `findall` wants a list column, `extract` wants a frame and `extractall` wants a frame with a MultiIndex, so the doors above the engine are the next slice.
+### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
+
+The ASCII fast path that went out in 0.8.4 went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
+
+`casefold` already had a shortcut for an element that is all ASCII and the shortcut went through the standard library's `lower`, so an ASCII element was walked once to find out it was well formed, walked again to find out it was ASCII, walked a third time into a fresh `String`, and then copied into the column being built before that `String` was dropped. Folding ASCII is lowering it, because all 353 code points that fold to something other than their lower case are above 127, so the one rule that makes folding different from lowering is the one rule that can never apply here. It takes the same single pass `upper` takes now.
+
+`isascii` is the other one. The helper behind it read a byte, compared it and branched, for every byte of every element, and it is the whole of what that kernel does. The top bits are accumulated into a register and asked about once at the end now, which is the same trick the case pass plays. `swapcase` and `title` call the same helper and get it for free.
+
+Measured here over a million elements of thirty two ASCII bytes, alternating the two binaries on a shared machine, with `strings/build_long` carried alongside as the control since it is the same loop with the case work taken out. The control ran 17.223 ms before and 16.145 ms after, which is the width of the noise. `strings/casefold_long` went from 5.668 seconds to 16.605 ms, and since the copy underneath it is 16.145 of those, what is left of the fold is about a nanosecond a row. `strings/ascii_long` went from 12.216 ms to 1.325 ms, which is nine times.
+
+Nothing about the Unicode answers moves. An element with a byte at or above 0x80 is refused by the pass and takes the path it took before, so the 353 folds, the corrections and the bytes that are not UTF-8 all come out as they did.
+
+## [0.8.5] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with one behaviour change that callers have to read, a regular expression engine where there was a refusal, whole TPC-H queries compared against DuckDB for the first time, and two pieces of the execution engine doing less work for the same answer.
+
+The behaviour change first, because it is the one that can break a program that works today. A column the query did not name used to come back as `__expr_0` and now comes back named after what was written, so `SELECT sum(x) FROM t` gives a column called `sum(x)`. That is what DuckDB does and the name is produced by the printer that already prints an AST back to SQL, which is why the two agree on as much of it as they do without either aiming at the other. A caller reading a result column back by the name firepanda invented has to read it back by the new name, and a caller that wrote an alias is unaffected. It is also what made TPC-H q18 agree with DuckDB, which was the only thing left between that query and agreement.
+
+The regular expression work is a whole front end and a whole engine in one release. Last release the five pattern methods on the `str` accessor answered a literal exactly and refused anything with a metacharacter in it, by name, rather than searching for a `.` literally and saying nothing. Now there is a parser that reads Python's grammar and decides which engine answers a call, a compiler and a matching engine for the RE2 side, and `contains`, `match`, `fullmatch` and `count` wired to them. The parser copies pandas rather than improving on it, including two places where pandas walks into only two of the seven node kinds that can hold another node, because a router that disagrees with pandas sends a working pattern to an engine that will not run it. It is checked by asking both questions of thirty thousand generated patterns against a live pandas with a ceiling of zero disagreements, and its first run found eighty nine, every one of them a rule in Python's grammar that had to be read rather than reasoned about.
+
+TPC-H is now asked of both engines over the same bytes. `pixi run tpch` runs whole queries through firepanda and through DuckDB and compares the answers row for row, over DuckDB's own generated data exported to Parquet and DuckDB's own query text, so there is no second copy of either to drift from the first. The four comparisons that were already here ask about one expression at a time, which is the right size for a kernel and the wrong size for a query, since a join that drops a row and a sort that is not stable both go through them untouched. Five queries agree at scale factor 1 as of this release. The eight `DECIMAL(15,2)` columns are exported as `DOUBLE`, because there is no decimal type here yet, so this is a comparison against DuckDB over this data rather than against the published answer set.
+
+Two pieces of the engine got faster and both were found by measuring rather than by guessing. Every reader produces a frame in one chunk, and a frame in one chunk ran a filtering line about 1.65 times slower than the same rows in chunks, so every query anyone runs over a file started on the slow side of that. New benchmark rows ruled out the cache answer and left the batched prefix, which the driver only runs once there is more than one chunk to hand out. `Buffer` carries an offset into its allocation now, so a window is the same allocation seen from further in, and `Scan` cuts any chunk taller than a morsel into morsel sized windows that cost nothing to make. On a quiet i9-13900K at four million rows, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 against 2.00 for the same rows already in chunks, so the row that was two and a half times slower sits inside the other row's spread. Separately, a filter that keeps several columns counted the same mask once per column to find out where each morsel's output starts; it counts once for the chunk now, which is 1.22 times on four million rows in one chunk and does not move a filter over a single column at all, which is the row that says where the saving comes from.
+
+The offset is not free and the measurement is worth recording. `Buffer` went from three machine words to four and the packaged Python extension's text grew by 516,480 bytes, past the size budget the extension tests keep. Building the same commit four ways says 461,792 of those bytes come from the field existing at all, since one unused `Int` added to `Buffer` and read nowhere costs almost the same, and that none of it comes from the window methods or from the scan. The budget went from ten mebibytes to eleven with the measurement written next to it, and issue #811 has what to try to get it back.
+
+On the planner side, a predicate is now sent past every join that keeps its left rows, which is the pushdown that a left join blocked before.
+
+Five wrong answers are fixed and three of them were queries that raised rather than queries that lied. A correlated subquery that counts answered null over an empty group where SQL says zero, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped. A mean over a column of times answered a point in time from the frame and a count of seconds from SQL, and both halves passed every test of themselves, because two paths read two different tables about what a reduction produces. Which side of a `JOIN` a table was written on decided whether the query ran, since the build side was read with a borrow that only a column of exactly one chunk has. A binary that used both `read_parquet` and `std.python` did not link, because one C function was declared twice with two return types. And a column the reader could not name is now named.
+
+The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
+
+### Changed: a predicate is placed by the relation the query named, not only by a column name
+
+Predicate pushdown decided which side of a join could answer a predicate by looking each column name up in the two schemas. `FROM nation n1, nation n2` puts an `n_nationkey` on each side, so the search found the name on both and could only answer that it did not know, and a query that qualified every mention of it got nothing pushed anywhere. Issue #309.
+
+The qualifier was never lost. The binder writes the relation it picked onto the reference and binding writes the relation each column came from onto the node, so the two can be compared and `n1.n_nationkey` placed on the side it was written about. A column that no single relation produced stays a maybe, which is what keeps the new answer no stricter than the old one: a name one side has and the other does not is still answered by the name alone, and the relation number only decides between two sides that both have it and both know where theirs came from.
+
+TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
+
+q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
 
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
@@ -85,6 +128,20 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
+### Changed: a condition written into every branch of an OR is carried out of it
+
+Predicate pushdown splits a filter at its `and` nodes, which reaches nothing when the filter is one `or`. It now also reads a disjunction and carries out of it any condition every branch holds, as a conjunct of its own that can then be pushed like any other. `(a AND b) OR (a AND c)` carries `a`. Issue #309.
+
+Three valued logic needs no exception. A filter keeps a row when its predicate is true, and if a disjunction is true then one of its branches is, and if that branch is true then every conjunct in it is true. So the condition is true wherever the `or` is, and asking it as well changes nothing about which rows survive.
+
+The `or` is left exactly as it was rather than having the condition taken out of it. The copy left behind runs on rows the pushed condition has already thinned, and taking it out means deciding what a branch with nothing left in it means. Adding a condition and not removing one is the smaller change and the same rows come out.
+
+TPC-H q19 is why this is here. Its whole `WHERE` is one disjunction of three branches, and each branch writes out `p_partkey = l_partkey` for itself rather than the query stating it once outside them. Nothing could reach the product under the filter, so the query did not run at all. It now answers what DuckDB answers over 1 row, and eleven of the twenty two queries are in `pixi run tpch`.
+
+### Added: an expression can be copied rather than shared
+
+`Expressions.duplicate` returns a second copy of a whole expression tree, sharing no index with the first. Handing one index to two plan nodes looks free and is not: binding writes a column's position into the node it resolved, two plan nodes have two schemas, and the second one to be bound overwrites what the first one needs. A pass that wants to put an expression somewhere it already is has to copy it, and this is the copy. Issue #309.
 
 ### Added: the five TPC-H queries that already answered are now compared
 
@@ -7476,7 +7533,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/tamnd/firepanda/releases/tag/v0.8.5
 [0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2

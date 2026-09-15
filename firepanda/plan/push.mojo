@@ -22,6 +22,29 @@ separated ends up unchanged.
 Splitting only at `and`. An `or` cannot be split, because neither side of it has
 to hold for the row to survive.
 
+An `or` can still be read, though, and that is the second thing the pass does. A
+condition written into every branch of a disjunction holds whenever the
+disjunction does, so it can be carried as a conjunct of its own alongside it.
+`(a and b) or (a and c)` carries `a`. The `or` is left exactly as it was rather
+than having `a` taken out of it, because the copy left behind is one comparison
+on rows a pushed `a` has already thinned, and taking it out means deciding what
+a branch with nothing left in it means. Adding a condition and not removing one
+is the smaller change and the same rows come out. What gets carried is a copy of
+the condition rather than the index it already has, because the copy and the
+original end up on two plan nodes with two schemas and
+`Expressions.duplicate` says what binding does to a node read from both.
+
+Three valued logic does not need an exception. A filter keeps a row when its
+predicate is true, and if a disjunction is true then one of its branches is,
+and if that branch is true then every conjunct in it is true, `a` among them.
+So `a` is true wherever the `or` is, and asking it as well changes nothing about
+which rows survive.
+
+TPC-H q19 is why this is here. Its whole `where` is one disjunction of three
+branches and each branch writes out `p_partkey = l_partkey` for itself, so
+splitting at `and` reaches nothing, the cross join under it never becomes a
+pairing and the query does not run at all.
+
 ## The order the pieces go back in
 
 Putting them back is also the one chance to decide which runs first, and the
@@ -68,8 +91,18 @@ filtered afterwards can empty a group that filtering beforehand would have kept
 a different row of.
 
 A join passes a predicate into the side that provides every column it reads, and
-only when the other side provides none of them, so the pass never has to decide
-which of two columns of one name was meant.
+only when the other side provides none of them.
+
+Which side provides a column is a question about the column and not only about
+its name. `FROM nation n1, nation n2` puts an `n_nationkey` on each side of a
+join, so a search by name finds the name on both and can only answer that it
+does not know, and a query that qualified every mention of it gets nothing
+pushed anywhere. The qualifier is not lost, though. The binder writes the
+relation it picked onto the reference and binding writes the relation each
+column came from onto the node, so `_provides` compares the two and places
+`n1.n_nationkey` on the side it was written about. A column that no single
+relation produced stays a maybe, which is what keeps this no stricter than the
+search by name it replaced.
 
 Which sides it may pass into depends on the kind, and the argument is about what
 happens to a row the predicate drops. An inner join passes into both. A row
@@ -165,6 +198,7 @@ from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.plan.bind import Bound, bind, bind_all
+from firepanda.plan.cse import shape_of
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NodeKind, Plan, PlanNode
 from firepanda.plan.transit import derive
@@ -238,7 +272,15 @@ def _rebuild(
         # The node itself disappears here and is rebuilt wherever its pieces
         # come to rest, which for a filter that cannot move at all is directly
         # above the same input it was above before.
-        plan.exprs.conjuncts(plan.nodes[old].exprs[0], carried)
+        var pieces = List[Int]()
+        plan.exprs.conjuncts(plan.nodes[old].exprs[0], pieces)
+        var shared = List[Int]()
+        for i in range(len(pieces)):
+            _common(plan, pieces[i], shared)
+        for i in range(len(pieces)):
+            carried.append(pieces[i])
+        for i in range(len(shared)):
+            carried.append(shared[i])
         return _rebuild(plan, inputs[0], bound, carried^, into)
 
     if (
@@ -265,6 +307,75 @@ def _rebuild(
     var input = _rebuild(plan, inputs[0], bound, down^, into)
     var at = _emit(plan, old, [input], into)
     return _apply(plan, at, here^, into)
+
+
+def _common(mut plan: Plan, root: Int, mut out: List[Int]) raises:
+    """Finds the conditions every branch of a disjunction holds.
+
+    Does nothing to anything that is not an `or` of two or more branches, which
+    is most of what it is handed.
+
+    The candidates are the first branch's conjuncts, since a condition every
+    branch holds is one the first branch holds, and a candidate survives a
+    branch when that branch holds a conjunct computing the same thing. Same
+    thing rather than same index, because the three branches of TPC-H q19 each
+    wrote `p_partkey = l_partkey` out for themselves and no pass has unified
+    them, so `shape_of` is what decides it.
+
+    Args:
+        plan: The plan, whose arena is read.
+        root: The predicate this was carrying.
+        out: The conditions every branch holds, appended to, each once.
+
+    Raises:
+        If an expression is not in the arena.
+    """
+    plan.exprs.check(root)
+    if plan.exprs.nodes[root].kind != ExprKind.CALL:
+        return
+    if plan.exprs.nodes[root].name != "or":
+        return
+    var branches = plan.exprs.nodes[root].children.copy()
+    if len(branches) < 2:
+        return
+
+    var candidates = List[Int]()
+    plan.exprs.conjuncts(branches[0], candidates)
+    var keys = List[String](capacity=len(candidates))
+    var alive = List[Bool](capacity=len(candidates))
+    for i in range(len(candidates)):
+        var key = shape_of(plan.exprs, candidates[i])
+        var first = True
+        for j in range(i):
+            if keys[j] == key:
+                first = False
+                break
+        keys.append(key^)
+        alive.append(first)
+
+    for branch in range(1, len(branches)):
+        var theirs = List[Int]()
+        plan.exprs.conjuncts(branches[branch], theirs)
+        var seen = List[String](capacity=len(theirs))
+        for i in range(len(theirs)):
+            seen.append(shape_of(plan.exprs, theirs[i]))
+        for i in range(len(candidates)):
+            if not alive[i]:
+                continue
+            var held = False
+            for j in range(len(seen)):
+                if seen[j] == keys[i]:
+                    held = True
+                    break
+            alive[i] = held
+
+    for i in range(len(candidates)):
+        if alive[i]:
+            # A copy rather than the index itself. The condition stays inside
+            # the disjunction as well, the two end up on two plan nodes with
+            # two schemas, and `duplicate` says what binding does to a node
+            # read from both.
+            out.append(plan.exprs.duplicate(candidates[i]))
 
 
 def _split(
@@ -461,30 +572,26 @@ def _join(
         if not leftwards:
             here.append(carried[i])
             continue
-        var names = plan.exprs.names(carried[i])
+        var reads = List[Int]()
+        _reads(plan.exprs, carried[i], reads)
         var all_left = True
         var all_right = True
-        var any_left = False
-        var any_right = False
-        for j in range(len(names)):
-            if bound[left].schema.has(names[j]):
-                any_left = True
-            else:
+        for j in range(len(reads)):
+            var whose = _owner(plan, reads[j], bound, left, right)
+            if whose != _LEFT:
                 all_left = False
-            if bound[right].schema.has(names[j]):
-                any_right = True
-            else:
+            if whose != _RIGHT:
                 all_right = False
-        if all_left and not any_right:
+        if all_left:
             to_left.append(carried[i])
-        elif inner and all_right and not any_left:
+        elif inner and all_right:
             to_right.append(carried[i])
         else:
             # Either it reads both sides, which makes it a join condition
-            # rather than a filter on one of them, or it reads a name both
-            # sides have, and that is the ambiguity this pass refuses, or it
-            # reads the right side of a join that only lets the left side's
-            # predicates past.
+            # rather than a filter on one of them, or it reads a column this
+            # cannot place on one side, and that is the ambiguity the pass
+            # refuses, or it reads the right side of a join that only lets the
+            # left side's predicates past.
             here.append(carried[i])
 
     var new_left = _rebuild(plan, left, bound, to_left^, into)
@@ -571,7 +678,7 @@ def _condition(
 def _owner(
     plan: Plan, at: Int, bound: List[Bound], left: Int, right: Int
 ) -> Int:
-    """Which side of a join one half of an equality reads.
+    """Which side of a join one column reference reads.
 
     Args:
         plan: The plan.
@@ -586,14 +693,74 @@ def _owner(
     """
     if plan.exprs.nodes[at].kind != ExprKind.COLUMN:
         return _NEITHER
-    ref name = plan.exprs.nodes[at].name
-    var here = bound[left].schema.has(name)
-    var there = bound[right].schema.has(name)
+    ref node = plan.exprs.nodes[at]
+    var here = _provides(bound[left], node.name, node.table)
+    var there = _provides(bound[right], node.name, node.table)
     if here and not there:
         return _LEFT
     if there and not here:
         return _RIGHT
     return _NEITHER
+
+
+def _provides(one: Bound, name: String, table: Int) -> Bool:
+    """Whether a node hands out the column a reference was written about.
+
+    By name, unless the reference says which relation it meant and the column
+    says which relation it came from. `FROM nation n1, nation n2` puts one
+    `n_nationkey` on each side of a join, and a search by name finds the name
+    on both and can only answer that it does not know. The qualifier the query
+    wrote is not lost, though: the binder puts the relation it picked on the
+    reference and binding puts the relation each column came from on the node,
+    so the two can be compared and `n1.n_nationkey` placed where it belongs.
+
+    A column that no single relation produced is a maybe rather than a no. That
+    is what keeps this no stricter than a search by name: a name that one side
+    has and the other does not is answered by the name alone, and the relation
+    number only ever decides between two sides that both have it and both know
+    where theirs came from.
+
+    Args:
+        one: What the node produces.
+        name: The name the reference was written with.
+        table: The relation the reference was qualified to, or `UNBOUND`.
+
+    Returns:
+        True when this side could be the one the reference meant.
+    """
+    for i in range(len(one.schema)):
+        if one.schema[i].name != name:
+            continue
+        if table == UNBOUND or one.origin[i] == UNBOUND:
+            return True
+        if one.origin[i] == table:
+            return True
+    return False
+
+
+def _reads(exprs: Expressions, root: Int, mut found: List[Int]) raises:
+    """Collects every column an expression reads, one entry per mention.
+
+    `Expressions.names` answers with a set of names and that is the wrong shape
+    for the routing. Two mentions of one name can be two columns, since a self
+    join has both `n1.n_nationkey` and `n2.n_nationkey` in it, and a name cannot
+    tell them apart where the node they are on can.
+
+    Args:
+        exprs: The arena.
+        root: The expression.
+        found: The column nodes, appended to in the order they were written.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    if exprs.nodes[root].kind == ExprKind.COLUMN:
+        found.append(root)
+        return
+    var kids = exprs.nodes[root].children.copy()
+    for i in range(len(kids)):
+        _reads(exprs, kids[i], found)
 
 
 def _union(

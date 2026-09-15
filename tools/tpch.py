@@ -57,13 +57,13 @@ TABLES = (
 )
 """The eight tables TPC-H defines, in the order the schema declares them."""
 
-QUERIES = (1, 3, 4, 5, 6, 10, 12, 15, 16, 18)
+QUERIES = (1, 3, 4, 5, 6, 7, 10, 12, 15, 16, 18, 19)
 """Which queries the harness covers.
 
 The three S4 names as its exit criteria, and every query that answers what
-DuckDB answers. The rest want a decimal, a join order, a cross product, a
-dependent join or a name resolved across a self join, and each one goes in here
-the day it runs rather than being listed as a pending failure.
+DuckDB answers. The rest want a decimal, a join order, a dependent join or
+a binder gap closed, and each one goes in here the day it runs rather than being
+listed as a pending failure.
 """
 
 BETWEEN = "\x1f"
