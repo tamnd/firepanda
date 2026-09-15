@@ -19,6 +19,7 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+
 ### Added: `str.extract`, whose answer is as wide as the pattern says
 
 `pandas.Series(["ab1"]).str.extract(r"([a-z])(\d)")` answers a frame of two columns and `.str.extract(r"([a-z])\d")` answers a frame of one, for the same column. This is the first name on the `str` accessor whose width varies per call and is still known before a single row is read, and the first of the three methods document 81 left unwired. Issue #8 M6.
