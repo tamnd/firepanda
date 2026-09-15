@@ -3571,6 +3571,81 @@ def test_a_correlated_subquery_read_another_way_is_refused_by_name() raises:
         )
 
 
+def test_a_correlation_written_bare_is_still_a_correlation() raises:
+    # `band` is a column of `tiers` and not one of `sales`, so the bare name
+    # inside the subquery is the outer query's and the subquery is asking for
+    # a different average per band. Nothing in the query says so twice.
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM"
+                " sales WHERE qty = band)"
+            ),
+            "band",
+        ),
+        [3, 20, 40],
+        "band",
+    )
+
+
+def test_a_correlation_written_bare_reads_the_same_as_a_qualified_one() raises:
+    var bare = run(
+        (
+            "SELECT band, (SELECT sum(price) FROM sales WHERE qty = band) AS"
+            " took FROM tiers"
+        ),
+        session(),
+    )
+    var qualified = run(
+        (
+            "SELECT band, (SELECT sum(price) FROM sales WHERE qty ="
+            " tiers.band) AS took FROM tiers"
+        ),
+        session(),
+    )
+    same(gapped(bare, "took"), [7, 2, 1, -1], "took")
+    same(gapped(qualified, "took"), gapped(bare, "took"), "took")
+
+
+def test_a_bare_name_the_subquery_has_itself_is_the_subquerys_own() raises:
+    # Both frames have a `shop`, so the bare one is the inner one, which makes
+    # this uncorrelated and gives every outer row the same total.
+    var got = run(
+        (
+            "SELECT shop, (SELECT sum(qty) FROM sales WHERE shop = 1) AS one"
+            " FROM shops"
+        ),
+        session(),
+    )
+    same(read_back(got, "shop"), [1, 2, 3], "shop")
+    same(read_back(got, "one"), [75, 75, 75], "one")
+
+
+def test_a_bare_name_neither_query_has_is_refused_as_a_missing_column() raises:
+    with assert_raises(contains="there is no column named 'nope'"):
+        _ = run(
+            (
+                "SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM"
+                " sales WHERE qty = nope)"
+            ),
+            session(),
+        )
+
+
+def test_a_bare_correlation_over_a_derived_table_is_not_claimed_yet() raises:
+    # The columns a subquery in a FROM hands out are decided by lowering it,
+    # and this question is asked before anything is lowered, so a bare name is
+    # left alone rather than guessed at. Which is a refusal and not an answer.
+    with assert_raises(contains="there is no column named 'band'"):
+        _ = run(
+            (
+                "SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM"
+                " (SELECT qty, price FROM sales) AS s WHERE qty = band)"
+            ),
+            session(),
+        )
+
+
 def test_a_subquery_over_no_table_runs() raises:
     same(
         answer(
