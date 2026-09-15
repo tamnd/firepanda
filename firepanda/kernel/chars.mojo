@@ -171,6 +171,7 @@ the row does.
 
 from std.collections.span import Span
 from std.collections.string import Codepoint
+from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
@@ -1376,6 +1377,17 @@ def text_casefold(a: StringArray) raises -> StringArray:
     lowers to, corrections and all, so the fold table is asked first and the
     lower case path answers the rest.
 
+    An ASCII element reaches none of that. Folding ASCII is lowering it: the 353
+    listed code points are all above 127, so nothing under 128 folds to anything
+    but its own lower case, and the one rule that makes folding different from
+    lowering is the one rule that never applies here. So the same SIMD pass
+    `text_case` uses answers this kernel too, writing into the builder's payload
+    and refusing anything with a byte at or above 0x80. There was already a
+    shortcut here for ASCII, but it went through the standard library's `lower`,
+    which walks the bytes into a fresh `String` that is then copied into the
+    builder and dropped. The pass replaces a walk, an allocation and a copy with
+    one pass and no allocation.
+
     Args:
         a: The column.
 
@@ -1398,14 +1410,12 @@ def text_casefold(a: StringArray) raises -> StringArray:
             built.append_null()
             continue
         var bytes = a.unsafe_bytes(i)
+        if built.append_ascii_cased(bytes, False):
+            continue
         if not _well_formed(bytes):
             built.append(bytes)
             continue
         var text = StringSlice(unsafe_from_utf8=bytes)
-        if _is_ascii(bytes):
-            var one = text.lower()
-            built.append(one.as_bytes())
-            continue
         var out = String()
         for point in text.codepoints():
             var seat = _listed_at(Span(folds), point.to_u32())
@@ -1423,16 +1433,34 @@ def text_casefold(a: StringArray) raises -> StringArray:
 def _is_ascii(bytes: Span[UInt8, _]) -> Bool:
     """Whether a run of bytes is all ASCII.
 
+    The top bits are accumulated rather than branched on, which is the same
+    trick `case_ascii_into` plays and for the same reason: a per byte branch on
+    text that is almost always ASCII predicts perfectly and still costs a compare
+    and a test per byte, where an or costs a register. Asking once at the end
+    gives up the early exit on a non ASCII element, and giving it up is free,
+    because the only element this can leave early on is one where the first block
+    already has a high byte in it.
+
     Args:
         bytes: The element.
 
     Returns:
         True if no byte has its top bit set.
     """
-    for k in range(len(bytes)):
-        if bytes[k] >= 0x80:
-            return False
-    return True
+    comptime width = simd_width_of[DType.uint8]()
+    var count = len(bytes)
+    var src = bytes.unsafe_ptr()
+    var seen = SIMD[DType.uint8, width](0)
+    var at = 0
+    while at + width <= count:
+        seen |= src.unsafe_offset(at).unsafe_load[width=width]()
+        at += width
+
+    var tail = seen.reduce_or()
+    while at < count:
+        tail |= src.unsafe_offset(at).unsafe_load()
+        at += 1
+    return tail < 0x80
 
 
 def _swap_ascii(bytes: Span[UInt8, _], mut into: List[UInt8]):
@@ -1588,6 +1616,10 @@ def text_is_ascii(a: StringArray) raises -> Array[DType.bool]:
     no kernel for it at all, and it does not matter here for once. Whether a
     byte has its top bit set is not a thing two Unicode tables can disagree
     about.
+
+    It is the whole of what this kernel does, so it is worth having `_is_ascii`
+    read a register at a time rather than a byte at a time. The other two callers
+    of that helper, `text_swapcase` and `text_title`, get the same pass for free.
 
     Args:
         a: The column.
