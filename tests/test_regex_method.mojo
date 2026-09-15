@@ -17,6 +17,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
+    METHOD_COUNT,
     METHOD_EXTRACT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
@@ -24,10 +25,16 @@ from firepanda.kernel.regex.method import (
     leading_flags,
     preprocessed,
     program_for,
+    python_anchored,
 )
 from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.pike import matches_text
-from firepanda.kernel.regex.tokens import FLAG_ASCII, FLAG_IGNORECASE
+from firepanda.kernel.regex.tokens import (
+    FLAG_ASCII,
+    FLAG_IGNORECASE,
+    FLAG_LOCALE,
+    FLAG_MULTILINE,
+)
 
 
 def test_a_pattern_with_no_flag_group_measures_nothing() raises:
@@ -280,6 +287,94 @@ def test_an_alphabet_passed_beside_the_pattern_meets_the_one_it_wrote() raises:
     assert_false(tree.ok)
     assert_equal(tree.problem, "ASCII and UNICODE flags are incompatible")
     assert_false(program_for(METHOD_CONTAINS, "(?u)a", FLAG_ASCII).ok)
+
+
+def test_an_argued_call_is_anchored_from_outside_the_pattern() raises:
+    """The other rewrite, which is the one upstream does not do.
+
+    A call that landed on Python's engine is answered there by `regex.match` and
+    `regex.fullmatch`, and those anchor from outside the pattern where the Arrow
+    rewrite glues anchors inside it. So the two positions written here are the
+    ones no flag can move, nothing is cropped off either end, and the three
+    methods that ask about a whole row rather than its front get the pattern
+    back unchanged.
+    """
+    assert_equal(python_anchored(METHOD_CONTAINS, "a"), "a")
+    assert_equal(python_anchored(METHOD_COUNT, "^a$"), "^a$")
+    assert_equal(python_anchored(METHOD_MATCH, "a"), "\\A(a)")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a"), "\\A(a)\\z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "^a$"), "\\A(^a$)\\z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "(?i)a"), "(?i)\\A(a)\\z")
+    assert_equal(python_anchored(METHOD_MATCH, "(?ims)a"), "(?ims)\\A(a)")
+
+
+def test_an_argued_flag_moves_the_call_and_a_written_one_does_not() raises:
+    """The same bit, spelled two ways, landing on two engines.
+
+    This is the whole reason the flags and the fact that they were argued cross
+    the door as two things rather than as one number. The dotted capital I is
+    where the two fold tables part company: Python folds it onto a plain `i` and
+    RE2 leaves it alone, so `contains("i", case=False)` and
+    `contains("i", flags=re.IGNORECASE)` answer differently upstream and have to
+    answer differently here.
+    """
+    assert_false(
+        matches_text(
+            program_for(METHOD_CONTAINS, "i", FLAG_IGNORECASE), "\u0130"
+        )
+    )
+    assert_true(
+        matches_text(
+            program_for(METHOD_CONTAINS, "i", FLAG_IGNORECASE, argued=True),
+            "\u0130",
+        )
+    )
+
+
+def test_an_argued_call_reads_its_classes_the_way_python_reads_them() raises:
+    """The second of the four differences between the engines, and the one that
+    covers the most patterns. A word character is 63 code points to RE2 and
+    138558 to Python, so a flag that moved the call moved what `\\w` means with
+    it, which is true upstream and is what makes the routing worth getting
+    right rather than merely tidy."""
+    assert_false(matches_text(program_for(METHOD_CONTAINS, "\\w"), "\u00e9"))
+    assert_true(
+        matches_text(
+            program_for(METHOD_CONTAINS, "\\w", FLAG_MULTILINE, argued=True),
+            "\u00e9",
+        )
+    )
+
+
+def test_an_argued_fullmatch_will_not_stop_short_of_a_trailing_newline() raises:
+    """What the anchors above are for. `re.fullmatch("a", "a\\n")` finds
+    nothing and `^(a)$` with the multiline flag on matches the first line of it,
+    so a rewrite that copied Arrow's anchors would answer True where pandas
+    answers False. The measurement is pandas 3.0.5 on a column of `a\\n` and
+    `a`, which answers False and then True."""
+    var program = program_for(
+        METHOD_FULLMATCH, "a", FLAG_MULTILINE, argued=True
+    )
+    assert_true(program.ok)
+    assert_false(matches_text(program, "a\n"))
+    assert_true(matches_text(program, "a"))
+
+
+def test_an_argued_call_is_refused_by_pythons_rules_and_not_by_re2s() raises:
+    """The letters the two engines will not take are not the same letters.
+
+    `(?a)` is a syntax error to RE2 and a flag Python reads perfectly well, so
+    an argued call carrying it is this library falling short rather than
+    agreeing with anybody, and it says gap. `(?L)` is refused by Python itself
+    on a pattern made of text, which is what every pattern here is made of, so
+    that one is an error on both sides and says so.
+    """
+    var ascii = program_for(METHOD_CONTAINS, "a", FLAG_ASCII, argued=True)
+    assert_false(ascii.ok)
+    assert_true(ascii.gap)
+    var locale = program_for(METHOD_CONTAINS, "a", FLAG_LOCALE, argued=True)
+    assert_false(locale.ok)
+    assert_false(locale.gap)
 
 
 def main() raises:

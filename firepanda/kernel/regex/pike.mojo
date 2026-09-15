@@ -150,7 +150,9 @@ def _holds(
 
     `AT_BOUNDARY_UNICODE` and `AT_NON_BOUNDARY_UNICODE` are the same story about
     the word boundary. RE2 asks it against 63 characters and Python asks it
-    against 138558, and document 81 is where that was measured.
+    against 138558, and document 81 is where that was measured. The second of
+    the two is also the one anchor in here that is not the negation of its
+    partner, for a reason the body gives where it happens.
 
     `AT_END_STRING` is `\\z`, and `\\Z` arrives here as the same thing because
     pandas rewrites a trailing `\\Z` to `\\z` on the way to Arrow. A `\\Z` that
@@ -190,6 +192,15 @@ def _holds(
         if at != length - 1:
             return False
         return _point(points, lead, at) == NEWLINE
+    if which == Int32(Int(AT_NON_BOUNDARY_UNICODE)) and length == 0:
+        # Python's `\\B` is the one anchor that is not simply the opposite of
+        # its partner. It fails on an empty row rather than succeeding there,
+        # which is a special case written into CPython in 3.12 and is not a
+        # consequence of any rule about word characters. RE2 has no such case
+        # and matches, so `str.contains(r"\\B")` on an empty row answers True
+        # and the same call with a flag beside it answers False, in pandas as
+        # much as here. Measured rather than read, and then read to check.
+        return False
     if which == Int32(Int(AT_BOUNDARY_UNICODE)) or which == Int32(
         Int(AT_NON_BOUNDARY_UNICODE)
     ):

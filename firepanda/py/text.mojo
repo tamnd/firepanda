@@ -288,7 +288,9 @@ def _one_character(fill: String) raises -> String:
     )
 
 
-def _compiled(kind: String, pattern: String) raises -> Program:
+def _compiled(
+    kind: String, pattern: String, argued: Int32 = 0
+) raises -> Program:
     """Compiles what a method would run, or raises the refusal that belongs to it.
 
     Everything about which pattern and which engine is in
@@ -319,10 +321,22 @@ def _compiled(kind: String, pattern: String) raises -> Program:
     compiled object on, which is why `case=False` and a written `(?i)` answer
     alike there and have to answer alike here.
 
+    A nonzero `argued` is a `flags` argument, which is a different fact from the
+    word ending in `_regex_folded` even when the bits it carries are the same
+    one. `case=False` folds on RE2 and `flags=re.IGNORECASE` folds on Python's
+    engine, because upstream routes on how the caller spelled it rather than on
+    what they asked for, so the two cross this door by two different routes and
+    can answer differently. They do answer differently, on the four Turkish I
+    code points, which is the whole of the measured gap between the two engines'
+    fold tables and is the thing this arrangement exists to keep visible.
+
     Args:
         kind: The word the Python layer sent, which is one of the six that end
             in `_regex` or one of the three that end in `_regex_folded`.
         pattern: The pattern as the caller wrote it.
+        argued: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            and zero when they passed none. Nonzero moves the call to Python's
+            engine, which is where upstream moves it.
 
     Returns:
         The compiled program.
@@ -346,7 +360,8 @@ def _compiled(kind: String, pattern: String) raises -> Program:
         method = METHOD_REPLACE
     elif name == "extract_regex":
         method = METHOD_EXTRACT
-    var program = program_for(method, pattern, FLAG_IGNORECASE if folded else 0)
+    var seeded = argued | (FLAG_IGNORECASE if folded else 0)
+    var program = program_for(method, pattern, seeded, argued=argued != 0)
     if program.ok:
         return program^
     var said = String("str: ", program.problem, ", in the pattern ", pattern)
@@ -717,8 +732,19 @@ def join(
     return column.chars_join(sep, na_rep, skip_missing)
 
 
-def flag(column: Series, kind: String, arg: String) raises -> Series:
+def flag(
+    column: Series, kind: String, arg: String, flags: Int
+) raises -> Series:
     """Runs one of the methods that answers a mask, and hands back a column.
+
+    The door takes a number as well as two words now, which is the arrangement
+    the text door already had and had for a related reason. A word says which
+    method and a word says whether it folds, because both of those are choices a
+    caller made by name. The flags are not a choice made by name: seven letters
+    in any combination is not a list of words anybody wants to write down, and
+    the only name that matters about them is already carried, which is that they
+    arrived as an argument at all. So the bits ride in a slot and the routing
+    rides in the slot being nonzero.
 
     Args:
         column: The column to read.
@@ -726,6 +752,9 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         arg: The prefix, the suffix or the pattern, and the empty string for
             every question about what the characters are, which takes no
             argument at all.
+        flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            and zero for every call that passed none and for every name in this
+            door that has no pattern to pass them about.
 
     Returns:
         A bool column, as tall as the one it read.
@@ -781,7 +810,7 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         or wanted == "match_regex_folded"
         or wanted == "fullmatch_regex_folded"
     ):
-        return column.chars_matches_regex(_compiled(wanted, arg))
+        return column.chars_matches_regex(_compiled(wanted, arg, Int32(flags)))
     # The same three with `case=False`, which is a word of its own rather than a
     # seventh argument on the door, for the reason `strip` and `strip_chars` are
     # two words: the name and what it does with its argument are what a caller

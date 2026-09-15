@@ -37,6 +37,15 @@ its pattern mean what Python says they mean rather than what RE2 says. That is
 the one line in this file where a method's engine is a property of the method
 rather than of the pattern, and document 81 has why.
 
+There is a second way to end up on Python's engine and it belongs to the call
+rather than to the pattern or to the method. A caller who passes `flags` to
+`contains`, `fullmatch`, `count` or `replace` has moved that call to Python's
+`re` upstream, because those four hand any flag straight to the object path and
+their Arrow path refuses one. `match` is the exception and keeps its two, and
+document 84 has why. A call that moved is anchored differently as well as run
+differently, since upstream stops rewriting the pattern the moment it stops
+talking to Arrow, and `python_anchored` is that other rewrite.
+
 This file is the layer above the compiler and below the binding. It knows what
 pandas does with a pattern before handing it over, and it hands back a program
 or a refusal, which is the same pair the compiler deals in. What it deliberately
@@ -266,7 +275,54 @@ def anchored(method: UInt8, pattern: String) -> String:
     return String(head, start, "(", out, ")")
 
 
-def program_for(method: UInt8, pattern: String, flags: Int32 = 0) -> Program:
+def python_anchored(method: UInt8, pattern: String) -> String:
+    """Rewrites a pattern the way a call that landed on Python's engine needs it.
+
+    The function above copies a rewrite pandas does. This one copies a rewrite
+    pandas does not do, which is why the two are separate rather than one
+    function with a branch in it. A call that goes to Python's engine upstream
+    is answered by `regex.match` and `regex.fullmatch` rather than by a pattern
+    with anchors glued to it, and those two methods anchor from outside the
+    pattern where the glued anchors are inside it. The difference is a flag
+    away: `re.fullmatch("a", "a\\n")` finds nothing, and `^(a)$` with the
+    multiline flag on matches the first line of it.
+
+    So the anchors written here are `\\A` and `\\z`, which are the two positions
+    no flag can move, rather than the `^` and `$` the Arrow rewrite uses. That
+    is the whole of the difference for `fullmatch`, and `match` needs only the
+    first of the two because `regex.match` says where a match may start and says
+    nothing about where it ends.
+
+    A pattern opening with a global flag group keeps that group at the front for
+    the reason `anchored` gives, which is that Python's grammar will not have
+    one anywhere else, and nothing is stripped or cropped on the way past
+    because there is no upstream rewrite here to copy the quirks of.
+
+    Nothing reaches this with `match` today, since the only flags upstream lets
+    `match` keep are the two that leave it on Arrow. The branch is written all
+    the same, because the alternative to a line nobody runs is a wrong anchor
+    the day somebody does.
+
+    Args:
+        method: Which of the six asked.
+        pattern: The pattern as the caller wrote it.
+
+    Returns:
+        The pattern the engine is to be given.
+    """
+    if method != METHOD_MATCH and method != METHOD_FULLMATCH:
+        return pattern.copy()
+    var cut = leading_flags(pattern)
+    var head = String(pattern[byte=0:cut])
+    var rest = String(pattern[byte=cut:])
+    if method == METHOD_MATCH:
+        return String(head, "\\A(", rest, ")")
+    return String(head, "\\A(", rest, ")\\z")
+
+
+def program_for(
+    method: UInt8, pattern: String, flags: Int32 = 0, argued: Bool = False
+) -> Program:
     """Compiles what one of the five methods would run, or refuses it.
 
     The routing decision is made first and on the pattern as written, which is
@@ -285,13 +341,19 @@ def program_for(method: UInt8, pattern: String, flags: Int32 = 0) -> Program:
     runs `regex.search` over the row as written.
 
     The flags a caller passed beside the pattern ride through both parses and
-    change nothing about which of the three steps happen. That is upstream's
-    arrangement rather than a simplification: pandas compiles the pattern with
-    the argument and then routes the compiled object, and the routing test asks
-    what the pattern holds rather than what was passed with it. So a flag can
-    change the answer and cannot change the engine, with one exception that is
-    not in this file, which is that a flag beyond ignore case moves four of the
-    six methods to Python before they ever get here.
+    change nothing about which of the three steps happen. What they can change
+    is the engine, and that is what `argued` says. The bits cannot say it on
+    their own: `case=False` reaches here as ignore case and stays on RE2, and
+    `flags=re.IGNORECASE` reaches here as the same bit and does not, so the fact
+    that is needed is how the caller spelled it rather than what they asked for.
+    Upstream draws the line in the same place and for the same reason, which is
+    that its routing test asks whether the accessor was handed a flags argument
+    rather than what the compiled pattern ended up holding.
+
+    A call that is argued skips the `\\Z` rewrite as well as Arrow's anchoring.
+    The rewrite exists to spell an escape the way RE2 spells it, and an argued
+    call has already left RE2, so doing it would turn a pattern Python reads one
+    way into a pattern Python reads another way for no reason at all.
 
     Args:
         method: Which of the six asked.
@@ -299,6 +361,9 @@ def program_for(method: UInt8, pattern: String, flags: Int32 = 0) -> Program:
         flags: Flags passed beside the pattern, as `FLAG_` bits. The `case`
             argument arrives here as ignore case, because upstream turns it
             into exactly that before anything else looks at it.
+        argued: Whether those flags came from a `flags` argument, which is what
+            moves the call to Python's engine. False is the ordinary call and
+            leaves everything below exactly as it was.
 
     Returns:
         The program, or the reason there is not one, with the flag saying whose
@@ -308,6 +373,18 @@ def program_for(method: UInt8, pattern: String, flags: Int32 = 0) -> Program:
     var tree = parse_pattern(pattern, flags)
     if method == METHOD_EXTRACT:
         return compile_program(tree, ENGINE_PYTHON, captures=True)
+    if argued:
+        if not tree.ok or holds_unsupported(tree):
+            # Refused over the pattern the caller wrote rather than over the
+            # anchored one, for the reason the `not tree.ok` branch below gives.
+            # The engine is the same either way here, so the only thing the
+            # choice decides is which pattern the message quotes.
+            return compile_program(tree, ENGINE_PYTHON)
+        return compile_program(
+            parse_pattern(python_anchored(method, pattern), flags),
+            ENGINE_PYTHON,
+            captures=method == METHOD_REPLACE,
+        )
     if holds_unsupported(tree):
         # Routed to Python, and Python's engine has none of the five yet. It is
         # compiled rather than refused in a sentence of this file's own so that

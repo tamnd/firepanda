@@ -3139,7 +3139,7 @@ SERIES = Exposed(
             mojo="PySeries.string_flag",
             name="string_flag",
             doc="One str accessor method that answers a mask, as a column.",
-            params=(("kind", "str"), ("arg", "str")),
+            params=(("kind", "str"), ("arg", "str"), ("flags", "int")),
             returns="Series",
         ),
         Binding(
