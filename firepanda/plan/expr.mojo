@@ -170,6 +170,52 @@ with nothing of its own to keep in `op`, so the flag lives there instead of in a
 field that every other expression would carry and never read."""
 
 
+comptime AGG_CODE = 255
+"""The part of an aggregate's `op` that names the fold. An `AggKind` code is a
+byte, so the bits above it are free for the flags a fold can carry and
+`agg_kind` is what reads the byte back out."""
+
+
+comptime EMPTY_IS_NULL = 256
+"""What an aggregate holds in `op` when folding nothing answers null rather than
+the fold's own identity.
+
+This is the one place SQL and pandas disagree about a fold with nothing in it.
+`SELECT sum(x) FROM t WHERE false` is null in DuckDB and `Series([]).sum()` is
+zero in pandas, and both front ends build plans, so the plan has to say which
+was asked for rather than pick one. Every other fold already agrees: a count is
+zero on both sides and a minimum, a maximum and an average are null on both.
+
+Only a fold over no rows at all is decided here. A group that saw rows and found
+every one of them null is the same disagreement and is not fixed by this, for
+the reason issue #836 gives, which is that knowing it happened costs a count per
+group and this case costs nothing."""
+
+
+def agg_kind(op: Int) -> AggKind:
+    """Reads the fold out of an aggregate's or a window's `op` field.
+
+    Args:
+        op: The field, flags and all.
+
+    Returns:
+        The fold it names.
+    """
+    return AggKind(UInt8(op & AGG_CODE))
+
+
+def folds_empty_to_null(op: Int) -> Bool:
+    """Whether this fold answers null over no rows rather than its identity.
+
+    Args:
+        op: The field, flags and all.
+
+    Returns:
+        True when the plan was built by a front end that wants SQL's answer.
+    """
+    return (op & EMPTY_IS_NULL) != 0
+
+
 struct Expr(Copyable, Movable):
     """One node of an expression tree.
 
@@ -565,7 +611,9 @@ struct Expressions(Movable, Sized):
             )
         )
 
-    def aggregate(mut self, op: AggKind, over: Int) raises -> Int:
+    def aggregate(
+        mut self, op: AggKind, over: Int, empty_is_null: Bool = False
+    ) raises -> Int:
         """Builds an aggregate.
 
         One child, the expression being folded.
@@ -573,6 +621,10 @@ struct Expressions(Movable, Sized):
         Args:
             op: Which fold.
             over: What is being folded.
+            empty_is_null: Whether folding no rows at all answers null rather
+                than the fold's own identity. False is pandas, where a sum of
+                nothing is zero. True is SQL, where it is null. `EMPTY_IS_NULL`
+                says why the plan carries this rather than choosing.
 
         Returns:
             The index of the new node.
@@ -588,7 +640,7 @@ struct Expressions(Movable, Sized):
                 UNBOUND,
                 UNBOUND,
                 Value(null=LogicalType.NULL),
-                Int(op.code),
+                Int(op.code) | (EMPTY_IS_NULL if empty_is_null else 0),
                 True,
                 0,
                 [over],

@@ -61,7 +61,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp, binary_type, resolve_constant
 from firepanda.kernel.group import AggKind, agg_type
 from firepanda.kernel.unary import UnaryOp, unary_type
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import UNBOUND, ExprKind, Expressions, agg_kind
 from firepanda.plan.node import (
     SET_EXCEPT,
     SET_INTERSECT,
@@ -822,7 +822,7 @@ def bind_expr(
         exprs.nodes[root].type = _call_type(exprs.nodes[root].name, below)
     elif kind == ExprKind.AGGREGATE or kind == ExprKind.WINDOW:
         exprs.nodes[root].type = agg_type(
-            AggKind(UInt8(exprs.nodes[root].op)),
+            agg_kind(exprs.nodes[root].op),
             below[0],
             whole_column=whole_column and kind == ExprKind.AGGREGATE,
         )

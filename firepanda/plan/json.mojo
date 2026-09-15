@@ -83,7 +83,14 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import (
+    AGG_CODE,
+    NEAREST,
+    UNBOUND,
+    ExprKind,
+    Expressions,
+    folds_empty_to_null,
+)
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -654,7 +661,12 @@ def _expr_json(
     elif node.kind == ExprKind.AGGREGATE:
         out += String(
             '"kind": "aggregate", "op": ',
-            _quoted(_agg_text(node.op)),
+            _quoted(_agg_text(node.op & AGG_CODE)),
+        )
+        # Written only when it is on, for the reason the cast's flag gives.
+        if folds_empty_to_null(node.op):
+            out += ', "empty_is_null": true'
+        out += String(
             ', "over": ',
             _expr_json(tree, node.children[0], naming),
         )
@@ -1267,6 +1279,7 @@ def _expr_of(
         )
         at = tree.call(name^, args^, rowwise)
     elif kind == "aggregate":
+        var empty = _at(bytes, members, "empty_is_null")
         at = tree.aggregate(
             _agg_of(
                 text_of(
@@ -1280,6 +1293,7 @@ def _expr_of(
                 tree,
                 ids,
             ),
+            empty != -1 and _flag(bytes, members[empty].value, "empty_is_null"),
         )
     elif kind == "conditional":
         var when = _expr_of(
