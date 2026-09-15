@@ -349,6 +349,36 @@ def test_a_graft_with_more_names_than_expressions_is_refused() raises:
         _ = tree.graft(a, ["a", "b"], [a])
 
 
+def test_a_duplicate_shares_no_index_with_what_it_copied() raises:
+    var tree = Expressions()
+    var over = tree.binary(
+        BinaryOp.LT, tree.column("x"), tree.literal(Value(Int64(2)))
+    )
+    var again = tree.duplicate(over)
+    assert_true(
+        again != over, "a second tree rather than a second name for one"
+    )
+    assert_equal(render_expr(tree, again), "x < 2", "computing the same thing")
+    # Every node under it too. A copy that shared an operand would be bound
+    # twice over two schemas, which is the whole reason for copying.
+    for i in range(len(tree.nodes[over].children)):
+        assert_true(
+            tree.nodes[again].children[i] != tree.nodes[over].children[i],
+            "and nothing underneath is shared either",
+        )
+
+
+def test_a_duplicate_of_a_cast_keeps_the_type_the_cast_was_for() raises:
+    var tree = Expressions()
+    var wider = tree.cast(LogicalType.FLOAT64, tree.column("a"))
+    var again = tree.duplicate(wider)
+    assert_true(again != wider, "copied")
+    assert_true(
+        tree.nodes[again].type == LogicalType.FLOAT64,
+        "and it is still a double",
+    )
+
+
 def test_a_column_that_says_its_input_has_a_table_set_before_binding() raises:
     # The analysis refuses a column whose table is not known yet, and a pinned
     # one's is known, because saying it is what pinning is. So a plan that
