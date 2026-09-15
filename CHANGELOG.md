@@ -21,6 +21,11 @@ The engine gained one thing, which is where a match ends rather than whether the
 `pixi run differential-regex-count` is new and compares the same thirty thousand generated patterns over the same sixteen texts as the other two regular expression differentials. It compares 7668 patterns, which is 122688 counts, and disagrees with pandas on none of them.
 
 `replace` is the one left refusing a metacharacter. It needs the text a match covered rather than where it ended, and `replace_substring_regex` turns out not to share this loop at all, so it is its own slice with its own measurements. Document 79 has all of it.
+### Changed: the differential programs are built several at a time
+
+The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
+
+The chain moved into `tools/build_differential.sh`, which hands the eight commands to `xargs -P`. The width is the core count capped at four, because a Mojo compile is itself parallel and holds around a gigabyte while it runs, so the limit is memory rather than cores. On a ten core machine the eight programs build in four minutes and nineteen seconds of wall clock against about twelve minutes in sequence. The step's ceiling went to fifteen minutes at the same time, so the next program added does not repeat the same failure.
 
 ### Added: `str.contains`, `str.match` and `str.fullmatch` answer a regular expression
 
@@ -35,6 +40,7 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
 ### Added: the five TPC-H queries that already answered are now compared
 
 `pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
