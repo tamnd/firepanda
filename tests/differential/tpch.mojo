@@ -7,12 +7,12 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Nine agree today. The other thirteen are refused rather than wrong, and they are
-refused in five places rather than thirteen: a decimal literal, a cross join
-with more than one row on the right, a name that does not resolve across a
-subquery, a scalar subquery in a HAVING, and a join condition that is not an
-equality. `recorded` below carries one reason per query and issue #816 has the
-five written out.
+Ten agree today. The other twelve are refused rather than wrong, and they are
+refused in five places rather than twelve: a decimal literal, a cross join with
+more than one row on the right, a name that does not resolve across a subquery,
+a scalar subquery in a HAVING, and a join condition that is not an equality.
+`recorded` below carries one reason per query and issue #816 has the five
+written out.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -92,12 +92,12 @@ def tables() -> List[String]:
 def queries() -> List[Int]:
     """Which queries this asks about.
 
-    All twenty two of them. It used to be the ten that answer, and the ten were
-    the wrong ten to ask for: the other twelve are refused rather than wrong, a
-    refusal is a fact about this engine worth checking, and `recorded` below is
-    where each one says why. Asking all of them is also what makes the printed
-    count mean anything, since nine of twenty two is the number this exists to
-    move and nine of ten is not.
+    All twenty two of them. It used to be the eleven that answer, and that was
+    the wrong eleven to ask for: the other twelve are refused rather than wrong,
+    a refusal is a fact about this engine worth checking, and `recorded` below
+    is where each one says why. Asking all of them is also what makes the
+    printed count mean anything, since ten of twenty two is the number this
+    exists to move and ten of eleven is not.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
     because the Python side is what writes an answer out and the Mojo side is
@@ -121,8 +121,8 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Thirteen entries and five reasons between them, which is the useful thing
-    the list says. Issue #816 has the five written out with the refusal each one
+    Twelve entries and five reasons between them, which is the useful thing the
+    list says. Issue #816 has the five written out with the refusal each one
     comes back with.
 
     Args:
@@ -144,12 +144,12 @@ def recorded(number: Int) -> String:
             " so the refusal is wider than the risk it names. Issues #309 and"
             " #816"
         )
-    if number == 7 or number == 8 or number == 9 or number == 19:
+    if number == 7 or number == 8 or number == 9:
         return String(
             "a cross join with more than one row on the right, which there is"
-            " no operator for. Three of these four should not be crossing at"
-            " all, and q19 hides its equality inside every branch of an OR."
-            " Issue #816"
+            " no operator for. None of the three should be crossing at all:"
+            " each one writes its join condition somewhere the lowering does"
+            " not read it as one. Issue #816"
         )
     if number == 2:
         return String(

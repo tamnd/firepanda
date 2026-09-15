@@ -592,6 +592,88 @@ def test_an_or_is_not_split() raises:
     assert_equal(_under(plan, at), "JOIN", "the whole disjunction stayed")
 
 
+def _branch(mut plan: Plan, size: Int) raises -> Int:
+    """Returns one branch of a disjunction, a bound on p_size and one shared.
+
+    The shared half is built again for each branch rather than shared by index,
+    because two branches of a written `or` are two pieces of text and nothing
+    has unified them.
+    """
+    var both = List[Int]()
+    both.append(_small(plan, "p_size", size))
+    both.append(
+        plan.exprs.binary(
+            BinaryOp.LT,
+            plan.exprs.column("l_quantity"),
+            plan.exprs.literal(Value(Float64(30.0))),
+        )
+    )
+    return plan.exprs.call(String("and"), both^, rowwise=True)
+
+
+def test_a_condition_every_branch_of_an_or_holds_is_carried_out_of_it() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left,
+        right,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("l_partkey")],
+        JoinKind.INNER,
+    )
+    var either = List[Int]()
+    either.append(_branch(plan, 15))
+    either.append(_branch(plan, 5))
+    var root = plan.filter(
+        joined, plan.exprs.call(String("or"), either^, rowwise=True)
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # Both branches ask the same thing of l_quantity, so the row has to answer
+    # it whichever branch is the one that holds, and it can be asked on
+    # lineitem before the join. The two p_size bounds are different questions
+    # and neither of them can.
+    assert_equal(_filters(plan, at), 2, "the shared half went down on its own")
+    assert_equal(_under(plan, at), "JOIN", "and the disjunction stayed above")
+    assert_true(
+        "FILTER l_quantity < 30.0\n      SCAN lineitem" in explain(plan, at),
+        "the shared half is the one that moved",
+    )
+
+
+def test_an_equality_every_branch_of_an_or_holds_becomes_the_join_key() raises:
+    var plan = Plan()
+    var left = plan.scan("part", List[String](), 0)
+    var right = plan.scan("lineitem", List[String](), 1)
+    var joined = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var either = List[Int]()
+    for size in [15, 5]:
+        var pieces = List[Int]()
+        pieces.append(
+            plan.exprs.binary(
+                BinaryOp.EQ,
+                plan.exprs.column("p_partkey"),
+                plan.exprs.column("l_partkey"),
+            )
+        )
+        pieces.append(_small(plan, "p_size", size))
+        either.append(plan.exprs.call(String("and"), pieces^, rowwise=True))
+    var root = plan.filter(
+        joined, plan.exprs.call(String("or"), either^, rowwise=True)
+    )
+    var at = push(plan, root, [_part(), _lineitem()])
+    # TPC-H q19 in miniature. The equality is written inside every branch and
+    # nowhere outside one, so without carrying it out of the disjunction the
+    # product stays a product and the query does not run at all.
+    assert_true(
+        "JOIN inner [p_partkey = l_partkey]" in explain(plan, at),
+        "the product became a pairing",
+    )
+    assert_equal(_filters(plan, at), 1, "and the disjunction is still asked")
+
+
 def _equals(mut plan: Plan, name: String, to: Int) raises -> Int:
     """Returns a predicate that one integer column is one number."""
     return plan.exprs.binary(
@@ -749,8 +831,9 @@ def test_a_q19_shaped_plan_filters_both_tables_before_the_join() raises:
         JoinKind.INNER,
     )
     # The four cheap conditions the spec says q19's three disjuncts share
-    # between them, written flat because flattening a disjunction into the
-    # conditions it implies is a later pass than this one.
+    # between them, written flat. Sharing here means each branch implies a
+    # weaker bound rather than each branch holding the same condition, and
+    # deriving the weaker one is a later pass than this one.
     var small = _small(plan, "p_size", 15)
     var light = plan.exprs.binary(
         BinaryOp.LT,

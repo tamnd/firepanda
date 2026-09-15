@@ -60,8 +60,8 @@ TABLES = (
 QUERIES = tuple(range(1, 23))
 """Which queries the harness covers, which is all twenty two of them.
 
-It used to be the ten that answer, on the grounds that a query with nothing to
-compare against is not a comparison. The ten were the wrong ten to ask for.
+It used to be the eleven that answer, on the grounds that a query with nothing
+to compare against is not a comparison. That was the wrong eleven to ask for.
 Twelve queries are refused rather than wrong, and a refusal is a fact about this
 engine worth writing down and checking, so all twenty two are asked and the
 twelve carry a recorded reason on the Mojo side. The run prints how many of the

@@ -19,10 +19,10 @@ almost per method and grouping by it would give a door per method. So the widest
 of the three carries the arguments the others do not need and hands them along:
 two strings, two positions that are allowed to be absent, and a step.
 
-The second string arrived with `replace`, which is the only name on the accessor
-that takes two of them, and it was worth widening the door rather than opening a
-fourth one. A fourth door would have been picked by argument shape, which is the
-one rule this file has.
+The second string arrived with `replace`, which with its regular expression
+form is the only name on the accessor that takes two of them, and it was worth
+widening the door rather than opening a fourth one. A fourth door would have
+been picked by argument shape, which is the one rule this file has.
 
 ### Why a position crosses as an absence rather than as a number
 
@@ -90,9 +90,11 @@ from firepanda.kernel.regex.method import (
     METHOD_COUNT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
+    METHOD_REPLACE,
     program_for,
 )
 from firepanda.kernel.regex.program import Program
+from firepanda.kernel.regex.replace import Rewrite, parse_rewrite
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, tagged
 
 
@@ -134,6 +136,7 @@ def _text_name(name: String) raises -> String:
         or name == "repeat"
         or name == "replace"
         or name == "replace_folded"
+        or name == "replace_regex"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -301,7 +304,7 @@ def _compiled(kind: String, pattern: String) raises -> Program:
     refusal in kind is what matters rather than reproducing it to the letter.
 
     Args:
-        kind: The word the Python layer sent, which is one of the four that end
+        kind: The word the Python layer sent, which is one of the five that end
             in `_regex`.
         pattern: The pattern as the caller wrote it.
 
@@ -319,11 +322,40 @@ def _compiled(kind: String, pattern: String) raises -> Program:
         method = METHOD_FULLMATCH
     elif kind == "count_regex":
         method = METHOD_COUNT
+    elif kind == "replace_regex":
+        method = METHOD_REPLACE
     var program = program_for(method, pattern)
     if program.ok:
         return program^
     var said = String("str: ", program.problem, ", in the pattern ", pattern)
     raise tagged(UNSUPPORTED if program.gap else VALUE, said)
+
+
+def _rewritten(replacement: String, groups: Int) raises -> Rewrite:
+    """Reads a replacement string, or raises the way pandas raises.
+
+    Every refusal the grammar makes is one RE2 makes too, and an Arrow error is
+    a `ValueError` in Python, so there is one tag here rather than the two the
+    pattern needs. The wording is this library's for the reason `_compiled`
+    gives.
+
+    Args:
+        replacement: The replacement as the caller wrote it.
+        groups: How many capturing groups the pattern opened.
+
+    Returns:
+        The replacement, read.
+
+    Raises:
+        Error: Tagged `value` when it cannot be read.
+    """
+    var rewrite = parse_rewrite(replacement, groups)
+    if rewrite.ok:
+        return rewrite^
+    raise tagged(
+        VALUE,
+        String("str: ", rewrite.problem, ", in the replacement ", replacement),
+    )
 
 
 def text(
@@ -440,6 +472,16 @@ def text(
         # text. pandas answers this one out of Python rather than out of Arrow
         # and the two fold the same way anyway, which document 69 measures.
         return column.chars_replace_folded(arg, other, _whole(start, "n"))
+    if wanted == "replace_regex":
+        # The one name in this door that reaches the engine, and the only one
+        # anywhere that has two things to refuse: the pattern, which is refused
+        # the way the other four regular expression names refuse theirs, and
+        # the replacement, which has a grammar of its own. There is no `n` here
+        # because the binding refuses one, and `replace.mojo` says why.
+        var program = _compiled(wanted, arg)
+        return column.chars_replace_regex(
+            program, _rewritten(other, program.groups)
+        )
     return column.chars_repeat(_whole(start, "repeats"))
 
 

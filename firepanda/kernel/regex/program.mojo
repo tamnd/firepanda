@@ -107,6 +107,22 @@ where the two engines disagree about `$`."""
 comptime IN_MATCH: UInt8 = 9
 """The pattern has matched."""
 
+comptime IN_SAVE: UInt8 = 10
+"""Write the position into slot `a` of the thread running this.
+
+The one instruction here that a yes or no answer has no use for, and it is only
+written into a program whose caller asked for captures. Slot zero and slot one
+are the two ends of the whole match, slot `2k` and slot `2k + 1` are the two ends
+of group `k`, and a group inside a repeat writes its slots again every time round,
+so what a group holds at the end is what it held on the last pass, which is what
+both engines say it holds.
+
+A program carrying these is larger and slower to run than the same pattern
+without them, which is why `contains` and the two anchored questions and `count`
+are compiled without and only `replace` is compiled with. The cost is not the
+instruction, it is that every thread then carries a copy of the slots.
+"""
+
 
 comptime MAX_INSTRUCTIONS: Int = 200000
 """How large a program may get before the compiler gives up.
@@ -199,6 +215,24 @@ struct Program(Movable):
     counts the second kind as held out.
     """
 
+    var slots: Int
+    """How many capture slots a thread running this program carries.
+
+    Zero for a program compiled without captures, which is every program asking
+    whether or how many, and `2 * (groups + 1)` for one compiled with them. A
+    machine reads this to size its thread state, so a program and a machine built
+    for it are the same call away from each other and neither has to be told
+    twice.
+    """
+
+    var groups: Int
+    """How many capturing groups the pattern opened.
+
+    Kept beside the slots because the replacement string is checked against it
+    rather than against the slot count, and because the number in RE2's own
+    refusal is this one.
+    """
+
     def __init__(out self):
         """Starts an empty program, which is what a refusal leaves behind."""
         self.code = []
@@ -206,6 +240,8 @@ struct Program(Movable):
         self.ok = True
         self.problem = String("")
         self.gap = False
+        self.slots = 0
+        self.groups = 0
 
     def sized(self) -> Int:
         """How many instructions the program has.
@@ -245,11 +281,21 @@ struct _Builder(Movable):
     """The pattern's global flags, which decide what a full stop and the two
     anchors mean."""
 
-    def __init__(out self, flags: Int32):
+    var captures: Bool
+    """Whether the caller wants to know where each group matched.
+
+    A flag rather than two compilers, because the only difference it makes is
+    three lines in `_emit_node` and two in `compile_program`, and because a
+    second walk over the same tree writing almost the same instructions is a
+    thing that drifts.
+    """
+
+    def __init__(out self, flags: Int32, captures: Bool):
         """Starts an empty program.
 
         Args:
             flags: The pattern's global flags.
+            captures: Whether to write the save instructions.
         """
         self.code = []
         self.ranges = []
@@ -257,6 +303,7 @@ struct _Builder(Movable):
         self.problem = String("")
         self.gap = False
         self.flags = flags
+        self.captures = captures
 
     def give_up(mut self, problem: String, gap: Bool = False):
         """Records the first reason the pattern cannot be compiled.
@@ -561,7 +608,18 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
             return
         b.add_set(pieces, negated)
         return
-    if it.op == OP_SEQ or it.op == OP_SUBPATTERN:
+    if it.op == OP_SUBPATTERN:
+        # The parser drops a non capturing group by inlining it, so every one of
+        # these opened a bracket somebody can refer to, and `a` is the number
+        # they would refer to it by.
+        if b.captures and it.a >= 1:
+            _ = b.emit(IN_SAVE, it.a * 2, 0)
+            _emit_children(b, nodes, node)
+            _ = b.emit(IN_SAVE, it.a * 2 + 1, 0)
+            return
+        _emit_children(b, nodes, node)
+        return
+    if it.op == OP_SEQ:
         _emit_children(b, nodes, node)
         return
     if it.op == OP_BRANCH:
@@ -809,12 +867,20 @@ def _refused_flags(flags: Int32) -> String:
     return String("")
 
 
-def compile_program(tree: Parsed, engine: UInt8) -> Program:
+def compile_program(
+    tree: Parsed, engine: UInt8, captures: Bool = False
+) -> Program:
     """Turns a parsed pattern into a program for one of the two engines.
 
     Args:
         tree: The pattern, as `parse_pattern` read it.
         engine: Which engine is to run it.
+        captures: Whether the caller needs to know where each group matched as
+            well as whether the pattern did. A program built this way carries a
+            save instruction around every group and one around the whole match,
+            and every thread running it carries a copy of the slots, so it is
+            the slower of the two and only the callers that need the text of a
+            match ask for it.
 
     Returns:
         The program, or the reason there is not one. A refusal is a value here
@@ -878,14 +944,18 @@ def compile_program(tree: Parsed, engine: UInt8) -> Program:
         out.gap = True
         return out^
 
-    var b = _Builder(tree.flags)
+    var b = _Builder(tree.flags, captures)
     _check_node(b, tree.nodes, tree.root, MAX_REPEAT_COUNT)
     if b.failed:
         out.ok = False
         out.problem = b.problem.copy()
         out.gap = b.gap
         return out^
+    if captures:
+        _ = b.emit(IN_SAVE, 0, 0)
     _emit_node(b, tree.nodes, tree.root)
+    if captures:
+        _ = b.emit(IN_SAVE, 1, 0)
     _ = b.emit(IN_MATCH, 0, 0)
     if b.failed:
         out.ok = False
@@ -894,6 +964,8 @@ def compile_program(tree: Parsed, engine: UInt8) -> Program:
         return out^
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
+    out.groups = Int(tree.groups)
+    out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
     return out^
 
 

@@ -207,3 +207,33 @@ def key_for(exprs: Expressions, root: Int, kids: List[String]) raises -> String:
     for i in range(len(kids)):
         written += String("|", kids[i])
     return written^
+
+
+def shape_of(exprs: Expressions, root: Int) raises -> String:
+    """Writes down what a whole expression tree computes, operands included.
+
+    `key_for` describes one node and takes its operands as tokens, which leaves
+    the caller to say what an operand is. There are three answers to that and
+    this is the third. `_canon` passes an index, because it has already unified
+    below and an index is a shape there. Subplan elimination passes the
+    operand's own key and keeps a table of them, because it asks about every
+    expression in the plan and would otherwise walk a shared subtree once per
+    reader. This one just walks the tree, for a caller that asks about a handful
+    of small predicates and has nowhere to keep a table.
+
+    Args:
+        exprs: The arena.
+        root: The expression.
+
+    Returns:
+        The key, which two expressions share when they compute the same thing.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    var kids = exprs.nodes[root].children.copy()
+    var tokens = List[String](capacity=len(kids))
+    for i in range(len(kids)):
+        tokens.append(shape_of(exprs, kids[i]))
+    return key_for(exprs, root, tokens)
