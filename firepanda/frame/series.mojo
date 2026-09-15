@@ -122,6 +122,7 @@ from firepanda.kernel.pattern import (
 from firepanda.kernel.pick import pick_any
 from firepanda.kernel.regex.column import (
     text_count_regex,
+    text_extract_regex,
     text_matches_regex,
     text_replace_regex,
 )
@@ -1817,6 +1818,45 @@ struct Series(Copyable, Movable, Sized, Writable):
                 text_replace_regex(self.values.strings(), program, rewrite)
             ),
         )
+
+    def chars_extract_regex(self, program: Program) raises -> List[Self]:
+        """Returns what each group of the first match held, one series per group.
+
+        This is `str.extract`, and it is the first regular expression method on
+        a text series that is not answered by RE2. pandas answers this one, and
+        `extractall` and `findall` with it, by compiling the pattern with
+        Python's own `re` and looping in Python, so the program handed here has
+        to have been compiled for that engine and the letters in the pattern
+        mean what Python says they mean. `\\w` is 138558 code points for this
+        method and 63 for the five above it, on the same accessor, and document
+        81 has the measurements.
+
+        The match is the leftmost one anywhere in the row, because upstream runs
+        `regex.search` rather than anchoring anything. A row with no match is
+        null in every group, and a group that took no part in a match that
+        happened is null on its own, which are two different kinds of nothing
+        and are the only two a row can hold.
+
+        Args:
+            program: The pattern, already compiled with captures for Python's
+                engine.
+
+        Returns:
+            One text series per capturing group, in the order the groups were
+            opened, each as tall as this one and null wherever this one is null.
+            A list rather than a tuple for the reason `chars_partition` gives,
+            and because how many there are is a property of the pattern.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        var parts = text_extract_regex(self.values.strings(), program)
+        var out = List[Self](capacity=len(parts))
+        for _ in range(len(parts)):
+            out.append(
+                self._relabelled(self.name.copy(), AnyArray(parts.pop(0)))
+            )
+        return out^
 
     def chars_contains_folded(self, pattern: StringSlice) raises -> Self:
         """Returns whether each row holds a substring, ignoring case.

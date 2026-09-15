@@ -1057,6 +1057,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="DataFrame",
         ),
         Member(
+            name="extract",
+            kind="method",
+            signature="pat: Any, flags: Any = 0, expand: Any = True",
+            body="self._extracted(pat, flags, expand)",
+            doc="What each group of the first match held, one column per group.",
+            returns="DataFrame | Series",
+        ),
+        Member(
             name="cat",
             kind="method",
             signature="others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = \"left\"",
@@ -3077,6 +3085,13 @@ SERIES = Exposed(
                 ("skip_missing", "bool"),
             ),
             returns="str",
+        ),
+        Binding(
+            mojo="PySeries.string_extract",
+            name="string_extract",
+            doc="The group labels and one column of what each group held.",
+            params=(("pat", "str"),),
+            returns="tuple[list[str], list[Series]]",
         ),
         Binding(
             mojo="PySeries.string_dummies",

@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `str.extract`, whose answer is as wide as the pattern says
+
+`pandas.Series(["ab1"]).str.extract(r"([a-z])(\d)")` answers a frame of two columns and `.str.extract(r"([a-z])\d")` answers a frame of one, for the same column. This is the first name on the `str` accessor whose width varies per call and is still known before a single row is read, and the first of the three methods document 81 left unwired. Issue #8 M6.
+
+It never asks the router. The five pattern methods above it ask whether Arrow can do what the pattern says and fall back to Python when it cannot, and this one has no Arrow path to fall back from, so it compiles for Python's engine every time. That is visible from Python in one line: `str.count(r"\w")` on a row holding one Greek letter is 0 and `str.extract(r"(\w)")` on the same row answers the letter, because the two names on the same accessor read the same pattern in two alphabets. A pattern holding syntax only RE2 refuses, a comment group or a `\u` escape, is compiled here rather than refused, and a lookaround is refused with the sentence that says this engine has none yet rather than the one that says RE2 has none.
+
+It searches where `match` and `fullmatch` anchor, because upstream runs `regex.search` here. A row with no match is missing in every column and a row that is itself missing is too, so the columns of one row agree about whether there was a match, with one exception: a group that took no part in a match that did happen is missing on its own, which is what `(a)(x)?` answers for a row holding `a`. A group that matched the empty string is a fourth state and is a value rather than a missing one.
+
+The group labels come off the compiled program rather than out of a second parse. The parser already knew which names belong to which groups and kept them as two lists as long as however many groups were named, and the compiler turns that into one entry per group in the order they were opened. A named group is labelled with its name and an unnamed one with its own position counted from zero, which pandas writes as an integer and this library writes as text, and that is the column label divergence `partition` already carries rather than a new one.
+
+`expand=False` with one group answers a column instead of a frame. If the group has a name the column takes it, which is the one place on this accessor the answer is not named after the column it was called on, and if the group has no name the column keeps the name it already had rather than losing it. `expand` is checked before the pattern is looked at and the group count after it is compiled, which is upstream's order and is the only thing that decides which of two errors a caller who got both wrong sees. Document 82 has the rest.
+
 ### Added: a comma FROM is reordered so that no pair of relations is left crossed
 
 A comma between two tables in a `FROM` is a join with no condition and the clause nests left, so the order the relations are written in is the order they are joined in. A relation whose equalities are all with something further along the list leaves a product in the middle of the chain, and a product of two real tables is refused rather than slow, so the query does not run at all. `FROM a, b, c WHERE a.x = c.x AND b.y = c.y` is that query and `FROM a, c, b` is the same query written in an order that works. Issue #309.

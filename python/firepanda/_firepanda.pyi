@@ -296,6 +296,9 @@ class Series:
     def string_join(self, sep: str, na_rep: str, skip_missing: bool) -> str:
         """The whole column folded into one string."""
         ...
+    def string_extract(self, pat: str) -> tuple[list[str], list[Series]]:
+        """The group labels and one column of what each group held."""
+        ...
     def string_dummies(self, sep: str) -> tuple[list[str], list[Series]]:
         """The token labels and one flag column for each of them."""
         ...
