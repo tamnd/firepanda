@@ -465,20 +465,36 @@ struct _Cursor(Movable):
 def decoded(pattern: StringSlice) -> List[UInt32]:
     """Reads a pattern's bytes as code points.
 
-    A pattern that is not valid UTF-8 cannot be written in Python source and is
-    not something this has to be careful about, so a bad byte is taken as a
-    single code point of its own value rather than reported. That keeps the
-    cursor in step with the bytes and lets whatever is wrong with the pattern be
-    reported by the grammar instead.
-
     Args:
         pattern: The pattern.
 
     Returns:
         Its code points.
     """
-    var bytes = pattern.as_bytes()
     var out = List[UInt32]()
+    decode_into(pattern.as_bytes(), out)
+    return out^
+
+
+def decode_into(bytes: Span[UInt8, _], mut out: List[UInt32]):
+    """Reads bytes as code points, into a list the caller keeps.
+
+    Text that is not valid UTF-8 cannot be written in Python source and Arrow
+    says a string column holds none, so a bad byte is taken as a single code
+    point of its own value rather than reported. That keeps the cursor in step
+    with the bytes and lets whatever is wrong with the pattern be reported by
+    the grammar instead.
+
+    The list is emptied first, so a column can hand the same one back row after
+    row and pay for the allocation once. That matters more than it looks: the
+    row is the unit here, a column has millions of them, and a list per row is
+    a malloc per row for a few dozen bytes of text.
+
+    Args:
+        bytes: The text. Borrowed for the length of the call and not stored.
+        out: Where to put the code points. Emptied first.
+    """
+    out.clear()
     var i = 0
     while i < len(bytes):
         var lead = UInt32(Int(bytes[i]))
@@ -508,7 +524,6 @@ def decoded(pattern: StringSlice) -> List[UInt32]:
         else:
             out.append(lead)
             i += 1
-    return out^
 
 
 def _is_digit(point: UInt32) -> Bool:

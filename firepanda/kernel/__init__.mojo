@@ -196,6 +196,7 @@ from .pick import (
     text_pick,
 )
 from .reduce import distinct_count, distinct_count_any, reduce_any
+from .regex.column import text_matches_regex
 from .select import (
     filter_any,
     filter_counted,

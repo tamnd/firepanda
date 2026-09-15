@@ -85,7 +85,14 @@ is a lie about a method nobody has written yet.
 
 from firepanda.frame.series import Series
 from firepanda.kernel.chars import character_count
-from firepanda.py.errors import DTYPE, VALUE, tagged
+from firepanda.kernel.regex.method import (
+    METHOD_CONTAINS,
+    METHOD_FULLMATCH,
+    METHOD_MATCH,
+    program_for,
+)
+from firepanda.kernel.regex.program import Program
+from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, tagged
 
 
 def _text_name(name: String) raises -> String:
@@ -159,6 +166,9 @@ def _flag_name(name: String) raises -> String:
         or name == "contains"
         or name == "match"
         or name == "fullmatch"
+        or name == "contains_regex"
+        or name == "match_regex"
+        or name == "fullmatch_regex"
         or name == "contains_folded"
         or name == "match_folded"
         or name == "fullmatch_folded"
@@ -260,6 +270,51 @@ def _one_character(fill: String) raises -> String:
             character_count(fill.as_bytes()),
         ),
     )
+
+
+def _compiled(kind: String, pattern: String) raises -> Program:
+    """Compiles what a method would run, or raises the refusal that belongs to it.
+
+    Everything about which pattern and which engine is in
+    `firepanda/kernel/regex/method.mojo`. What is decided here, and can only be
+    decided here, is what a refusal becomes in Python.
+
+    The two kinds the compiler tells apart become two different exceptions, and
+    telling them apart is the whole point of the flag it carries. A pattern RE2
+    refuses is refused by pandas today with an Arrow error, which is a
+    `ValueError` in Python, so `value` is the tag that keeps a program written
+    against pandas working. A pattern this library has not learned yet is
+    `unsupported`, which reaches Python as `NotImplementedError`, because it is
+    a shortfall and a caller who catches `ValueError` around a pattern they know
+    to be good should not be told they wrote a bad one.
+
+    The wording is this library's rather than RE2's. Document 76 made that
+    decision for the routing refusal and the argument is the same one: pandas'
+    message names Arrow, a caller here did not call Arrow, and reproducing a
+    refusal in kind is what matters rather than reproducing it to the letter.
+
+    Args:
+        kind: The word the Python layer sent, which is one of the three that end
+            in `_regex`.
+        pattern: The pattern as the caller wrote it.
+
+    Returns:
+        The compiled program.
+
+    Raises:
+        Error: Tagged `value` when RE2 would refuse the pattern too, and
+            `unsupported` when the refusal is this library's own.
+    """
+    var method = METHOD_CONTAINS
+    if kind == "match_regex":
+        method = METHOD_MATCH
+    elif kind == "fullmatch_regex":
+        method = METHOD_FULLMATCH
+    var program = program_for(method, pattern)
+    if program.ok:
+        return program^
+    var said = String("str: ", program.problem, ", in the pattern ", pattern)
+    raise tagged(UNSUPPORTED if program.gap else VALUE, said)
 
 
 def text(
@@ -581,15 +636,26 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
     if wanted == "isalnum":
         return column.chars_is_alnum()
     # The three pattern questions take a literal and pandas takes a regular
-    # expression. Which patterns are allowed to arrive here is decided in the
-    # Python layer, because that is where the pattern is still a Python string
-    # and where a refusal can name the metacharacter that caused it.
+    # expression. A pattern with no metacharacter in it means the same thing
+    # either way and gets the byte search, which is what these three are, and
+    # the Python layer is what decides that because that is where the pattern is
+    # still a Python string.
     if wanted == "contains":
         return column.chars_contains(arg)
     if wanted == "match":
         return column.chars_match(arg)
     if wanted == "fullmatch":
         return column.chars_full_match(arg)
+    # Everything else goes to the engine. Three words rather than one, because
+    # the pattern arrives as the caller wrote it and which of the three asked is
+    # what decides both the rewrite and, for a pattern that cannot be answered,
+    # nothing at all: the routing decision is made before the rewrite.
+    if (
+        wanted == "contains_regex"
+        or wanted == "match_regex"
+        or wanted == "fullmatch_regex"
+    ):
+        return column.chars_matches_regex(_compiled(wanted, arg))
     # The same three with `case=False`, which is a word of its own rather than a
     # seventh argument on the door, for the reason `strip` and `strip_chars` are
     # two words: the name and what it does with its argument are what a caller
