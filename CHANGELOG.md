@@ -19,6 +19,7 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+
 ### Added: the second regular expression engine, which reads a different alphabet
 
 `pandas.Series(["café"]).str.count(r"\w")` is 3 and `pandas.Series(["café"]).str.findall(r"\w")` is four characters long, from one accessor with one pattern, and neither number is wrong. Six of the accessor's pattern methods go to Arrow and get RE2's reading, where `\w` is 63 characters of ASCII. The other three never reach Arrow at all: pandas compiles the pattern with `re` and loops in Python, where `\w` is 138558 code points. Document 76 built a router that picks between two engines and only one of them was ever written. This is the other one. Issue #8 M6.
