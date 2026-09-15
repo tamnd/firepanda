@@ -7,9 +7,9 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Sixteen agree today. The other six are refused rather than wrong, and they are
-refused in four places rather than six: a table named on both sides of a
-correlation, a left join on two key pairs, a scalar subquery in a HAVING, and a
+Seventeen agree today. The other five are refused rather than wrong, and they
+are refused in four places rather than five: a cross join with more than one row
+on the right, a left join on two key pairs, a scalar subquery in a HAVING, and a
 join condition that is not an equality. `recorded` below carries one reason per
 query and issue #816 has the four written out.
 
@@ -95,8 +95,8 @@ def queries() -> List[Int]:
     was the wrong list to ask for: the rest are refused rather than wrong, a
     refusal is a fact about this engine worth checking, and `recorded` below is
     where each one says why. Asking all of them is also what makes the printed
-    count mean anything, since sixteen of twenty two is the number this exists
-    to move and sixteen of sixteen is not.
+    count mean anything, since seventeen of twenty two is the number this
+    exists to move and seventeen of seventeen is not.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
     because the Python side is what writes an answer out and the Mojo side is
@@ -120,7 +120,7 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Six entries and four reasons between them, which is the useful thing the
+    Five entries and four reasons between them, which is the useful thing the
     list says. Issue #816 has the four written out with the refusal each one
     comes back with.
 
@@ -130,13 +130,11 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 2 or number == 17:
+    if number == 2:
         return String(
-            "a table named on both sides of a correlation. The subquery's FROM"
-            " is lowered into the caller's scope, because a condition reading"
-            " both sides can only be written where both are in reach, and two"
-            " relations of the same name in one scope is the thing that scope"
-            " refuses. Inner shadows outer is the rule it wants. Issue #816"
+            "a cross join whose right side is more than one row, which is the"
+            " whole frame join rather than a column added as each chunk goes"
+            " past. Issue #816"
         )
     if number == 20:
         return String(

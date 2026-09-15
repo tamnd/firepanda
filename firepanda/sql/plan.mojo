@@ -1582,6 +1582,28 @@ struct _Scope(Movable):
     the join, so a search for it finds two columns and would be refused, and
     the join is what decides which of the two the query gets."""
 
+    var floor: Int
+    """Where the innermost query's own names begin.
+
+    Zero for a query lowered on its own, which is every query until a correlated
+    subquery is met. A correlated subquery is lowered into the scope around it,
+    because a condition reading both sides can only be written where both sides
+    are in reach, and that puts two queries' names in one list. This is the
+    line between them, so that what belongs to which query is still a question
+    with an answer.
+
+    SQL resolves a name in the innermost query that has one and works outward,
+    which is what the line is for. A relation named on both sides of a
+    correlation is two relations, and the inner one shadows the outer rather
+    than clashing with it, so `add` only refuses a repeat above this line. A
+    bare column written under the line is the inner query's whenever the inner
+    query has it, which is what `shadowed` answers.
+
+    The caller saves it and puts it back, the same way it saves and puts back
+    how far reach went, so a correlated subquery inside a correlated subquery
+    nests rather than flattens.
+    """
+
     def __init__(out self):
         """Starts with nothing in reach, which is what a query with no FROM has.
         """
@@ -1591,18 +1613,26 @@ struct _Scope(Movable):
         self.spellings = List[List[String]]()
         self.merged = List[String]()
         self.pinned = List[Int]()
+        self.floor = 0
 
     def add(mut self, var name: String, table: Int) raises:
         """Puts one name in reach.
+
+        A repeat is refused within the innermost query and allowed across the
+        line `floor` draws, because two relations of the same name in one
+        `FROM` is a query that cannot say which it means, and the same name in
+        a subquery and in the query around it is SQL working as written. The
+        inner one shadows the outer for as long as the subquery is being
+        lowered, which is the whole of the window this scope holds both.
 
         Args:
             name: What the query may write in front of a column.
             table: Which relation it is.
 
         Raises:
-            If something is already called that.
+            If the innermost query already has something called that.
         """
-        for i in range(len(self.names)):
+        for i in range(self.floor, len(self.names)):
             if self.names[i] == name:
                 raise Error(
                     String(
@@ -1810,16 +1840,88 @@ struct _Scope(Movable):
     def find(self, name: StringSlice) -> Int:
         """Which relation a name is, or minus one when nothing is called that.
 
+        Searched from the end, so that the innermost query answers first. That
+        only decides anything while a correlated subquery is being lowered,
+        since `add` refuses a repeat within one query, and there it decides the
+        right way: a relation named on both sides of a correlation means the
+        subquery's own when the name is written inside the subquery.
+
         Args:
             name: What was written in front of the column.
 
         Returns:
             The relation, `DERIVED` for a subquery, or `NOT_IN_REACH`.
         """
-        for i in range(len(self.names)):
+        for i in reversed(range(len(self.names))):
             if self.names[i] == name:
                 return self.tables[i]
         return NOT_IN_REACH
+
+    def shadowed(self, name: StringSlice) -> Int:
+        """Which relation a bare column name means, innermost query first.
+
+        Only asked while a correlated subquery is being lowered, which is when
+        `floor` is past zero and two queries' names are in one list. Everywhere
+        else a bare name goes on unqualified and binding finds it, which is the
+        behaviour this leaves alone: there is one query in reach, so innermost
+        first and anywhere at all are the same search.
+
+        With two queries in reach they are not the same search. SQL resolves a
+        bare name in the innermost query that has a column of that name and
+        works outward from there, so the names below the line are looked at
+        first and the ones above it only when nothing below has the column.
+        Without that, a table named on both sides gives binding the same column
+        name twice and it refuses an ambiguity the query does not have.
+
+        Two relations within the same query having the column is a real
+        ambiguity and is left to binding, which already has the words for it.
+        So is a derived table, which has no relation number to lower to, for
+        the reason the qualified path gives.
+
+        Args:
+            name: The column name as the query wrote it, folded.
+
+        Returns:
+            The relation, or `NOT_IN_REACH` when this does not decide.
+        """
+        if self.floor == 0:
+            return NOT_IN_REACH
+        var inner = self._holder(self.floor, len(self.names), name)
+        if inner != NOT_IN_REACH:
+            return inner
+        return self._holder(0, self.floor, name)
+
+    def _holder(self, first: Int, past: Int, name: StringSlice) -> Int:
+        """The one relation in a stretch of reach that has a column.
+
+        Args:
+            first: Where to start looking.
+            past: Where to stop.
+            name: The column name, folded.
+
+        Returns:
+            The relation, or `NOT_IN_REACH` when none has it, more than one
+            does, or the one that does is a derived table.
+        """
+        var key = fold(name)
+        var found = NOT_IN_REACH
+        for i in range(first, past):
+            var has = False
+            for j in range(len(self.spellings[i])):
+                if fold(self.spellings[i][j]) == key:
+                    has = True
+                    break
+            if not has:
+                for j in range(len(self.columns[i])):
+                    if fold(self.columns[i][j]) == key:
+                        has = True
+                        break
+            if not has:
+                continue
+            if found != NOT_IN_REACH or self.tables[i] == DERIVED:
+                return NOT_IN_REACH
+            found = self.tables[i]
+        return found
 
     def written(self) -> String:
         """The names in reach, for a message that has to list them.
@@ -2320,6 +2422,18 @@ def _lower_expr(
             if whose != NOT_IN_REACH:
                 return plan.exprs.column_of(
                     whose, scope.spelled_at(whose, bare)
+                )
+            # A correlated subquery is lowered into the scope around it, so
+            # while one is being lowered there are two queries in reach and a
+            # bare name is the innermost one's that has it. Said here rather
+            # than left to binding, which sees one list of columns and cannot
+            # tell a name two queries have from a name one query has twice.
+            # Everywhere else this answers nothing and the name goes on the way
+            # it always has.
+            var inner = scope.shadowed(bare)
+            if inner != NOT_IN_REACH:
+                return plan.exprs.column_of(
+                    inner, scope.spelled_at(inner, bare)
                 )
             return plan.exprs.column(scope.spelled(bare))
         if parts == 2:
@@ -5682,8 +5796,17 @@ def _folded_join(
     # Lowered into the caller's scope rather than a scope of its own, which is
     # the whole difference between this and the uncorrelated case: a condition
     # that reads both sides can only be written where both sides are in reach.
+    #
+    # Which is also why the line moves. Two queries' names are about to be in
+    # one list, and from here down the subquery's own are the innermost: a
+    # relation it names that the query around it also names is a second
+    # relation and shadows the first, and a bare column it writes is its own
+    # whenever it has one. The line goes back where it was below, beside reach,
+    # so a correlated subquery inside this one nests rather than flattens.
     var reach = len(scope.names)
     var merged = len(scope.merged)
+    var outside = scope.floor
+    scope.floor = reach
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -5820,7 +5943,9 @@ def _folded_join(
 
     # Back out of reach, for the reason a semi join's right side goes out of
     # reach: nothing the join hands out is called what the subquery called it.
+    # The line between the two queries goes back with it.
     scope.hide(reach, merged)
+    scope.floor = outside
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
     walk.scalar_zeroes.append(zeroed)
@@ -6402,8 +6527,17 @@ def _exists_join(
     # Lowered into the caller's scope rather than a scope of its own, which is
     # the whole difference between this and the uncorrelated case: a condition
     # that reads both sides can only be written where both sides are in reach.
+    #
+    # Which is also why the line moves. Two queries' names are about to be in
+    # one list, and from here down the subquery's own are the innermost: a
+    # relation it names that the query around it also names is a second
+    # relation and shadows the first, and a bare column it writes is its own
+    # whenever it has one. The line goes back where it was below, beside reach,
+    # so a correlated subquery inside this one nests rather than flattens.
     var reach = len(scope.names)
     var merged = len(scope.merged)
+    var outside = scope.floor
+    scope.floor = reach
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -6461,8 +6595,10 @@ def _exists_join(
         )
 
     # Back out of reach, for the reason a written out semi join's right side
-    # goes out of reach: the join hands out no column of it.
+    # goes out of reach: the join hands out no column of it. The line between
+    # the two queries goes back with it.
     scope.hide(reach, merged)
+    scope.floor = outside
 
     if len(left_keys) == 0:
         raise Error(
