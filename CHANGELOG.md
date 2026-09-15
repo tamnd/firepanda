@@ -8,6 +8,28 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-09-15
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with one behaviour change that callers have to read, a regular expression engine where there was a refusal, whole TPC-H queries compared against DuckDB for the first time, and two pieces of the execution engine doing less work for the same answer.
+
+The behaviour change first, because it is the one that can break a program that works today. A column the query did not name used to come back as `__expr_0` and now comes back named after what was written, so `SELECT sum(x) FROM t` gives a column called `sum(x)`. That is what DuckDB does and the name is produced by the printer that already prints an AST back to SQL, which is why the two agree on as much of it as they do without either aiming at the other. A caller reading a result column back by the name firepanda invented has to read it back by the new name, and a caller that wrote an alias is unaffected. It is also what made TPC-H q18 agree with DuckDB, which was the only thing left between that query and agreement.
+
+The regular expression work is a whole front end and a whole engine in one release. Last release the five pattern methods on the `str` accessor answered a literal exactly and refused anything with a metacharacter in it, by name, rather than searching for a `.` literally and saying nothing. Now there is a parser that reads Python's grammar and decides which engine answers a call, a compiler and a matching engine for the RE2 side, and `contains`, `match`, `fullmatch` and `count` wired to them. The parser copies pandas rather than improving on it, including two places where pandas walks into only two of the seven node kinds that can hold another node, because a router that disagrees with pandas sends a working pattern to an engine that will not run it. It is checked by asking both questions of thirty thousand generated patterns against a live pandas with a ceiling of zero disagreements, and its first run found eighty nine, every one of them a rule in Python's grammar that had to be read rather than reasoned about.
+
+TPC-H is now asked of both engines over the same bytes. `pixi run tpch` runs whole queries through firepanda and through DuckDB and compares the answers row for row, over DuckDB's own generated data exported to Parquet and DuckDB's own query text, so there is no second copy of either to drift from the first. The four comparisons that were already here ask about one expression at a time, which is the right size for a kernel and the wrong size for a query, since a join that drops a row and a sort that is not stable both go through them untouched. Five queries agree at scale factor 1 as of this release. The eight `DECIMAL(15,2)` columns are exported as `DOUBLE`, because there is no decimal type here yet, so this is a comparison against DuckDB over this data rather than against the published answer set.
+
+Two pieces of the engine got faster and both were found by measuring rather than by guessing. Every reader produces a frame in one chunk, and a frame in one chunk ran a filtering line about 1.65 times slower than the same rows in chunks, so every query anyone runs over a file started on the slow side of that. New benchmark rows ruled out the cache answer and left the batched prefix, which the driver only runs once there is more than one chunk to hand out. `Buffer` carries an offset into its allocation now, so a window is the same allocation seen from further in, and `Scan` cuts any chunk taller than a morsel into morsel sized windows that cost nothing to make. On a quiet i9-13900K at four million rows, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 against 2.00 for the same rows already in chunks, so the row that was two and a half times slower sits inside the other row's spread. Separately, a filter that keeps several columns counted the same mask once per column to find out where each morsel's output starts; it counts once for the chunk now, which is 1.22 times on four million rows in one chunk and does not move a filter over a single column at all, which is the row that says where the saving comes from.
+
+The offset is not free and the measurement is worth recording. `Buffer` went from three machine words to four and the packaged Python extension's text grew by 516,480 bytes, past the size budget the extension tests keep. Building the same commit four ways says 461,792 of those bytes come from the field existing at all, since one unused `Int` added to `Buffer` and read nowhere costs almost the same, and that none of it comes from the window methods or from the scan. The budget went from ten mebibytes to eleven with the measurement written next to it, and issue #811 has what to try to get it back.
+
+On the planner side, a predicate is now sent past every join that keeps its left rows, which is the pushdown that a left join blocked before.
+
+Five wrong answers are fixed and three of them were queries that raised rather than queries that lied. A correlated subquery that counts answered null over an empty group where SQL says zero, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped. A mean over a column of times answered a point in time from the frame and a count of seconds from SQL, and both halves passed every test of themselves, because two paths read two different tables about what a reduction produces. Which side of a `JOIN` a table was written on decided whether the query ran, since the build side was read with a borrow that only a column of exactly one chunk has. A binary that used both `read_parquet` and `std.python` did not link, because one C function was declared twice with two return types. And a column the reader could not name is now named.
+
+The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
+
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
 The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
@@ -7446,7 +7468,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/tamnd/firepanda/releases/tag/v0.8.5
 [0.8.4]: https://github.com/tamnd/firepanda/releases/tag/v0.8.4
 [0.8.3]: https://github.com/tamnd/firepanda/releases/tag/v0.8.3
 [0.8.2]: https://github.com/tamnd/firepanda/releases/tag/v0.8.2
