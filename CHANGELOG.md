@@ -21,6 +21,7 @@ A nested column is the one shape a window cannot be taken of, so a chunk that ho
 On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
 
 The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+
 ### Added: `str.replace` answers a regular expression
 
 The last of the five pattern methods, and the first whose answer is text rather than a bit or a number. `df["a"].str.replace(r"(\w+)@(\w+)", r"\2 at \1", regex=True)` answers where it used to raise. Issue #8 M6.
@@ -68,6 +69,7 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+
 ### Changed: a condition written into every branch of an OR is carried out of it
 
 Predicate pushdown splits a filter at its `and` nodes, which reaches nothing when the filter is one `or`. It now also reads a disjunction and carries out of it any condition every branch holds, as a conjunct of its own that can then be pushed like any other. `(a AND b) OR (a AND c)` carries `a`. Issue #309.
