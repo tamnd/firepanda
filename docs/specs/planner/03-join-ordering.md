@@ -46,9 +46,9 @@ That ranking is specific to TPC-H, whose schema is a well behaved snowflake with
 
 Not DPhyp, not yet, and possibly not ever in the form DuckDB has it.
 
-**Now.** Nothing. There is no plan to reorder.
+**Now.** The half of it that needs no estimate: no needless product. A comma separated `FROM` nests left, so a relation whose equalities are all with something further along the list leaves a cross join in the middle of the chain, and a cross join of two real tables is refused rather than slow. The pass keeps the first relation where the query put it and then repeatedly takes the first one left that has an equality with something already taken, and changes nothing at all if that ever fails, since a relation tied to nothing already taken is a product the query really did ask for. It is about a hundred and fifty lines with the comments, it chooses between nothing, and it is what makes TPC-H q8 and q9 run. Both of them write the table every equality is against third in a list of six or eight.
 
-**With the plan layer.** A greedy order: repeatedly join the pair whose result is estimated smallest, starting from the smallest relation. Greedy with even rough estimates captures the q7 case, because the difference between eight per cent of the suppliers and all of them is not a subtle estimation problem. Greedy is about fifty lines and it is the fallback DuckDB uses above its own threshold anyway.
+**With the plan layer.** A greedy order: repeatedly join the pair whose result is estimated smallest, starting from the smallest relation. Greedy with even rough estimates captures the q7 case, because the difference between eight per cent of the suppliers and all of them is not a subtle estimation problem. Greedy is about fifty lines and it is the fallback DuckDB uses above its own threshold anyway. It replaces the rule above rather than sitting beside it: among the orders with no product in them the rule takes the first one it finds, and choosing between them is the whole of what the estimate is for.
 
 **Then predicate transfer**, document 04, which is where the effort actually goes and which makes the order matter much less.
 
@@ -59,6 +59,8 @@ The order of that list is the point of this folder. Every engine got here by wri
 ## What we should take from this document
 
 Join ordering is real and it is third in line.
+
+The part of it that is about whether a query runs at all is not third in line and is not about cost. Take a product out of a chain that does not need one before doing anything about which order is cheapest.
 
 Greedy is enough to capture the case we actually hit, and it is cheap.
 

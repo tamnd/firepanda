@@ -70,6 +70,10 @@ Ours, by hand, and the largest single one: q7 joined the full `supplier`, `order
 
 The only pass that is a search rather than a rewrite. Document 03.
 
+Half of it is not a search, and that half is written. A comma separated `FROM` nests left, so the order the relations are written in is the order they are joined in, and a relation whose equalities are all with something further along the list leaves a product in the middle. `FROM a, b, c WHERE a.x = c.x AND b.y = c.y` crosses `a` with `b` before either of them meets `c`, and a product of two real tables is refused rather than slow, so the query does not run at all. Written as `FROM a, c, b` it does, and the two are the same query. Reordering so that every relation has an equality with something already joined needs no cardinality estimate and no cost model, and it runs before predicate pushdown because pushdown is what turns those equalities into join keys and it can only do that once the two relations are next to each other. TPC-H q8 and q9 are the case, and both write the table every equality is against third in a list of six or eight.
+
+Choosing between two orders that both have no product in them is the other half, and that is the one that wants the estimates. Document 03 says when to write it.
+
 ## 11. Build side selection
 
 Once the order is fixed, each hash join still chooses which side to build the table from. DuckDB has this as a separate pass from join ordering, `BUILD_SIDE_PROBE_SIDE`, and the two can be disabled independently.

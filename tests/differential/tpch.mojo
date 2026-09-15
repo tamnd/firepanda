@@ -6,7 +6,7 @@ a plan has a join order, a group, a sort and a limit, and every one of those is
 a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, together with every other query that answers what
-DuckDB answers. Twelve of the twenty two are in the list today.
+DuckDB answers. Fourteen of the twenty two are in the list today.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -87,8 +87,8 @@ def queries() -> List[Int]:
     """Which queries this asks about.
 
     The three S4 names as its exit criteria, and every query that answers what
-    DuckDB answers. The rest want a decimal, a join order, a dependent join
-    or a binder gap closed, and each one is added here the day it runs rather
+    DuckDB answers. The rest want a decimal, a dependent join or a binder
+    gap closed, and each one is added here the day it runs rather
     than sitting in a list of pending failures.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
@@ -100,7 +100,7 @@ def queries() -> List[Int]:
     Returns:
         The query numbers.
     """
-    return [1, 3, 4, 5, 6, 7, 10, 12, 15, 16, 18, 19]
+    return [1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16, 18, 19]
 
 
 def recorded(number: Int) -> String:
