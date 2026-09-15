@@ -1,4 +1,4 @@
-"""Which pattern each of the four methods actually runs, and who runs it.
+"""Which pattern each of the five methods actually runs, and who runs it.
 
 `contains`, `match` and `fullmatch` are one question upstream. pandas asks the
 engine whether a pattern matches somewhere and asks the other two by changing
@@ -23,6 +23,12 @@ wrote without any anchor, so everything in this file treats it the way it treats
 `contains`. Where it parts company with the other three is further down, in the
 scan that uses the answer: `firepanda/kernel/regex/pike.mojo` has the three
 rules Arrow counts by and none of them is visible here.
+
+`replace` is the fifth and is the first that changes how the pattern is
+compiled rather than what the pattern is. It anchors nothing, the way `count`
+and `contains` do not, and it asks for a program that records where every group
+matched, which is the one thing here that costs something and is the one thing
+only it needs.
 
 This file is the layer above the compiler and below the binding. It knows what
 pandas does with a pattern before handing it over, and it hands back a program
@@ -58,6 +64,21 @@ nothing for either, and a fourth name costs one branch and says which of the
 four a reader is looking at. What `count` does differ in is a line upstream that
 is not in this file at all: it never asks whether the pattern is a compiled one
 carrying flags, because it has no `case` argument to disagree with.
+"""
+
+comptime METHOD_REPLACE: UInt8 = 4
+"""`str.replace` with a pattern, which anchors nothing and needs captures.
+
+The fifth name and the first that changes what the compiler is asked for rather
+than what it is asked about. A replacement can write `\\1` for what a group
+held, so the program has to be built with the instructions that record where
+each group matched, which every other method here would only pay for.
+
+The scan it runs is not the scan `count` runs either, and the difference is not
+arithmetic this time. Counting cuts the row after each match and replacing does
+not, so `^` means the start of what is left to one and the start of the row to
+the other, in the same library on the same pattern. Document 80 has the
+measurements and `firepanda/kernel/regex/replace.mojo` has the loop.
 """
 
 
@@ -184,13 +205,17 @@ def anchored(method: UInt8, pattern: String) -> String:
     for is ASCII and a byte of a longer character cannot be mistaken for one.
 
     Args:
-        method: Which of the four asked.
+        method: Which of the five asked.
         pattern: The pattern as the caller wrote it, with `\\Z` already seen to.
 
     Returns:
         The pattern the engine is to be given.
     """
-    if method == METHOD_CONTAINS or method == METHOD_COUNT:
+    if (
+        method == METHOD_CONTAINS
+        or method == METHOD_COUNT
+        or method == METHOD_REPLACE
+    ):
         return pattern.copy()
     var cut = leading_flags(pattern)
     var head = String(pattern[byte=0:cut])
@@ -215,7 +240,7 @@ def anchored(method: UInt8, pattern: String) -> String:
 
 
 def program_for(method: UInt8, pattern: String) -> Program:
-    """Compiles what one of the three methods would run, or refuses it.
+    """Compiles what one of the five methods would run, or refuses it.
 
     The routing decision is made first and on the pattern as written, which is
     this file's docstring and is pandas' order. A pattern routed to Python is
@@ -227,7 +252,7 @@ def program_for(method: UInt8, pattern: String) -> Program:
     order as well and is not an order either step is indifferent to.
 
     Args:
-        method: Which of the four asked.
+        method: Which of the five asked.
         pattern: The pattern as the caller wrote it.
 
     Returns:
@@ -252,5 +277,7 @@ def program_for(method: UInt8, pattern: String) -> Program:
         # already over.
         return compile_program(tree, ENGINE_RE2)
     return compile_program(
-        parse_pattern(anchored(method, preprocessed(pattern))), ENGINE_RE2
+        parse_pattern(anchored(method, preprocessed(pattern))),
+        ENGINE_RE2,
+        captures=method == METHOD_REPLACE,
     )

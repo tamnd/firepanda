@@ -159,15 +159,20 @@ def test_a_metacharacter_is_the_character_itself_by_default(
 
 
 @needs_pandas
-def test_a_metacharacter_with_regex_on_is_refused_rather_than_searched_for(
+def test_a_metacharacter_with_regex_on_is_read_as_a_pattern(
     firepanda: ModuleType,
 ) -> None:
-    """The same refusal the other four give, reached by asking for an engine."""
-    mine = made(firepanda)
+    """Which is the other half of the test above, and used to be a refusal.
+
+    Turning `regex` on changes more than the pattern here. It changes the
+    replacement as well, because Arrow reads a replacement with a grammar of its
+    own in which a pair of backslashes is one backslash and a backslash and a
+    digit is a group. `test_str_replace_regex.py` is the test of all of that.
+    """
+    rows = ["a.c", "abc", "a+c", "a|b", "", "aaaa"]
     for pattern in ("a.c", "^a", "a+", "a|b", "[ab]", "a*"):
-        with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-            mine.str.replace(pattern, "X", regex=True)
-        assert "regular expression" in str(caught.value), pattern
+        got = made(firepanda, rows).str.replace(pattern, "X", regex=True).tolist()
+        assert got == theirs(rows).str.replace(pattern, "X", regex=True).tolist(), pattern
 
 
 @needs_pandas

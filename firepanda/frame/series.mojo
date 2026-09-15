@@ -120,8 +120,13 @@ from firepanda.kernel.pattern import (
     text_starts_with_folded,
 )
 from firepanda.kernel.pick import pick_any
-from firepanda.kernel.regex.column import text_count_regex, text_matches_regex
+from firepanda.kernel.regex.column import (
+    text_count_regex,
+    text_matches_regex,
+    text_replace_regex,
+)
 from firepanda.kernel.regex.program import Program
+from firepanda.kernel.regex.replace import Rewrite
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.shift import shift_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
@@ -1773,6 +1778,44 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count_regex(self.values.strings(), program)),
+        )
+
+    def chars_replace_regex(
+        self, program: Program, rewrite: Rewrite
+    ) raises -> Self:
+        """Returns each row with every match of a compiled pattern swapped.
+
+        This is the regular expression form of `chars_replace` and it takes a
+        compiled program for the same reason the two above it do. It takes the
+        replacement already read as well, because the replacement has a grammar
+        of its own that can be wrong in three ways, and that refusal belongs
+        beside the pattern's rather than inside the loop over the rows.
+
+        The scan is Arrow's and is not the one `chars_count_regex` runs, which
+        is the thing worth knowing before reading either. The text is not cut
+        after a match, so `^` stays the start of the row where counting makes it
+        the start of what is left. The cursor moves a character at a time where
+        counting moves it a byte at a time. And a match of no width landing
+        exactly where the last match ended is thrown away, with one character
+        copied across instead, which is why replacing `a*` in `abc` gives
+        `#b#c#` where Python's `re` gives `##b#c#`.
+        `firepanda/kernel/regex/replace.mojo` has the measurements.
+
+        Args:
+            program: The pattern, already compiled with captures.
+            rewrite: The replacement, already read.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            AnyArray(
+                text_replace_regex(self.values.strings(), program, rewrite)
+            ),
         )
 
     def chars_contains_folded(self, pattern: StringSlice) raises -> Self:

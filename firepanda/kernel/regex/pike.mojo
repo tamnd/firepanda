@@ -38,11 +38,16 @@ earlier is preferred, the start of a fresh attempt is added last, and a thread
 reaching a match ends every thread behind it in the list while leaving the ones
 in front of it running. So the earliest attempt that can match wins, and among
 the ways that attempt can match the one the pattern prefers wins, which is what
-leftmost first means and is what both RE2 and Python's `re` do. That order was
-already what `_queue` produced before anything read it, and `_queue` says why it
-was written that way while nothing needed it.
+leftmost first means and is what both RE2 and Python's `re` do.
 
-`counts` is neither of those two. It is a loop around `find`, and the loop is
+`search` is `find` with two differences, and both of them are for the scan that
+replaces. It starts its attempts at a cursor rather than at the start of the
+text, so the text around a position is the real one and `^` stays the start of
+the row. And it answers where every group matched as well as where the whole
+match did, which is a slot vector carried by every thread and is the reason a
+program is compiled with saves in it or without them.
+
+`counts` is neither of those. It is a loop around `find`, and the loop is
 Arrow's rather than either engine's: three rules about where to look next after
 a match, none of which is what a reader would guess, all of which were measured
 out of pandas rather than read anywhere. They are written out on `counts` and
@@ -60,6 +65,7 @@ from firepanda.kernel.regex.program import (
     IN_JUMP,
     IN_MATCH,
     IN_NOT_SET,
+    IN_SAVE,
     IN_SET,
     IN_SPLIT,
     Instruction,
@@ -197,12 +203,17 @@ def _accepts(
     return False
 
 
-def _byte_width(point: UInt32) -> Int:
+def byte_width(point: UInt32) -> Int:
     """How many bytes a character takes when it is written out.
 
     The scan in `counts` moves in bytes because Arrow's does, and this is the
     whole of what it needs to know about how the row was written. Nothing else
     in this file has any idea that a character is more than one thing.
+
+    The scan that replaces borrows it for a different reason. That one moves in
+    characters, so it never needs a width to step with, and it needs the widths
+    to turn a pair of character positions back into a piece of the row it can
+    copy out.
 
     Args:
         point: The character.
@@ -222,25 +233,48 @@ def _byte_width(point: UInt32) -> Int:
 def _queue(
     code: List[Instruction],
     mut list: List[Int32],
+    mut slots: List[Int32],
+    mut carry: List[Int32],
     mut stamp: List[Int32],
     at: Int32,
     start: Int32,
     points: Span[UInt32, _],
     lead: Int,
     position: Int,
+    nslots: Int,
 ):
     """Adds an instruction and everything reachable from it without reading a
     character.
 
     The walk is depth first with the first arm of a split taken before the
     second, which puts the instructions into the list in the order the pattern
-    prefers them. Nothing here needs that order, since the answer is yes or no,
-    and it is written that way because the thing that will need it is captures
-    and changing the order later is the kind of change that looks harmless.
+    prefers them. The yes or no answer does not need that order, but where a
+    match ends does and where each group matched does, so it is the order the
+    whole of the rest of this file rests on.
+
+    It is written as a recursion rather than as a loop over an explicit stack
+    because of the save instruction. A save writes a position into a slot, walks
+    on, and then has to put back what the slot held, since the walk it made is
+    one path through the program and the next path does not go through this
+    save. A stack would have to carry a copy of the slots per entry to say the
+    same thing, and the copy is the expensive part. The depth is the length of a
+    chain of instructions that read no character, which a pattern can make long
+    with nested repeats and cannot make unbounded, because a repeat is unrolled
+    at most a thousand times and the stamp stops the walk the second time it
+    reaches the same instruction at the same position.
+
+    The slots are the one thing here that is optional. A program compiled
+    without captures has none, `nslots` is zero, nothing is appended beside the
+    thread, and the save branch is never reached because no save was emitted.
 
     Args:
         code: The program.
         list: The list to add to.
+        slots: The slots of the threads in `list`, `nslots` of them per thread,
+            laid out end to end rather than as a list of lists so that a thread
+            costs no allocation.
+        carry: The slots of the path being walked, which is what a thread that
+            is added here takes a copy of.
         stamp: One entry per instruction, holding the position it was last added
             at.
         at: The position to stamp with, which is where this list will be read.
@@ -248,25 +282,108 @@ def _queue(
         points: The text.
         lead: How many unreadable bytes stand in front of the text.
         position: Where in the text the assertions are to be judged.
+        nslots: How many slots a thread carries.
     """
-    var stack = List[Int32]()
-    stack.append(start)
-    while len(stack) > 0:
-        var pc = stack.pop()
-        if stamp[Int(pc)] == at:
-            continue
-        stamp[Int(pc)] = at
-        var instruction = code[Int(pc)]
-        if instruction.op == IN_JUMP:
-            stack.append(instruction.a)
-        elif instruction.op == IN_SPLIT:
-            stack.append(instruction.b)
-            stack.append(instruction.a)
-        elif instruction.op == IN_AT:
-            if _holds(instruction.a, points, lead, position):
-                stack.append(pc + 1)
-        else:
-            list.append(pc)
+    if stamp[Int(start)] == at:
+        return
+    stamp[Int(start)] = at
+    var instruction = code[Int(start)]
+    if instruction.op == IN_JUMP:
+        _queue(
+            code,
+            list,
+            slots,
+            carry,
+            stamp,
+            at,
+            instruction.a,
+            points,
+            lead,
+            position,
+            nslots,
+        )
+    elif instruction.op == IN_SPLIT:
+        _queue(
+            code,
+            list,
+            slots,
+            carry,
+            stamp,
+            at,
+            instruction.a,
+            points,
+            lead,
+            position,
+            nslots,
+        )
+        _queue(
+            code,
+            list,
+            slots,
+            carry,
+            stamp,
+            at,
+            instruction.b,
+            points,
+            lead,
+            position,
+            nslots,
+        )
+    elif instruction.op == IN_AT:
+        if _holds(instruction.a, points, lead, position):
+            _queue(
+                code,
+                list,
+                slots,
+                carry,
+                stamp,
+                at,
+                start + 1,
+                points,
+                lead,
+                position,
+                nslots,
+            )
+    elif instruction.op == IN_SAVE:
+        if nslots == 0:
+            # A caller asking a program with saves in it a question that has no
+            # use for them, which is `matches` being handed whatever program is
+            # to hand. The instruction is then a jump to the next one.
+            _queue(
+                code,
+                list,
+                slots,
+                carry,
+                stamp,
+                at,
+                start + 1,
+                points,
+                lead,
+                position,
+                nslots,
+            )
+            return
+        var slot = Int(instruction.a)
+        var was = carry[slot]
+        carry[slot] = Int32(position)
+        _queue(
+            code,
+            list,
+            slots,
+            carry,
+            stamp,
+            at,
+            start + 1,
+            points,
+            lead,
+            position,
+            nslots,
+        )
+        carry[slot] = was
+    else:
+        list.append(start)
+        for i in range(nslots):
+            slots.append(carry[i])
 
 
 struct Machine(Movable):
@@ -289,6 +406,21 @@ struct Machine(Movable):
     var next: List[Int32]
     """The threads that have read it and are waiting for the next one."""
 
+    var slots_here: List[Int32]
+    """The slots of the threads in `here`, `nslots` of them per thread."""
+
+    var slots_next: List[Int32]
+    """The slots of the threads in `next`, the same way."""
+
+    var carry: List[Int32]
+    """The slots of the path `_queue` is walking, which it lends rather than
+    copies. One of these rather than one per call because the walk puts back
+    what it changed on the way out."""
+
+    var nslots: Int
+    """How many slots a thread carries, which is zero for a program compiled
+    without captures and is then the whole of what the slot machinery costs."""
+
     def __init__(out self, program: Program):
         """Sizes the buffers for a program.
 
@@ -298,6 +430,10 @@ struct Machine(Movable):
         self.stamp = List[Int32](length=program.sized(), fill=-1)
         self.here = []
         self.next = []
+        self.nslots = program.slots
+        self.slots_here = []
+        self.slots_next = []
+        self.carry = List[Int32](length=self.nslots, fill=-1)
 
     def matches(mut self, program: Program, points: Span[UInt32, _]) -> Bool:
         """Whether a compiled pattern matches anywhere in the text.
@@ -328,12 +464,15 @@ struct Machine(Movable):
             _queue(
                 program.code,
                 self.here,
+                self.slots_here,
+                self.carry,
                 self.stamp,
                 Int32(position),
                 0,
                 points,
                 0,
                 position,
+                0,
             )
             var i = 0
             while i < len(self.here):
@@ -347,12 +486,15 @@ struct Machine(Movable):
                     _queue(
                         program.code,
                         self.next,
+                        self.slots_next,
+                        self.carry,
                         self.stamp,
                         Int32(position + 1),
                         pc + 1,
                         points,
                         0,
                         position + 1,
+                        0,
                     )
                 i += 1
             swap(self.here, self.next)
@@ -360,16 +502,15 @@ struct Machine(Movable):
             position += 1
         return False
 
-    def find(
-        mut self, program: Program, points: Span[UInt32, _], lead: Int
+    def _run(
+        mut self,
+        program: Program,
+        points: Span[UInt32, _],
+        lead: Int,
+        first: Int,
+        mut found: List[Int32],
     ) -> Int:
-        """Where the leftmost first match of a compiled pattern ends.
-
-        The end and not the start, because the end is the whole of what a scan
-        down a row needs: it is where the next search begins, and a match of no
-        width is one that ends where the search began rather than one whose two
-        ends agree. Those are the same thing for a machine that only ever starts
-        where it was told to, and this one does.
+        """Where the leftmost first match ends, starting attempts at `first`.
 
         Two rules turn the yes or no of `matches` into a where. New attempts
         stop being started once anything has matched, which is what makes the
@@ -378,12 +519,25 @@ struct Machine(Movable):
         makes the answer the one the pattern prefers rather than the longest
         one, so `a|ab` ends after one character and `ab|a` ends after two.
 
+        `first` is where the attempts begin and not where the text begins, and
+        the difference is the whole reason this is one function with two names
+        on it. A caller that cut the text and handed over what was left passes
+        zero, and the assertions then read the cut text as the whole of it. A
+        caller that kept the text whole and moved a cursor along it passes the
+        cursor, and the assertions read the text as it really is, so `^` is the
+        start of the row rather than the start of what is left. Arrow's two
+        scans disagree about which of those is right, and document 80 has the
+        measurements: counting cuts, replacing does not.
+
         Args:
             program: The compiled pattern.
             points: The text, as code points.
             lead: How many unreadable bytes stand in front of the text, which
                 is how a search that begins in the middle of a character says
                 so.
+            first: The first position an attempt may start at.
+            found: Filled with the slots of the thread that matched, and left
+                alone when nothing matched or when the program carries none.
 
         Returns:
             How many positions from the start of the text the match ends, or
@@ -397,20 +551,30 @@ struct Machine(Movable):
             self.stamp[i] = -1
         self.here.clear()
         self.next.clear()
+        self.slots_here.clear()
+        self.slots_next.clear()
         var length = lead + len(points)
         var end = -1
-        var position = 0
+        var position = first
         while position <= length:
             if end < 0:
+                # A fresh attempt knows nothing about any group, and it is added
+                # behind whatever survived the last character, which is what
+                # makes an earlier attempt win over this one.
+                for k in range(self.nslots):
+                    self.carry[k] = -1
                 _queue(
                     program.code,
                     self.here,
+                    self.slots_here,
+                    self.carry,
                     self.stamp,
                     Int32(position),
                     0,
                     points,
                     lead,
                     position,
+                    self.nslots,
                 )
             elif len(self.here) == 0:
                 break
@@ -420,27 +584,90 @@ struct Machine(Movable):
                 var instruction = program.code[Int(pc)]
                 if instruction.op == IN_MATCH:
                     end = position
+                    found.clear()
+                    for k in range(self.nslots):
+                        found.append(self.slots_here[i * self.nslots + k])
                     break
                 if position < length and _accepts(
                     instruction,
                     program.ranges,
                     _point(points, lead, position),
                 ):
+                    for k in range(self.nslots):
+                        self.carry[k] = self.slots_here[i * self.nslots + k]
                     _queue(
                         program.code,
                         self.next,
+                        self.slots_next,
+                        self.carry,
                         self.stamp,
                         Int32(position + 1),
                         pc + 1,
                         points,
                         lead,
                         position + 1,
+                        self.nslots,
                     )
                 i += 1
             swap(self.here, self.next)
+            swap(self.slots_here, self.slots_next)
             self.next.clear()
+            self.slots_next.clear()
             position += 1
         return end
+
+    def find(
+        mut self, program: Program, points: Span[UInt32, _], lead: Int
+    ) -> Int:
+        """Where the leftmost first match of a compiled pattern ends.
+
+        The end and not the start, because the end is the whole of what the
+        counting scan needs: it is where the next search begins, and a match of
+        no width is one that ends where the search began rather than one whose
+        two ends agree. Those are the same thing for a search that starts at the
+        start of the text it was given, and this one does.
+
+        Args:
+            program: The compiled pattern.
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of the text.
+
+        Returns:
+            Where the match ends, or -1 when there is no match.
+        """
+        var nothing = List[Int32]()
+        return self._run(program, points, lead, 0, nothing)
+
+    def search(
+        mut self,
+        program: Program,
+        points: Span[UInt32, _],
+        first: Int,
+        mut found: List[Int32],
+    ) -> Int:
+        """Where the leftmost first match at or after a position ends, and what
+        each group of it held.
+
+        The text stays whole, so a pattern that reads the text around a position
+        reads the real one. That is what the replacing scan wants and what the
+        counting scan does not, and the two are different because Arrow's two
+        kernels are different rather than because either of them is right.
+
+        Args:
+            program: The compiled pattern, which has to have been compiled with
+                captures for `found` to hold anything.
+            points: The whole text, as code points.
+            first: The cursor, which is the first position an attempt may start
+                at.
+            found: Filled with the two ends of the whole match and the two ends
+                of every group, as `2k` and `2k + 1` for group `k`, with -1 for
+                a group that did not take part.
+
+        Returns:
+            Where the match ends, or -1 when there is no match at or after the
+            cursor.
+        """
+        return self._run(program, points, 0, first, found)
 
     def counts(mut self, program: Program, points: Span[UInt32, _]) -> Int:
         """How many times a compiled pattern matches in the text.
@@ -479,7 +706,7 @@ struct Machine(Movable):
             return 0
         var bytes = 0
         for i in range(len(points)):
-            bytes += _byte_width(points[i])
+            bytes += byte_width(points[i])
         var seen = 0
         var cursor = 0
         var at = 0
@@ -493,7 +720,7 @@ struct Machine(Movable):
             if end > lead:
                 step = lead
                 for i in range(end - lead):
-                    step += _byte_width(points[at + i])
+                    step += byte_width(points[at + i])
             if step == 0:
                 step = 1
             cursor += step
@@ -506,7 +733,7 @@ struct Machine(Movable):
                 # above, which is where a scan that matched nothing at the end
                 # of the row stops. There is no character there to walk over.
                 while rest > 0 and at < len(points):
-                    var width = _byte_width(points[at])
+                    var width = byte_width(points[at])
                     at += 1
                     if rest >= width:
                         rest -= width

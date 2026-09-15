@@ -8848,12 +8848,13 @@ class StringMixin:
         search, which is the faster of the two and is what every pattern nobody
         wrote a metacharacter in should get.
 
-        `contains`, `match`, `fullmatch` and `count` no longer come here for a
-        pattern that fails the check, because there is an engine for those four
-        now. `replace` still does, because it needs the text a match covered and
-        not only where the match ended, and because the scan it runs over a row
-        is not the scan `count` runs, which document 79 measured and is why the
-        two did not arrive together.
+        None of the five comes here for a pattern that fails the check any more,
+        because there is an engine for all five. What is left is `case=False`,
+        which is a fold rather than an engine and has no folding engine behind
+        it yet, and `replace` with a count, which upstream answers out of a
+        different Arrow loop that this library refuses to copy. Both of those
+        reach the byte search or they reach a refusal, and this is where the two
+        are told apart.
 
         The refusal names the character it tripped on, because a caller who wrote
         `replace(".", "-")` meaning a full stop is one keyword away from the
@@ -8969,15 +8970,38 @@ class StringMixin:
     def _replaced(self, pat: Any, repl: Any, n: Any, case: Any, flags: Any, regex: Any) -> Series:
         """Every row with a run of characters swapped for another.
 
-        The one name in this group that needs no promise made for it, because
-        `regex` defaults to False in pandas 3 and the default call is therefore a
-        literal replacement. `regex=True` still goes through `_literal`, so a
-        caller who asks for an engine on a pattern that does not need one gets
-        the same answer and a caller who asks for one that does gets the refusal.
+        `regex` defaults to False in pandas 3, so the default call is a literal
+        replacement and goes nowhere near the engine. `regex=True` goes to the
+        engine whatever the pattern looks like, which is not the rule the four
+        names above this one follow and is not an inconsistency. The others hand
+        the engine a pattern and get an answer back. This one also hands it a
+        replacement, and the replacement has a grammar: `\\1` names a group and
+        a lone backslash is an error, which is true of `str.replace("a", chr(92),
+        regex=True)` as much as it is of a pattern full of metacharacters. A
+        literal shortcut would read the replacement the other way round and
+        answer a different question.
 
         A dict pattern is several replacements applied in order, which is what
         pandas does with one, and `repl` has to be absent when a dict is given
         because the dict holds both halves.
+
+        ### Why a count and a pattern are refused together
+
+        `n` of zero or more takes a different path in Arrow, one that finds a
+        match and then asks RE2 to replace inside the text it found. That loop
+        has no rule about a match of no width and does not move the cursor, so
+        `str.replace("a*", "#", n=5)` puts five markers at the front of a row it
+        then leaves alone, and `str.replace(chr(92) + "b", "#", n=1)` raises on
+        every row including a row of plain ASCII, because RE2 is asked to
+        replace a boundary inside an empty piece of text. Copying that would put
+        wrong answers on the board where a refusal puts a gap.
+
+        The refusal is narrowed to the calls that would have reached the engine,
+        so a count with a pattern holding no metacharacter and a replacement
+        holding no backslash still goes down the literal path and still works.
+        Both halves of that are needed: the pattern has to mean itself and the
+        replacement has to mean itself, and either one failing is a call where
+        the two paths would answer differently.
         """
         if isinstance(pat, dict):
             if repl is not None:
@@ -9008,6 +9032,34 @@ class StringMixin:
             # zero is widened here rather than in the kernel, where the number
             # still means what it says.
             limit = -1
+        if not fold and isinstance(pat, str) and regex:
+            if r"\g<" in repl:
+                # pandas reads a replacement holding this out of Python's `re`
+                # rather than out of Arrow, whichever way `regex` was written,
+                # and the two grammars name a group differently.
+                raise UnsupportedError(
+                    "firepanda:unsupported: str.replace with a named group in the"
+                    " replacement needs the Python engine and none is written yet"
+                )
+            if pat == "" and "\\" in repl:
+                # An empty pattern is the one shape pandas sends to Python's
+                # engine rather than to Arrow, because pyarrow used not to
+                # terminate on one, so the replacement is read by Python's
+                # grammar there and the two grammars only agree while there is
+                # no backslash in it to disagree about.
+                raise UnsupportedError(
+                    "firepanda:unsupported: str.replace with an empty pattern reads the"
+                    " replacement out of the Python engine upstream and none is written"
+                    " yet"
+                )
+            if limit < 0:
+                return self._text("replace_regex", pat, other=repl)
+            if _needs_an_engine(pat, True) or "\\" in repl:
+                raise UnsupportedError(
+                    "firepanda:unsupported: str.replace with a regular expression and a"
+                    " count is a different scan upstream, and the one it runs replaces"
+                    " nothing after the first match and raises on a pattern of no width"
+                )
         return self._text(
             f"replace{fold}",
             self._literal(pat, bool(regex), "replace"),
