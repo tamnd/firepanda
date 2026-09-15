@@ -42,6 +42,16 @@ Five wrong answers are fixed and three of them were queries that raised rather t
 
 The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
 
+### Changed: a predicate is placed by the relation the query named, not only by a column name
+
+Predicate pushdown decided which side of a join could answer a predicate by looking each column name up in the two schemas. `FROM nation n1, nation n2` puts an `n_nationkey` on each side, so the search found the name on both and could only answer that it did not know, and a query that qualified every mention of it got nothing pushed anywhere. Issue #309.
+
+The qualifier was never lost. The binder writes the relation it picked onto the reference and binding writes the relation each column came from onto the node, so the two can be compared and `n1.n_nationkey` placed on the side it was written about. A column that no single relation produced stays a maybe, which is what keeps the new answer no stricter than the old one: a name one side has and the other does not is still answered by the name alone, and the relation number only decides between two sides that both have it and both know where theirs came from.
+
+TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
+
+q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
+
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
 The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
