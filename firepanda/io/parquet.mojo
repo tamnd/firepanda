@@ -31,7 +31,7 @@ this milestone needs is already a SQL string. A Hive partitioned directory is a
 path and a setting. Reading some of the columns is naming them instead of a star,
 and it is a real projection pushdown rather than a filter after the fact, because
 DuckDB never decodes the pages it was not asked for. None of that is code here,
-and `ParquetOptions` at the bottom is three booleans and a list of names rather
+and `ParquetOptions` at the bottom is four booleans and a list of names rather
 than a reader with a life of its own.
 
 What is here, and matters, is that the query is built rather than interpolated.
@@ -511,13 +511,38 @@ struct ParquetOptions(Copyable, Movable):
     Useful for a dataset assembled out of files that are not interchangeable, and
     for finding the one file in ten thousand that has the bad row in it."""
 
+    var decimals_as_double: Bool
+    """Whether a decimal column is read as a float64 rather than refused.
+
+    firepanda has no decimal column, so a file with one in it cannot be read
+    without a conversion, and the conversion loses the exactness that is the
+    entire reason somebody wrote a decimal. `DECIMAL(15,2)` holds an unscaled
+    integer below 2^53, so the integer survives, and then it is divided by a
+    hundred and a hundred is not a power of two. Money that was exact stops being
+    exact, and a sum over six million rows of it is off by a number that depends
+    on the order they were added in.
+
+    So this is off, and a file with a decimal column is refused by name with a
+    message that says this flag is here. It is the same decision the date64
+    refusal in `arrow_c.type_for_format` makes, for the same reason: a
+    conversion nobody asked for is worse than an error, because an error gets
+    read.
+
+    On, the cast happens in DuckDB before the bytes ever become Arrow, which is
+    also what it would have cost to do it here and means the doubles arrive as
+    doubles. Only a column whose own type is a decimal is cast. A decimal inside
+    a list or a struct is left alone and is still refused, because the cast that
+    would reach it has to name the shape it is in.
+    """
+
     def __init__(out self):
         """The defaults: every column, partitioning detected, no unioning, no
-        filename."""
+        filename, and a decimal column refused rather than approximated."""
         self.columns = List[String]()
         self.hive_partitioning = True
         self.union_by_name = False
         self.filename = False
+        self.decimals_as_double = False
 
 
 def _scan_of(path: StringSlice, options: ParquetOptions) -> String:
@@ -583,6 +608,10 @@ def read_parquet(
     that are in no file, and a query that names neither of them never opens the
     directories that cannot match.
 
+    It is also the form that reads a file with money in it, since a decimal
+    column is refused unless `decimals_as_double` is on and the one path form has
+    nowhere to say so.
+
     Args:
         path: The file, glob or directory.
         options: What to read, and what to read it as.
@@ -596,14 +625,56 @@ def read_parquet(
             read.
     """
     var session = Session()
-    return session.run(
-        String(
-            "SELECT ",
-            _projection_of(options.columns),
-            " FROM ",
-            _scan_of(path, options),
-        )
+    var scan = _scan_of(path, options)
+    var projection: String
+    if options.decimals_as_double:
+        projection = _cast_projection(session, scan, options.columns)
+    else:
+        projection = _projection_of(options.columns)
+    return session.run(String("SELECT ", projection, " FROM ", scan))
+
+
+def _cast_projection(
+    mut session: Session, scan: StringSlice, columns: List[String]
+) raises -> String:
+    """Builds the select list that casts every decimal column to a double.
+
+    A star cannot say this, because there is no way to write "cast the decimals"
+    in SQL without knowing which columns are decimals, so the types are asked for
+    first. `DESCRIBE` answers from the file's footer and reads no pages, so this
+    is a round trip to DuckDB and not a second scan.
+
+    The match is on the type text beginning with `DECIMAL(`, which is how DuckDB
+    prints the type and is exact for a column that is a decimal. A list of them
+    prints as `DECIMAL(15,2)[]` and does not match, which is deliberate: casting
+    it needs `DOUBLE[]` rather than `DOUBLE` and a struct needs the whole struct
+    type written out, so those stay refused rather than being half handled.
+
+    Args:
+        session: The connection, used for the describe and then for the read.
+        scan: The `read_parquet(...)` call, already built.
+        columns: The columns the caller asked for, empty for all of them.
+
+    Returns:
+        The select list.
+
+    Raises:
+        Error: If the files cannot be read or a named column is not in them,
+            which is raised here now rather than by the read below.
+    """
+    var described = session.run(
+        String("DESCRIBE SELECT ", _projection_of(columns), " FROM ", scan)
     )
+    var out = String()
+    for i in range(described.rows):
+        if i != 0:
+            out += ", "
+        var name = _quoted_name(described[0].strings()[i])
+        if described[1].strings()[i].startswith("DECIMAL("):
+            out += String("CAST(", name, " AS DOUBLE) AS ", name)
+        else:
+            out += name
+    return out^
 
 
 def read_parquet(path: StringSlice) raises -> DataFrame:

@@ -20,6 +20,12 @@ itself, so the interesting default is the one that turns that off, and the
 partition columns come back after the file's own columns sorted by name rather
 than in the order the path visits them.
 
+There is a second fixture and DuckDB writes that one, which is a deliberate
+exception to the paragraph above. It has a decimal column in it, and the only
+files with a decimal column this reader is going to be pointed at in anger are
+TPC-H tables out of DuckDB's own generator, so the writer being the same one is
+what makes the test worth running rather than what makes it circular.
+
 There is no test here for a file of several row groups, because DuckDB hands
 back chunks of two thousand rows and a fixture that large cannot be checked in
 as hex. The glob test covers the same code path from the other side: two files
@@ -286,6 +292,108 @@ def test_a_glob_of_two_files_reads_as_one_frame() raises:
     assert_equal(frame[3].null_count(), 2)
     assert_equal(frame[3].strings()[0], "a")
     assert_equal(frame[3].strings()[6], "a")
+
+
+comptime MONEY = "/tmp/firepanda_parquet_money.parquet"
+"""Where the decimal fixture is written."""
+
+
+def _put_money() raises:
+    """Writes a file with a decimal column in it, using DuckDB.
+
+    Written here rather than checked in as hex, which is what the other fixture
+    is, because the writer is the point. Every decimal file this reader is going
+    to be pointed at in anger is a TPC-H table, and those come out of DuckDB's
+    own generator, so the fixture is the same writer producing the same
+    `DECIMAL(15,2)` the specification asks for.
+
+    Four columns and three rows. The decimal is beside an integer and a string so
+    that the cast can be seen to touch one column and not the others, and the
+    second decimal is there because a file with money in it usually has two and
+    the projection has to keep them both.
+    """
+    var session = Session()
+    _ = session.run(
+        String(
+            (
+                "COPY (SELECT * FROM (VALUES (1, CAST(1.25 AS DECIMAL(15,2)),"
+                " CAST(0.07 AS DECIMAL(15,2)), 'a'), (2, CAST(-3.50 AS"
+                " DECIMAL(15,2)), CAST(0.00 AS DECIMAL(15,2)), 'b'), (3, NULL,"
+                " CAST(0.10 AS DECIMAL(15,2)), 'c')) AS t(id, price, rate,"
+                " tag)) TO "
+            ),
+            quote(MONEY),
+            " (FORMAT PARQUET)",
+        )
+    )
+
+
+def test_a_decimal_column_is_refused_and_the_refusal_says_what_to_do() raises:
+    # Every money column in TPC-H is one of these, so this is the refusal a
+    # reader is most likely to meet, and an Arrow format string on its own names
+    # nothing anybody would recognise.
+    _put_money()
+    with assert_raises(contains="decimals_as_double"):
+        _ = read_parquet(MONEY)
+
+
+def test_a_decimal_column_reads_as_a_double_when_asked() raises:
+    _put_money()
+    var options = ParquetOptions()
+    options.decimals_as_double = True
+    var frame = read_parquet(MONEY, options)
+    assert_equal(len(frame), 3)
+    assert_equal(frame.width(), 4)
+    assert_equal(frame.names()[1], "price")
+    assert_true(frame.schema[1].dtype == LogicalType.FLOAT64)
+    var price = frame[1].as_typed[DType.float64]()
+    assert_equal(price[0], Float64(1.25))
+    assert_equal(price[1], Float64(-3.5))
+    # The null survives the cast rather than becoming a zero, which is the one
+    # way a cast in the middle of a read can quietly change an answer.
+    assert_equal(frame[1].null_count(), 1)
+
+
+def test_the_cast_touches_the_decimals_and_nothing_else() raises:
+    # The whole select list is rewritten to say this, so the columns that are not
+    # decimals have to come back as themselves, with their names and their types.
+    _put_money()
+    var options = ParquetOptions()
+    options.decimals_as_double = True
+    var frame = read_parquet(MONEY, options)
+    assert_equal(frame.names()[0], "id")
+    assert_true(frame.schema[0].dtype == LogicalType.INT32)
+    assert_equal(frame.names()[3], "tag")
+    assert_equal(frame[3].strings()[2], "c")
+    assert_true(frame.schema[2].dtype == LogicalType.FLOAT64)
+    assert_equal(frame[2].as_typed[DType.float64]()[2], Float64(0.1))
+
+
+def test_a_projection_and_the_cast_agree_about_which_columns() raises:
+    # The describe runs over the projection rather than over the file, so asking
+    # for two of four columns has to leave two, in the order that was asked for.
+    _put_money()
+    var options = ParquetOptions()
+    options.decimals_as_double = True
+    options.columns = ["price", "id"]
+    var frame = read_parquet(MONEY, options)
+    assert_equal(frame.width(), 2)
+    assert_equal(frame.names()[0], "price")
+    assert_equal(frame.names()[1], "id")
+    assert_true(frame.schema[0].dtype == LogicalType.FLOAT64)
+    assert_true(frame.schema[1].dtype == LogicalType.INT32)
+
+
+def test_asking_for_a_column_that_is_not_there_still_says_so() raises:
+    # With the cast on, the failure moves from the read to the describe, and a
+    # describe that failed quietly would turn a missing column into an empty
+    # select list.
+    _put_money()
+    var options = ParquetOptions()
+    options.decimals_as_double = True
+    options.columns = ["nope"]
+    with assert_raises(contains="duckdb"):
+        _ = read_parquet(MONEY, options)
 
 
 def test_asking_for_no_columns_is_refused() raises:
