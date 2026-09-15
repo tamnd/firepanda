@@ -1000,7 +1000,13 @@ def _string_members() -> tuple[Member, ...]:
         Member(
             name="match",
             kind="method",
-            signature="pat: Any, case: Any = True, flags: Any = 0, na: Any = None",
+            # The only name on this accessor whose `case` starts off as nothing
+            # rather than as True, and upstream does the same by a different
+            # spelling. `match` alone compiles the pattern with the flags before
+            # it looks at `case`, and then refuses a `case` that disagrees with
+            # what it just compiled, so a call that passed neither and a call
+            # that passed `case=True` beside `flags=re.I` have to be told apart.
+            signature="pat: Any, case: Any = None, flags: Any = 0, na: Any = None",
             body='self._searched("match", pat, case, flags, na, True)',
             doc="Whether every row begins with a literal pattern.",
             returns="Series",

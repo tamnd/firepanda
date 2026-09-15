@@ -266,7 +266,7 @@ def anchored(method: UInt8, pattern: String) -> String:
     return String(head, start, "(", out, ")")
 
 
-def program_for(method: UInt8, pattern: String) -> Program:
+def program_for(method: UInt8, pattern: String, flags: Int32 = 0) -> Program:
     """Compiles what one of the five methods would run, or refuses it.
 
     The routing decision is made first and on the pattern as written, which is
@@ -284,16 +284,28 @@ def program_for(method: UInt8, pattern: String) -> Program:
     part of this method goes near RE2. And it is not anchored, because upstream
     runs `regex.search` over the row as written.
 
+    The flags a caller passed beside the pattern ride through both parses and
+    change nothing about which of the three steps happen. That is upstream's
+    arrangement rather than a simplification: pandas compiles the pattern with
+    the argument and then routes the compiled object, and the routing test asks
+    what the pattern holds rather than what was passed with it. So a flag can
+    change the answer and cannot change the engine, with one exception that is
+    not in this file, which is that a flag beyond ignore case moves four of the
+    six methods to Python before they ever get here.
+
     Args:
         method: Which of the six asked.
         pattern: The pattern as the caller wrote it.
+        flags: Flags passed beside the pattern, as `FLAG_` bits. The `case`
+            argument arrives here as ignore case, because upstream turns it
+            into exactly that before anything else looks at it.
 
     Returns:
         The program, or the reason there is not one, with the flag saying whose
         refusal it is. A refusal is a value here rather than a raise for the
         reason `compile_program` gives.
     """
-    var tree = parse_pattern(pattern)
+    var tree = parse_pattern(pattern, flags)
     if method == METHOD_EXTRACT:
         return compile_program(tree, ENGINE_PYTHON, captures=True)
     if holds_unsupported(tree):
@@ -312,7 +324,7 @@ def program_for(method: UInt8, pattern: String) -> Program:
         # already over.
         return compile_program(tree, ENGINE_RE2)
     return compile_program(
-        parse_pattern(anchored(method, preprocessed(pattern))),
+        parse_pattern(anchored(method, preprocessed(pattern)), flags),
         ENGINE_RE2,
         captures=method == METHOD_REPLACE,
     )

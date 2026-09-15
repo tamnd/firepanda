@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `case=False` on a regular expression, and the one flag argument pandas lets through
+
+`Series.str.contains("a.c", case=False)` used to be refused. It is answered now, on `contains`, `match` and `fullmatch`, and it answers what a pattern written `(?i)a.c` answers, because upstream makes those two the same thing by compiling the pattern with the argument before anything routes it and this makes them the same thing by seeding the parser. A pattern with nothing special in it still goes to the byte search and still folds through that search's own table, which is a different rule and agrees with this one on everything measured. Issue #8 M6.
+
+`Series.str.match(pat, flags=re.IGNORECASE)` is answered as well, and it is the only `flags` argument on the whole accessor that gets an answer. `match` alone compiles the pattern before it decides which engine to use, so a pattern carrying nothing but ignore case stays on Arrow upstream. `contains`, `fullmatch` and `count` hand a pattern that was passed any flag at all straight to Python's engine, whose counting and replacing scans differ from Arrow's in ways document 79 measured, so those three still refuse and say which engine they are waiting for.
+
+`match` also picked up two `ValueError`s, both of them upstream's. A `case` that disagrees with the `flags` beside it raises `Cannot both specify 'case' and pass a compiled regexp object with conflicting case-sensitivity`, even when the caller passed a plain string, because upstream compiled one on the way past. A flag beyond ignore case raises `Cannot pass flags that do not match pat.flags`, where `fullmatch` with the same argument answers. The first fires before the second when a call trips both. Document 84 has the whole of it.
+
+`str.match` now takes `case=None` rather than `case=True` as its default, so that a caller who passed nothing can be told apart from a caller who passed `True` beside a flag. Nothing about a call that passes neither argument changes.
+
 ### Added: a correlated subquery may write its correlation without a qualifier in front of it
 
 `SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM sales WHERE qty = band)` is a correlated subquery, because `band` is a column of `tiers` and not one of `sales`. Written that way it was refused with `there is no column named 'band' here`, and the same query with `tiers.band` in place of `band` ran. Nothing but the spelling was different. Issue #309.
@@ -47,6 +57,7 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+
 ### Added: `(?i)` inside a pattern, spent before the first row is read
 
 `pandas.Series(["ABC"]).str.contains("(?i)abc")` is True, and so is every other method of the `str` accessor that reads a pattern. The flag is the last of the seven inline letters both engines have and this compiler refused, and it was the largest single family of patterns the match differential was holding out. Issue #8 M6.

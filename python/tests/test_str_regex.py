@@ -243,21 +243,21 @@ def test_a_pattern_the_engine_refuses_is_a_value_error(firepanda: ModuleType) ->
             assert pattern in str(caught.value), (name, pattern)
 
 
-def test_case_folding_is_refused_rather_than_quietly_dropped(
+def test_case_folding_reaches_the_engine_rather_than_stopping_at_it(
     firepanda: ModuleType,
 ) -> None:
-    """`case=False` folds the pattern and the text against a table there is not
-    one of yet.
+    """`case=False` folds the pattern against a table that is written now.
 
-    pandas serves it by handing RE2 its own ignore case flag. A literal pattern
-    has a folding path here already and keeps it, so what is refused is the pair
-    of a metacharacter and `case=False` rather than either on its own.
+    pandas serves it by handing RE2 its own ignore case flag, and so does this.
+    A literal pattern still goes to the byte search and folds through the other
+    table, so the argument is one word to a caller and two paths underneath, and
+    both of them answer here. What they answer is measured against pandas in
+    `test_str_regex_case_and_flags.py`.
     """
     mine = made(firepanda)
     for name in ("contains", "match", "fullmatch"):
-        with pytest.raises(NotImplementedError) as caught:
-            getattr(mine.str, name)("a.c", case=False)
-        assert "case=False" in str(caught.value), name
+        folded = getattr(mine.str, name)("a.c", case=False)
+        assert len(folded.tolist()) == len(mine.tolist()), name
         getattr(mine.str, name)("abc", case=False)
 
 

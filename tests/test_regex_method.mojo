@@ -17,6 +17,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
+    METHOD_EXTRACT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
     anchored,
@@ -24,6 +25,9 @@ from firepanda.kernel.regex.method import (
     preprocessed,
     program_for,
 )
+from firepanda.kernel.regex.parse import parse_pattern
+from firepanda.kernel.regex.pike import matches_text
+from firepanda.kernel.regex.tokens import FLAG_ASCII, FLAG_IGNORECASE
 
 
 def test_a_pattern_with_no_flag_group_measures_nothing() raises:
@@ -187,6 +191,95 @@ def test_a_pattern_the_grammar_cannot_read_is_refused_as_written() raises:
     for method in [METHOD_CONTAINS, METHOD_MATCH, METHOD_FULLMATCH]:
         var program = program_for(method, ")a")
         assert_false(program.ok)
+
+
+def test_a_flag_passed_beside_the_pattern_folds_what_a_written_one_folds() raises:
+    """The `case` argument and `(?i)` are one fact spelled two ways.
+
+    Upstream makes them one fact by compiling the pattern with the argument
+    before anything routes or rewrites it, and this makes them one fact by
+    seeding the parser. Either way what reaches the compiler is a tree with a
+    flag on it and no memory of how the flag got there, which is why this can be
+    asserted as an equality over rows rather than as a rule about arguments.
+    """
+    var rows = [
+        String("abc"),
+        String("ABC"),
+        String("k"),
+        String("\u212a"),
+        String("s"),
+        String("\u017f"),
+        String("\u03c3"),
+        String("\u03a3"),
+        String("0"),
+        String(""),
+    ]
+    for method in [METHOD_CONTAINS, METHOD_MATCH, METHOD_FULLMATCH]:
+        for pattern in [
+            String("a"),
+            String("[a-z]"),
+            String("k"),
+            String("\u03c3"),
+            String("a.c"),
+        ]:
+            var argued = program_for(method, pattern, FLAG_IGNORECASE)
+            var written = program_for(method, String("(?i)", pattern))
+            assert_true(argued.ok)
+            assert_true(written.ok)
+            for row in rows:
+                assert_equal(
+                    matches_text(argued, row), matches_text(written, row)
+                )
+
+
+def test_a_flag_passed_beside_the_pattern_survives_the_rewrite() raises:
+    """`match` and `fullmatch` compile a second time, on a pattern this file
+    built rather than on the one the caller wrote, and the flag has to be handed
+    to that parse as well. A seeded flag dropped on the way would leave these
+    two folding and `contains` not, which is the shape of bug that shows up as
+    one method out of three disagreeing with pandas."""
+    assert_true(
+        matches_text(
+            program_for(METHOD_FULLMATCH, "[a-z]+", FLAG_IGNORECASE), "ABC"
+        )
+    )
+    assert_true(
+        matches_text(program_for(METHOD_MATCH, "ab", FLAG_IGNORECASE), "ABc")
+    )
+    assert_false(
+        matches_text(
+            program_for(METHOD_FULLMATCH, "[a-z]+", FLAG_IGNORECASE), "AB1"
+        )
+    )
+
+
+def test_a_flag_passed_beside_the_pattern_reaches_whichever_engine_runs_it() raises:
+    """The flag is spent by the compiler and the compiler is told which engine
+    it is compiling for, so an argued flag picks up the engine difference the
+    same way a written one does. The dotted capital I is the whole of that
+    difference: Python folds it onto a plain `i` and RE2 leaves it alone."""
+    assert_false(
+        matches_text(
+            program_for(METHOD_CONTAINS, "i", FLAG_IGNORECASE), "\u0130"
+        )
+    )
+    assert_true(
+        matches_text(
+            program_for(METHOD_EXTRACT, "i", FLAG_IGNORECASE), "\u0130"
+        )
+    )
+
+
+def test_an_alphabet_passed_beside_the_pattern_meets_the_one_it_wrote() raises:
+    """Seeding rather than merging afterwards means the checks that read the
+    flags read the argument too, so a pattern written `(?u)` and handed the
+    other alphabet is refused for the reason a pattern writing both is. Nothing
+    upstream sends this combination, and the point is that the check cannot be
+    walked around rather than that the combination matters."""
+    var tree = parse_pattern("(?u)a", FLAG_ASCII)
+    assert_false(tree.ok)
+    assert_equal(tree.problem, "ASCII and UNICODE flags are incompatible")
+    assert_false(program_for(METHOD_CONTAINS, "(?u)a", FLAG_ASCII).ok)
 
 
 def main() raises:
