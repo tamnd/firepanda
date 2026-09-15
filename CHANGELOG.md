@@ -18,6 +18,10 @@ The one rule a window has to keep is about padding. An allocated buffer is round
 
 A nested column is the one shape a window cannot be taken of, so a chunk that holds one is left whole and runs the way it ran before.
 
+On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
+
+The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+
 ### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
 A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.
