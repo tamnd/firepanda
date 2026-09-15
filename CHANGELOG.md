@@ -35,6 +35,7 @@ The engine gained one thing, which is where a match ends rather than whether the
 `pixi run differential-regex-count` is new and compares the same thirty thousand generated patterns over the same sixteen texts as the other two regular expression differentials. It compares 7668 patterns, which is 122688 counts, and disagrees with pandas on none of them.
 
 `replace` is the one left refusing a metacharacter. It needs the text a match covered rather than where it ended, and `replace_substring_regex` turns out not to share this loop at all, so it is its own slice with its own measurements. Document 79 has all of it.
+
 ### Changed: the differential programs are built several at a time
 
 The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
