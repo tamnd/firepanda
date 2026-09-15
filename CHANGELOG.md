@@ -20,7 +20,7 @@ Everything that cannot be answered is refused by name and none of it is dropped 
 
 The grammar is the stated gap. The only pattern reader here is Python's, so `\p{L}` is a pattern DuckDB takes and this refuses. That is a refusal and not a wrong answer, and an RE2 front end is what closes it.
 
-`text_hostname` stays, and it is a fast path now rather than a stand in. It is q28's pattern written out in Mojo, so it knows how long a row comes out before any byte moves and sizes and copies in two parallel passes, where the engine builds one row at a time into a serial builder because it cannot know. Every case its tests were written for was read off the pattern by hand when there was nothing to ask, and those 21 rows now go through both and are compared, which is what says the fast path is the pattern rather than approximately the pattern.
+`text_hostname` stays, and it is a fast path now rather than a stand in. It is q28's pattern written out in Mojo, so it knows how long a row comes out before any byte moves and sizes and copies in two parallel passes, where the engine builds one row at a time into a serial builder because it cannot know. Every case its tests were written for was read off the pattern by hand when there was nothing to ask, and those 21 rows now go through the kernel, through the engine and through DuckDB 1.5.5, and all three agree. Two of those three were written here, so the third is the one that rules out reading the pattern wrong the same way twice.
 
 ### Added: the second regular expression engine, which reads a different alphabet
 

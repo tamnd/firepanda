@@ -8,11 +8,12 @@ Each of those is a place where stripping a prefix and cutting at the first slash
 diverges from what `regexp_replace` does.
 
 Those cases were read off the pattern by hand, because when they were written
-there was no engine to ask. There is one now, so
-`test_the_extractor_answers_what_the_engine_answers` runs both over every row
-the rest of the file cares about and compares them. That is the test that keeps
-this file honest, and the ones above it are what say which rows are worth
-putting in it.
+there was no engine to ask. There are two now, so
+`test_the_extractor_the_engine_and_duckdb_all_answer_the_same` runs every row
+the rest of the file cares about through this kernel and through the engine and
+compares both against what DuckDB answers for the same pattern. That is the
+test that keeps this file honest, and the ones above it are what say which rows
+are worth putting in it.
 
 The last test is q28 itself, built out of the extractor. It is the only query in
 ClickBench whose group by key is computed rather than read, and the shape
@@ -188,7 +189,7 @@ def through_the_engine(values: List[String]) raises -> List[String]:
     return out^
 
 
-def test_the_extractor_answers_what_the_engine_answers() raises:
+def test_the_extractor_the_engine_and_duckdb_all_answer_the_same() raises:
     """The claim the module docstring makes, asserted rather than reasoned.
 
     This file used to stand in for an engine that did not exist, so every case
@@ -196,6 +197,13 @@ def test_the_extractor_answers_what_the_engine_answers() raises:
     are run over the same rows and compared, and every row that any test above
     cares about is in this list. A fast path that is approximately the pattern
     is worse than no fast path, and this is what says it is not one.
+
+    DuckDB is the third answer and it is the one that makes the other two worth
+    something. The kernel and the engine were both written here, so the two of
+    them agreeing rules out one kind of mistake and not the kind where this
+    library has read the pattern wrong in the same way twice. The third column
+    was read off DuckDB rather than reasoned about, the same way the counting
+    and replacing tests were read off pandas.
     """
     var rows: List[String] = [
         String("http://example.com/"),
@@ -220,11 +228,40 @@ def test_the_extractor_answers_what_the_engine_answers() raises:
         String("http://example.com//"),
         String("http://example.com/?"),
     ]
+    # Read off DuckDB 1.5.5, one `REGEXP_REPLACE` per row over the published
+    # pattern, rather than worked out from the rules here. Two engines and a
+    # kernel agreeing is worth more than either of the pairs.
+    var duckdb: List[String] = [
+        String("example.com"),
+        String("example.com"),
+        String("example.com"),
+        String("example.com"),
+        String(""),
+        String("not a url at all"),
+        String("ftp://example.com/a"),
+        String("http://example.com"),
+        String("HTTP://EXAMPLE.COM/a"),
+        String("http://"),
+        String("http:/example.com/a"),
+        String("www."),
+        String("www."),
+        String("www"),
+        String("http://example.com/a\nb"),
+        String("http://example.com/a\n"),
+        String("ex\nample.com"),
+        String("a.very.long.hostname.example.com"),
+        String("héllo.example.com"),
+        String("example.com"),
+        String("example.com"),
+    ]
     var by_hand = hosts(rows)
     var by_engine = through_the_engine(rows)
-    assert_equal(len(by_hand), len(by_engine), "one answer each per row")
+    assert_equal(len(by_hand), len(rows), "one answer per row by hand")
+    assert_equal(len(by_engine), len(rows), "one answer per row by engine")
+    assert_equal(len(duckdb), len(rows), "and one read off DuckDB")
     for i in range(len(rows)):
         assert_equal(by_hand[i], by_engine[i], rows[i])
+        assert_equal(by_engine[i], duckdb[i], rows[i])
 
 
 def test_a_hostname_too_long_for_a_view_goes_through_the_payload() raises:
