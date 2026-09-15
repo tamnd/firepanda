@@ -114,6 +114,7 @@ from firepanda.join.pairs import (
 from firepanda.kernel.accum import accumulator
 from firepanda.kernel.binary import (
     BinaryOp,
+    all_null,
     binary_any,
     binary_type,
     binary_value_any,
@@ -4747,13 +4748,27 @@ struct GroupAgg(Copyable, Movable, Writable):
     var value_on_left: Bool
     """True for `5 - x` rather than `x - 5`. Read only when `op` is set."""
 
-    def __init__(out self, column: Int, kind: AggKind, name: String):
+    var empty_is_null: Bool
+    """Whether reducing no rows at all answers null rather than the reduction's
+    own identity. False is pandas, where a sum of nothing is zero, and true is
+    SQL, where it is null. Only `Reduce` reads it, because a group is a group
+    only once a row has made one and so there is no empty group to answer for.
+    `EMPTY_IS_NULL` in `plan/expr.mojo` is where the choice comes from."""
+
+    def __init__(
+        out self,
+        column: Int,
+        kind: AggKind,
+        name: String,
+        empty_is_null: Bool = False,
+    ):
         """Constructs one output column.
 
         Args:
             column: The position of the column to reduce.
             kind: The reduction.
             name: The output column's name.
+            empty_is_null: Whether reducing nothing answers null.
         """
         self.column = column
         self.kind = kind
@@ -4763,6 +4778,7 @@ struct GroupAgg(Copyable, Movable, Writable):
         # so rather than a second optional wrapped around the first.
         self.constant = Value(null=LogicalType.NULL)
         self.value_on_left = False
+        self.empty_is_null = empty_is_null
 
     def __init__(
         out self,
@@ -4772,6 +4788,7 @@ struct GroupAgg(Copyable, Movable, Writable):
         op: BinaryOp,
         var constant: Value,
         value_on_left: Bool = False,
+        empty_is_null: Bool = False,
     ):
         """Constructs one output column over an expression rather than a column.
 
@@ -4782,6 +4799,7 @@ struct GroupAgg(Copyable, Movable, Writable):
             op: The operation applied before the reduction.
             constant: The operation's other operand. Consumed.
             value_on_left: Whether the constant is the left operand.
+            empty_is_null: Whether reducing nothing answers null.
         """
         self.column = column
         self.kind = kind
@@ -4789,6 +4807,7 @@ struct GroupAgg(Copyable, Movable, Writable):
         self.op = op
         self.constant = constant^
         self.value_on_left = value_on_left
+        self.empty_is_null = empty_is_null
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the aggregate as it would be read back.
@@ -5789,6 +5808,12 @@ struct Reduce(Movable):
     zero for a count and a null for a minimum and a maximum, and it is read off
     the kernel rather than written out here so that the two cannot drift.
 
+    Unless the aggregate is marked `empty_is_null`, which is the one thing the
+    two front ends disagree about and so is the one thing the caller says rather
+    than the kernel. A sum of nothing is zero in pandas and null in SQL, and a
+    marked reduction gets the null. Nothing else about that row moves, since a
+    count is never marked and the rest are null either way.
+
     An aggregate here may carry an operation against a constant and reduce what
     that produces rather than the column itself. The one that made it worth
     doing is ClickBench q29, ninety sums over one column under ninety different
@@ -6173,7 +6198,13 @@ struct Reduce(Movable):
             # count finds nothing and is zero, a minimum and a maximum find
             # nothing and are null, and a sum is zero because that is what the
             # same kernel answers over a column that is entirely null and the
-            # two cases have to agree with each other.
+            # two cases agree with each other.
+            #
+            # A reduction marked `empty_is_null` overrides that below, since the
+            # two front ends disagree about this one row and only this one row.
+            # The state is still built, because a mean reads its count out of it
+            # and because an unmarked reduction beside a marked one still wants
+            # the kernel's answer.
             self.state = List[AnyArray](capacity=len(self._source))
             for s in range(len(self._source)):
                 var none = empty_any(self.input[self._source[s]].dtype)
@@ -6184,7 +6215,14 @@ struct Reduce(Movable):
         var out = List[AnyArray](capacity=len(self.aggs))
         for a in range(len(self.aggs)):
             var at = self._at[a]
-            if self._holds[a]:
+            if not self.started and self.aggs[a].empty_is_null:
+                # SQL's answer for a fold over no rows, which is null whatever
+                # the fold is. The only one it changes is a sum, since a count
+                # is not marked and every other fold here answers null over
+                # nothing anyway, but writing it once for all of them is what
+                # keeps a new fold from having to remember.
+                out.append(all_null(self.output[a].dtype, 1))
+            elif self._holds[a]:
                 # One kernel call over the whole column, which is the same call
                 # `agg` on a frame would have made and the only one there is.
                 out.append(

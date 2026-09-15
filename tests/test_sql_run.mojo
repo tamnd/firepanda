@@ -3727,6 +3727,63 @@ def test_a_count_over_no_rows_hands_out_a_zero() raises:
     )
 
 
+def test_a_sum_over_no_rows_is_a_null_and_not_a_zero() raises:
+    # Where SQL and pandas part. A sum of nothing is zero in pandas, because
+    # zero is what adding no numbers gives, and it is null in SQL, because a
+    # total of nothing is not a total. The plan says which was asked for.
+    same(
+        gapped(
+            run(
+                "SELECT sum(band) AS total FROM tiers WHERE band > 1000",
+                session(),
+            ),
+            "total",
+        ),
+        [-1],
+        "total",
+    )
+
+
+def test_a_sum_over_no_rows_carries_its_null_upward() raises:
+    # TPC-H q17's shape, which is a sum divided by a constant over a query that
+    # keeps no rows at some scales. A zero there would come out as a zero and a
+    # null comes out as a null, so the whole answer turns on the row above.
+    same(
+        gapped(
+            run(
+                "SELECT sum(band) * 2 AS doubled FROM tiers WHERE band > 1000",
+                session(),
+            ),
+            "doubled",
+        ),
+        [-1],
+        "doubled",
+    )
+
+
+def test_a_sum_over_rows_is_still_the_sum() raises:
+    # The other half of it. Nothing about an input with rows in it changed.
+    same(
+        answer("SELECT sum(band) AS total FROM tiers", "total"),
+        [162],
+        "total",
+    )
+
+
+def test_a_sum_over_an_empty_group_does_not_arise() raises:
+    # A group exists because a row made it, so a GROUP BY over an input that
+    # keeps nothing has no groups rather than a group of nothing, and the sum
+    # that is null above has no row to be null in.
+    var got = run(
+        (
+            "SELECT band, sum(rate) AS total FROM tiers WHERE band > 1000 GROUP"
+            " BY band"
+        ),
+        session(),
+    )
+    assert_equal(len(got), 0)
+
+
 def test_a_subquery_over_no_rows_keeps_no_rows() raises:
     # The fold above is one null row, the cross join puts that null on every
     # row, and a comparison against a null keeps nothing.

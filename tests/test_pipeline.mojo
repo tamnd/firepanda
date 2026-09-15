@@ -2022,6 +2022,82 @@ def test_a_fold_and_a_hold_in_one_reduction_both_answer() raises:
     assert_equal(got, Float64(3.5), "the median of the same six")
 
 
+def barren_frame() raises -> DataFrame:
+    """The same six rows with a mask that keeps none of them.
+
+    A filter over this hands the reduction below it no chunk with rows in it,
+    which is the one input the two front ends answer differently about.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2]))
+    n.append(numbers([3, 4, 5]))
+    n.append(numbers([6]))
+    var keep = ChunkedArray(LogicalType.BOOL)
+    keep.append(flags([False, False]))
+    keep.append(flags([False, False, False]))
+    keep.append(flags([False]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(keep^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_reduction_over_no_rows_answers_what_the_kernel_answers() raises:
+    """The pandas answers, which is what a reduction carrying no mark gives. A
+    sum of nothing is zero, a count of nothing is zero, and a minimum and a
+    maximum of nothing are null."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(0, AggKind.COUNT, "seen"))
+    aggs.append(GroupAgg(0, AggKind.MAX, "high"))
+    var pipeline = Pipeline(barren_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(
+        len(out), 1, "one row, because a fold with no key is one group"
+    )
+    assert_equal(one_int(out, "total"), 0, "pandas sums nothing to zero")
+    assert_equal(one_int(out, "seen"), 0, "and counts nothing as zero")
+    var high = out.column("high").as_typed[DType.int64]()
+    assert_true(not high.is_valid(0), "the maximum of nothing")
+
+
+def test_a_marked_reduction_over_no_rows_answers_null() raises:
+    """SQL's answer for the same input. The mark is on the sum and the maximum
+    and not on the count, which is what the SQL front end does, and the only
+    column it changes is the sum."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total", empty_is_null=True))
+    aggs.append(GroupAgg(0, AggKind.COUNT, "seen"))
+    aggs.append(GroupAgg(0, AggKind.MAX, "high", empty_is_null=True))
+    var pipeline = Pipeline(barren_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var total = out.column("total").as_typed[DType.int64]()
+    assert_true(not total.is_valid(0), "SQL sums nothing to null")
+    assert_equal(one_int(out, "seen"), 0, "a count is zero on both sides")
+    var high = out.column("high").as_typed[DType.int64]()
+    assert_true(not high.is_valid(0), "the maximum of nothing, either way")
+
+
+def test_a_marked_reduction_over_rows_is_the_ordinary_sum() raises:
+    """The mark decides one row of one case and nothing else, so an input with
+    rows in it answers what it always answered."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total", empty_is_null=True))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "total"), 21, "1 through 6")
+
+
 def test_a_held_column_survives_the_parallel_route() raises:
     """Two hundred rows in forty chunks through a filter, which is the shape
     that runs the front of the pipeline on every core and hands the reduction

@@ -1,11 +1,13 @@
 """The inline `(?i)` flag on the pattern methods, against pandas.
 
-The flag is not an argument. `case=False` is next door in
-`test_str_case_insensitive.py` and is a literal search with a folding compare;
-this file is the flag written inside the pattern, which reaches the regular
-expression compiler and is spent there. pandas sends such a pattern to whichever
-engine it would have sent the pattern to anyway, so an inline `(?i)` never moves
-a call between Arrow and Python upstream, and the same is true here.
+The flag is not an argument. `case=False` on a pattern with nothing special in
+it is a literal search with a folding compare and is in
+`test_str_case_insensitive.py`, and the same argument on a real pattern is in
+`test_str_regex_case_and_flags.py`; this file is the flag written inside the
+pattern, which reaches the regular expression compiler and is spent there.
+pandas sends such a pattern to whichever engine it would have sent the pattern
+to anyway, so an inline `(?i)` never moves a call between Arrow and Python
+upstream, and the same is true here.
 
 That matters because the two engines do not fold the same alphabet. They agree
 about 2923 of the 2927 code points either of them considers cased, and they
@@ -255,11 +257,16 @@ def test_a_scoped_flag_group_is_still_refused(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_the_case_argument_is_still_a_gap_on_a_regular_expression(
+def test_the_argument_beside_the_pattern_says_the_same_thing(
     firepanda: ModuleType,
 ) -> None:
-    """The flag inside the pattern is carried and the argument beside it is not,
-    which is the next slice rather than this one. A caller is told which."""
+    """`case=False` used to be refused here and is now the same fold by another
+    spelling, which is how upstream has it too. The rest of that argument is in
+    `test_str_regex_case_and_flags.py`, and this is the one line of it that
+    belongs here, because it is the claim this file's table is asked for from
+    two directions."""
     mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.contains("a.c", case=False)
+    for pattern in ("a.c", "[a-z]", "k"):
+        assert mine.str.contains(pattern, case=False).tolist() == (
+            mine.str.contains("(?i)" + pattern).tolist()
+        ), pattern

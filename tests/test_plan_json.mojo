@@ -24,7 +24,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
-from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind
+from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, folds_empty_to_null
 from firepanda.plan.json import Loaded, from_json, to_json
 from firepanda.plan.node import (
     NO_LIMIT,
@@ -715,6 +715,50 @@ def test_every_aggregate_is_named_and_reads_back() raises:
             code,
             String("aggregate ", code, " came back as itself"),
         )
+
+
+def test_a_fold_that_is_null_over_nothing_says_so_and_still_is() raises:
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var fold = plan.exprs.aggregate(
+        AggKind.SUM, plan.exprs.column("a"), empty_is_null=True
+    )
+    var at = plan.aggregate(t, List[Int](), [fold], ["x"])
+    assert_true(
+        to_json(plan, at).find('"empty_is_null": true') != -1,
+        "the flag is in the JSON",
+    )
+    assert_true(
+        to_json(plan, at).find('"op": "sum"') != -1,
+        "and the fold is still written by its own name",
+    )
+    var back = _trip(plan, at)
+    assert_true(
+        folds_empty_to_null(
+            back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].op
+        ),
+        "and it is still on the node that came back",
+    )
+
+
+def test_a_fold_that_is_not_marked_writes_nothing_about_it() raises:
+    # The same bytes a document written before there was a flag holds, which is
+    # what the cast's flag promises too.
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var fold = plan.exprs.aggregate(AggKind.SUM, plan.exprs.column("a"))
+    var at = plan.aggregate(t, List[Int](), [fold], ["x"])
+    assert_true(
+        to_json(plan, at).find('"empty_is_null"') == -1,
+        "nothing is written for the pandas fold",
+    )
+    var back = _trip(plan, at)
+    assert_true(
+        not folds_empty_to_null(
+            back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].op
+        ),
+        "and it comes back unmarked",
+    )
 
 
 def test_every_binary_operator_is_written_and_reads_back() raises:

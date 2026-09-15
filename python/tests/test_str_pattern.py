@@ -211,13 +211,17 @@ def test_flags_are_refused_rather_than_ignored(
     """An ignored argument is the one failure mode a compatibility layer must not have.
 
     `case=False` used to be refused here beside this and is answered now, which
-    `test_str_case_insensitive.py` covers. A flag is a statement about how the
-    engine is to read the pattern, and the engine reads none of them yet, so
-    this one stays. pandas refuses `flags` out of Arrow as well and answers it
-    out of its other engine.
+    `test_str_case_insensitive.py` covers. Three of these four still refuse a
+    flag, because pandas hands a pattern that was passed one to its other engine
+    whatever the flag says, and that engine's scan is not written.
+
+    `match` is the fourth and is no longer here. It compiles the pattern before
+    it routes it, so a pattern carrying ignore case and nothing else stays on
+    Arrow upstream and is answered here, and the two refusals it does have are
+    `ValueError` rather than this. `test_str_regex_case_and_flags.py` has them.
     """
     mine = made(firepanda)
-    for name in ("contains", "match", "fullmatch", "count"):
+    for name in ("contains", "fullmatch", "count"):
         with pytest.raises(firepanda.errors.UnsupportedError):
             getattr(mine.str, name)("abc", flags=re.IGNORECASE)
 

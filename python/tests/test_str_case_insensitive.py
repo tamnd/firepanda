@@ -291,16 +291,18 @@ def test_case_true_is_the_search_that_was_already_there(firepanda: ModuleType) -
 
 @needs_pandas
 def test_flags_are_still_refused_with_case_off(firepanda: ModuleType) -> None:
-    """One of the two refusals went away and the other did not, so both are checked.
+    """`case=False` is served on all four of these now and `flags` is not, except
+    on the one name upstream lets through.
 
-    `re.IGNORECASE` as a flag is the same request `case=False` makes and is
-    still refused, because accepting one spelling of it would mean accepting
-    every other flag beside it and there is no engine to read them with.
+    `re.IGNORECASE` as a flag asks for the same fold `case=False` asks for, and
+    that is not enough to make it the same call: pandas routes a pattern that
+    was handed any flag to Python's engine, and the one exception is `match`,
+    which is measured in `test_str_regex_case_and_flags.py` rather than here.
     """
     import re
 
     mine = made(firepanda)
-    for name in ("contains", "match", "fullmatch"):
+    for name in ("contains", "fullmatch"):
         with pytest.raises(firepanda.errors.UnsupportedError):
             getattr(mine.str, name)("a", case=False, flags=re.IGNORECASE)
     with pytest.raises(firepanda.errors.UnsupportedError):
@@ -309,9 +311,16 @@ def test_flags_are_still_refused_with_case_off(firepanda: ModuleType) -> None:
 
 @needs_pandas
 def test_a_metacharacter_is_still_refused_with_case_off(firepanda: ModuleType) -> None:
-    """Folding a pattern does not make it a literal, so the promise is unchanged."""
+    """Folding a pattern does not make it a literal, and it no longer has to.
+
+    These three used to refuse a metacharacter beside `case=False` because the
+    engine had no fold to run it with. It has one now, so the pattern goes to
+    the engine and the row is searched rather than the refusal being raised, and
+    what is left to assert here is that `regex=False` still means the characters
+    themselves. The folded engine paths are measured in
+    `test_str_regex_case_and_flags.py`.
+    """
     mine = made(firepanda)
     for name in ("contains", "match", "fullmatch"):
-        with pytest.raises(firepanda.errors.UnsupportedError):
-            getattr(mine.str, name)("a.c", case=False)
+        assert getattr(mine.str, name)("a.c", case=False).tolist()[0] is not None
     assert mine.str.contains("a.c", case=False, regex=False).tolist()[0] is False

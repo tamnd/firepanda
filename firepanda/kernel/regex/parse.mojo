@@ -221,6 +221,12 @@ struct Parsed(Movable):
 
     Only the global form reaches here, because only the global form applies to
     the whole pattern. What the scoped form turned on and off is in `scoped`.
+
+    A caller can start this off with flags the pattern never wrote, which is
+    what the accessor's `flags` argument and its `case` argument are. Upstream
+    does the same thing by a different route, compiling the pattern with the
+    argument and handing the compiled object on, and the two arrive at one
+    pattern carrying one set of flags either way.
     """
 
     var scoped: Int32
@@ -1903,11 +1909,24 @@ def _settle(mut c: _Cursor):
         c.give_up(String("ASCII and UNICODE flags are incompatible"))
 
 
-def parse_pattern(pattern: StringSlice) -> Parsed:
+def parse_pattern(pattern: StringSlice, flags: Int32 = 0) -> Parsed:
     """Reads a pattern with Python's grammar.
+
+    The flags are seeded rather than merged afterwards, so that a letter passed
+    as an argument and the same letter written `(?i)` at the front of the
+    pattern are the same fact by the time anything reads them. Seeding is safe
+    because nothing in this file reads the field before the pattern is walked
+    and the only write to it is an or, so a flag turned on here stays on.
+
+    It also means the two checks that look at flags see the argument. A pattern
+    passed both alphabets, one written and one argued, is refused here the same
+    way a pattern writing both is, which is the answer upstream gives as well
+    even though it gives it in a different exception.
 
     Args:
         pattern: The pattern as the caller wrote it.
+        flags: Flags the caller passed beside the pattern rather than inside it,
+            as `FLAG_` bits. Zero is the ordinary call.
 
     Returns:
         The tree, or the reason there is not one. A failure is a value here
@@ -1915,6 +1934,7 @@ def parse_pattern(pattern: StringSlice) -> Parsed:
         engine answers, and a pattern Python cannot read is one RE2 is given.
     """
     var c = _Cursor(decoded(pattern))
+    c.flagged = flags
     var root = _branch(c)
     _settle(c)
     return _harvested(c^, root)

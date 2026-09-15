@@ -23,6 +23,27 @@ The line is saved and put back beside how far reach went, so a correlated subque
 TPC-H q17 runs now, where it used to refuse, and running it found the next thing. No row survives its correlated filter at scale 0.01, so its whole answer is one sum over no rows, and a sum over no rows is null in SQL and zero here. `pixi run tpch` grew a second and shorter list for that, `disagreed`, which is the same device the expression differential already uses: a query that runs and answers something DuckDB does not is a worse gap than one that refuses, so it is written down with the issue that closes it and printed beside the difference every run rather than left out of the list or allowed to stop the run. Issue #838 is that one.
 
 q2 and q20 are both past the names as well and stop on operator limits instead, q2 on a cross join whose right side is more than one row and q20 on a left join with two key pairs. Sixteen of the twenty two agree, five are refused in four places, and q17 is the one on the second list.
+### Fixed: a SQL sum over no rows answers null rather than zero
+
+`SELECT sum(x) FROM t WHERE false` answered zero. DuckDB answers null, and so does every other SQL engine, because a total of nothing is not a total. pandas answers zero, because zero is what adding no numbers gives, and firepanda was answering pandas' answer to a SQL question. Issue #836.
+
+Both answers are right for the front end that asks for them, so the plan now says which was asked for rather than the operator picking one. An aggregate carries a flag, the SQL front end sets it on every fold but a count, and `Reduce` reads it when nothing reached it. A count is the exception on both sides: counting what is there is a question an empty column can answer and the answer is zero. Everything else already agreed, since a minimum, a maximum and an average over nothing are null in pandas too, so a sum is the only column this moves.
+
+The flag lives in the aggregate's operator field beside the fold's own code, which is where a cast already keeps the flag that says whether it rounds or truncates, and for the same reason: a field of its own would cost every expression in every plan a byte to answer a question two kinds ask. It is written to JSON only when it is on, so a document written before there was a flag and one written now for the same plan are the same bytes.
+
+Only a fold over no rows at all is decided here. A group that saw rows and found every one of them null is the same disagreement and still answers zero, which is issue #836, because telling that group apart from one whose values summed to zero costs a count of the non null values per group and this case costs nothing.
+
+TPC-H q17 is the query that found it. It divides a sum by a constant, and at scale 0.01 the rows it sums are none, so it answered zero where DuckDB answers null.
+
+### Added: `case=False` on a regular expression, and the one flag argument pandas lets through
+
+`Series.str.contains("a.c", case=False)` used to be refused. It is answered now, on `contains`, `match` and `fullmatch`, and it answers what a pattern written `(?i)a.c` answers, because upstream makes those two the same thing by compiling the pattern with the argument before anything routes it and this makes them the same thing by seeding the parser. A pattern with nothing special in it still goes to the byte search and still folds through that search's own table, which is a different rule and agrees with this one on everything measured. Issue #8 M6.
+
+`Series.str.match(pat, flags=re.IGNORECASE)` is answered as well, and it is the only `flags` argument on the whole accessor that gets an answer. `match` alone compiles the pattern before it decides which engine to use, so a pattern carrying nothing but ignore case stays on Arrow upstream. `contains`, `fullmatch` and `count` hand a pattern that was passed any flag at all straight to Python's engine, whose counting and replacing scans differ from Arrow's in ways document 79 measured, so those three still refuse and say which engine they are waiting for.
+
+`match` also picked up two `ValueError`s, both of them upstream's. A `case` that disagrees with the `flags` beside it raises `Cannot both specify 'case' and pass a compiled regexp object with conflicting case-sensitivity`, even when the caller passed a plain string, because upstream compiled one on the way past. A flag beyond ignore case raises `Cannot pass flags that do not match pat.flags`, where `fullmatch` with the same argument answers. The first fires before the second when a call trips both. Document 84 has the whole of it.
+
+`str.match` now takes `case=None` rather than `case=True` as its default, so that a caller who passed nothing can be told apart from a caller who passed `True` beside a flag. Nothing about a call that passes neither argument changes.
 
 ### Added: a correlated subquery may write its correlation without a qualifier in front of it
 

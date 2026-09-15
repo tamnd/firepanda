@@ -96,6 +96,7 @@ from firepanda.kernel.regex.method import (
 )
 from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.program import Program
+from firepanda.kernel.regex.tokens import FLAG_IGNORECASE
 from firepanda.kernel.regex.replace import Rewrite, parse_rewrite
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, tagged
 
@@ -178,6 +179,9 @@ def _flag_name(name: String) raises -> String:
         or name == "contains_folded"
         or name == "match_folded"
         or name == "fullmatch_folded"
+        or name == "contains_regex_folded"
+        or name == "match_regex_folded"
+        or name == "fullmatch_regex_folded"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -305,9 +309,19 @@ def _compiled(kind: String, pattern: String) raises -> Program:
     message names Arrow, a caller here did not call Arrow, and reproducing a
     refusal in kind is what matters rather than reproducing it to the letter.
 
+    A word ending in `_regex_folded` is the same method with `case=False`, and
+    the fold it asks for is the one `(?i)` asks for rather than the one the byte
+    search folds through. Those two are not the same rule: the search maps one
+    character to one character and the engine takes every code point that folds
+    onto the one written down, so `STRASSE` holds `straße` to neither and a row
+    holding a Kelvin sign matches `(?i)k` to the engine alone. Upstream reaches
+    the same place by compiling the pattern with `re.IGNORECASE` and handing the
+    compiled object on, which is why `case=False` and a written `(?i)` answer
+    alike there and have to answer alike here.
+
     Args:
         kind: The word the Python layer sent, which is one of the six that end
-            in `_regex`.
+            in `_regex` or one of the three that end in `_regex_folded`.
         pattern: The pattern as the caller wrote it.
 
     Returns:
@@ -317,18 +331,22 @@ def _compiled(kind: String, pattern: String) raises -> Program:
         Error: Tagged `value` when RE2 would refuse the pattern too, and
             `unsupported` when the refusal is this library's own.
     """
+    var folded = kind.endswith("_folded")
+    var name = String(
+        kind[byte = 0 : kind.byte_length() - 7]
+    ) if folded else kind
     var method = METHOD_CONTAINS
-    if kind == "match_regex":
+    if name == "match_regex":
         method = METHOD_MATCH
-    elif kind == "fullmatch_regex":
+    elif name == "fullmatch_regex":
         method = METHOD_FULLMATCH
-    elif kind == "count_regex":
+    elif name == "count_regex":
         method = METHOD_COUNT
-    elif kind == "replace_regex":
+    elif name == "replace_regex":
         method = METHOD_REPLACE
-    elif kind == "extract_regex":
+    elif name == "extract_regex":
         method = METHOD_EXTRACT
-    var program = program_for(method, pattern)
+    var program = program_for(method, pattern, FLAG_IGNORECASE if folded else 0)
     if program.ok:
         return program^
     var said = String("str: ", program.problem, ", in the pattern ", pattern)
@@ -759,6 +777,9 @@ def flag(column: Series, kind: String, arg: String) raises -> Series:
         wanted == "contains_regex"
         or wanted == "match_regex"
         or wanted == "fullmatch_regex"
+        or wanted == "contains_regex_folded"
+        or wanted == "match_regex_folded"
+        or wanted == "fullmatch_regex_folded"
     ):
         return column.chars_matches_regex(_compiled(wanted, arg))
     # The same three with `case=False`, which is a word of its own rather than a
