@@ -8884,10 +8884,11 @@ class StringMixin:
         """Picks which of the two searches the pattern runs through.
 
         `case=False` used to be refused here beside `flags` and is now served,
-        which leaves one refusal rather than two. `flags` still says no because
-        every one of them is a statement about a regular expression and there is
-        no engine, and an ignored argument is the one failure mode a
-        compatibility layer must not have.
+        which leaves one refusal rather than two. `flags` still says no for the
+        two names that still come through here, `replace` and `extract`, because
+        a flag beyond ignore case moves the call to Python's engine upstream and
+        that engine runs a different scan for both of them. The four that ask a
+        question rather than answer one go through `_folding` instead.
 
         The fold a search compares through is not the one `casefold` does. It
         maps one character to one character, so `STRASSE` does not hold `straße`
@@ -8900,6 +8901,55 @@ class StringMixin:
                 f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
             )
         return "" if case is None or case else "_folded"
+
+    @staticmethod
+    def _folding(kind: str, case: Any, flags: Any) -> bool:
+        """Whether a pattern method folds, and which of three ways it can refuse.
+
+        `case=False` and `flags=re.IGNORECASE` are one argument written twice.
+        Upstream turns the second into the first by compiling the pattern with
+        it, which is why a call passing both agrees with itself and a call
+        passing one of each does not. What comes out here is one bit, and the
+        engine is told about it by the word rather than by a second argument,
+        which is the rule the byte search already followed.
+
+        Only `match` reads `flags` at all, and that is upstream's doing rather
+        than a line drawn here. `match` alone compiles the pattern before it
+        routes it, so a pattern carrying nothing but ignore case still reaches
+        Arrow, while `contains`, `fullmatch` and `count` hand any flag straight
+        to Python's engine. The other three are refused below until that engine
+        has the scan they need.
+
+        Two refusals belong to `match` and neither of them is this library's.
+        A `case` given beside a `flags` that disagrees with it is refused first,
+        because upstream reads the compiled pattern's own ignore case bit back
+        out and compares it to the argument before anything is run. Then a flag
+        beyond ignore case reaches a check that compares the flags the accessor
+        just zeroed against the ones it just compiled in, and they differ, so
+        `str.match(pat, flags=re.M)` raises where `str.fullmatch` with the same
+        argument answers. The order matters and is measured rather than guessed:
+        `match(pat, case=False, flags=re.M)` gives the first message and not the
+        second. Both are `ValueError` upstream and both are reproduced, because
+        a caller catching one of them today is catching something real.
+        """
+        if kind == "match" and flags:
+            folded = bool(flags & re.IGNORECASE)
+            if case is not None and bool(case) is folded:
+                raise InvalidArgumentError(
+                    "firepanda:value: Cannot both specify 'case' and pass a compiled"
+                    " regexp object with conflicting case-sensitivity"
+                )
+            if flags & ~(re.IGNORECASE | re.UNICODE):
+                raise InvalidArgumentError(
+                    "firepanda:value: Cannot pass flags that do not match pat.flags"
+                )
+            return folded
+        if flags:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{kind} hands any flag argument to Python's"
+                " engine upstream, and that engine's scan is not written yet"
+            )
+        return case is not None and not case
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
         """Whether a pattern is in every row, at the front, or the whole row.
@@ -8914,23 +8964,26 @@ class StringMixin:
         else goes to the engine, which compiles the pattern once and walks the
         column, and which refuses what it cannot do rather than answering it.
         """
-        fold = self._fold_word(case, flags, kind)
+        folded = self._folding(kind, case, flags)
+        fold = "_folded" if folded else ""
         if _needs_an_engine(pat, regex):
-            answer = self._matched(kind, pat, case)
+            answer = self._matched(kind, pat, folded)
         else:
             answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
 
-    def _matched(self, kind: str, pat: str, case: Any) -> Series:
+    def _matched(self, kind: str, pat: str, folded: bool) -> Series:
         """Runs a pattern through the regular expression engine.
 
-        `case=False` is the one argument that stops here rather than reaching
-        the engine. pandas serves it by handing RE2 its own ignore case flag,
-        which folds the pattern and the text against a table this library has
-        not written, and the refusal is a gap of the same kind the engine itself
-        reports rather than something this layer invented.
+        `case=False` used to stop here and now goes through as a word, because
+        upstream serves it by handing RE2 its own ignore case flag and the table
+        behind that flag is written. Which fold it is matters: the engine takes
+        every code point that folds onto the one written down, so a pattern of
+        `k` matches a Kelvin sign here and does not in the byte search, and the
+        two halves of `case=False` on this accessor are two different rules
+        upstream as well as here.
 
         The pattern crosses as the caller wrote it. `match` and `fullmatch` are
         a `contains` with the pattern anchored, both here and upstream, and the
@@ -8938,13 +8991,7 @@ class StringMixin:
         a pattern goes to before rewriting it and the rewrite can change that
         decision. `firepanda/py/text.mojo` has which pattern and why.
         """
-        if case is not None and not case:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{kind} with case=False reads its pattern"
-                " with case folded, the regular expression engine has no folding table"
-                " yet, and folding is not something that can be left out of an answer"
-            )
-        return self._flag(f"{kind}_regex", pat)
+        return self._flag(f"{kind}_regex_folded" if folded else f"{kind}_regex", pat)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
         """How many times a pattern matches in every row.
@@ -8952,7 +8999,9 @@ class StringMixin:
         `count` has no `case` argument, which is the one place the four disagree
         about their own signature, so it passes `None` and the check falls
         through. Upstream has no case argument here either, so there is no fold
-        to pick and the word the byte search gets is the bare one.
+        to pick and the word the byte search gets is the bare one. It goes
+        through the same check the other three do all the same, so that a caller
+        who passes `flags` is told the same thing by all four.
 
         The split is the one `_searched` makes and is made for the same reason,
         but what happens after it is not the same, because counting is not
@@ -8962,7 +9011,7 @@ class StringMixin:
         rather than out of reading either engine. `firepanda/kernel/regex/pike.mojo`
         has them and document 79 has where they were measured.
         """
-        self._fold_word(None, flags, "count")
+        self._folding("count", None, flags)
         if _needs_an_engine(pat, True):
             return self._number("count_regex", pat)
         return self._number("count", self._literal(pat, True, "count"))

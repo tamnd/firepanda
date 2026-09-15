@@ -475,7 +475,7 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
-    def match(self, pat: Any, case: Any = True, flags: Any = 0, na: Any = None) -> Series:
+    def match(self, pat: Any, case: Any = None, flags: Any = 0, na: Any = None) -> Series:
         """Whether every row begins with a literal pattern."""
         try:
             return self._searched("match", pat, case, flags, na, True)
