@@ -186,7 +186,11 @@ from firepanda.kernel import (
     text_pick,
     text_substring,
 )
-from firepanda.kernel.chars import text_character_length
+from firepanda.kernel.chars import (
+    text_casefold,
+    text_character_length,
+    text_is_ascii,
+)
 from firepanda.kernel.url import text_hostname
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -3014,6 +3018,11 @@ def bench_strings(mut harness: Harness) raises:
     is: in the prefix, which the view settles on its own, or in the last byte,
     which costs a walk into a buffer the view alone would never have touched.
 
+    `strings/casefold_long` and `strings/ascii_long` are here rather than beside
+    the operator rows because neither has an operator to sit behind. Both are
+    read against `strings/build_long`, which is the copy they both contain and
+    nothing else, so what is left after subtracting it is the kernel.
+
     Args:
         harness: The harness.
 
@@ -3047,6 +3056,26 @@ def bench_strings(mut harness: Harness) raises:
         keep(len(out))
 
     harness.record("strings/build_long", "rows", rows, build_long)
+
+    # The two case kernels the ASCII fast path did not cover when it landed, at
+    # the level of the kernel rather than the operator. `strings/build_long`
+    # above is the same loop over the same column with the case work taken out,
+    # so the gap between it and `strings/casefold_long` is the whole of what
+    # folding costs on top of the copy it has to do anyway. `strings/ascii_long`
+    # has no copy in it at all: it is one pass over the bytes and a bool per
+    # row, so it is the closest thing here to a direct reading of what looking
+    # at a byte at a time costs against looking at a register at a time.
+    def casefold_long() raises {imm long}:
+        var out = text_casefold(long)
+        keep(len(out))
+
+    harness.record("strings/casefold_long", "rows", rows, casefold_long)
+
+    def ascii_long() raises {imm long}:
+        var out = text_is_ascii(long)
+        keep(len(out))
+
+    harness.record("strings/ascii_long", "rows", rows, ascii_long)
 
     def length_short() raises {imm short, imm rows}:
         var total = 0

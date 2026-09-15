@@ -343,14 +343,19 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
 
 
-def test_the_python_engine_is_named_rather_than_quietly_compiled() raises:
-    """A pattern routed to the other engine is not an RE2 pattern with some
-    features missing, so the compiler says so rather than producing
-    something."""
-    var program = compile_program(parse_pattern("(?=a)b"), ENGINE_PYTHON)
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(program.problem, "the Python engine is not written yet")
+def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
+    """A lookaround is the whole reason the router exists, and it is still
+    refused on both sides, but the flag says something different on each: for
+    RE2 the refusal agrees with upstream and for Python it is a shortfall
+    here."""
+    var theirs = compile_program(parse_pattern("(?=a)b"), ENGINE_RE2)
+    assert_false(theirs.ok)
+    assert_false(theirs.gap)
+    assert_equal(theirs.problem, "RE2 has no lookaround")
+    var ours = compile_program(parse_pattern("(?=a)b"), ENGINE_PYTHON)
+    assert_false(ours.ok)
+    assert_true(ours.gap)
+    assert_equal(ours.problem, "this engine has no lookaround yet")
 
 
 def main() raises:

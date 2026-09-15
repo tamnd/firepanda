@@ -121,6 +121,27 @@ comptime AT_BOUNDARY: UInt8 = 7
 comptime AT_NON_BOUNDARY: UInt8 = 8
 """`\\B`, anywhere `\\b` is not."""
 
+comptime AT_END_TEXT: UInt8 = 9
+"""`$` outside multiline mode when the pattern is being read the way Python
+reads it, which is at the end of the text and also just before a newline that
+ends it.
+
+The parser never writes this one. The compiler writes it in place of `AT_END`
+when it is compiling for Python's engine, the same way it writes `AT_END_LINE`
+in place of it under multiline, so which engine is running is settled while the
+pattern is being compiled rather than once per position of every row."""
+
+comptime AT_BOUNDARY_UNICODE: UInt8 = 10
+"""`\\b` read the way Python reads it, which is against Python's `\\w` and so
+against every letter there is rather than against the ASCII 63."""
+
+comptime AT_NON_BOUNDARY_UNICODE: UInt8 = 11
+"""`\\B` read the way Python reads it.
+
+This one has no ASCII twin that works. `AT_NON_BOUNDARY` is refused, because
+RE2 asks the question between bytes and this engine walks characters, and there
+is no such trouble here: Python asks it between characters and so does this."""
+
 
 comptime CATEGORY_DIGIT: UInt8 = 1
 """`\\d`. Every Unicode decimal digit to Python and `[0-9]` to RE2, which is the
