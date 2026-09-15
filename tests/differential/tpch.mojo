@@ -130,13 +130,6 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 8 or number == 9:
-        return String(
-            "a cross join with more than one row on the right, which there is"
-            " no operator for. Neither should be crossing at all: each one"
-            " writes its join condition somewhere the lowering does not read"
-            " it as one. Issue #816"
-        )
     if number == 2 or number == 17 or number == 20:
         return String(
             "a name the inner query reads from the query around it, which"

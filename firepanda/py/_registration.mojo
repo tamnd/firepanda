@@ -374,6 +374,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.string_join](
         "string_join", docstring="The whole column folded into one string."
     )
+    _ = series.def_method[PySeries.string_extract](
+        "string_extract",
+        docstring="The group labels and one column of what each group held.",
+    )
     _ = series.def_method[PySeries.string_dummies](
         "string_dummies",
         docstring="The token labels and one flag column for each of them.",

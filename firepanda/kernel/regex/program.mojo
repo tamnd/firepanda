@@ -249,6 +249,18 @@ struct Program(Movable):
     refusal is this one.
     """
 
+    var labels: List[String]
+    """What each group is called, one entry per group and empty for an unnamed
+    one.
+
+    This is here rather than being worked out again from the pattern because
+    `extract` labels its columns with them, and working them out again would
+    mean parsing the pattern a second time in the one place that has already
+    parsed it. It is the length of `groups` whether or not the pattern named
+    anything, so a caller walking it does not have to know how many names there
+    were.
+    """
+
     def __init__(out self):
         """Starts an empty program, which is what a refusal leaves behind."""
         self.code = []
@@ -258,6 +270,7 @@ struct Program(Movable):
         self.gap = False
         self.slots = 0
         self.groups = 0
+        self.labels = []
 
     def sized(self) -> Int:
         """How many instructions the program has.
@@ -1142,6 +1155,16 @@ def compile_program(
     out.ranges = b.ranges.copy()
     out.groups = Int(tree.groups)
     out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
+    # The parser keeps the names and the numbers as two lists the length of
+    # however many groups were named, and what a caller labelling columns wants
+    # is one entry per group whether it was named or not.
+    for group in range(1, Int(tree.groups) + 1):
+        var label = String("")
+        for i in range(len(tree.names)):
+            if Int(tree.numbers[i]) == group:
+                label = tree.names[i].copy()
+                break
+        out.labels.append(label^)
     return out^
 
 

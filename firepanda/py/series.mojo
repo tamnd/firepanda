@@ -52,6 +52,7 @@ from firepanda.py.text import number as text_number
 from firepanda.py.text import text as text_text
 from firepanda.py.text import dummies as text_dummies
 from firepanda.py.text import dummy_tokens as text_dummy_tokens
+from firepanda.py.text import extract as text_extract
 from firepanda.py.text import join as text_join
 from firepanda.py.text import partition as text_partition
 from firepanda.py.text import translate as text_translate
@@ -1432,6 +1433,52 @@ struct PySeries(Movable, Writable):
         for i in range(len(tokens)):
             labels.append(PythonObject(tokens[i]))
             columns.append(PythonObject(alloc=Self(ArcPointer(flags.pop(0)))))
+        return Python.tuple(labels, columns)
+
+    @staticmethod
+    def string_extract(
+        py_self: PythonObject, pattern: PythonObject
+    ) raises -> PythonObject:
+        """Pulls the groups of the first match out of every row, as columns.
+
+        The second `str` method that answers a pair rather than a column, and
+        the reason it is a pair is the same as `string_dummies`: the labels and
+        the columns belong together and a frame here would have to be taken
+        apart again on the other side. What differs is where the width comes
+        from. `get_dummies` reads the column to find out, and this one reads
+        the pattern, so the pair is one call rather than two.
+
+        A label is a group's name, or empty for a group nobody named. Writing
+        an unnamed group's position out as text is left to the Python layer,
+        because that is where the divergence lives: pandas labels it with an
+        integer and a frame here holds text labels.
+
+        Args:
+            py_self: The series.
+            pattern: The pattern, which the Python layer has already checked is
+                a string and opens at least one group.
+
+        Returns:
+            A Python tuple of the list of labels and the list of wrapped text
+            series, both in the order the groups were opened and both the same
+            length.
+
+        Raises:
+            Error: Tagged `value` if the column is not text or RE2 would refuse
+                the pattern too, and `unsupported` when the refusal is this
+                library's own.
+        """
+        var found = text_extract(
+            Self._held(py_self)[].series[], words(pattern, "pat")
+        )
+        var names = found[0].copy()
+        var parts = found[1].copy()
+
+        var labels = Python.list()
+        var columns = Python.list()
+        for i in range(len(names)):
+            labels.append(PythonObject(names[i]))
+            columns.append(PythonObject(alloc=Self(ArcPointer(parts.pop(0)))))
         return Python.tuple(labels, columns)
 
     @staticmethod
