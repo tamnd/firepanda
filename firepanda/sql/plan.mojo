@@ -777,10 +777,13 @@ def _raised(value: _Exact, scale: Int) -> _Exact:
         The constant at that scale, or `ok` false when it no longer fits
         thirty eight digits.
     """
-    var out = value.unscaled
+    # Not named `out`, because `out` is an argument convention and the
+    # formatter reads `out *` as the start of one rather than as a
+    # multiplication.
+    var scaled = value.unscaled
     for _ in range(scale - value.scale):
-        out *= 10
-    return _fitted(out, scale)
+        scaled *= 10
+    return _fitted(scaled, scale)
 
 
 def _fitted(unscaled: Int128, scale: Int) -> _Exact:
@@ -2461,7 +2464,9 @@ def _lower_expr(
             var when = _lower_operand(ast, arms[i], plan, walk, scope, grouped)
             if simple:
                 when = plan.exprs.binary(BinaryOp.EQ, subject, when)
-            var then = _lower_operand(ast, arms[i + 1], plan, walk, scope, grouped)
+            var then = _lower_operand(
+                ast, arms[i + 1], plan, walk, scope, grouped
+            )
             built = plan.exprs.conditional(when, then, built)
             i -= 2
         return built
