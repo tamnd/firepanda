@@ -58,7 +58,26 @@ needs_a_build = pytest.mark.skipif(
 # formality. The headroom is thinner than it was and the next raise should come
 # with a look at what is actually in the binary rather than another round
 # number.
-SIZE_BUDGET = 10 * 1024 * 1024
+#
+# Raised again from ten, and this time with that look. The window work crossed
+# it at 10,793,224 bytes, and the four files are the same four they have always
+# been, so nothing was wrongly vendored. All of the growth is in the extension's
+# own text, which went from 7,426,521 bytes to 7,943,001 on x86-64.
+#
+# Where it came from was measured rather than guessed, by building the same
+# commit three ways on one machine. The whole of the change with only
+# firepanda/buffer/buffer.mojo taken from it weighs exactly what the whole
+# change weighs, to the byte, so none of it comes from the new window methods on
+# the array types or from the scan that calls them. Adding a single unused Int
+# field to Buffer and touching it nowhere accounts for 461,792 of the 516,480
+# bytes on its own. So the cost is Buffer going from three words to four and
+# every struct that embeds one growing with it, not the offset arithmetic, which
+# is the other 54,688 bytes. Issue #811.
+#
+# Eleven mebibytes leaves 741,112 bytes above the measured figure, which is
+# still under the megabyte the smallest wrongly vendored library weighs, so the
+# first paragraph is still true.
+SIZE_BUDGET = 11 * 1024 * 1024
 
 
 def _stripped_environment() -> dict[str, str]:

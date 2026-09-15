@@ -72,3 +72,33 @@ struct ColumnData(Copyable, Movable):
         self.values = Buffer(copy=copy.values)
         self.validity = Bitmap(copy=copy.validity)
         self.length = copy.length
+
+    def __init__(
+        out self, *, window_of: Self, at: Int, length: Int, width: Int
+    ):
+        """Shares a run of rows of a column, copying nothing.
+
+        The values and the bits both become windows onto what they were part
+        of, so the piece costs an atomic per buffer rather than a memcpy per
+        row. Writing through either one copies that piece and leaves the rest
+        of the column where it is.
+
+        Both windows carry the alignment promise their own constructors
+        document, and both are satisfied by cutting on a morsel: a hundred and
+        twenty eight thousand values is a multiple of 64 bytes at every fixed
+        width we have, and a hundred and twenty eight thousand bits is a
+        multiple of 64 bytes too.
+
+        Args:
+            window_of: The storage to share part of.
+            at: The first row.
+            length: The number of rows.
+            width: The bytes per value, from `dtype_size`.
+        """
+        self.values = Buffer(
+            window_of=window_of.values, at=at * width, size=length * width
+        )
+        self.validity = Bitmap(
+            window_of=window_of.validity, at=at, length=length
+        )
+        self.length = length

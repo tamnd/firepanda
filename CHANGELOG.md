@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a scan cuts a tall chunk into morsels without copying it
+
+The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
+
+What makes them free is a window, which is what a slice would be if it did not allocate. A `Buffer` carries an offset into its allocation now, so a window is the same allocation seen from further in, with its own length and its own capacity. `Bitmap`, `ColumnData`, `StringArray` and `AnyArray` each gained the same thing on top of it, and a column of text shares its payload whole, since a long view carries an absolute block and offset and stays valid wherever the views are cut.
+
+The one rule a window has to keep is about padding. An allocated buffer is rounded up to 64 bytes and the bytes between its length and that boundary are zero, which is what lets a kernel read a whole register past the end of a column and mask the answer. A window that stops before its parent does has the next window's rows sitting there instead of zeroes, so the rule is that a window never has a tail to mask: it starts and ends on a 64 byte boundary, or it runs to the end of the column and inherits the column's own padding. A morsel of a hundred and twenty eight thousand rows keeps that for every fixed width dtype, for a sixteen byte string view and for validity bits, so a scan cutting on whole morsels is always inside it. Writing through a window takes a private copy of that window and leaves the column it came from alone, the same way a copied buffer already did.
+
+A nested column is the one shape a window cannot be taken of, so a chunk that holds one is left whole and runs the way it ran before.
+
+On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
+
+The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+
 ### Added: `str.count` answers a regular expression
 
 The fourth of the five pattern methods, and the first that is not a yes or no question. `df["a"].str.count(r"\w+")` answers where it used to raise. Issue #8 M6.
@@ -21,6 +35,7 @@ The engine gained one thing, which is where a match ends rather than whether the
 `pixi run differential-regex-count` is new and compares the same thirty thousand generated patterns over the same sixteen texts as the other two regular expression differentials. It compares 7668 patterns, which is 122688 counts, and disagrees with pandas on none of them.
 
 `replace` is the one left refusing a metacharacter. It needs the text a match covered rather than where it ended, and `replace_substring_regex` turns out not to share this loop at all, so it is its own slice with its own measurements. Document 79 has all of it.
+
 ### Changed: the differential programs are built several at a time
 
 The differential job built its programs one after another in a single shell line, and the number of programs grew from five to eight over a few days. The five took five minutes and nine seconds, so eight went past the step's eight minute ceiling and the job started failing on every pull request in the repository with a timeout rather than with a disagreement. Because a pull request workflow builds the merge ref, a branch that changed nothing about the differential comparison inherited the failure.
