@@ -21,6 +21,23 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+### Added: the five TPC-H queries that already answered are now compared
+
+`pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
+
+A query that answers and is not compared is worse than a query that does not run. Nothing notices when it starts answering something else, and the reason it was left out is the reason a harness exists: it had not been checked, so it went on the list of things to check rather than into the thing that checks.
+
+The data is prepared against two markers now rather than one. The Parquet goes stale when the scale changes and nothing else, and at scale 1 it is a quarter of a gigabyte to regenerate. The reference answers go stale when a query is added to the list too, since only the queries in the list get an answer written. One marker for both meant either regenerating the data every time a query was added, or adding a query and leaving it with no answer to be compared against, which is what happened the first time this was run.
+
+### Changed: a predicate is sent past every join that keeps its left rows
+
+Predicate pushdown used to move a predicate into the side of an inner join that provides every column it reads, and to leave everything alone at every other kind of join. It now sends a predicate into the left side of a left, semi, anti, mark or cross join as well, which is the same rule the inner join already had, applied on the one side where it holds. Issue #309.
+
+The argument is about what happens to a row the predicate drops. All five of those kinds hand out left rows, so one output row reads one left row, and a left row dropped below the join drops exactly the output rows the predicate would have dropped above it. The other direction is the one that does not hold: a right row dropped below a left join does not drop the left row it matched, it null extends it instead, and a null is not what the predicate answered about. So the right side of those joins is still left alone, and a right or a full outer join still passes nothing in either direction.
+
+A cross join is the one where the reason is about firepanda rather than about SQL. Both sides would be sound, since a cross join is an inner join with nothing asked of the pair, and the right side is still left alone because the lowering pairs a whole frame against a right side of a single row, and a predicate pushed into that side can leave it holding no row at all.
+
+The two halves compose, and that is what this is worth. A predicate that gets past a mark join reaches the cross join under it, and the pass then turns that cross join into a pairing because the predicate is an equality over its two sides. TPC-H q16 is exactly that shape, a product under a mark join under a filter, and it did not run at all before this: the equality that pairs `partsupp` with `part` could not reach the product it belonged on. It now answers what DuckDB answers and has joined `pixi run tpch`, which covers five of the twenty two queries.
 
 ### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
@@ -29,6 +46,7 @@ A frame that arrives in one chunk runs a filtering line about 1.65 times slower 
 `exec/pipeline_line_two_chunks` and `exec/pipeline_line_eight_chunks` run the same line over chunks of two million and five hundred thousand rows. Both are as far past every level of cache as the four million row chunk is, so if the cost were the size of the intermediates they would sit with the one chunk row. They sit with the morsel sized row instead. On the i9-13900K at four million rows with the machine idle, one chunk is 3.46 milliseconds, two is 2.42, eight is 2.16, thirty two is 2.10 and two hundred and forty four is 2.26. The whole of the cost is the step from one chunk to two, which is where the driver stops running the line on the calling thread and starts handing the prefix out, so what a one chunk frame is missing is the batched prefix and not a cache.
 
 `exec/pipeline_line_one_chunk_split` cuts the one chunk frame into morsels inside the timing and then runs the line, which is what a scan that re-chunked its input would cost today. It is 11.9 milliseconds against 3.46 for leaving the frame alone, because slicing a column allocates and a copy of the source costs more than the whole query. A scan that re-chunks has to slice without allocating, and that is the work the issue describes.
+
 ### Added: a compiler and a matching engine for the RE2 side of the string accessor
 
 Document 76 read a pattern with Python's grammar and worked out which of the two engines pandas would hand it to. This turns one of those parsed patterns into instructions and runs them, for the RE2 side, which is the side that answers the common case. Issue #8 M6.
@@ -42,6 +60,18 @@ Six of the constructs RE2 refuses were already known and the rest were measured 
 `pixi run differential-regex-match` runs thirty thousand generated patterns against sixteen pieces of text through both this engine and pandas, and compares the refusals and the answers. It agrees on every pattern it compares across five seeds, with the held out patterns counted by reason so that setting one aside is a number somebody watches rather than a silence. The first run disagreed about 66 patterns in three families and every one was a fact about RE2 that had not been measured, which is the same thing the routing corpus did and the reason it was written before the hand written tests.
 
 Nothing is wired to the string accessor yet, and captures, case folding and the Python engine are named in document 77 section 8 rather than half done.
+
+### Changed: a column the query did not name is named after what it was written as
+
+`SELECT sum(x) FROM t` used to come back with a column called `__expr_0`. It comes back with one called `sum(x)` now, which is what DuckDB calls it, and `SELECT 1` comes back with a column called `1`.
+
+The name is printed by the printer that already prints an AST back to SQL, which is the same arrangement DuckDB has, and it is why the two agree on as much of this as they do without either side aiming at the other. Both normalize rather than copying the text, so `SUM( x  )` is `sum(x)` in both. Both parenthesize every operand of an operator, so `x * 2 + 1` is `((x * 2) + 1)` in both. Neither makes a duplicate name unique, so two columns written the same way come back with the same name in both.
+
+Five shapes are still named differently and all five are the printer disagreeing rather than the rule disagreeing. DuckDB names `count(*)` as `count_star()`, negation as `-(x)`, a cast by the type it resolved to rather than by the type text that was written, a `CASE` with the `ELSE` it filled in, and a call to a function whose name is a keyword with the schema it found the function in. Four of the five would not read back as themselves, so closing them means a printer that prints for a name rather than for a reparse.
+
+This is a change to what queries answer, not only to what `EXPLAIN` prints. A caller reading a column back by the name firepanda gave it has to read it back by the new name, and a caller that wrote an alias is unaffected. TPC-H q18 agrees with DuckDB because of it, and it was the only thing standing between that query and agreement.
+
+The lowering takes the grammar now, because the printer needs the keyword table to know when a name has to be quoted. `lower` has one more argument and so does everything between it and the select list.
 
 ### Changed: a filter counts its mask once for the chunk and not once per column
 
