@@ -19,6 +19,19 @@ The flag lives in the aggregate's operator field beside the fold's own code, whi
 Only a fold over no rows at all is decided here. A group that saw rows and found every one of them null is the same disagreement and still answers zero, which is issue #836, because telling that group apart from one whose values summed to zero costs a count of the non null values per group and this case costs nothing.
 
 TPC-H q17 is the query that found it. It divides a sum by a constant, and at scale 0.01 the rows it sums are none, so it answered zero where DuckDB answers null.
+### Added: a `flags` argument on `str.contains` and `str.fullmatch`, answered by the other engine
+
+`Series.str.contains("^b", flags=re.MULTILINE)` used to be refused. It is answered now, and so is the same argument on `fullmatch`, out of Python's engine rather than out of Arrow's, which is the engine upstream sends a flagged call to. Four of the seven flag letters go through and mean what they mean: ignore case, multiline, dotall and unicode. Issue #8 M6.
+
+The routing could not ride in the flag bits, because `case=False` arrives as the same ignore case bit and has to stay on the other engine. So the mask door takes a number beside its two words, the letters are in the number and the route is the number being nonzero. A value holding a bit that is none of the seven letters is refused rather than quietly dropped.
+
+A call that moved engines is also anchored differently. pandas stops rewriting the pattern the moment it stops talking to Arrow and answers with `regex.fullmatch` instead, so `fullmatch` here pins with `\A` and `\z` rather than with a caret and a dollar sign. A dollar sign moves under `re.MULTILINE` and sits before a trailing newline whatever the flags say, and `re.fullmatch("a", "a\n")` finds nothing.
+
+`re.LOCALE` raises a `ValueError` on both sides, because Python turns that letter down on a pattern made of text. `re.VERBOSE` and `re.ASCII` are refused as gaps and say so, because the parser does not read verbose mode and does not narrow the Perl classes. `count` and `replace` still refuse every flag, and `extract` still refuses one, because those three want the counting and replacing halves of the same scan.
+
+`str.contains(r"\B")` on an empty row answers True and `str.contains(r"\B", flags=re.IGNORECASE)` answers False, which is pandas' behaviour and is now this library's. Python's `\B` fails on an empty subject, which is a special case written into CPython rather than a consequence of any rule about word characters, and RE2 has no such case. Document 85 has the whole of it.
+
+A pattern that is not text is now refused before the flags are read, which is the order upstream has, and it is checked on a path an argued call used to skip.
 
 ### Added: `case=False` on a regular expression, and the one flag argument pandas lets through
 

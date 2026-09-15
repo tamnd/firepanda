@@ -8581,6 +8581,51 @@ def _needs_an_engine(pat: Any, regex: bool) -> bool:
     return any(character in _REGEX_CHARACTERS for character in pat)
 
 
+_DOOR_FLAGS: tuple[tuple[int, int], ...] = (
+    (re.IGNORECASE, 1),
+    (re.LOCALE, 2),
+    (re.MULTILINE, 4),
+    (re.DOTALL, 8),
+    (re.VERBOSE, 16),
+    (re.ASCII, 32),
+    (re.UNICODE, 64),
+)
+"""The seven flag letters as `re` numbers them beside the numbers the kernel uses.
+
+The two do not agree about a single one, because `re` numbered its letters in
+the order Python gained them and the kernel numbers them in the order they are
+written inside a `(?...)` group, so translating means walking the pairs rather
+than handing the argument across. The kernel's numbers are repeated here rather
+than imported for the same reason every word this layer sends across the door is
+a literal: the Python side knows what to say and the Mojo side knows what it
+means, and there is nothing in between that could hold the shared copy.
+"""
+
+
+def _door_flags(flags: int, name: str) -> int:
+    """The flags a caller passed, written the way the kernel numbers them.
+
+    A bit belonging to none of the seven letters is refused rather than dropped.
+    `re.DEBUG` is the one anybody reaches for by accident, and upstream answers
+    it by printing the parsed pattern to the screen on the way past, which is
+    not something this library can do quietly or loudly. Dropping it would be
+    answering a question nobody asked.
+    """
+    known = 0
+    out = 0
+    for theirs, ours in _DOOR_FLAGS:
+        known |= theirs
+        if flags & theirs:
+            out |= ours
+    if flags & ~known:
+        raise UnsupportedError(
+            f"firepanda:unsupported: str.{name} was passed the flag value"
+            f" {flags & ~known}, which is not one of the seven letters a pattern can"
+            " be read with"
+        )
+    return out
+
+
 class StringMixin:
     """The hand written half of `StringAccessor`.
 
@@ -8654,12 +8699,12 @@ class StringMixin:
         except Exception as error:
             raise translate(error) from None
 
-    def _flag(self, kind: str, arg: str) -> Series:
+    def _flag(self, kind: str, arg: str, flags: int = 0) -> Series:
         """Runs a method that answers a mask."""
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.string_flag(kind, arg))
+            return Series._wrap(self._series._inner.string_flag(kind, arg, flags))
         except Exception as error:
             raise translate(error) from None
 
@@ -8838,6 +8883,19 @@ class StringMixin:
 
         return Series(values, name=self._series.name)
 
+    @staticmethod
+    def _a_pattern(pat: Any) -> str:
+        """Refuses a pattern that is not text, before anything else reads it.
+
+        The message is `re.compile`'s rather than pandas' own, because pandas
+        does not check and the compile is the first thing to notice. That is
+        true down every route a pattern can take upstream, which is why the
+        check is out here rather than inside whichever of them was taken.
+        """
+        if not isinstance(pat, str):
+            raise DTypeError("firepanda:dtype: first argument must be string or compiled pattern")
+        return pat
+
     def _literal(self, pat: Any, regex: bool, name: str) -> str:
         """Reads a pattern, and refuses one that needs an engine we do not have.
 
@@ -8861,11 +8919,10 @@ class StringMixin:
         answer they want and a caller who wrote `replace("^a", "-")` is not, and
         the message should let them tell which of the two they are.
         """
-        if not isinstance(pat, str):
-            raise DTypeError("firepanda:dtype: first argument must be string or compiled pattern")
+        text = self._a_pattern(pat)
         if not regex:
-            return pat
-        for character in pat:
+            return text
+        for character in text:
             if character in _REGEX_CHARACTERS:
                 way_out = (
                     ", and regex=False searches for the characters themselves"
@@ -8877,7 +8934,7 @@ class StringMixin:
                     f" expression, {character!r} is a regular expression character, and"
                     f" no engine is written yet{way_out}"
                 )
-        return pat
+        return text
 
     @staticmethod
     def _fold_word(case: Any, flags: Any, name: str) -> str:
@@ -8903,22 +8960,39 @@ class StringMixin:
         return "" if case is None or case else "_folded"
 
     @staticmethod
-    def _folding(kind: str, case: Any, flags: Any) -> bool:
-        """Whether a pattern method folds, and which of three ways it can refuse.
+    def _folding(kind: str, case: Any, flags: Any, regex: bool = True) -> tuple[bool, int]:
+        """Whether a pattern method folds, which engine it lands on, and how it refuses.
 
         `case=False` and `flags=re.IGNORECASE` are one argument written twice.
         Upstream turns the second into the first by compiling the pattern with
         it, which is why a call passing both agrees with itself and a call
-        passing one of each does not. What comes out here is one bit, and the
-        engine is told about it by the word rather than by a second argument,
-        which is the rule the byte search already followed.
+        passing one of each does not. What they are not is one route: a `flags`
+        argument moves the call off Arrow and `case=False` does not, so the two
+        spellings of the same fold reach two different engines with two
+        different fold tables, and they answer differently on the four Turkish I
+        code points. That is upstream's behaviour and the pair this returns is
+        how it is carried, one bit for the fold and one number for the flags,
+        with the number being zero for every call that stays where it was.
 
-        Only `match` reads `flags` at all, and that is upstream's doing rather
-        than a line drawn here. `match` alone compiles the pattern before it
-        routes it, so a pattern carrying nothing but ignore case still reaches
-        Arrow, while `contains`, `fullmatch` and `count` hand any flag straight
-        to Python's engine. The other three are refused below until that engine
-        has the scan they need.
+        Only `match` keeps its flags on Arrow, and that is upstream's doing
+        rather than a line drawn here. `match` alone compiles the pattern before
+        it routes it, so a pattern carrying nothing but ignore case still
+        reaches Arrow, while `contains`, `fullmatch`, `count` and `replace` hand
+        any flag straight to Python's engine. Two of those four are served now.
+        `count` and `replace` are not, because Python's engine scans a row for a
+        second match by a different rule than Arrow does and that loop is not
+        written yet, so they are refused below rather than answered out of the
+        wrong one.
+
+        A flag beside `regex=False` is refused as well, and it looks at first
+        like the one refusal here with nothing behind it, because upstream reads
+        no pattern with a flag and the answer comes back the same. It is not the
+        same once a `case` is beside it. The flag moves the call off Arrow, and
+        the search it lands on upper cases both sides where Arrow was asked to
+        compare without case, so `contains("ss", case=False, regex=False)` finds
+        no sharp s and the same call with a flag added finds one. Measured, on a
+        row holding a sharp s and a row holding STRASSE. So a flag there is a
+        route rather than a no-op and the refusal says which route.
 
         Two refusals belong to `match` and neither of them is this library's.
         A `case` given beside a `flags` that disagrees with it is refused first,
@@ -8943,13 +9017,24 @@ class StringMixin:
                 raise InvalidArgumentError(
                     "firepanda:value: Cannot pass flags that do not match pat.flags"
                 )
-            return folded
+            return folded, 0
+        if flags and regex and kind in ("contains", "fullmatch"):
+            if case is not None and not case:
+                flags = flags | re.IGNORECASE
+            return False, _door_flags(flags, kind)
+        if flags and not regex:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{kind} was passed a flag beside regex=False,"
+                " where upstream reads no pattern with it and answers out of a search"
+                " that upper cases both sides, which disagrees with a case insensitive"
+                " byte search about a sharp s"
+            )
         if flags:
             raise UnsupportedError(
                 f"firepanda:unsupported: str.{kind} hands any flag argument to Python's"
                 " engine upstream, and that engine's scan is not written yet"
             )
-        return case is not None and not case
+        return case is not None and not case, 0
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
         """Whether a pattern is in every row, at the front, or the whole row.
@@ -8963,18 +9048,25 @@ class StringMixin:
         three have always done and is the faster path by a long way. Anything
         else goes to the engine, which compiles the pattern once and walks the
         column, and which refuses what it cannot do rather than answering it.
+
+        A call carrying flags goes to the engine whatever its pattern looks
+        like, and the shortcut is wrong for it rather than merely unnecessary.
+        `contains("k", flags=re.I)` finds a Kelvin sign upstream, because the
+        flag reaches a compiler that folds every code point onto the letter, and
+        the byte search maps one character to one character and would not.
         """
-        folded = self._folding(kind, case, flags)
+        pat = self._a_pattern(pat)
+        folded, argued = self._folding(kind, case, flags, regex)
         fold = "_folded" if folded else ""
-        if _needs_an_engine(pat, regex):
-            answer = self._matched(kind, pat, folded)
+        if argued or _needs_an_engine(pat, regex):
+            answer = self._matched(kind, pat, folded, argued)
         else:
             answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
 
-    def _matched(self, kind: str, pat: str, folded: bool) -> Series:
+    def _matched(self, kind: str, pat: str, folded: bool, argued: int = 0) -> Series:
         """Runs a pattern through the regular expression engine.
 
         `case=False` used to stop here and now goes through as a word, because
@@ -8990,8 +9082,14 @@ class StringMixin:
         rewrite happens on the other side because upstream decides which engine
         a pattern goes to before rewriting it and the rewrite can change that
         decision. `firepanda/py/text.mojo` has which pattern and why.
+
+        Which anchor that rewrite uses is decided on the other side too, and it
+        depends on the same number this hands over. A call that stayed on Arrow
+        is anchored the way pandas anchors it, and a call that a flag moved to
+        Python's engine is not anchored by a rewrite upstream at all, so it gets
+        the two positions no flag can move rather than the two pandas writes.
         """
-        return self._flag(f"{kind}_regex_folded" if folded else f"{kind}_regex", pat)
+        return self._flag(f"{kind}_regex_folded" if folded else f"{kind}_regex", pat, argued)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
         """How many times a pattern matches in every row.
@@ -9011,6 +9109,7 @@ class StringMixin:
         rather than out of reading either engine. `firepanda/kernel/regex/pike.mojo`
         has them and document 79 has where they were measured.
         """
+        self._a_pattern(pat)
         self._folding("count", None, flags)
         if _needs_an_engine(pat, True):
             return self._number("count_regex", pat)

@@ -290,21 +290,24 @@ def test_case_true_is_the_search_that_was_already_there(firepanda: ModuleType) -
 
 
 @needs_pandas
-def test_flags_are_still_refused_with_case_off(firepanda: ModuleType) -> None:
-    """`case=False` is served on all four of these now and `flags` is not, except
-    on the one name upstream lets through.
+def test_a_flag_beside_the_case_argument_changes_which_engine_answers(
+    firepanda: ModuleType,
+) -> None:
+    """`re.IGNORECASE` as a flag asks for the same fold `case=False` asks for,
+    and that is not enough to make it the same call.
 
-    `re.IGNORECASE` as a flag asks for the same fold `case=False` asks for, and
-    that is not enough to make it the same call: pandas routes a pattern that
-    was handed any flag to Python's engine, and the one exception is `match`,
-    which is measured in `test_str_regex_case_and_flags.py` rather than here.
+    pandas routes a pattern that was handed any flag to Python's engine, so the
+    two spellings land on two engines with two fold tables. Two of the four
+    names take that route now and `test_str_flags_python_engine.py` measures
+    where it leads. `replace` does not, because the engine it would land on
+    replaces by a rule Arrow does not share and that loop is not written.
     """
     import re
 
     mine = made(firepanda)
     for name in ("contains", "fullmatch"):
-        with pytest.raises(firepanda.errors.UnsupportedError):
-            getattr(mine.str, name)("a", case=False, flags=re.IGNORECASE)
+        answer = getattr(mine.str, name)("ABCABC", case=False, flags=re.IGNORECASE)
+        assert answer.tolist()[0] is True
     with pytest.raises(firepanda.errors.UnsupportedError):
         mine.str.replace("a", "#", case=False, flags=re.IGNORECASE)
 
