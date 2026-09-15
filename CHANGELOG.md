@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the second regular expression engine, which reads a different alphabet
+
+`pandas.Series(["café"]).str.count(r"\w")` is 3 and `pandas.Series(["café"]).str.findall(r"\w")` is four characters long, from one accessor with one pattern, and neither number is wrong. Six of the accessor's pattern methods go to Arrow and get RE2's reading, where `\w` is 63 characters of ASCII. The other three never reach Arrow at all: pandas compiles the pattern with `re` and loops in Python, where `\w` is 138558 code points. Document 76 built a router that picks between two engines and only one of them was ever written. This is the other one. Issue #8 M6.
+
+The engine is the machine that was already there, compiled differently. Three things are settled while the pattern compiles, so the loop that runs a row never learns which engine asked for it. A category node reads Unicode ranges instead of ASCII ones. A dollar sign matches at the end of the text or just before a newline that ends it, rather than only at the end. A word boundary is asked against the wider class, which moves it in both directions: `a\bé` matches for RE2, which sees a word character beside something that is not one, and fails for Python, which sees two word characters.
+
+The three classes were generated out of the running CPython rather than out of the Unicode data files, because pandas answers these methods by compiling the pattern with that exact module. `\w` is what `str.isalnum` accepts plus the underscore, `\d` is exactly `str.isdecimal` and not `str.isdigit`, which is 128 code points wider, and `\s` is exactly `str.isspace`, which holds the no break space and does not hold the zero width space. The generator checks all three over every code point before it writes, so a CPython that widens one of them without widening the matching string method fails there rather than passing quietly.
+
+Three families of pattern stopped being refused along the way, and none of them was the point. The parser records that a pattern holds syntax RE2 has never had, a comment group or a `\u` escape or a `\Z` that is not trailing, and it reads the pattern correctly into Python's nodes anyway. That record is a fact about the other engine, so this one compiles the tree it already has. The same goes for `a{,2}` and `[[:alpha:]]`, which both engines read and read differently. And `(?u)` asks for what this engine now does, so it is taken rather than refused.
+
+Every refusal also gained an owner. A lookaround used to say RE2 has no lookaround whichever engine was asking, and now says that for RE2 and says this engine has no lookaround yet for Python, because the first is agreement with upstream and the second is a shortfall here. That is the distinction the compiler's gap flag was built for and this is the first slice where both sides of it are filled in.
+
+`pixi run differential-regex-python` is new and runs the same thirty thousand generated patterns over the same sixteen texts as the other three, through `str.findall`. It compares 26608 patterns and disagrees on none of them, against 7668 compared on the RE2 side of the identical corpus, because the parser is Python's grammar and so a pattern it cannot read is a pattern Python cannot read either. The 3444 it holds out are eleven reasons and every one of them is this library falling short of an engine that reads the pattern. Document 81 has all of it.
+
+The three methods are not wired yet. `findall` wants a list column, `extract` wants a frame and `extractall` wants a frame with a MultiIndex, so the doors above the engine are the next slice.
+
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 
 The row above says a frame in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and that the cost is the batched prefix the driver only runs once there is more than one chunk to hand out. Every reader we have produces a frame in one chunk, so every query over a file started on the slow side of that. `Scan` now cuts any chunk taller than a morsel into morsel sized pieces as it builds, and the pieces cost nothing to make. Issue #800.
@@ -21,6 +37,7 @@ A nested column is the one shape a window cannot be taken of, so a chunk that ho
 On the i9-13900K with the machine quiet, `exec/pipeline_line_one_chunk` goes from 5.07 milliseconds to 2.03 at four million rows, against 2.00 for the same rows already in chunks, so the row that was two and a half times slower now sits inside the other row's spread.
 
 The offset costs something and it is not where anyone would look for it. Buffer went from three machine words to four, and the packaged Python extension's text grew by 516,480 bytes, which took it past the size budget in the extension tests. Building the same commit three ways says that 461,792 of those bytes come from the field existing at all, since adding one unused Int to Buffer and reading it nowhere costs almost exactly the same, and that none of it comes from the new window methods or from the scan. Every struct that embeds a Buffer grew with it. The budget went from ten mebibytes to eleven to let this land, and issue #811 has the measurements and what to try.
+
 ### Added: `str.replace` answers a regular expression
 
 The last of the five pattern methods, and the first whose answer is text rather than a bit or a number. `df["a"].str.replace(r"(\w+)@(\w+)", r"\2 at \1", regex=True)` answers where it used to raise. Issue #8 M6.

@@ -6,10 +6,18 @@ choice is the same reason RE2 made it: a pattern is written by a caller and run
 against a column, and an engine that can take exponential time on a pattern like
 `(a+)+b` is a denial of service with a friendly API in front of it.
 
-What is here is the RE2 side only. Compiling for Python's `re` needs a Unicode
-class table that does not exist in this repository yet, and it needs the three
-constructs RE2 does not have, so `compile_program` is given the engine and
-refuses the other one by name rather than quietly producing something.
+Both engines are compiled here and the difference between them is three lines.
+Python reads the three Perl classes as Unicode where RE2 reads them as ASCII,
+Python asks the word boundary question against its own wider class, and Python's
+dollar sign matches before a newline that ends the text where RE2's does not.
+All three are settled while the pattern is being compiled, so the machine that
+runs the program never learns which engine asked for it. Document 81 is where
+the three were measured and says which methods take which engine.
+
+What is still RE2 only is the constructs. Python has a lookaround, a
+backreference, a conditional, an atomic group and a possessive quantifier and
+this engine has none of them, so a pattern using one is refused for Python as a
+gap here rather than as something Python cannot do.
 
 The refusals are worth reading as a group, because they are not a list of things
 that were too hard. Every one of them is a construct RE2 itself refuses, which
@@ -22,6 +30,11 @@ pattern pyarrow turns down, and that correspondence is the thing
 
 from std.collections.span import Span
 
+from firepanda.kernel.regex.classdata import (
+    DIGIT_RANGES,
+    SPACE_RANGES,
+    WORD_RANGES,
+)
 from firepanda.kernel.regex.parse import Parsed
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
 from firepanda.kernel.regex.tokens import (
@@ -29,10 +42,13 @@ from firepanda.kernel.regex.tokens import (
     AT_BEGINNING_LINE,
     AT_BEGINNING_STRING,
     AT_BOUNDARY,
+    AT_BOUNDARY_UNICODE,
     AT_END,
     AT_END_LINE,
     AT_END_STRING,
+    AT_END_TEXT,
     AT_NON_BOUNDARY,
+    AT_NON_BOUNDARY_UNICODE,
     CATEGORY_DIGIT,
     CATEGORY_NOT_DIGIT,
     CATEGORY_NOT_SPACE,
@@ -290,12 +306,24 @@ struct _Builder(Movable):
     thing that drifts.
     """
 
-    def __init__(out self, flags: Int32, captures: Bool):
+    var python: Bool
+    """Whether this program is being compiled for Python's engine.
+
+    A flag for the same reason `captures` is one, and it earns the comparison
+    better than that one does: the two engines differ in three places in this
+    file and nowhere else, and all three are decided here rather than while a
+    row is being read. The classes become ranges, the word boundary becomes a
+    different position code, and the dollar sign becomes a different position
+    code. Everything downstream of the compiler is the same machine.
+    """
+
+    def __init__(out self, flags: Int32, captures: Bool, python: Bool = False):
         """Starts an empty program.
 
         Args:
             flags: The pattern's global flags.
             captures: Whether to write the save instructions.
+            python: Whether the program is for Python's engine.
         """
         self.code = []
         self.ranges = []
@@ -304,6 +332,7 @@ struct _Builder(Movable):
         self.gap = False
         self.flags = flags
         self.captures = captures
+        self.python = python
 
     def give_up(mut self, problem: String, gap: Bool = False):
         """Records the first reason the pattern cannot be compiled.
@@ -426,20 +455,58 @@ def _sorted_merged(var ranges: List[Int32]) -> List[Int32]:
     return out^
 
 
-def _category_ranges(which: Int32) -> List[Int32]:
-    """What one of the six Perl classes means to RE2.
+def _held(table: Span[Int32, _]) -> List[Int32]:
+    """Copies one of the generated tables out into the shape the compiler uses.
+
+    A copy rather than a span, because the ranges of a class are merged with
+    whatever else is inside the same brackets and the result is sorted in
+    place, so the caller owns what it gets back.
+
+    Args:
+        table: The table from `classdata.mojo`, already materialized.
+
+    Returns:
+        The same low and high pairs as a list.
+    """
+    var out = List[Int32](capacity=len(table))
+    for i in range(len(table)):
+        out.append(table[i])
+    return out^
+
+
+def word_ranges_unicode() -> List[Int32]:
+    """Python's word characters as low and high pairs, ready to be read.
+
+    The table in `classdata.mojo` only exists while the program is being
+    compiled, so something has to bring it out into memory, and that costs a
+    copy of six kilobytes. This is the place that does it, once, and the caller
+    is expected to hold on to what it gets rather than ask again per row.
+
+    Returns:
+        The 749 ranges, in order, both ends inside the class.
+    """
+    var table = materialize[WORD_RANGES]()
+    return _held(Span(table))
+
+
+def _category_ranges(which: Int32, python: Bool) -> List[Int32]:
+    """What one of the six Perl classes means to whichever engine is running it.
 
     These are the measured sets rather than the documented ones. RE2's
-    documentation writes `\\s` as `[\\t\\n\\f\\r ]` and this agrees with it,
-    which is worth saying because Python's `\\s` also holds a vertical tab and
-    the documentation is the only place the two look alike.
+    documentation writes `\\s` as `[\\t\\n\\f\\r ]` and the ASCII half of this
+    agrees with it, which is worth saying because Python's `\\s` also holds a
+    vertical tab and the documentation is the only place the two look alike.
 
-    Every one of them is ASCII. That is the difference document 76 opens with,
-    and it is the reason a column of Arabic Indic digits answers False to
+    RE2's three are ASCII. That is the difference document 76 opens with, and
+    it is the reason a column of Arabic Indic digits answers False to
     `str.contains(r"\\d")` and True once the same pattern picks up a lookahead.
+    Python's three are Unicode and come out of `classdata.mojo`, which is what
+    document 81 is about: the same letter in the same accessor covers 63
+    characters or 138558 of them depending on which method was called.
 
     Args:
         which: The `CATEGORY_` value.
+        python: Whether the program is being compiled for Python's engine.
 
     Returns:
         The ranges as low and high pairs, already in order.
@@ -449,11 +516,19 @@ def _category_ranges(which: Int32) -> List[Int32]:
     var spaces: Int32 = Int32(Int(CATEGORY_SPACE))
     var not_spaces: Int32 = Int32(Int(CATEGORY_NOT_SPACE))
     if which == digits or which == not_digits:
+        if python:
+            var table = materialize[DIGIT_RANGES]()
+            return _held(Span(table))
         var out: List[Int32] = [0x30, 0x39]
         return out^
     if which == spaces or which == not_spaces:
+        if python:
+            var table = materialize[SPACE_RANGES]()
+            return _held(Span(table))
         var out: List[Int32] = [0x09, 0x0A, 0x0C, 0x0D, 0x20, 0x20]
         return out^
+    if python:
+        return word_ranges_unicode()
     var out: List[Int32] = [0x30, 0x39, 0x41, 0x5A, 0x5F, 0x5F, 0x61, 0x7A]
     return out^
 
@@ -531,7 +606,7 @@ def _class_ranges(
             gathered.append(it.a)
             gathered.append(it.b)
         elif it.op == OP_CATEGORY:
-            var pieces = _category_ranges(it.a)
+            var pieces = _category_ranges(it.a, b.python)
             if _category_is_negated(it.a):
                 pieces = _complemented(_sorted_merged(pieces^))
             for i in range(len(pieces)):
@@ -551,13 +626,29 @@ def _at_value(b: _Builder, which: Int32) -> Int32:
     `^` without it and the parser does not know the flags when it reads the
     caret.
 
+    It also turns it into what it means to the engine that is going to run it,
+    which is the second of the three places the two engines part company in this
+    file. `\\b` and `\\B` ask about a word character and the two engines mean
+    different sets of characters by that, and `$` outside multiline mode matches
+    before a newline that ends the text to Python and only at the end to RE2.
+    Both are settled here so that nothing downstream has to know.
+
     Args:
-        b: The builder, for its flags.
+        b: The builder, for its flags and its engine.
         which: The `AT_` value the parser wrote.
 
     Returns:
         The `AT_` value to check at run time.
     """
+    if b.python:
+        if which == Int32(Int(AT_BOUNDARY)):
+            return Int32(Int(AT_BOUNDARY_UNICODE))
+        if which == Int32(Int(AT_NON_BOUNDARY)):
+            return Int32(Int(AT_NON_BOUNDARY_UNICODE))
+        if which == Int32(Int(AT_END)):
+            if (b.flags & FLAG_MULTILINE) == 0:
+                return Int32(Int(AT_END_TEXT))
+            return Int32(Int(AT_END_LINE))
     if (b.flags & FLAG_MULTILINE) == 0:
         return which
     if which == Int32(Int(AT_BEGINNING)):
@@ -598,7 +689,7 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         _ = b.emit(IN_AT, _at_value(b, it.a), 0)
         return
     if it.op == OP_CATEGORY:
-        var pieces = _sorted_merged(_category_ranges(it.a))
+        var pieces = _sorted_merged(_category_ranges(it.a, b.python))
         b.add_set(pieces, _category_is_negated(it.a))
         return
     if it.op == OP_IN:
@@ -635,6 +726,27 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     b.give_up(String("unsupported pattern"))
 
 
+def _refuse_construct(mut b: _Builder, what: String):
+    """Says that a construct will not compile, in the voice of whichever engine
+    asked for it.
+
+    The six constructs below are the five RE2 has never had plus the collapse
+    the parser writes for an empty negative lookaround, and refusing them means
+    two different things. For RE2 the refusal is agreement with upstream, since
+    pandas hands the pattern to RE2 and RE2 raises. For Python the same pattern
+    is one pandas answers perfectly well, so a refusal here is a shortfall of
+    this library and is flagged as a gap.
+
+    Args:
+        b: The builder.
+        what: The construct, as a noun phrase that follows `has no`.
+    """
+    if b.python:
+        b.give_up(String("this engine has no ", what, " yet"), True)
+        return
+    b.give_up(String("RE2 has no ", what))
+
+
 def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
     """Looks over the whole tree for anything that cannot be compiled.
 
@@ -666,24 +778,24 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         return
     var it = nodes[Int(node)]
     if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
-        b.give_up(String("RE2 has no lookaround"))
+        _refuse_construct(b, String("lookaround"))
         return
     if it.op == OP_GROUPREF:
-        b.give_up(String("RE2 has no backreference"))
+        _refuse_construct(b, String("backreference"))
         return
     if it.op == OP_GROUPREF_EXISTS:
-        b.give_up(String("RE2 has no conditional group"))
+        _refuse_construct(b, String("conditional group"))
         return
     if it.op == OP_ATOMIC_GROUP:
-        b.give_up(String("RE2 has no atomic group"))
+        _refuse_construct(b, String("atomic group"))
         return
     if it.op == OP_POSSESSIVE_REPEAT:
-        b.give_up(String("RE2 has no possessive quantifier"))
+        _refuse_construct(b, String("possessive quantifier"))
         return
     if it.op == OP_FAILURE:
-        b.give_up(String("RE2 has no empty negative lookaround"))
+        _refuse_construct(b, String("empty negative lookaround"))
         return
-    if it.op == OP_AT and it.a == Int32(Int(AT_NON_BOUNDARY)):
+    if it.op == OP_AT and it.a == Int32(Int(AT_NON_BOUNDARY)) and not b.python:
         # RE2 asks the word boundary question between bytes rather than between
         # characters, so `\B` matches in the middle of any character that takes
         # more than one byte to write, and `str.contains(r"\B")` on a column
@@ -692,6 +804,9 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         # byte on either side of it and a boundary needs one. Running this
         # engine over bytes rather than code points is the fix and it is a
         # larger change than this one.
+        #
+        # Python asks it between characters, which is what this engine already
+        # walks, so there is nothing to refuse on that side.
         b.give_up(String("RE2 reads a non boundary between bytes"), True)
         return
 
@@ -701,6 +816,11 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         if asked < 1:
             asked = 1
         if asked > budget:
+            if b.python:
+                b.give_up(
+                    String("this engine will not repeat that many times"), True
+                )
+                return
             b.give_up(String("RE2 will not repeat that many times"))
             return
         left = budget // asked
@@ -867,6 +987,40 @@ def _refused_flags(flags: Int32) -> String:
     return String("")
 
 
+def _refused_flags_python(flags: Int32) -> String:
+    """The same question asked about Python's engine, which answers differently
+    for every letter.
+
+    Three of the four RE2 will not hear of are letters Python reads perfectly
+    well, so refusing them here is this library falling short rather than
+    agreeing with anybody. One of them is not refused at all: `(?u)` asks for
+    what this engine already does, so taking it is more honest than turning it
+    down for a reason that does not exist.
+
+    `(?L)` never reaches this, and is answered anyway. Python has the letter and
+    will not take it on a pattern made of text, which is the only kind that
+    arrives here, so the parser turns the pattern down before any of this and
+    the caller is told that Python's grammar cannot read it. The branch is here
+    because a reader looking for the seventh letter should find it rather than
+    conclude it was forgotten.
+
+    Args:
+        flags: The flags, as `FLAG_` bits.
+
+    Returns:
+        The reason, or empty when there is none.
+    """
+    if (flags & FLAG_LOCALE) != 0:
+        return String("a locale flag cannot be used on text")
+    if (flags & FLAG_VERBOSE) != 0:
+        return String("verbose mode is not read yet")
+    if (flags & FLAG_ASCII) != 0:
+        return String("the ascii flag is not carried yet")
+    if (flags & FLAG_IGNORECASE) != 0:
+        return String("case folding is not written yet")
+    return String("")
+
+
 def compile_program(
     tree: Parsed, engine: UInt8, captures: Bool = False
 ) -> Program:
@@ -889,25 +1043,35 @@ def compile_program(
         different things.
     """
     var out = Program()
+    var python = engine == ENGINE_PYTHON
     if not tree.ok:
         # pandas gives Arrow the pattern as written, and RE2 has syntax Python
         # does not, so `\p{L}` is a working pattern upstream and unreachable
         # here. An RE2 front end is what closes this, and document 77 section 8
         # has it as the largest single gap in the component.
+        #
+        # For Python's engine this is not a gap at all. The parser is Python's
+        # grammar, so a pattern it cannot read is a pattern Python cannot read
+        # either, and the refusal is upstream's rather than this library's.
         out.ok = False
         out.problem = String("Python's grammar cannot read this pattern")
-        out.gap = True
+        out.gap = not python
         return out^
-    if engine == ENGINE_PYTHON:
-        out.ok = False
-        out.problem = String("the Python engine is not written yet")
-        out.gap = True
-        return out^
-    if tree.re2_refuses:
+    if tree.re2_refuses and not python:
+        # A comment group, a `\\u` escape, a `\\Z` that is not trailing and the
+        # three others the parser records. Every one of them is syntax Python
+        # reads and RE2 has never had, and the parser read all of them into the
+        # nodes Python would have read them into, so there is nothing here to
+        # refuse on Python's side. The flag is a statement about the other
+        # engine and is only consulted when the other engine is the one asking.
         out.ok = False
         out.problem = String("RE2 has no such syntax")
         return out^
-    if tree.re2_differs:
+    if tree.re2_differs and not python:
+        # `a{,2}` and `[[:alpha:]]`, which both engines read and read
+        # differently. The tree is Python's reading, so again there is only one
+        # engine with a problem and it is not the one this branch is skipped
+        # for.
         out.ok = False
         out.problem = String("RE2 reads this syntax differently")
         out.gap = True
@@ -919,11 +1083,19 @@ def compile_program(
         return out^
 
     var theirs = FLAG_LOCALE | FLAG_VERBOSE | FLAG_ASCII | FLAG_UNICODE
-    var refused = _refused_flags(tree.flags)
+    var refused = _refused_flags_python(
+        tree.flags
+    ) if python else _refused_flags(tree.flags)
     if refused.byte_length() > 0:
         out.ok = False
         out.problem = refused^
-        out.gap = (tree.flags & theirs) == 0
+        # For RE2 the four letters it has never had are a refusal and `(?i)` is
+        # a gap. For Python only the locale letter is a refusal, since Python
+        # turns that one down as well, and the rest are this library falling
+        # short of an engine that reads them.
+        out.gap = ((tree.flags & FLAG_LOCALE) == 0) if python else (
+            (tree.flags & theirs) == 0
+        )
         return out^
 
     # The same four letters are refused in a scoped group, so `(?x:a)` is an
@@ -932,11 +1104,15 @@ def compile_program(
     # away, and a program built from that tree would answer `(?i:b)` without
     # folding while RE2 folds. Carrying the flags on the node is what closes
     # this, and document 77 section 8 has it.
-    var scoped_refused = _refused_flags(tree.scoped)
+    var scoped_refused = _refused_flags_python(
+        tree.scoped
+    ) if python else _refused_flags(tree.scoped)
     if scoped_refused.byte_length() > 0:
         out.ok = False
         out.problem = scoped_refused^
-        out.gap = (tree.scoped & theirs) == 0
+        out.gap = ((tree.scoped & FLAG_LOCALE) == 0) if python else (
+            (tree.scoped & theirs) == 0
+        )
         return out^
     if tree.scoped != 0:
         out.ok = False
@@ -944,7 +1120,7 @@ def compile_program(
         out.gap = True
         return out^
 
-    var b = _Builder(tree.flags, captures)
+    var b = _Builder(tree.flags, captures, python)
     _check_node(b, tree.nodes, tree.root, MAX_REPEAT_COUNT)
     if b.failed:
         out.ok = False
@@ -1023,3 +1199,42 @@ def is_word_point(point: UInt32) -> Bool:
     if point == 0x5F:
         return True
     return point >= 0x61 and point <= 0x7A
+
+
+def is_word_point_unicode(point: UInt32, edges: Span[Int32, _]) -> Bool:
+    """Whether a code point counts as a word character to Python's `\\b`.
+
+    The same question as the one above and a different answer for 138495 code
+    points, which is what document 81 is about. Python's boundary is written
+    against Python's `\\w`, so this reads the generated table rather than four
+    ranges of literals, and a boundary in a column of Greek is where a reader of
+    the pattern would put it.
+
+    The ranges arrive as a span rather than being read out of `classdata.mojo`
+    here, because bringing that table out of the compiler's world costs a copy
+    and this is asked once per position of every row. The machine holds one copy
+    for as long as it is walking a column and lends it out.
+
+    A binary search rather than the ASCII word and mask `charclass.mojo` uses,
+    because a boundary is only asked about where a pattern wrote one, while a
+    class question is asked of every character of every row.
+
+    Args:
+        point: The code point.
+        edges: The ranges from `word_ranges_unicode`, low and high pairs.
+
+    Returns:
+        True for anything `str.isalnum` says yes to, and for the underscore.
+    """
+    var value = Int32(Int(point))
+    var low = 0
+    var high = len(edges) // 2 - 1
+    while low <= high:
+        var mid = (low + high) // 2
+        if value < edges[mid * 2]:
+            high = mid - 1
+        elif value > edges[mid * 2 + 1]:
+            low = mid + 1
+        else:
+            return True
+    return False

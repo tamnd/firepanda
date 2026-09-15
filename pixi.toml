@@ -144,6 +144,7 @@ differential-build = { cmd = "bash tools/build_differential.sh", default-environ
   "build/differential/regex-match",
   "build/differential/regex-count",
   "build/differential/regex-replace",
+  "build/differential/regex-python",
   "build/differential/tpch",
 ] }
 
@@ -219,6 +220,17 @@ differential-regex-count = { cmd = "./build/differential/regex-count", default-e
 # no corpus.
 # See docs/specs/80-replacing-is-a-third-loop.md section 7.
 differential-regex-replace = { cmd = "./build/differential/regex-replace", default-environment = "differential", depends-on = ["differential-build"] }
+
+# The same corpus asked of the other engine. Six of the accessor's nine pattern
+# methods go to Arrow and get RE2's reading, and `extract`, `extractall` and
+# `findall` never reach Arrow at all: pandas compiles the pattern with `re` and
+# loops in Python. So `\\w` covers 63 characters for one half of the accessor
+# and 138558 for the other, `\\d` is the ASCII ten or every decimal digit there
+# is, and `$` matches before a final newline for one and not for the other. This
+# runs the same corpus over the same sixteen texts through `str.findall` and
+# compares the refusals and the answers. It needs no corpus.
+# See docs/specs/81-the-same-letter-in-two-alphabets.md section 7.
+differential-regex-python = { cmd = "./build/differential/regex-python", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a
