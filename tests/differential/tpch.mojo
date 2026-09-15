@@ -8,10 +8,10 @@ this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
 Sixteen agree today. The other six are refused rather than wrong, and they are
-refused in three places rather than six: a name that does not resolve across a
-subquery, a scalar subquery in a HAVING, and a join condition that is not an
-equality. `recorded` below carries one reason per query and issue #816 has the
-three written out.
+refused in four places rather than six: a table named on both sides of a
+correlation, a left join on two key pairs, a scalar subquery in a HAVING, and a
+join condition that is not an equality. `recorded` below carries one reason per
+query and issue #816 has the four written out.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -120,8 +120,8 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Six entries and three reasons between them, which is the useful thing the
-    list says. Issue #816 has the three written out with the refusal each one
+    Six entries and four reasons between them, which is the useful thing the
+    list says. Issue #816 has the four written out with the refusal each one
     comes back with.
 
     Args:
@@ -130,11 +130,18 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 2 or number == 17 or number == 20:
+    if number == 2 or number == 17:
         return String(
-            "a name the inner query reads from the query around it, which"
-            " resolves against what is in scope inside and not outside."
-            " Issue #816"
+            "a table named on both sides of a correlation. The subquery's FROM"
+            " is lowered into the caller's scope, because a condition reading"
+            " both sides can only be written where both are in reach, and two"
+            " relations of the same name in one scope is the thing that scope"
+            " refuses. Inner shadows outer is the rule it wants. Issue #816"
+        )
+    if number == 20:
+        return String(
+            "a left join on two key pairs, which needs the ordinal space that"
+            " concatenating both key columns builds. Issue #816"
         )
     if number == 11:
         return String(

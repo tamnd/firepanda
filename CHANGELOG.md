@@ -18,6 +18,8 @@ It is asked before anything is lowered, because the shape has to be picked befor
 
 A bare name the subquery does have is still the subquery's own, which is the same rule read the other way and is why `FROM sales WHERE shop = 1` next to a `shops` in the outer query stays uncorrelated.
 
+None of the three TPC-H queries written this way answers yet, and the gap list now says where each one really stops instead of pointing at this. q2 and q17 stop at a table named on both sides of the correlation: the subquery's `FROM` is lowered into the caller's scope, so that a condition reading both sides has somewhere to be written, and two relations of the same name in one scope is the thing that scope refuses. Inner shadows outer is the rule it wants, and it wants a scope that knows which level each name arrived at. q20 is past that and stops on a left join with two key pairs, which is an operator limit and nothing to do with names. `pixi run tpch` is sixteen of twenty two either way, and the six left are refused in four places rather than three.
+
 ### Added: a decimal literal written against a column is read as a double
 
 `SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07` used to come back with a refusal, because `0.05` is a `DECIMAL(3,2)` to DuckDB and a plan has no decimal column. That refusal covered more than it needed to. The literal in that query never stays a decimal: it meets `l_discount`, which is a double here, and DuckDB casts it to one before the comparison happens. So there was a right answer available and the engine was not giving it.
