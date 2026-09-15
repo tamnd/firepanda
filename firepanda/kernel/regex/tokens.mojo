@@ -165,8 +165,9 @@ comptime CATEGORY_NOT_WORD: UInt8 = 6
 
 
 comptime FLAG_IGNORECASE: Int32 = 1
-"""`(?i)`. RE2 has it and Python has it and they fold different alphabets, which
-is a table nobody here has written yet."""
+"""`(?i)`. RE2 has it and Python has it and they fold the same 2927 code points
+as each other but for the four Turkish I ones, which was measured rather than
+guessed and is in `folddata.mojo`."""
 
 comptime FLAG_LOCALE: Int32 = 2
 """`(?L)`, which asks for the C library's idea of a letter. RE2 refuses the

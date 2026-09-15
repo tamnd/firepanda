@@ -295,13 +295,16 @@ def test_the_four_inline_flag_letters_re2_has_never_heard_of() raises:
     assert_false(compile_program(parse_pattern("(?x)a"), ENGINE_RE2).gap)
 
 
-def test_case_folding_is_firepandas_gap_rather_than_re2s() raises:
-    """RE2 has `(?i)` and there is no folding table here, so a program that ran
-    it would give a wrong answer rather than a missing one."""
+def test_case_folding_is_spent_here_rather_than_refused() raises:
+    """This used to be the one flag letter RE2 has that this compiler refused,
+    on the grounds that no folding table had been written. Document 83 wrote
+    one, so the flag compiles now and the set it built is what
+    `test_regex_fold.mojo` reads. What is left here is the regression guard:
+    the flag is no longer a refusal and no longer a gap."""
     var program = compile_program(parse_pattern("(?i)a"), ENGINE_RE2)
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(program.problem, "case folding is not written yet")
+    assert_true(program.ok)
+    assert_false(program.gap)
+    assert_equal(program.problem, "")
 
 
 def test_a_scoped_flag_group_is_refused_because_the_flags_are_dropped() raises:
