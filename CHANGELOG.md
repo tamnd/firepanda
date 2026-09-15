@@ -19,6 +19,17 @@ The part that needed care is arithmetic between literals. TPC-H q6 writes its bo
 Addition, subtraction, multiplication and unary minus fold. Division does not, because DuckDB answers a double for it anyway. The cases where DuckDB saturates at thirty eight digits and quietly drops the carry it asked for do not fold either, and those fall back to double arithmetic, which is no more lossy than what it replaces.
 
 Six more expressions went into `pixi run differential-answers`, which asks firepanda and DuckDB the same expression over the same column and compares the answers. Three of them write arithmetic between literals, which is the case that has a wrong answer waiting in it.
+### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
+
+The ASCII fast path that went out in 0.8.4 went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
+
+`casefold` already had a shortcut for an element that is all ASCII and the shortcut went through the standard library's `lower`, so an ASCII element was walked once to find out it was well formed, walked again to find out it was ASCII, walked a third time into a fresh `String`, and then copied into the column being built before that `String` was dropped. Folding ASCII is lowering it, because all 353 code points that fold to something other than their lower case are above 127, so the one rule that makes folding different from lowering is the one rule that can never apply here. It takes the same single pass `upper` takes now.
+
+`isascii` is the other one. The helper behind it read a byte, compared it and branched, for every byte of every element, and it is the whole of what that kernel does. The top bits are accumulated into a register and asked about once at the end now, which is the same trick the case pass plays. `swapcase` and `title` call the same helper and get it for free.
+
+Measured here over a million elements of thirty two ASCII bytes, alternating the two binaries on a shared machine, with `strings/build_long` carried alongside as the control since it is the same loop with the case work taken out. The control ran 17.223 ms before and 16.145 ms after, which is the width of the noise. `strings/casefold_long` went from 5.668 seconds to 16.605 ms, and since the copy underneath it is 16.145 of those, what is left of the fold is about a nanosecond a row. `strings/ascii_long` went from 12.216 ms to 1.325 ms, which is nine times.
+
+Nothing about the Unicode answers moves. An element with a byte at or above 0x80 is refused by the pass and takes the path it took before, so the 353 folds, the corrections and the bytes that are not UTF-8 all come out as they did.
 
 ## [0.8.5] - 2026-09-15
 
@@ -41,6 +52,16 @@ On the planner side, a predicate is now sent past every join that keeps its left
 Five wrong answers are fixed and three of them were queries that raised rather than queries that lied. A correlated subquery that counts answered null over an empty group where SQL says zero, so `WHERE (SELECT count(*) ...) = 0` found nothing at all and the row it was looking for was exactly the one it dropped. A mean over a column of times answered a point in time from the frame and a count of seconds from SQL, and both halves passed every test of themselves, because two paths read two different tables about what a reduction produces. Which side of a `JOIN` a table was written on decided whether the query ran, since the build side was read with a borrow that only a column of exactly one chunk has. A binary that used both `read_parquet` and `std.python` did not link, because one C function was declared twice with two return types. And a column the reader could not name is now named.
 
 The last change is about the repository rather than the library, and it was breaking every pull request in it. The differential check built its programs one after another and the count grew from five to eight, which took it past the step's ceiling. They are built four at a time now, which takes that job from about twelve minutes to four minutes and nineteen seconds.
+
+### Changed: a predicate is placed by the relation the query named, not only by a column name
+
+Predicate pushdown decided which side of a join could answer a predicate by looking each column name up in the two schemas. `FROM nation n1, nation n2` puts an `n_nationkey` on each side, so the search found the name on both and could only answer that it did not know, and a query that qualified every mention of it got nothing pushed anywhere. Issue #309.
+
+The qualifier was never lost. The binder writes the relation it picked onto the reference and binding writes the relation each column came from onto the node, so the two can be compared and `n1.n_nationkey` placed on the side it was written about. A column that no single relation produced stays a maybe, which is what keeps the new answer no stricter than the old one: a name one side has and the other does not is still answered by the name alone, and the relation number only decides between two sides that both have it and both know where theirs came from.
+
+TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
+
+q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
 
 ### Changed: a scan cuts a tall chunk into morsels without copying it
 

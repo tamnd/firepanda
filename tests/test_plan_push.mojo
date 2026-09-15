@@ -11,7 +11,8 @@ splitting a filter at its `and` nodes, the places the pass declines to move
 anything, and a q19 shaped plan where the point of the pass is visible.
 """
 
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_raises
+from std.testing import assert_true
 
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
@@ -533,6 +534,124 @@ def test_a_cross_join_keeps_a_predicate_on_its_right_side_above_it() raises:
     # leave it holding no row, which is a shape the lowering refuses.
     assert_true("JOIN cross" in explain(plan, at), "it is still a product")
     assert_equal(_under(plan, at), "JOIN", "with the filter still on top")
+
+
+def _nation() -> Schema:
+    """Returns a schema shaped like a cut down TPC-H nation table.
+
+    Returns:
+        Two columns, the key not nullable.
+    """
+    var out = Schema()
+    out.append(Field("n_nationkey", LogicalType.INT64, False))
+    out.append(Field("n_name", LogicalType.STRING, True))
+    return out^
+
+
+def _supplier() -> Schema:
+    """Returns a schema shaped like a cut down TPC-H supplier table.
+
+    Returns:
+        Two columns, neither nullable.
+    """
+    var out = Schema()
+    out.append(Field("s_suppkey", LogicalType.INT64, False))
+    out.append(Field("s_nationkey", LogicalType.INT64, False))
+    return out^
+
+
+def test_a_qualified_column_goes_to_the_side_of_a_self_join_it_names() raises:
+    var plan = Plan()
+    var one = plan.scan("nation", List[String](), 0)
+    var two = plan.scan("nation", List[String](), 1)
+    var joined = plan.join(
+        one,
+        two,
+        [plan.exprs.column_of(0, "n_nationkey")],
+        [plan.exprs.column_of(1, "n_nationkey")],
+        JoinKind.INNER,
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column_of(1, "n_name"),
+            plan.exprs.literal(Value(String("FRANCE"))),
+        ),
+    )
+    var at = push(plan, root, [_nation(), _nation()])
+    # Both sides have a column called n_name and only one of them is the one
+    # the query wrote, so a search by name can only answer that it does not
+    # know. The relation the qualifier picked is on the reference and the
+    # relation each column came from is on the node, and the two agree on the
+    # right side and disagree on the left.
+    var printed = explain(plan, at)
+    assert_equal(_filters(plan, at), 1, "one filter came out of it")
+    assert_true(
+        "JOIN inner" in printed
+        and printed.find("JOIN") < printed.find("FILTER"),
+        "and it went below the join",
+    )
+    assert_equal(
+        String(plan.nodes[plan.nodes[at].inputs[1]].kind),
+        "FILTER",
+        "on the side the qualifier named",
+    )
+
+
+def test_an_unqualified_column_of_a_self_join_is_refused_before_this() raises:
+    var plan = Plan()
+    var one = plan.scan("nation", List[String](), 0)
+    var two = plan.scan("nation", List[String](), 1)
+    var joined = plan.join(
+        one,
+        two,
+        [plan.exprs.column_of(0, "n_nationkey")],
+        [plan.exprs.column_of(1, "n_nationkey")],
+        JoinKind.INNER,
+    )
+    var root = plan.filter(
+        joined,
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("n_name"),
+            plan.exprs.literal(Value(String("FRANCE"))),
+        ),
+    )
+    # Nothing says which of the two was meant, and binding says so before the
+    # pass runs, which is why the routing never has to guess at one: a name on
+    # both sides of a join reaches it only when something else says which.
+    with assert_raises(contains="is the name of more than one column here"):
+        _ = push(plan, root, [_nation(), _nation()])
+
+
+def test_an_equality_qualified_across_a_self_join_becomes_the_key() raises:
+    var plan = Plan()
+    var supplier = plan.scan("supplier", List[String](), 0)
+    var first = plan.scan("nation", List[String](), 1)
+    var second = plan.scan("nation", List[String](), 2)
+    var inner = plan.join(
+        supplier, first, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var outer = plan.join(
+        inner, second, List[Int](), List[Int](), JoinKind.CROSS
+    )
+    var root = plan.filter(
+        outer,
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("s_nationkey"),
+            plan.exprs.column_of(2, "n_nationkey"),
+        ),
+    )
+    var at = push(plan, root, [_supplier(), _nation(), _nation()])
+    # TPC-H q7 in miniature. The left side of the outer join already holds an
+    # n_nationkey of its own, so by name this equality reads both sides and is
+    # neither a key nor a filter, and the product stays a product.
+    assert_true(
+        "JOIN inner [s_nationkey = n_nationkey]" in explain(plan, at),
+        "the outer product became a pairing",
+    )
 
 
 def test_a_filter_goes_into_both_arms_of_a_union() raises:

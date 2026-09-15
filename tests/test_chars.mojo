@@ -903,6 +903,83 @@ def test_folding_leaves_bytes_that_are_not_utf8_alone() raises:
     assert_equal(rows(text_casefold(col))[1], "ab")
 
 
+def test_folding_an_ascii_row_is_folded_to_its_last_byte() raises:
+    # The fast path writes a register at a time and finishes by hand, so the
+    # lengths that matter are the ones either side of a block boundary. A row
+    # that came out right for the first sixteen bytes and wrong for the last
+    # one would pass every other test in this file.
+    var out = folded(
+        [
+            "ABCDEFGHIJKLMNOPQ",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEF",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFG",
+        ]
+    )
+    assert_equal(out[0], "abcdefghijklmnopq")
+    assert_equal(out[1], "abcdefghijklmnopqrstuvwxyzabcdef")
+    assert_equal(out[2], "abcdefghijklmnopqrstuvwxyzabcdefg")
+
+
+def test_folding_leaves_the_ascii_bytes_beside_the_letters_alone() raises:
+    # The letters are found by two compares, and the bytes on either side of
+    # each range are the ones a compare written with the wrong edge would take
+    # with it.
+    var out = folded(["@[`{", "0123456789", "AZ[az{"])
+    assert_equal(out[0], "@[`{")
+    assert_equal(out[1], "0123456789")
+    assert_equal(out[2], "az[az{")
+
+
+def test_an_ascii_row_folds_beside_a_row_that_the_fast_path_refuses() raises:
+    # A refusal has already written over the payload where the element would
+    # have gone, and it must not have moved the payload size or appended a view.
+    # If it did, this row is the one that comes back short or shifted.
+    var out = folded(
+        [
+            "ABCDEFGHIJKLMNOP",
+            "STRASSE",
+            "Straße",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "CAFÉ",
+            "XY",
+        ]
+    )
+    assert_equal(out[0], "abcdefghijklmnop")
+    assert_equal(out[1], "strasse")
+    assert_equal(out[2], "strasse")
+    assert_equal(out[3], "abcdefghijklmnopqrstuvwxyz")
+    assert_equal(out[4], "café")
+    assert_equal(out[5], "xy")
+
+
+def test_folding_an_ascii_row_at_the_edge_of_the_inline_limit() raises:
+    # Twelve bytes live in the view and thirteen live in the payload, so these
+    # two rows take the two branches the fast path has after it writes.
+    var out = folded(["ABCDEFGHIJKL", "ABCDEFGHIJKLM"])
+    assert_equal(out[0], "abcdefghijkl")
+    assert_equal(out[1], "abcdefghijklm")
+
+
+def test_the_ascii_question_over_a_row_longer_than_a_block() raises:
+    # The same boundary from the other side. The high byte is put in the tail
+    # of the second row and in the body of the third, which are the two places
+    # a pass that only looked at one of them would miss it.
+    var out = asked(
+        text_is_ascii(
+            made(
+                [
+                    "abcdefghijklmnopqrstuvwxyzabcdef",
+                    "abcdefghijklmnopqrstuvwxyzabcdeé",
+                    "abcdéfghijklmnopqrstuvwxyzabcdef",
+                ]
+            )
+        )
+    )
+    assert_equal(out[0], "yes")
+    assert_equal(out[1], "no")
+    assert_equal(out[2], "no")
+
+
 def titled(var values: List[String]) raises -> List[String]:
     """Titles a column built from a list and reads it back.
 
