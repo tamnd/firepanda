@@ -111,7 +111,7 @@ A query firepanda refuses is reported rather than failed when the refusal has a 
 
 The scale factor is `FIREPANDA_TPCH_SCALE` and defaults to 0.01, which is about sixty thousand lineitem rows and three megabytes and takes a few seconds, so it is cheap enough to run on a push. The exit criterion for stage S4 is written at scale 1, which is a hundred times that in both, and is a number to run by hand or nightly.
 
-Twelve of the twenty two queries are in the list today. q1, q3, q4, q5, q7, q10, q12, q15, q16, q18 and q19 agree with DuckDB row for row, and q6 is refused for the decimal literals in `l_discount BETWEEN 0.05 AND 0.07`. The other ten want a decimal, a join order, a dependent join or a binder gap closed, and each one goes in the list the day it runs rather than sitting there as a pending failure.
+Fourteen of the twenty two queries are in the list today. q1, q3, q4, q5, q7, q8, q9, q10, q12, q15, q16, q18 and q19 agree with DuckDB row for row, and q6 is refused for the decimal literals in `l_discount BETWEEN 0.05 AND 0.07`. The other eight want a decimal, a dependent join or a binder gap closed, and each one goes in the list the day it runs rather than sitting there as a pending failure.
 
 ## 8. The plan equality test
 

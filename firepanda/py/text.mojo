@@ -88,11 +88,13 @@ from firepanda.kernel.chars import character_count
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
     METHOD_COUNT,
+    METHOD_EXTRACT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
     METHOD_REPLACE,
     program_for,
 )
+from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite, parse_rewrite
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, tagged
@@ -304,7 +306,7 @@ def _compiled(kind: String, pattern: String) raises -> Program:
     refusal in kind is what matters rather than reproducing it to the letter.
 
     Args:
-        kind: The word the Python layer sent, which is one of the five that end
+        kind: The word the Python layer sent, which is one of the six that end
             in `_regex`.
         pattern: The pattern as the caller wrote it.
 
@@ -324,6 +326,8 @@ def _compiled(kind: String, pattern: String) raises -> Program:
         method = METHOD_COUNT
     elif kind == "replace_regex":
         method = METHOD_REPLACE
+    elif kind == "extract_regex":
+        method = METHOD_EXTRACT
     var program = program_for(method, pattern)
     if program.ok:
         return program^
@@ -555,6 +559,56 @@ def partition(
     """
     _text_column(column)
     return column.chars_partition(sep, from_right)
+
+
+def extract(
+    column: Series, pattern: String
+) raises -> Tuple[List[String], List[Series]]:
+    """Pulls the groups of the first match out of every row, as columns.
+
+    The fifth shape outside the three doors and the second whose width comes
+    out of something rather than being written down. `dummies` reads the column
+    to find out how wide its answer is, and this one reads the pattern, which
+    is why this is one call where that one is two: the labels and the columns
+    are both known as soon as the pattern has been compiled, and compiling it
+    twice to hand them over separately would be compiling it twice.
+
+    The labels are the group names, with an empty string for a group that was
+    not named. pandas labels an unnamed group with its position counting from
+    zero, and a firepanda frame holds text labels, so the Python layer writes
+    the position out as text and the divergence is the one `partition` already
+    has. Naming the groups is how a caller avoids it.
+
+    A pattern that reads and opens no group is refused here with pandas' own
+    sentence, and it is refused before the pattern is compiled because that is
+    upstream's order. `re.compile` runs first there, so a pattern whose syntax
+    is broken is a syntax error and a pattern that is merely groupless is the
+    other message, and a pattern that is groupless and also holds a construct
+    this library has not written is the other message too. Compiling first would
+    get the last of those three backwards.
+
+    Args:
+        column: The column to read.
+        pattern: The pattern as the caller wrote it, which is compiled for
+            Python's engine because this is one of the three names pandas never
+            sends to Arrow.
+
+    Returns:
+        The group labels and the columns, in the order the groups were opened
+        and the same length as each other.
+
+    Raises:
+        Error: Tagged `value` if the column is not text or RE2 would refuse the
+            pattern too, and `unsupported` when the refusal is this library's
+            own.
+    """
+    _text_column(column)
+    var tree = parse_pattern(pattern)
+    if tree.ok and tree.groups == 0:
+        raise tagged(VALUE, String("pattern contains no capture groups"))
+    var program = _compiled(String("extract_regex"), pattern)
+    var labels = program.labels.copy()
+    return (labels^, column.chars_extract_regex(program))
 
 
 def dummy_tokens(column: Series, sep: String) raises -> List[String]:

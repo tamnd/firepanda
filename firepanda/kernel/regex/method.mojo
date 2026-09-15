@@ -1,4 +1,4 @@
-"""Which pattern each of the five methods actually runs, and who runs it.
+"""Which pattern each of the six methods actually runs, and who runs it.
 
 `contains`, `match` and `fullmatch` are one question upstream. pandas asks the
 engine whether a pattern matches somewhere and asks the other two by changing
@@ -30,6 +30,13 @@ and `contains` do not, and it asks for a program that records where every group
 matched, which is the one thing here that costs something and is the one thing
 only it needs.
 
+`extract` is the sixth and is the first that is not asking Arrow anything at
+all. pandas answers it, and `extractall` and `findall` with it, by compiling the
+pattern with `re` and looping in Python, so it is not routed and the letters in
+its pattern mean what Python says they mean rather than what RE2 says. That is
+the one line in this file where a method's engine is a property of the method
+rather than of the pattern, and document 81 has why.
+
 This file is the layer above the compiler and below the binding. It knows what
 pandas does with a pattern before handing it over, and it hands back a program
 or a refusal, which is the same pair the compiler deals in. What it deliberately
@@ -39,7 +46,11 @@ about the binding.
 
 from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.program import Program, compile_program
-from firepanda.kernel.regex.route import ENGINE_RE2, holds_unsupported
+from firepanda.kernel.regex.route import (
+    ENGINE_PYTHON,
+    ENGINE_RE2,
+    holds_unsupported,
+)
 
 
 comptime METHOD_CONTAINS: UInt8 = 0
@@ -79,6 +90,21 @@ arithmetic this time. Counting cuts the row after each match and replacing does
 not, so `^` means the start of what is left to one and the start of the row to
 the other, in the same library on the same pattern. Document 80 has the
 measurements and `firepanda/kernel/regex/replace.mojo` has the loop.
+"""
+
+comptime METHOD_EXTRACT: UInt8 = 5
+"""`str.extract`, which is the first name here that does not go to Arrow at all.
+
+The five above are five ways of asking Arrow a question. This one is not: pandas
+answers it by compiling the pattern with `re` and looping in Python, so the
+engine it runs is Python's and the letters in the pattern mean what Python says
+they mean. `\\w` covers 138558 code points for this method and 63 for the five
+above, in the same accessor, and document 81 is where that was measured.
+
+Everything else about it is the easy half. Nothing is rewritten, because a
+rewrite here would be a rewrite pandas does not do, and nothing is anchored,
+because upstream runs `regex.search` and takes the leftmost match wherever it
+falls. It wants captures for the obvious reason: the groups are the answer.
 """
 
 
@@ -215,6 +241,7 @@ def anchored(method: UInt8, pattern: String) -> String:
         method == METHOD_CONTAINS
         or method == METHOD_COUNT
         or method == METHOD_REPLACE
+        or method == METHOD_EXTRACT
     ):
         return pattern.copy()
     var cut = leading_flags(pattern)
@@ -251,8 +278,14 @@ def program_for(method: UInt8, pattern: String) -> Program:
     The `\\Z` rewrite comes next and the anchoring last, which is upstream's
     order as well and is not an order either step is indifferent to.
 
+    `extract` skips all three steps. It is not routed, because upstream never
+    routes it and always answers it in Python. It is not preprocessed, because
+    the `\\Z` rewrite exists to spell an escape the way RE2 spells it and no
+    part of this method goes near RE2. And it is not anchored, because upstream
+    runs `regex.search` over the row as written.
+
     Args:
-        method: Which of the five asked.
+        method: Which of the six asked.
         pattern: The pattern as the caller wrote it.
 
     Returns:
@@ -261,12 +294,14 @@ def program_for(method: UInt8, pattern: String) -> Program:
         reason `compile_program` gives.
     """
     var tree = parse_pattern(pattern)
-    var out = Program()
+    if method == METHOD_EXTRACT:
+        return compile_program(tree, ENGINE_PYTHON, captures=True)
     if holds_unsupported(tree):
-        out.ok = False
-        out.problem = String("the Python engine is not written yet")
-        out.gap = True
-        return out^
+        # Routed to Python, and Python's engine has none of the five yet. It is
+        # compiled rather than refused in a sentence of this file's own so that
+        # the caller is told which construct is missing, which is what the
+        # compiler's own refusal says and what this used to throw away.
+        return compile_program(tree, ENGINE_PYTHON)
     if not tree.ok:
         # A pattern the grammar cannot read is refused over what the caller
         # wrote rather than over the rewrite, because the rewrite can make a

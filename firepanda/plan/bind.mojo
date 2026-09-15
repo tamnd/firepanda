@@ -113,6 +113,40 @@ struct Bound(Copyable, Movable):
         self.origin = List[Int](length=len(schema), fill=table)
         self.schema = schema^
 
+    def provides(self, name: String, table: Int) -> Bool:
+        """Whether this node hands out the column a reference was written about.
+
+        By name, unless the reference says which relation it meant and the
+        column says which relation it came from. `FROM nation n1, nation n2`
+        puts one `n_nationkey` on each side of a join, and a search by name
+        finds the name on both and can only answer that it does not know. The
+        qualifier the query wrote is not lost, though: the binder puts the
+        relation it picked on the reference and binding puts the relation each
+        column came from on the node, so the two can be compared and
+        `n1.n_nationkey` placed where it belongs.
+
+        A column that no single relation produced is a maybe rather than a no.
+        That is what keeps this no stricter than a search by name: a name that
+        one side has and the other does not is answered by the name alone, and
+        the relation number only ever decides between two sides that both have
+        it and both know where theirs came from.
+
+        Args:
+            name: The name the reference was written with.
+            table: The relation the reference was qualified to, or `UNBOUND`.
+
+        Returns:
+            True when this node could be the one the reference meant.
+        """
+        for i in range(len(self.schema)):
+            if self.schema[i].name != name:
+                continue
+            if table == UNBOUND or self.origin[i] == UNBOUND:
+                return True
+            if self.origin[i] == table:
+                return True
+        return False
+
 
 def _edits(a: String, b: String) -> Int:
     """Returns the number of single character edits between two names.

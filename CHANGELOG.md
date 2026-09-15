@@ -19,6 +19,27 @@ The refusal says what to do now. It names the type as a decimal, says why there 
 With the flag on, the cast happens in DuckDB before the bytes are ever Arrow, so the doubles arrive as doubles and nothing is converted twice. Which columns to cast comes from a `DESCRIBE` over the same projection, which reads the file's footer and no pages, so it is a round trip and not a second scan. Only a column whose own type is a decimal is cast. A decimal inside a list or a struct prints as `DECIMAL(15,2)[]` and is left alone, because the cast that reaches it has to name the shape it is in, and half handling that is worse than refusing it.
 
 sf1 `lineitem` reads as sixteen columns and six million rows now, where before it raised after allocating two and a half gigabytes.
+### Added: `str.extract`, whose answer is as wide as the pattern says
+
+`pandas.Series(["ab1"]).str.extract(r"([a-z])(\d)")` answers a frame of two columns and `.str.extract(r"([a-z])\d")` answers a frame of one, for the same column. This is the first name on the `str` accessor whose width varies per call and is still known before a single row is read, and the first of the three methods document 81 left unwired. Issue #8 M6.
+
+It never asks the router. The five pattern methods above it ask whether Arrow can do what the pattern says and fall back to Python when it cannot, and this one has no Arrow path to fall back from, so it compiles for Python's engine every time. That is visible from Python in one line: `str.count(r"\w")` on a row holding one Greek letter is 0 and `str.extract(r"(\w)")` on the same row answers the letter, because the two names on the same accessor read the same pattern in two alphabets. A pattern holding syntax only RE2 refuses, a comment group or a `\u` escape, is compiled here rather than refused, and a lookaround is refused with the sentence that says this engine has none yet rather than the one that says RE2 has none.
+
+It searches where `match` and `fullmatch` anchor, because upstream runs `regex.search` here. A row with no match is missing in every column and a row that is itself missing is too, so the columns of one row agree about whether there was a match, with one exception: a group that took no part in a match that did happen is missing on its own, which is what `(a)(x)?` answers for a row holding `a`. A group that matched the empty string is a fourth state and is a value rather than a missing one.
+
+The group labels come off the compiled program rather than out of a second parse. The parser already knew which names belong to which groups and kept them as two lists as long as however many groups were named, and the compiler turns that into one entry per group in the order they were opened. A named group is labelled with its name and an unnamed one with its own position counted from zero, which pandas writes as an integer and this library writes as text, and that is the column label divergence `partition` already carries rather than a new one.
+
+`expand=False` with one group answers a column instead of a frame. If the group has a name the column takes it, which is the one place on this accessor the answer is not named after the column it was called on, and if the group has no name the column keeps the name it already had rather than losing it. `expand` is checked before the pattern is looked at and the group count after it is compiled, which is upstream's order and is the only thing that decides which of two errors a caller who got both wrong sees. Document 82 has the rest.
+
+### Added: a comma FROM is reordered so that no pair of relations is left crossed
+
+A comma between two tables in a `FROM` is a join with no condition and the clause nests left, so the order the relations are written in is the order they are joined in. A relation whose equalities are all with something further along the list leaves a product in the middle of the chain, and a product of two real tables is refused rather than slow, so the query does not run at all. `FROM a, b, c WHERE a.x = c.x AND b.y = c.y` is that query and `FROM a, c, b` is the same query written in an order that works. Issue #309.
+
+The new pass keeps the first relation where the query put it and then repeatedly takes the first one left that has an equality with something already taken. It changes nothing at all if that ever fails, because a relation tied to nothing already taken is a product the query really did ask for and leaving it as written is what keeps this from turning one refusal into a different one. An equality counts when both sides are a plain column and each of them is handed out by exactly one relation, which is the same test predicate pushdown uses to decide whether an equality can become a join key.
+
+There is no cost model in it and no cardinality estimate. Among the orders with no product in them it takes the first one it finds, which is the one closest to what the query wrote, and `docs/specs/planner/03-join-ordering.md` says when choosing between them is worth writing.
+
+TPC-H q8 and q9 are why this is here. Both write the table every one of their equalities is against third in a list of six or eight, so the first join in the chain paired every part with every supplier and nothing after it ever ran. Both agree with DuckDB now, over 2 rows and 173 rows, and `pixi run tpch` covers fourteen of the twenty two queries.
 
 ### Added: `REGEXP_MATCHES` and `REGEXP_REPLACE` in SQL, which is the last ClickBench query
 

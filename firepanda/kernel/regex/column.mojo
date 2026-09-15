@@ -50,7 +50,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.parse import decode_into
-from firepanda.kernel.regex.pike import Machine
+from firepanda.kernel.regex.pike import Machine, byte_width
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite, replaced
 
@@ -138,6 +138,98 @@ def text_count_regex(
     parallel_morsels(compute, n)
 
     out.data.validity = validity^
+    return out^
+
+
+def text_extract_regex(
+    a: StringArray, program: Program
+) raises -> List[StringArray]:
+    """What each group of the first match held, one column per group.
+
+    The fourth kernel here and the first whose answer is more than one column.
+    Everything above answers a column as tall as the one it read, and so does
+    this, several times over: one column per capturing group, each as tall as
+    the input, and a caller with the group labels puts them side by side into a
+    frame.
+
+    Three rules decide what a row gets and all three are pandas', which here
+    means Python's, since this is one of the three names that never reach
+    Arrow. The match is the leftmost one anywhere in the row rather than one
+    anchored at the front, because upstream runs `regex.search`. A row with no
+    match is null in every column rather than null in some of them, so the
+    columns of one row agree about whether there was a match at all. And a
+    group that took no part in the match it was in is null on its own, which is
+    the one case where the columns of a row disagree and is what `(a)(x)?`
+    answers for a row holding `a`.
+
+    A null row is null everywhere, the same as every other kernel here, and it
+    is written rather than repaired at the end because these are builders and a
+    builder has to be told what a row is before it can be told the next one.
+
+    This one is serial for the same reason `text_replace_regex` is. The answers
+    go into builders, a builder is one buffer with one cursor, and handing four
+    threads a share of one is a different design rather than a flag. What is
+    paid once per column rather than once per row is everything else: the
+    pattern is compiled before the first row, and the machine, the offsets and
+    the slots are made here and handed to every row.
+
+    Args:
+        a: The column.
+        program: The pattern, already compiled with captures. A program that did
+            not compile answers nothing, which no caller should ever see,
+            because the layer holding the call raises on a refusal before
+            reaching here.
+
+    Returns:
+        One text column per capturing group, in the order the groups were
+        opened. A pattern with no groups answers no columns, which the Python
+        layer refuses before reaching here because pandas refuses it too.
+
+    Raises:
+        Error: If a builder cannot allocate.
+    """
+    var n = len(a)
+    var groups = program.groups
+    var built = List[StringBuilder]()
+    for _ in range(groups):
+        built.append(StringBuilder(capacity=n))
+
+    var machine = Machine(program)
+    var points = List[UInt32]()
+    var offsets = List[Int]()
+    var found = List[Int32]()
+    for i in range(n):
+        if not a.is_valid(i):
+            for g in range(groups):
+                built[g].append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        decode_into(bytes, points)
+        offsets.clear()
+        var at = 0
+        for k in range(len(points)):
+            offsets.append(at)
+            at += byte_width(points[k])
+        offsets.append(at)
+        # The whole row is searched from its first position, which is the one
+        # place this differs from the replacing scan: that one walks a cursor
+        # and this one asks once and stops.
+        var end = machine.search(program, Span(points), 0, found)
+        if end < 0:
+            for g in range(groups):
+                built[g].append_null()
+            continue
+        for g in range(groups):
+            var opened = Int(found[(g + 1) * 2])
+            var closed = Int(found[(g + 1) * 2 + 1])
+            if opened < 0 or closed < opened:
+                built[g].append_null()
+                continue
+            built[g].append(bytes[offsets[opened] : offsets[closed]])
+
+    var out = List[StringArray]()
+    for _ in range(groups):
+        out.append(built.pop(0).finish())
     return out^
 
 

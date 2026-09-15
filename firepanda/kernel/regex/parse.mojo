@@ -149,6 +149,15 @@ struct Parsed(Movable):
     """The names of the named groups, in the order they were opened, so that
     `(?P=name)` and `(?(name)...)` can be resolved to a number while reading."""
 
+    var numbers: List[Int32]
+    """Which group each of those names belongs to, in the same order.
+
+    The two lists are what Python calls `groupindex` written the other way
+    round, and they are both here because a name on its own does not say which
+    group it is. `(a)(?P<L>b)` opens two groups and names one of them, so
+    `names` is one long and the number it holds is two, and anything labelling
+    columns has to know that rather than guess from the position in the list."""
+
     var ok: Bool
     """Whether it parsed at all."""
 
@@ -236,6 +245,7 @@ struct Parsed(Movable):
         self.root = NO_NODE
         self.groups = 0
         self.names = []
+        self.numbers = []
         self.ok = True
         self.problem = String("")
         self.approximate = False
@@ -1841,6 +1851,7 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     var scoped = c.scoped
     var nodes = c.nodes.copy()
     var names = c.names.copy()
+    var numbers = c.numbers.copy()
     var problem = c.problem.copy()
     var out = Parsed()
     if gave_up:
@@ -1860,6 +1871,7 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     out.scoped = scoped
     out.nodes = nodes^
     out.names = names^
+    out.numbers = numbers^
     return out^
 
 

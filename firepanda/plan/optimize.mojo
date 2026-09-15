@@ -8,9 +8,9 @@ planner that a query could go through end to end.
 ## The order
 
 Simplification, then empty and constant pruning, then projection pushdown, then
-predicate pushdown, then common subexpression elimination, then projection
-merging, then slice pushdown and top n. The spec gives the reason for each
-adjacency and none of them is arbitrary.
+join ordering, then predicate pushdown, then common subexpression elimination,
+then projection merging, then slice pushdown and top n. The spec gives the
+reason for each adjacency and none of them is arbitrary.
 
 Simplification runs first so that every later pass sees the simplest form of
 every expression. A predicate that folds to a constant is cheaper to move and a
@@ -24,6 +24,16 @@ that makes the plan smaller rather than different.
 Projection pushdown runs before predicate pushdown so that a predicate arriving
 at a scan finds a column list that already exists rather than one that is about
 to be written.
+
+Join ordering runs between them, which is not where the spec's list has it, and
+the reason is which half of it is written. The spec puts ordering tenth because
+the half that chooses between two orders wants the cardinalities the pushed
+filters imply. The half that is written chooses nothing: it only reorders a
+comma `FROM` whose relations were written in an order that leaves a product in
+the middle, and it has to run before predicate pushdown because pushdown is what
+turns an equality into a join key and it can only do that once the two relations
+the equality reads are next to each other. The cost half, when it is written,
+goes where the spec puts it.
 
 Common subexpression elimination runs after the two pushdowns, because the spec
 asks for elimination after both so that subtrees the pushdowns made identical
@@ -93,6 +103,7 @@ from firepanda.plan.empty import empty
 from firepanda.plan.limits import limits
 from firepanda.plan.merge import merge
 from firepanda.plan.node import Plan
+from firepanda.plan.order import order
 from firepanda.plan.print import explain
 from firepanda.plan.prune import prune
 from firepanda.plan.push import push
@@ -157,6 +168,7 @@ def _sweep(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
     simplify(plan, root)
     var at = empty(plan, root, sources)
     _ = prune(plan, at, sources)
+    at = order(plan, at, sources)
     at = push(plan, at, sources)
     _ = cse(plan, at, sources)
     _ = merge(plan, at, sources)
