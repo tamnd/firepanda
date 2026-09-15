@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the five TPC-H queries that already answered are now compared
+
+`pixi run tpch` asked five of the twenty two queries and q4, q5, q10, q12 and q15 ran without being asked. They are asked now, and all five agree with DuckDB row for row over the same Parquet, so ten of the twenty two are in the harness. Issue #309.
+
+A query that answers and is not compared is worse than a query that does not run. Nothing notices when it starts answering something else, and the reason it was left out is the reason a harness exists: it had not been checked, so it went on the list of things to check rather than into the thing that checks.
+
+The data is prepared against two markers now rather than one. The Parquet goes stale when the scale changes and nothing else, and at scale 1 it is a quarter of a gigabyte to regenerate. The reference answers go stale when a query is added to the list too, since only the queries in the list get an answer written. One marker for both meant either regenerating the data every time a query was added, or adding a query and leaving it with no answer to be compared against, which is what happened the first time this was run.
+
 ### Changed: a predicate is sent past every join that keeps its left rows
 
 Predicate pushdown used to move a predicate into the side of an inner join that provides every column it reads, and to leave everything alone at every other kind of join. It now sends a predicate into the left side of a left, semi, anti, mark or cross join as well, which is the same rule the inner join already had, applied on the one side where it holds. Issue #309.
