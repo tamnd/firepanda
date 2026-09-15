@@ -57,13 +57,18 @@ TABLES = (
 )
 """The eight tables TPC-H defines, in the order the schema declares them."""
 
-QUERIES = (1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16, 18, 19)
-"""Which queries the harness covers.
+QUERIES = tuple(range(1, 23))
+"""Which queries the harness covers, which is all twenty two of them.
 
-The three S4 names as its exit criteria, and every query that answers what
-DuckDB answers. The rest want a decimal, a dependent join or a binder gap
-closed, and each one goes in here the day it runs rather than being
-listed as a pending failure.
+It used to be only the ones that answer, on the grounds that a query with
+nothing to compare against is not a comparison. That was the wrong list to ask
+for. The rest are refused rather than wrong, and a refusal is a fact about this
+engine worth writing down and checking, so all twenty two are asked and the
+refused ones carry a recorded reason on the Mojo side. The run prints how many
+of the twenty two agree, which is the number this is all for.
+
+An answer is written for every query here whether firepanda can ask it or not,
+because the day a gap closes the answer has to already be sitting there.
 """
 
 BETWEEN = "\x1f"

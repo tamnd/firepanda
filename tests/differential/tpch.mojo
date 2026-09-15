@@ -5,8 +5,13 @@ size for a kernel and the wrong size for a query. A query has a plan in it, and
 a plan has a join order, a group, a sort and a limit, and every one of those is
 a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
-criteria, TPC-H q1, q3 and q6, together with every other query that answers what
-DuckDB answers. Fourteen of the twenty two are in the list today.
+criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
+
+Sixteen agree today. The other six are refused rather than wrong, and they are
+refused in three places rather than six: a name that does not resolve across a
+subquery, a scalar subquery in a HAVING, and a join condition that is not an
+equality. `recorded` below carries one reason per query and issue #816 has the
+three written out.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -86,10 +91,12 @@ def tables() -> List[String]:
 def queries() -> List[Int]:
     """Which queries this asks about.
 
-    The three S4 names as its exit criteria, and every query that answers what
-    DuckDB answers. The rest want a decimal, a dependent join or a binder
-    gap closed, and each one is added here the day it runs rather
-    than sitting in a list of pending failures.
+    All twenty two of them. It used to be only the ones that answer, and that
+    was the wrong list to ask for: the rest are refused rather than wrong, a
+    refusal is a fact about this engine worth checking, and `recorded` below is
+    where each one says why. Asking all of them is also what makes the printed
+    count mean anything, since sixteen of twenty two is the number this exists
+    to move and sixteen of sixteen is not.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
     because the Python side is what writes an answer out and the Mojo side is
@@ -100,7 +107,10 @@ def queries() -> List[Int]:
     Returns:
         The query numbers.
     """
-    return [1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16, 18, 19]
+    var out = List[Int](capacity=22)
+    for number in range(1, 23):
+        out.append(number)
+    return out^
 
 
 def recorded(number: Int) -> String:
@@ -110,17 +120,31 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
+    Six entries and three reasons between them, which is the useful thing the
+    list says. Issue #816 has the three written out with the refusal each one
+    comes back with.
+
     Args:
         number: The query number.
 
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 6:
+    if number == 2 or number == 17 or number == 20:
         return String(
-            "the decimal literals in `l_discount BETWEEN 0.05 AND 0.07`, which"
-            " a plan cannot hold exactly and which a double in their place"
-            " would answer wrongly. Issue #309"
+            "a name the inner query reads from the query around it, which"
+            " resolves against what is in scope inside and not outside."
+            " Issue #816"
+        )
+    if number == 11:
+        return String(
+            "a scalar subquery in a HAVING, which is above the aggregate, and"
+            " the lowering puts one below the FROM. Issue #816"
+        )
+    if number == 13 or number == 21:
+        return String(
+            "a join condition that is not an equality, which q13 writes in a"
+            " LEFT JOIN ON and q21 correlates an EXISTS through. Issue #816"
         )
     return String()
 

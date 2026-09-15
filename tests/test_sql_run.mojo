@@ -4486,16 +4486,62 @@ def test_a_decimal_literal_past_the_widest_decimal_is_a_double() raises:
     assert_equal(out.column("a").as_typed[DType.float64]()[0], 1.5, "1.5")
 
 
-def test_a_decimal_literal_that_fits_a_decimal_is_refused() raises:
-    # The refusal that stands. A double in its place answers 3.3000000000000003
-    # where DuckDB answers 3.3, and the plan has no exact decimal to hold the
-    # right answer in.
+def test_a_decimal_literal_on_its_own_is_refused() raises:
+    # The refusal that stands, and it is about the answer's own type rather
+    # than about the literal. Nothing above either of these turns the decimal
+    # into anything else, so the column handed back would have to be a decimal
+    # and there is no decimal column to hand back.
     with assert_raises(contains="does not lower the decimal literal"):
         _ = run("SELECT 1.1 AS a", session())
     with assert_raises(contains="does not lower the decimal literal"):
         _ = run(
             "SELECT 1234567890123456789012345678901234567.8 AS a", session()
         )
+    with assert_raises(contains="expression of decimal literals"):
+        _ = run("SELECT 1.1 + 2.2 AS a", session())
+    with assert_raises(contains="expression of decimal literals"):
+        _ = run("SELECT -1.5 * 4 AS a", session())
+
+
+def test_a_decimal_literal_against_a_column_is_read_as_a_double() raises:
+    # Against a column there is somewhere for it to go, because the column is
+    # not a decimal either and DuckDB casts the literal to a double at exactly
+    # this point. So this answers rather than refusing, and answers what DuckDB
+    # answers.
+    var out = run("SELECT qty * 0.5 AS half FROM sales", session())
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "a double")
+    var col = out.column("half").as_typed[DType.float64]()
+    assert_equal(col[0], 2.5, "five halves")
+    assert_equal(col[7], 0.5, "one half")
+
+
+def test_the_decimal_arithmetic_happens_before_the_double_does() raises:
+    # The whole reason the fold is exact. Both sides here are folded in the
+    # scaled integers a decimal really is and converted once, so both land on
+    # the double nearest five hundredths and the two agree. Lowering each
+    # literal to a double first and subtracting would put the left side at
+    # 0.049999999999999996, which is a different number, and TPC-H q6 writes
+    # its lower bound exactly this way.
+    var out = run("SELECT 0.06 - 0.01 = 0.05 AS same", session())
+
+    assert_equal(truths(out, "same"), [Int64(1)], "five hundredths twice")
+
+    # The one everybody knows. DuckDB answers true because it adds decimals,
+    # and so does this for the same reason.
+    var known = run("SELECT 0.1 + 0.2 = 0.3 AS same", session())
+
+    assert_equal(truths(known, "same"), [Int64(1)], "three tenths")
+
+
+def test_an_expression_of_whole_numbers_is_not_touched_by_any_of_this() raises:
+    # No point written anywhere, so there is no decimal and nothing folds. The
+    # answer stays an integer, which it would not if the fold read every
+    # literal expression rather than the ones with a scale.
+    var out = run("SELECT qty + 2 * 3 AS grown FROM sales", session())
+
+    assert_true(out.schema[0].dtype == LogicalType.INT64, "still an integer")
+    assert_equal(read_back(out, "grown")[0], 11, "five and six")
 
 
 def test_an_integer_literal_past_a_bigint_is_refused_rather_than_wrapped() raises:

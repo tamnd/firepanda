@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a decimal literal written against a column is read as a double
+
+`SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07` used to come back with a refusal, because `0.05` is a `DECIMAL(3,2)` to DuckDB and a plan has no decimal column. That refusal covered more than it needed to. The literal in that query never stays a decimal: it meets `l_discount`, which is a double here, and DuckDB casts it to one before the comparison happens. So there was a right answer available and the engine was not giving it.
+
+Now a decimal literal written underneath anything else lowers to the double DuckDB casts it to, and only a decimal literal that would be the answer's own type is refused. `SELECT 1.1` is still refused and so is `SELECT 1.1 + 2.2`, because there the column handed back would have to be a decimal.
+
+The part that needed care is arithmetic between literals. TPC-H q6 writes its bounds as `l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01`, and the two ways of reading that are not the same query. DuckDB subtracts decimals and gets exactly five hundredths. Lowering each literal to a double first and subtracting gets 0.049999999999999996, and the upper bound lands just under seven hundredths rather than on it, which silently drops every row with a discount of seven hundredths. So the literals are folded first, in the scaled integers a decimal really is, and the fold is converted once, at the same boundary DuckDB converts at. `0.1 + 0.2 = 0.3` answers true here for the same reason it answers true in DuckDB.
+
+Addition, subtraction, multiplication and unary minus fold. Division does not, because DuckDB answers a double for it anyway. The cases where DuckDB saturates at thirty eight digits and quietly drops the carry it asked for do not fold either, and those fall back to double arithmetic, which is no more lossy than what it replaces.
+
+Six more expressions went into `pixi run differential-answers`, which asks firepanda and DuckDB the same expression over the same column and compares the answers. Three of them write arithmetic between literals, which is the case that has a wrong answer waiting in it.
+
+One of the six disagrees and is recorded rather than removed, because it is the one place where reading a decimal constant as a double is visibly not what DuckDB has. `CAST(n * 2.50 AS BIGINT)` with `n` at five is `CAST(DECIMAL(13,2) 12.50 AS BIGINT)` to DuckDB, and a decimal cast to an integer rounds away from zero, so DuckDB answers 13. firepanda holds the double 12.5 by then and rounds it to even, which is 12, and 12 is also what DuckDB itself answers for `CAST(12.5e0 AS BIGINT)`. The rule is right and the type underneath it is not: a cast to `BIGINT` is a boundary where the far side is an integer rather than a double, so DuckDB never makes a double at all. The two only part on a tie, and only a real decimal type closes it, which is issue #309.
+
+`pixi run tpch` asks all twenty two queries now rather than the eleven that answered, because a refusal is a fact about this engine worth checking and a list of only the ones that work cannot say how far there is to go. Each refused query carries a written reason beside it, a refusal with no reason fails the run, and so does a query that answers where a reason is recorded, which is how a gap that closes stops looking open. Sixteen of the twenty two agree with DuckDB row for row today, and q6, q14 and q22 are three of the ones that moved, each of them on the decimal literals above. The six that are left are refused in three places rather than six: a name the inner query reads from the query around it, a scalar subquery in a HAVING, and a join condition that is not an equality. Issue #816 has the three written out.
+
 ### Added: a Parquet file with money in it can be read
 
 `read_parquet` on TPC-H's `lineitem` failed with `arrow: unsupported format string 'd:15,2,128'`, which is Arrow's decimal128 with precision 15 and scale 2, and is what the specification says `l_quantity`, `l_extendedprice`, `l_discount` and `l_tax` are. Four of the sixteen columns of the table every TPC-H query starts from could not be read, and the read failed outright rather than skipping them. It is not only TPC-H either, since a decimal is the ordinary type for money in a warehouse. Issue #812.

@@ -1142,11 +1142,22 @@ def test_a_name_the_catalog_does_not_have_suggests_one_it_does() raises:
         _ = _plan("SELECT a FROM tt")
 
 
-def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
-    # The one refusal in here that is not about effort. A double in place of an
-    # exact decimal answers a different question and says nothing about it.
-    with assert_raises(contains="3.3000000000000003"):
-        _ = _plan("SELECT a FROM t WHERE f > 1.5")
+def test_a_decimal_literal_against_a_column_lowers_to_a_double() raises:
+    # The column is not a decimal either, so DuckDB casts the literal to a
+    # double before the comparison and the plan can hold what it casts it to.
+    var text = _plan("SELECT a FROM t WHERE f > 1.5")
+
+    assert_true("1.5" in text, "the bound is in the plan")
+
+
+def test_a_decimal_expression_of_literals_alone_is_refused() raises:
+    # The refusal in here that is not about effort. Nothing above these turns
+    # the decimal into anything else, so the answer's own type would have to be
+    # the decimal and there is no decimal column to put it in.
+    with assert_raises(contains="does not lower the decimal literal"):
+        _ = _plan("SELECT 1.5 AS a")
+    with assert_raises(contains="expression of decimal literals"):
+        _ = _plan("SELECT 1.1 + 2.2 AS a")
 
 
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:

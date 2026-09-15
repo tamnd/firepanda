@@ -117,11 +117,25 @@ def recorded(expression: StringSlice) -> String:
     Returns:
         The reason, or an empty string if this disagreement is a new one.
     """
-    # Empty, and it has been empty three times over now. The integer division
-    # under issue #770, the LIKE pattern under issue #776 and the cast of a
-    # double to an integer under issue #786 were each found here and then fixed
-    # rather than written down and left. The list is worth keeping for the next
-    # one whose fix is a decision rather than a patch.
+    # It was empty three times over before this one. The integer division under
+    # issue #770, the LIKE pattern under issue #776 and the cast of a double to
+    # an integer under issue #786 were each found here and then fixed rather
+    # than written down and left.
+    if expression == "CAST(n * 2.50 AS BIGINT)":
+        return String(
+            "the one place a decimal constant read as a double is visibly not"
+            " what DuckDB has. A decimal constant is folded exactly and"
+            " converted once, at the boundary where it meets something that is"
+            " not a decimal, which is what DuckDB does and lands on the same"
+            " number everywhere that something is a double. A cast to BIGINT is"
+            " that boundary too and the far side of it is an integer, so DuckDB"
+            " never makes a double at all: it rounds DECIMAL(13,2) 12.50"
+            " straight to a bigint, away from zero, and answers 13. firepanda"
+            " has the double 12.5 by then and rounds it to even, which is 12"
+            " and is what DuckDB itself answers for CAST(12.5e0 AS BIGINT). The"
+            " two rules only part on a tie, and only a real decimal type closes"
+            " it. Issue #309"
+        )
     _ = expression
     return ""
 
@@ -363,12 +377,24 @@ def expressions() -> List[String]:
     # The number literals that are doubles to DuckDB, over a column so that
     # neither engine folds the expression before it is run. Read back as a
     # whole number or a yes and no, because this compares three types and a
-    # double is not one of them. The decimal literal that fits a decimal is not
-    # here, because firepanda refuses it.
+    # double is not one of them.
     out.append("CAST(n * 1e3 AS BIGINT)")
     out.append("CAST(n + 1.5e3 AS BIGINT)")
     out.append("n * 1.1e-2 < 1")
     out.append("CAST(n * 1.5000000000000000000000000000000000000000 AS BIGINT)")
+
+    # And the decimal literals, which are not doubles to DuckDB. Against a
+    # column both engines cast them to one, and the question these ask is
+    # whether they cast at the same point. The last three write arithmetic
+    # between literals, which DuckDB does in decimals and firepanda folds in
+    # the scaled integers a decimal really is, and a bound written as
+    # `0.06 - 0.01` lands a row either side of itself depending on which.
+    out.append("n * 0.5 > 1")
+    out.append("CAST(n * 2.50 AS BIGINT)")
+    out.append("n + 0.25 < 3")
+    out.append("n * (0.06 - 0.01) < 0.05")
+    out.append("n > 0.06 - 0.01")
+    out.append("CAST(n AS DOUBLE) BETWEEN 0.06 - 0.01 AND 2.50 * 2")
 
     # Nested, because a kernel that is right on a column can still be wrong on
     # what another kernel just built.
