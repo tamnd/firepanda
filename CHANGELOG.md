@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a correlated subquery may write its correlation without a qualifier in front of it
+
+`SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM sales WHERE qty = band)` is a correlated subquery, because `band` is a column of `tiers` and not one of `sales`. Written that way it was refused with `there is no column named 'band' here`, and the same query with `tiers.band` in place of `band` ran. Nothing but the spelling was different. Issue #309.
+
+SQL resolves a bare column name in the innermost scope that has one and works outward from there, so a bare name the subquery's own `FROM` does not hand out is the outer query's whenever the outer query has it. The check that decides which of the two shapes to build now asks that question as well as the one about qualifiers, and a subquery it answers yes to goes to the aggregate and the left join rather than to the cross join.
+
+It is asked before anything is lowered, because the shape has to be picked before the `FROM` under it exists, so the columns a source hands out have to come from the catalog rather than from a plan. That works for a plain table and not for a CTE, a subquery, a table function or a set operation, whose column lists are decided by lowering them. When the subquery's `FROM` holds one of those the bare question is left unasked and the subquery is read the way it was read before, which is a refusal rather than a wrong answer.
+
+A bare name the subquery does have is still the subquery's own, which is the same rule read the other way and is why `FROM sales WHERE shop = 1` next to a `shops` in the outer query stays uncorrelated.
+
 ### Added: a decimal literal written against a column is read as a double
 
 `SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07` used to come back with a refusal, because `0.05` is a `DECIMAL(3,2)` to DuckDB and a plan has no decimal column. That refusal covered more than it needed to. The literal in that query never stays a decimal: it meets `l_discount`, which is a double here, and DuckDB casts it to one before the comparison happens. So there was a right answer available and the engine was not giving it.

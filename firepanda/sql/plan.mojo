@@ -5156,8 +5156,10 @@ def _from_names(ast: Ast, at: UInt32, mut names: List[String]) raises:
     names.append(String(ast.text(ast.at(source.children, parts - 1))))
 
 
-def _qualifiers(ast: Ast, at: UInt32, mut found: List[String]) raises:
-    """Collects the name written in front of every qualified column.
+def _written_names(
+    ast: Ast, at: UInt32, mut found: List[String], mut plain: List[String]
+) raises:
+    """Collects every column reference, split by whether it carries a qualifier.
 
     The same walk `_taken` does, and it stops at a subquery for the same reason:
     what is written inside one is that query's business and is looked at when
@@ -5166,7 +5168,8 @@ def _qualifiers(ast: Ast, at: UInt32, mut found: List[String]) raises:
     Args:
         ast: The arenas.
         at: The expression.
-        found: The list to add to, in the order the names are written.
+        found: The qualifiers, in the order the names are written.
+        plain: The column names written with no qualifier in front of them.
 
     Raises:
         If a name part is not there to read.
@@ -5177,6 +5180,8 @@ def _qualifiers(ast: Ast, at: UInt32, mut found: List[String]) raises:
     if node.kind == EXPR_COLUMN:
         if ast.length(node.children) == 2:
             found.append(String(ast.text(ast.at(node.children, 0))))
+        elif ast.length(node.children) == 1:
+            plain.append(String(ast.text(ast.at(node.children, 0))))
         return
     if (
         node.kind == EXPR_SUBQUERY
@@ -5189,42 +5194,116 @@ def _qualifiers(ast: Ast, at: UInt32, mut found: List[String]) raises:
         if node.b != NO_NODE:
             var window = ast.exprs[Int(node.b)]
             for key in ast.items(window.children):
-                _qualifiers(ast, key, found)
+                _written_names(ast, key, found, plain)
         for arg in ast.items(node.children):
-            _qualifiers(ast, arg, found)
+            _written_names(ast, arg, found, plain)
         return
     if node.kind == EXPR_BINARY:
-        _qualifiers(ast, node.a, found)
-        _qualifiers(ast, node.b, found)
+        _written_names(ast, node.a, found, plain)
+        _written_names(ast, node.b, found, plain)
         return
     if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
-        _qualifiers(ast, node.a, found)
+        _written_names(ast, node.a, found, plain)
         return
     if node.kind == EXPR_CASE:
-        _qualifiers(ast, node.a, found)
-        _qualifiers(ast, node.b, found)
+        _written_names(ast, node.a, found, plain)
+        _written_names(ast, node.b, found, plain)
         for arm in ast.items(node.children):
-            _qualifiers(ast, arm, found)
+            _written_names(ast, arm, found, plain)
         return
     if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
         for part in ast.items(node.children):
-            _qualifiers(ast, part, found)
-        _qualifiers(ast, node.a, found)
+            _written_names(ast, part, found, plain)
+        _written_names(ast, node.a, found, plain)
 
 
-def _reaches_out(ast: Ast, at: UInt32) raises -> Bool:
+def _from_columns(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    ctes: _Bindings,
+    mut columns: List[String],
+    mut certain: Bool,
+) raises:
+    """What one table reference in a `FROM` hands out, when that can be known.
+
+    Read off the catalog before anything is lowered, which is the whole reason
+    it can only answer for a plain table. A CTE, a subquery, a table function
+    and a set operation all produce a column list that is decided by lowering
+    them, and asking for it here would mean lowering a subquery in order to find
+    out whether to lower it a second time and in a different shape.
+
+    So the answer carries a flag saying whether it is the whole list. Nothing
+    reads the column list when the flag is down, since a list that is missing a
+    source is a list a name can be absent from for the wrong reason.
+
+    Args:
+        ast: The arenas.
+        at: The table reference.
+        catalog: What a table name is resolved against.
+        ctes: The CTE names in reach, which a table name is looked up in first.
+        columns: The names, added to in the order the tables are written.
+        certain: Put down by anything whose columns are not known from here.
+
+    Raises:
+        If a name part is not there to read.
+    """
+    if at == NO_NODE:
+        return
+    var source = ast.refs[Int(at)]
+    if source.kind == REF_PARENS:
+        _from_columns(ast, source.a, catalog, ctes, columns, certain)
+        return
+    if source.kind == REF_JOIN or source.kind == REF_JOIN_USING:
+        _from_columns(ast, source.a, catalog, ctes, columns, certain)
+        _from_columns(ast, source.b, catalog, ctes, columns, certain)
+        return
+    if source.kind != REF_TABLE or ast.length(source.payload) > 1:
+        # A subquery, a table function, or a table whose columns the reference
+        # renames, which is a shape `_table` refuses anyway.
+        certain = False
+        return
+    var parts = ast.length(source.children)
+    if parts == 0:
+        certain = False
+        return
+    var name = String(ast.text(ast.at(source.children, parts - 1)))
+    if ctes.find(name) != NOT_A_CTE:
+        certain = False
+        return
+    var found = catalog.find(name)
+    if found < 0 or catalog.kind_at(found) != KIND_FRAME:
+        certain = False
+        return
+    ref schema = catalog.frame_at(found).schema
+    for i in range(len(schema)):
+        columns.append(String(schema[i].name))
+
+
+def _reaches_out(
+    ast: Ast, at: UInt32, catalog: Catalog, ctes: _Bindings, scope: _Scope
+) raises -> Bool:
     """Whether a subquery written as a value reads the query around it.
 
     Read before anything is lowered, the same way `_may_pair` is read, because
     the choice it decides is which of two shapes to build and the shape has to
     be picked before the `FROM` under it exists.
 
-    What counts as reading out is a name written in front of a column that the
-    subquery's own `FROM` did not put in reach. That is the only way to write
-    correlation that this lowers, and it is the only way the name can be read
-    without ambiguity anyway: a bare column name that both queries have is the
-    inner one in SQL, so an outer column written bare is a column the subquery
-    already has and means the subquery's own.
+    Two ways of writing it count. The first is a name written in front of a
+    column that the subquery's own `FROM` did not put in reach, which is the
+    unambiguous spelling and is the one every book writes.
+
+    The second is a bare column the subquery's own `FROM` does not have. SQL
+    resolves a bare name in the innermost scope that has it and works outward
+    from there, so a bare name the subquery does not have is the outer query's
+    if the outer query has it. TPC-H q2 writes its correlation that way, as
+    `WHERE p_partkey = ps_partkey` over a subquery whose `FROM` holds no `part`.
+
+    The bare half is only asked when every source in the subquery's `FROM` is a
+    plain table, because that is when the list of columns it has is known from
+    the catalog without lowering anything. Anything else leaves the question
+    unanswered and the subquery is read as uncorrelated, which is what it was
+    read as before this and is a refusal rather than a wrong answer.
 
     Only the `WHERE` is looked at. Correlation in a select list or a `HAVING` is
     the dependent join rather than a join on keys, and both are refused where
@@ -5233,6 +5312,10 @@ def _reaches_out(ast: Ast, at: UInt32) raises -> Bool:
     Args:
         ast: The arenas.
         at: The subquery's statement.
+        catalog: What the table names in its `FROM` are resolved against.
+        ctes: The CTE names in reach.
+        scope: What the query around it has in reach, which is what a bare name
+            the subquery does not have would be read against.
 
     Returns:
         True if it reads a name its own `FROM` does not have.
@@ -5252,11 +5335,15 @@ def _reaches_out(ast: Ast, at: UInt32) raises -> Bool:
         return False
 
     var inside = List[String]()
+    var columns = List[String]()
+    var certain = True
     for one in ast.items(ast.slot(clauses, CLAUSE_FROM)):
         _from_names(ast, one, inside)
+        _from_columns(ast, one, catalog, ctes, columns, certain)
 
     var written = List[String]()
-    _qualifiers(ast, restriction, written)
+    var plain = List[String]()
+    _written_names(ast, restriction, written, plain)
     for i in range(len(written)):
         var name = fold(written[i])
         var mine = False
@@ -5265,6 +5352,17 @@ def _reaches_out(ast: Ast, at: UInt32) raises -> Bool:
                 mine = True
                 break
         if not mine:
+            return True
+    if not certain:
+        return False
+    for i in range(len(plain)):
+        var name = fold(plain[i])
+        var mine = False
+        for j in range(len(columns)):
+            if fold(columns[j]) == name:
+                mine = True
+                break
+        if not mine and scope.holds(name):
             return True
     return False
 
@@ -5438,7 +5536,16 @@ def _folded_join(
     middle and a left join rather than a semi join at the top. The subquery's
     `FROM` is lowered into the scope the outer query is using, which puts both
     sides in reach at once, and its `WHERE` is split the way a join condition
-    is. A part with one side out and one side in is a key pair and becomes a
+    is.
+
+    One scope for both is also where this stops. A subquery whose `FROM` names a
+    table the outer query already named is refused for having two tables of one
+    name, and in SQL the inner one shadows the outer one rather than clashing
+    with it. TPC-H q2 is that query, repeating `partsupp`, `supplier`, `nation`
+    and `region` under an outer `FROM` that has all four. Shadowing wants a
+    scope that knows which level each name was added at, and a bare column
+    written under one that has to be pinned to the innermost relation holding
+    it rather than left for binding to find on both sides. A part with one side out and one side in is a key pair and becomes a
     group key. A part that reads the subquery's own tables and nothing else is
     a filter under the aggregate, where it runs once rather than once per outer
     row. A part that reads the outer query any other way is refused, since it is
@@ -6467,7 +6574,7 @@ def _block(
         # A correlated one is a different shape and not a different scope. It
         # goes to the aggregate and the left join, which answer it for every
         # outer row at once, and an uncorrelated one goes to the cross join.
-        if _reaches_out(ast, ast.exprs[Int(found[i])].a):
+        if _reaches_out(ast, ast.exprs[Int(found[i])].a, catalog, ctes, scope):
             var source = _From(at, Schema(copy=schema), origin.copy())
             at = _folded_join(
                 ast,
