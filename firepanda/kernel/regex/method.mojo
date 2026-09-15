@@ -1,4 +1,4 @@
-"""Which pattern each of the three questions actually runs, and who runs it.
+"""Which pattern each of the four methods actually runs, and who runs it.
 
 `contains`, `match` and `fullmatch` are one question upstream. pandas asks the
 engine whether a pattern matches somewhere and asks the other two by changing
@@ -16,6 +16,13 @@ Arrow rewrites it. Deciding on the rewritten pattern instead is wrong for a
 family: `(?i)(?=a)` is a pattern Python reads and answers, and wrapping it puts
 the flag group somewhere Python's grammar will not have it, which would send a
 pattern upstream answers to the engine that has never heard of a lookahead.
+
+`count` is the fourth and is not that question at all. It asks how many matches
+there are rather than whether there is one, and it runs the pattern the caller
+wrote without any anchor, so everything in this file treats it the way it treats
+`contains`. Where it parts company with the other three is further down, in the
+scan that uses the answer: `firepanda/kernel/regex/pike.mojo` has the three
+rules Arrow counts by and none of them is visible here.
 
 This file is the layer above the compiler and below the binding. It knows what
 pandas does with a pattern before handing it over, and it hands back a program
@@ -39,6 +46,19 @@ front."""
 
 comptime METHOD_FULLMATCH: UInt8 = 2
 """`str.fullmatch`, which is the same question anchored at both ends."""
+
+comptime METHOD_COUNT: UInt8 = 3
+"""`str.count`, which asks a different question of the engine and asks it of the
+same pattern.
+
+It is here rather than being served by `METHOD_CONTAINS` because the two are the
+same by arithmetic rather than by meaning. `count` runs the pattern the caller
+wrote for the same reason `contains` does, which is that upstream anchors
+nothing for either, and a fourth name costs one branch and says which of the
+four a reader is looking at. What `count` does differ in is a line upstream that
+is not in this file at all: it never asks whether the pattern is a compiled one
+carrying flags, because it has no `case` argument to disagree with.
+"""
 
 
 def _is_flag_byte(b: UInt8) -> Bool:
@@ -164,13 +184,13 @@ def anchored(method: UInt8, pattern: String) -> String:
     for is ASCII and a byte of a longer character cannot be mistaken for one.
 
     Args:
-        method: Which of the three asked.
+        method: Which of the four asked.
         pattern: The pattern as the caller wrote it, with `\\Z` already seen to.
 
     Returns:
         The pattern the engine is to be given.
     """
-    if method == METHOD_CONTAINS:
+    if method == METHOD_CONTAINS or method == METHOD_COUNT:
         return pattern.copy()
     var cut = leading_flags(pattern)
     var head = String(pattern[byte=0:cut])
@@ -207,7 +227,7 @@ def program_for(method: UInt8, pattern: String) -> Program:
     order as well and is not an order either step is indifferent to.
 
     Args:
-        method: Which of the three asked.
+        method: Which of the four asked.
         pattern: The pattern as the caller wrote it.
 
     Returns:
