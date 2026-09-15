@@ -464,7 +464,7 @@ from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
 from firepanda.plan.bind import bind
 from firepanda.plan.cse import key_for
-from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import UNBOUND, ExprKind, Expressions, agg_kind
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -2510,7 +2510,15 @@ def _lower_expr(
                         len(args),
                     )
                 )
-            var built = plan.exprs.aggregate(_agg_kind(name, distinct), over)
+            # A fold over no rows at all is null in SQL and zero in pandas,
+            # and a count is the exception on both sides. Marked here rather
+            # than decided in the operator, because the operator serves both
+            # front ends and only the front end knows which answer was asked
+            # for. Today it is a sum that this changes and nothing else.
+            var fold = _agg_kind(name, distinct)
+            var built = plan.exprs.aggregate(
+                fold, over, empty_is_null=not _counts_rows(fold)
+            )
             var place = walk._record(
                 plan.exprs, built, String("__agg_", len(walk.aggs))
             )
@@ -5367,8 +5375,8 @@ def _reaches_out(
     return False
 
 
-def _counting(exprs: Expressions, at: Int) -> Bool:
-    """Whether a fold answers a number on a group with no rows in it.
+def _counts_rows(op: AggKind) -> Bool:
+    """Whether a fold answers a number over no values rather than a null.
 
     A count does and every other fold here does not, which is the whole of the
     count bug and the reason this is asked at all. `count` over nothing is zero
@@ -5377,15 +5385,30 @@ def _counting(exprs: Expressions, at: Int) -> Bool:
     over an empty group is not the null a left join pads with, and the one that
     has to have that null read back as something.
 
+    The same split decides `EMPTY_IS_NULL` on the fold a call lowers to, which
+    is the other end of the one question: what a fold with nothing in it
+    answers.
+
+    Args:
+        op: The fold.
+
+    Returns:
+        True for a count and a distinct count.
+    """
+    return op == AggKind.COUNT or op == AggKind.SIZE or op == AggKind.NUNIQUE
+
+
+def _counting(exprs: Expressions, at: Int) -> Bool:
+    """Whether a lowered fold answers a number on a group with no rows in it.
+
     Args:
         exprs: The arena.
         at: The lowered aggregate.
 
     Returns:
-        True for a count and a distinct count.
+        What `_counts_rows` says about the fold it names.
     """
-    var op = AggKind(UInt8(exprs.nodes[at].op))
-    return op == AggKind.COUNT or op == AggKind.SIZE or op == AggKind.NUNIQUE
+    return _counts_rows(agg_kind(exprs.nodes[at].op))
 
 
 def _scalar_join(

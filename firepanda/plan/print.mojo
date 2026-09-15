@@ -44,7 +44,13 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.temporal import civil_from_days
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import (
+    NEAREST,
+    UNBOUND,
+    ExprKind,
+    Expressions,
+    agg_kind,
+)
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -220,8 +226,11 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
         )
 
     if node.kind == ExprKind.AGGREGATE:
+        # The flag `EMPTY_IS_NULL` carries is deliberately not written. It
+        # changes one row of one answer in one case and nothing about the shape
+        # of the plan, and this is the rendering a person reads.
         return String(
-            AggKind(UInt8(node.op)),
+            agg_kind(node.op),
             "(",
             render_expr(tree, node.children[0]),
             ")",

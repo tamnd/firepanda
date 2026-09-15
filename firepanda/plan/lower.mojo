@@ -301,7 +301,14 @@ from firepanda.kernel.regex.replace import parse_rewrite
 from firepanda.kernel.regex.route import ENGINE_RE2
 from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import NEAREST, UNBOUND, ExprKind, Expressions
+from firepanda.plan.expr import (
+    NEAREST,
+    UNBOUND,
+    ExprKind,
+    Expressions,
+    agg_kind,
+    folds_empty_to_null,
+)
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -2296,7 +2303,8 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 )
             )
         var over = plan.exprs.nodes[held[i]].children[0]
-        var kind = AggKind(UInt8(plan.exprs.nodes[held[i]].op))
+        var kind = agg_kind(plan.exprs.nodes[held[i]].op)
+        var empty = folds_empty_to_null(plan.exprs.nodes[held[i]].op)
 
         if count == 0 and plan.exprs.nodes[over].kind == ExprKind.BINARY:
             var op = BinaryOp(UInt8(plan.exprs.nodes[over].op))
@@ -2324,6 +2332,7 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                         op,
                         Value(copy=plan.exprs.nodes[value].value),
                         value_on_left=left_is_value,
+                        empty_is_null=empty,
                     )
                 )
                 continue
@@ -2334,7 +2343,7 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         var made = _lower_expr(
             plan.exprs, over, pipe, base, names[i], memo, reuse=True
         )
-        aggs.append(GroupAgg(made, kind, names[i]))
+        aggs.append(GroupAgg(made, kind, names[i], empty_is_null=empty))
 
     if count == 0:
         pipe.add(Node(Reduce(aggs^)))
@@ -2679,7 +2688,7 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 reuse=True,
             )
         )
-        kinds.append(AggKind(UInt8(node.op)))
+        kinds.append(agg_kind(node.op))
 
     var made = len(pipe.schema) - base
     pipe.add(Node(Window(keys^, sources^, kinds^, names^)))
