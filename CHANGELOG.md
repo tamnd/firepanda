@@ -20,9 +20,10 @@ A bare column is the part that needed more than a lookup. `qty` in the query abo
 
 The line is saved and put back beside how far reach went, so a correlated subquery inside a correlated subquery nests rather than flattens.
 
-TPC-H q17 runs now, where it used to refuse, and running it found the next thing. No row survives its correlated filter at scale 0.01, so its whole answer is one sum over no rows, and a sum over no rows is null in SQL and zero here. `pixi run tpch` grew a second and shorter list for that, `disagreed`, which is the same device the expression differential already uses: a query that runs and answers something DuckDB does not is a worse gap than one that refuses, so it is written down with the issue that closes it and printed beside the difference every run rather than left out of the list or allowed to stop the run. Issue #838 is that one.
+TPC-H q17 answers now, where it used to refuse, and it took two changes rather than one. Running it at all was this. Answering what DuckDB answers was the sum over no rows in the entry below, which q17 is what found: no row survives its correlated filter at scale 0.01, so the whole of its answer is one sum over nothing.
 
-q2 and q20 are both past the names as well and stop on operator limits instead, q2 on a cross join whose right side is more than one row and q20 on a left join with two key pairs. Sixteen of the twenty two agree, five are refused in four places, and q17 is the one on the second list.
+q2 and q20 are both past the names as well and stop on operator limits instead, q2 on a cross join whose right side is more than one row and q20 on a left join with two key pairs. `pixi run tpch` is seventeen of twenty two, and the five that are left are refused in four places.
+
 ### Fixed: a SQL sum over no rows answers null rather than zero
 
 `SELECT sum(x) FROM t WHERE false` answered zero. DuckDB answers null, and so does every other SQL engine, because a total of nothing is not a total. pandas answers zero, because zero is what adding no numbers gives, and firepanda was answering pandas' answer to a SQL question. Issue #836.
