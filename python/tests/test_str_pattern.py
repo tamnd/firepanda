@@ -205,25 +205,29 @@ def test_contains_with_regex_off_searches_for_the_characters_themselves(
 
 
 @needs_pandas
-def test_flags_are_refused_rather_than_ignored(
+def test_a_flag_is_answered_or_refused_and_never_ignored(
     firepanda: ModuleType,
 ) -> None:
     """An ignored argument is the one failure mode a compatibility layer must not have.
 
     `case=False` used to be refused here beside this and is answered now, which
-    `test_str_case_insensitive.py` covers. Three of these four still refuse a
-    flag, because pandas hands a pattern that was passed one to its other engine
-    whatever the flag says, and that engine's scan is not written.
+    `test_str_case_insensitive.py` covers. Two of these three are answered as
+    well, out of the engine pandas hands a flagged pattern to, which
+    `test_str_flags_python_engine.py` measures. `count` is the one left and it
+    refuses, because the engine it would land on counts again from a different
+    place than Arrow does and that loop is not written.
 
-    `match` is the fourth and is no longer here. It compiles the pattern before
-    it routes it, so a pattern carrying ignore case and nothing else stays on
-    Arrow upstream and is answered here, and the two refusals it does have are
-    `ValueError` rather than this. `test_str_regex_case_and_flags.py` has them.
+    `match` is the fourth of the family and is no longer here. It compiles the
+    pattern before it routes it, so a pattern carrying ignore case and nothing
+    else stays on Arrow upstream and is answered here, and the two refusals it
+    does have are `ValueError` rather than this.
+    `test_str_regex_case_and_flags.py` has them.
     """
     mine = made(firepanda)
-    for name in ("contains", "fullmatch", "count"):
-        with pytest.raises(firepanda.errors.UnsupportedError):
-            getattr(mine.str, name)("abc", flags=re.IGNORECASE)
+    for name in ("contains", "fullmatch"):
+        assert getattr(mine.str, name)("ABCABC", flags=re.IGNORECASE).tolist()[0] is True
+    with pytest.raises(firepanda.errors.UnsupportedError):
+        mine.str.count("abc", flags=re.IGNORECASE)
 
 
 @needs_pandas

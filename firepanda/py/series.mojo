@@ -1636,7 +1636,10 @@ struct PySeries(Movable, Writable):
 
     @staticmethod
     def string_flag(
-        py_self: PythonObject, kind: PythonObject, arg: PythonObject
+        py_self: PythonObject,
+        kind: PythonObject,
+        arg: PythonObject,
+        flags: PythonObject,
     ) raises -> PythonObject:
         """Runs a `str` method that answers a mask and hands back a column.
 
@@ -1644,6 +1647,8 @@ struct PySeries(Movable, Writable):
             py_self: The series.
             kind: The method, as pandas spells it.
             arg: The prefix or the suffix.
+            flags: The regular expression flags passed beside the pattern, as
+                the kernel numbers them, and zero when there were none.
 
         Returns:
             A new series of booleans.
@@ -1659,6 +1664,7 @@ struct PySeries(Movable, Writable):
                         Self._held(py_self)[].series[],
                         words(kind, "kind"),
                         words(arg, "arg"),
+                        whole(flags, "flags"),
                     )
                 )
             )

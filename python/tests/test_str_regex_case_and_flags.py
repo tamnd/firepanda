@@ -258,16 +258,19 @@ def test_the_conflict_is_reported_before_the_flag_is(firepanda: ModuleType) -> N
 
 
 @needs_pandas
-def test_the_other_three_refuse_any_flag_at_all(firepanda: ModuleType) -> None:
+def test_the_other_three_take_the_flag_to_the_other_engine(
+    firepanda: ModuleType,
+) -> None:
     """`contains`, `fullmatch` and `count` hand a pattern with any flag argument
-    to Python's engine upstream, ignore case included, and that engine counts
-    and scans differently from Arrow. Answering them out of Arrow would be a
-    column that looks right, so they say no instead."""
+    to Python's engine upstream, ignore case included, and that engine scans
+    differently from Arrow. Two of the three are answered out of that engine now
+    and `test_str_flags_python_engine.py` is where they are measured. `count`
+    still refuses, because counting again from after a match is a rule the two
+    engines do not share and the second loop is not written."""
     mine = made(firepanda)
     for flags in (re.IGNORECASE, re.MULTILINE, re.UNICODE):
         for name in ("contains", "fullmatch"):
-            with pytest.raises(NotImplementedError):
-                getattr(mine.str, name)("a", flags=flags)
+            assert getattr(mine.str, name)("abc", flags=flags).tolist()[0] is True
         with pytest.raises(NotImplementedError):
             mine.str.count("a", flags=flags)
 
