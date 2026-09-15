@@ -72,16 +72,21 @@ from firepanda.kernel.regex.program import (
     Program,
     in_set,
     is_word_point,
+    is_word_point_unicode,
+    word_ranges_unicode,
 )
 from firepanda.kernel.regex.tokens import (
     AT_BEGINNING,
     AT_BEGINNING_LINE,
     AT_BEGINNING_STRING,
     AT_BOUNDARY,
+    AT_BOUNDARY_UNICODE,
     AT_END,
     AT_END_LINE,
     AT_END_STRING,
+    AT_END_TEXT,
     AT_NON_BOUNDARY,
+    AT_NON_BOUNDARY_UNICODE,
 )
 
 
@@ -126,15 +131,26 @@ def _point(points: Span[UInt32, _], lead: Int, at: Int) -> UInt32:
     return points[at - lead]
 
 
-def _holds(which: Int32, points: Span[UInt32, _], lead: Int, at: Int) -> Bool:
+def _holds(
+    which: Int32,
+    points: Span[UInt32, _],
+    lead: Int,
+    at: Int,
+    word: Span[Int32, _],
+) -> Bool:
     """Whether a position in the text is the kind of position an anchor wants.
 
-    `AT_END` is the line in this function where the two engines part company.
-    Python's `$` matches at the end of the text and also just before a newline
-    that ends it, so `re.search("a$", "a\\n")` finds something. RE2's matches
-    only at the end, so the same pattern through Arrow finds nothing. This is
-    the RE2 reading, and the Python one is a different table for the same
-    reason the classes are.
+    `AT_END` is RE2's dollar sign, which matches only at the end, and
+    `AT_END_TEXT` is Python's, which matches at the end and also just before a
+    newline that ends the text, so `re.search("a$", "a\\n")` finds something and
+    the same pattern through Arrow finds nothing. Which of the two an
+    instruction holds was settled while the pattern was being compiled, so this
+    function carries both readings and has no idea which engine asked for
+    either.
+
+    `AT_BOUNDARY_UNICODE` and `AT_NON_BOUNDARY_UNICODE` are the same story about
+    the word boundary. RE2 asks it against 63 characters and Python asks it
+    against 138558, and document 81 is where that was measured.
 
     `AT_END_STRING` is `\\z`, and `\\Z` arrives here as the same thing because
     pandas rewrites a trailing `\\Z` to `\\z` on the way to Arrow. A `\\Z` that
@@ -147,6 +163,8 @@ def _holds(which: Int32, points: Span[UInt32, _], lead: Int, at: Int) -> Bool:
         points: The text.
         lead: How many unreadable bytes stand in front of the text.
         at: How many characters have been read.
+        word: Python's word characters as ranges, empty when the program never
+            asks for one of the two Unicode boundaries.
 
     Returns:
         True when the anchor is satisfied here.
@@ -166,6 +184,24 @@ def _holds(which: Int32, points: Span[UInt32, _], lead: Int, at: Int) -> Bool:
         if at == length:
             return True
         return _point(points, lead, at) == NEWLINE
+    if which == Int32(Int(AT_END_TEXT)):
+        if at == length:
+            return True
+        if at != length - 1:
+            return False
+        return _point(points, lead, at) == NEWLINE
+    if which == Int32(Int(AT_BOUNDARY_UNICODE)) or which == Int32(
+        Int(AT_NON_BOUNDARY_UNICODE)
+    ):
+        var was = at > 0 and is_word_point_unicode(
+            _point(points, lead, at - 1), word
+        )
+        var next = at < length and is_word_point_unicode(
+            _point(points, lead, at), word
+        )
+        if which == Int32(Int(AT_BOUNDARY_UNICODE)):
+            return was != next
+        return was == next
     var before = at > 0 and is_word_point(_point(points, lead, at - 1))
     var after = at < length and is_word_point(_point(points, lead, at))
     if which == Int32(Int(AT_BOUNDARY)):
@@ -242,6 +278,7 @@ def _queue(
     lead: Int,
     position: Int,
     nslots: Int,
+    word: Span[Int32, _],
 ):
     """Adds an instruction and everything reachable from it without reading a
     character.
@@ -283,6 +320,8 @@ def _queue(
         lead: How many unreadable bytes stand in front of the text.
         position: Where in the text the assertions are to be judged.
         nslots: How many slots a thread carries.
+        word: Python's word characters as ranges, which only the two Unicode
+            boundaries read and which is empty when the program holds neither.
     """
     if stamp[Int(start)] == at:
         return
@@ -301,6 +340,7 @@ def _queue(
             lead,
             position,
             nslots,
+            word,
         )
     elif instruction.op == IN_SPLIT:
         _queue(
@@ -315,6 +355,7 @@ def _queue(
             lead,
             position,
             nslots,
+            word,
         )
         _queue(
             code,
@@ -328,9 +369,10 @@ def _queue(
             lead,
             position,
             nslots,
+            word,
         )
     elif instruction.op == IN_AT:
-        if _holds(instruction.a, points, lead, position):
+        if _holds(instruction.a, points, lead, position, word):
             _queue(
                 code,
                 list,
@@ -343,6 +385,7 @@ def _queue(
                 lead,
                 position,
                 nslots,
+                word,
             )
     elif instruction.op == IN_SAVE:
         if nslots == 0:
@@ -361,6 +404,7 @@ def _queue(
                 lead,
                 position,
                 nslots,
+                word,
             )
             return
         var slot = Int(instruction.a)
@@ -378,6 +422,7 @@ def _queue(
             lead,
             position,
             nslots,
+            word,
         )
         carry[slot] = was
     else:
@@ -421,12 +466,28 @@ struct Machine(Movable):
     """How many slots a thread carries, which is zero for a program compiled
     without captures and is then the whole of what the slot machinery costs."""
 
+    var word: List[Int32]
+    """Python's word characters as ranges, held here rather than read per
+    position because the table lives in the compiler's world and coming out of
+    it costs a copy of six kilobytes. Empty unless the program holds one of the
+    two Unicode boundaries, which is every program RE2 would have run."""
+
     def __init__(out self, program: Program):
         """Sizes the buffers for a program.
 
         Args:
             program: The compiled pattern this machine is going to run.
         """
+        self.word = []
+        for i in range(len(program.code)):
+            var instruction = program.code[i]
+            if instruction.op != IN_AT:
+                continue
+            if instruction.a == Int32(Int(AT_BOUNDARY_UNICODE)) or (
+                instruction.a == Int32(Int(AT_NON_BOUNDARY_UNICODE))
+            ):
+                self.word = word_ranges_unicode()
+                break
         self.stamp = List[Int32](length=program.sized(), fill=-1)
         self.here = []
         self.next = []
@@ -473,6 +534,7 @@ struct Machine(Movable):
                 0,
                 position,
                 0,
+                Span(self.word),
             )
             var i = 0
             while i < len(self.here):
@@ -495,6 +557,7 @@ struct Machine(Movable):
                         0,
                         position + 1,
                         0,
+                        Span(self.word),
                     )
                 i += 1
             swap(self.here, self.next)
@@ -575,6 +638,7 @@ struct Machine(Movable):
                     lead,
                     position,
                     self.nslots,
+                    Span(self.word),
                 )
             elif len(self.here) == 0:
                 break
@@ -607,6 +671,7 @@ struct Machine(Movable):
                         lead,
                         position + 1,
                         self.nslots,
+                        Span(self.word),
                     )
                 i += 1
             swap(self.here, self.next)
