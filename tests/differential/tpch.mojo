@@ -86,16 +86,18 @@ def tables() -> List[String]:
 def queries() -> List[Int]:
     """Which queries this asks about.
 
-    The three S4 names as its exit criteria, and q18, which answered what DuckDB
-    answers as soon as the two agreed on what to call a column the query did not
-    name. The other eighteen want a dependent join, a decimal, or both, and each
-    one is added here the day it runs rather than sitting in a list of pending
-    failures.
+    The three S4 names as its exit criteria, and the ones that answer what
+    DuckDB answers: q18, which ran as soon as the two engines agreed on what to
+    call a column the query did not name, and q16, which ran as soon as
+    predicate pushdown would send an equality past a mark join and into the
+    product below it. The rest want a dependent join, a decimal, a join order or
+    a cross product, and each one is added here the day it runs rather than
+    sitting in a list of pending failures.
 
     Returns:
         The query numbers.
     """
-    return [1, 3, 6, 18]
+    return [1, 3, 6, 16, 18]
 
 
 def recorded(number: Int) -> String:

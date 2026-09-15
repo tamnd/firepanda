@@ -69,17 +69,43 @@ a different row of.
 
 A join passes a predicate into the side that provides every column it reads, and
 only when the other side provides none of them, so the pass never has to decide
-which of two columns of one name was meant. Only inner joins, for now. An outer
-join invents null rows and a semi join is already a filter, so what is safe
-there is a longer argument than what is safe here, and the pass would rather do
-nothing than do it on a guess.
+which of two columns of one name was meant.
 
-A cross join is an inner join with nothing asked of the pair, so moving a
-predicate into one of its sides would be sound, and it is still not done. The
-operator behind a cross join pairs a whole frame against a single row, so a
+Which sides it may pass into depends on the kind, and the argument is about what
+happens to a row the predicate drops. An inner join passes into both. A row
+dropped on either side takes with it every pair it would have made, and the
+pairs it would have made are the only place that row could have reached the
+output.
+
+A left, semi, anti or mark join passes into the left side and into nothing else.
+The same argument holds on the left: all four hand out left rows, one output row
+reads one left row, and a left row dropped below drops exactly the output rows
+the predicate would have dropped above. It does not hold on the right. Dropping
+a right row below a left join does not drop the left row it matched, it null
+extends it instead, and a null is not what the predicate answered about. A semi
+join turns that left row into no row and an anti join turns it into a row, which
+are two more ways to get a different answer from the same push. A mark join is
+the same as the semi one with the answer written into a column, and a predicate
+that reads that column is reading something neither side has, so it stays where
+it is by the rule above rather than by a rule of its own.
+
+A right or a full outer join passes into neither side. It is the left join's
+argument in both directions at once.
+
+A cross join passes into the left side only. Both sides would be sound, since a
+cross join is an inner join with nothing asked of the pair, and the right side
+is left alone for a reason about the operator rather than about the answer: the
+lowering pairs a whole frame against a right side of a single row, and a
 predicate pushed into that side can leave it holding no row at all, which is a
-shape the lowering refuses. Filtering afterwards is what the query said and it
-runs, so that is what is left in place.
+shape it refuses. The left side has no such requirement and is the side a
+predicate that came from a `where` over a comma separated `from` wants anyway.
+
+What this is worth is not a constant factor. The two halves compose: a predicate
+that gets past a mark join reaches the cross join under it, and `_condition`
+turns that cross join into a pairing. TPC-H q16 is `from partsupp, part where
+ps_partkey = p_partkey and ... and ps_suppkey not in (...)`, which is a product
+under a mark join under a filter, and the equality could not reach the product
+until the mark join let it through. Before this the query did not run at all.
 
 ## The cross join gains a condition here
 
@@ -399,7 +425,8 @@ def _join(
         # An equality over the two sides is the condition this join was written
         # without, and putting it on the node turns the product into a pairing.
         _condition(plan, old, bound, carried)
-    var inner = plan.nodes[old].op == Int(JoinKind.INNER.code)
+    var kind = JoinKind(UInt8(plan.nodes[old].op))
+    var inner = kind == JoinKind.INNER
     if inner:
         # Transitive predicates. A filter on one side of an equality reaches
         # the other, and it arrives here as though it had been written above
@@ -408,12 +435,30 @@ def _join(
         # whole reason the condition is read first.
         derive(plan, old, bound, carried)
 
+    # Which way a predicate is allowed to go. An inner join lets one go either
+    # way, because a row either side drops takes every pair it would have made
+    # with it. The four that keep a left row whatever the right side holds let
+    # the left side's predicates go and nothing else: a right row dropped below
+    # a left join does not drop the left row it matched, it null extends it
+    # instead, and a null is not what the predicate was asked about. A cross
+    # join is the left half of that same rule, for a reason about the operator
+    # rather than about the answer, and the paragraph in the module docstring
+    # says which. A right or an outer join keeps everything where it was.
+    var leftwards = (
+        inner
+        or kind == JoinKind.CROSS
+        or kind == JoinKind.LEFT
+        or kind == JoinKind.SEMI
+        or kind == JoinKind.ANTI
+        or kind == JoinKind.MARK
+    )
+
     var to_left = List[Int]()
     var to_right = List[Int]()
     var here = List[Int]()
 
     for i in range(len(carried)):
-        if not inner:
+        if not leftwards:
             here.append(carried[i])
             continue
         var names = plan.exprs.names(carried[i])
@@ -432,12 +477,14 @@ def _join(
                 all_right = False
         if all_left and not any_right:
             to_left.append(carried[i])
-        elif all_right and not any_left:
+        elif inner and all_right and not any_left:
             to_right.append(carried[i])
         else:
             # Either it reads both sides, which makes it a join condition
             # rather than a filter on one of them, or it reads a name both
-            # sides have, and that is the ambiguity this pass refuses.
+            # sides have, and that is the ambiguity this pass refuses, or it
+            # reads the right side of a join that only lets the left side's
+            # predicates past.
             here.append(carried[i])
 
     var new_left = _rebuild(plan, left, bound, to_left^, into)

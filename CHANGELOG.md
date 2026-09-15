@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a predicate is sent past every join that keeps its left rows
+
+Predicate pushdown used to move a predicate into the side of an inner join that provides every column it reads, and to leave everything alone at every other kind of join. It now sends a predicate into the left side of a left, semi, anti, mark or cross join as well, which is the same rule the inner join already had, applied on the one side where it holds. Issue #309.
+
+The argument is about what happens to a row the predicate drops. All five of those kinds hand out left rows, so one output row reads one left row, and a left row dropped below the join drops exactly the output rows the predicate would have dropped above it. The other direction is the one that does not hold: a right row dropped below a left join does not drop the left row it matched, it null extends it instead, and a null is not what the predicate answered about. So the right side of those joins is still left alone, and a right or a full outer join still passes nothing in either direction.
+
+A cross join is the one where the reason is about firepanda rather than about SQL. Both sides would be sound, since a cross join is an inner join with nothing asked of the pair, and the right side is still left alone because the lowering pairs a whole frame against a right side of a single row, and a predicate pushed into that side can leave it holding no row at all.
+
+The two halves compose, and that is what this is worth. A predicate that gets past a mark join reaches the cross join under it, and the pass then turns that cross join into a pairing because the predicate is an equality over its two sides. TPC-H q16 is exactly that shape, a product under a mark join under a filter, and it did not run at all before this: the equality that pairs `partsupp` with `part` could not reach the product it belonged on. It now answers what DuckDB answers and has joined `pixi run tpch`, which covers five of the twenty two queries.
+
 ### Added: benchmark rows that say why a frame in one chunk runs a line slowly
 
 A frame that arrives in one chunk runs a filtering line about 1.65 times slower than the same rows in chunks, and every reader we have produces a frame in one chunk. Three rows were added to find out why, and between them they rule out the answer that looked obvious and point at the one that was not. Issue #800.
