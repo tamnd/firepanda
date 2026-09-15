@@ -22,6 +22,29 @@ separated ends up unchanged.
 Splitting only at `and`. An `or` cannot be split, because neither side of it has
 to hold for the row to survive.
 
+An `or` can still be read, though, and that is the second thing the pass does. A
+condition written into every branch of a disjunction holds whenever the
+disjunction does, so it can be carried as a conjunct of its own alongside it.
+`(a and b) or (a and c)` carries `a`. The `or` is left exactly as it was rather
+than having `a` taken out of it, because the copy left behind is one comparison
+on rows a pushed `a` has already thinned, and taking it out means deciding what
+a branch with nothing left in it means. Adding a condition and not removing one
+is the smaller change and the same rows come out. What gets carried is a copy of
+the condition rather than the index it already has, because the copy and the
+original end up on two plan nodes with two schemas and
+`Expressions.duplicate` says what binding does to a node read from both.
+
+Three valued logic does not need an exception. A filter keeps a row when its
+predicate is true, and if a disjunction is true then one of its branches is,
+and if that branch is true then every conjunct in it is true, `a` among them.
+So `a` is true wherever the `or` is, and asking it as well changes nothing about
+which rows survive.
+
+TPC-H q19 is why this is here. Its whole `where` is one disjunction of three
+branches and each branch writes out `p_partkey = l_partkey` for itself, so
+splitting at `and` reaches nothing, the cross join under it never becomes a
+pairing and the query does not run at all.
+
 ## The order the pieces go back in
 
 Putting them back is also the one chance to decide which runs first, and the
@@ -165,6 +188,7 @@ from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.plan.bind import Bound, bind, bind_all
+from firepanda.plan.cse import shape_of
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NodeKind, Plan, PlanNode
 from firepanda.plan.transit import derive
@@ -238,7 +262,15 @@ def _rebuild(
         # The node itself disappears here and is rebuilt wherever its pieces
         # come to rest, which for a filter that cannot move at all is directly
         # above the same input it was above before.
-        plan.exprs.conjuncts(plan.nodes[old].exprs[0], carried)
+        var pieces = List[Int]()
+        plan.exprs.conjuncts(plan.nodes[old].exprs[0], pieces)
+        var shared = List[Int]()
+        for i in range(len(pieces)):
+            _common(plan, pieces[i], shared)
+        for i in range(len(pieces)):
+            carried.append(pieces[i])
+        for i in range(len(shared)):
+            carried.append(shared[i])
         return _rebuild(plan, inputs[0], bound, carried^, into)
 
     if (
@@ -265,6 +297,75 @@ def _rebuild(
     var input = _rebuild(plan, inputs[0], bound, down^, into)
     var at = _emit(plan, old, [input], into)
     return _apply(plan, at, here^, into)
+
+
+def _common(mut plan: Plan, root: Int, mut out: List[Int]) raises:
+    """Finds the conditions every branch of a disjunction holds.
+
+    Does nothing to anything that is not an `or` of two or more branches, which
+    is most of what it is handed.
+
+    The candidates are the first branch's conjuncts, since a condition every
+    branch holds is one the first branch holds, and a candidate survives a
+    branch when that branch holds a conjunct computing the same thing. Same
+    thing rather than same index, because the three branches of TPC-H q19 each
+    wrote `p_partkey = l_partkey` out for themselves and no pass has unified
+    them, so `shape_of` is what decides it.
+
+    Args:
+        plan: The plan, whose arena is read.
+        root: The predicate this was carrying.
+        out: The conditions every branch holds, appended to, each once.
+
+    Raises:
+        If an expression is not in the arena.
+    """
+    plan.exprs.check(root)
+    if plan.exprs.nodes[root].kind != ExprKind.CALL:
+        return
+    if plan.exprs.nodes[root].name != "or":
+        return
+    var branches = plan.exprs.nodes[root].children.copy()
+    if len(branches) < 2:
+        return
+
+    var candidates = List[Int]()
+    plan.exprs.conjuncts(branches[0], candidates)
+    var keys = List[String](capacity=len(candidates))
+    var alive = List[Bool](capacity=len(candidates))
+    for i in range(len(candidates)):
+        var key = shape_of(plan.exprs, candidates[i])
+        var first = True
+        for j in range(i):
+            if keys[j] == key:
+                first = False
+                break
+        keys.append(key^)
+        alive.append(first)
+
+    for branch in range(1, len(branches)):
+        var theirs = List[Int]()
+        plan.exprs.conjuncts(branches[branch], theirs)
+        var seen = List[String](capacity=len(theirs))
+        for i in range(len(theirs)):
+            seen.append(shape_of(plan.exprs, theirs[i]))
+        for i in range(len(candidates)):
+            if not alive[i]:
+                continue
+            var held = False
+            for j in range(len(seen)):
+                if seen[j] == keys[i]:
+                    held = True
+                    break
+            alive[i] = held
+
+    for i in range(len(candidates)):
+        if alive[i]:
+            # A copy rather than the index itself. The condition stays inside
+            # the disjunction as well, the two end up on two plan nodes with
+            # two schemas, and `duplicate` says what binding does to a node
+            # read from both.
+            out.append(plan.exprs.duplicate(candidates[i]))
 
 
 def _split(

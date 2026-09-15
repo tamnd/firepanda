@@ -68,6 +68,19 @@ A pattern opening with a global flag group is the one place this library rewrite
 A refusal reaches Python as one of two exceptions. A pattern RE2 refuses is a `ValueError`, which is what pandas raises for it out of Arrow, so `a*+` and `(?#note)a` behave the same in both libraries. A pattern this library has not learned yet, such as a lookaround or a backreference or `case=False` with a metacharacter, is a `NotImplementedError`, because a caller who catches `ValueError` around a pattern they know to be good should not be told they wrote a bad one.
 
 `pixi run differential-regex-match` now runs three sweeps over the same thirty thousand generated patterns, one per method, and each of them agrees with pandas on every text of every pattern it compares. `count` and `replace` did not move, because both need to know where a match ends and the engine answers whether there is one, and document 78 section 11 has the rest of what is left.
+### Changed: a condition written into every branch of an OR is carried out of it
+
+Predicate pushdown splits a filter at its `and` nodes, which reaches nothing when the filter is one `or`. It now also reads a disjunction and carries out of it any condition every branch holds, as a conjunct of its own that can then be pushed like any other. `(a AND b) OR (a AND c)` carries `a`. Issue #309.
+
+Three valued logic needs no exception. A filter keeps a row when its predicate is true, and if a disjunction is true then one of its branches is, and if that branch is true then every conjunct in it is true. So the condition is true wherever the `or` is, and asking it as well changes nothing about which rows survive.
+
+The `or` is left exactly as it was rather than having the condition taken out of it. The copy left behind runs on rows the pushed condition has already thinned, and taking it out means deciding what a branch with nothing left in it means. Adding a condition and not removing one is the smaller change and the same rows come out.
+
+TPC-H q19 is why this is here. Its whole `WHERE` is one disjunction of three branches, and each branch writes out `p_partkey = l_partkey` for itself rather than the query stating it once outside them. Nothing could reach the product under the filter, so the query did not run at all. It now answers what DuckDB answers over 1 row, and eleven of the twenty two queries are in `pixi run tpch`.
+
+### Added: an expression can be copied rather than shared
+
+`Expressions.duplicate` returns a second copy of a whole expression tree, sharing no index with the first. Handing one index to two plan nodes looks free and is not: binding writes a column's position into the node it resolved, two plan nodes have two schemas, and the second one to be bound overwrites what the first one needs. A pass that wants to put an expression somewhere it already is has to copy it, and this is the copy. Issue #309.
 
 ### Added: the five TPC-H queries that already answered are now compared
 
