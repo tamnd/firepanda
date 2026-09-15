@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
+
+The ASCII fast path that went out in 0.8.4 went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
+
+`casefold` already had a shortcut for an element that is all ASCII and the shortcut went through the standard library's `lower`, so an ASCII element was walked once to find out it was well formed, walked again to find out it was ASCII, walked a third time into a fresh `String`, and then copied into the column being built before that `String` was dropped. Folding ASCII is lowering it, because all 353 code points that fold to something other than their lower case are above 127, so the one rule that makes folding different from lowering is the one rule that can never apply here. It takes the same single pass `upper` takes now.
+
+`isascii` is the other one. The helper behind it read a byte, compared it and branched, for every byte of every element, and it is the whole of what that kernel does. The top bits are accumulated into a register and asked about once at the end now, which is the same trick the case pass plays. `swapcase` and `title` call the same helper and get it for free.
+
+Measured here over a million elements of thirty two ASCII bytes, alternating the two binaries on a shared machine, with `strings/build_long` carried alongside as the control since it is the same loop with the case work taken out. The control ran 17.223 ms before and 16.145 ms after, which is the width of the noise. `strings/casefold_long` went from 5.668 seconds to 16.605 ms, and since the copy underneath it is 16.145 of those, what is left of the fold is about a nanosecond a row. `strings/ascii_long` went from 12.216 ms to 1.325 ms, which is nine times.
+
+Nothing about the Unicode answers moves. An element with a byte at or above 0x80 is refused by the pass and takes the path it took before, so the 353 folds, the corrections and the bytes that are not UTF-8 all come out as they did.
+
 ## [0.8.5] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -413,17 +425,6 @@ The pattern is folded once and the row is never folded at all, so nothing column
 One finding came out of sweeping the argument space. `n=0` means no replacements to `str.replace` and every replacement to `str.replace(case=False)`, because the Arrow path takes the number at its word and the fallback hands it to `re.sub`, where zero has meant unlimited since long before pandas existed. Same method, same column, two answers. This library matches pandas, and widens the zero in the Python layer so that the number still means what it says in the kernel.
 
 `flags` is still refused. Every flag is a statement about a regular expression and there is still no engine, so `re.IGNORECASE` written as a flag says no even though it is the same request `case=False` makes.
-### Changed: `casefold` over ASCII text stops paying for a walk and an allocation, and the ASCII question is answered a register at a time
-
-The fix below went into `upper` and `lower` and nowhere else, and two things in the same file were left holding the same bill.
-
-`casefold` already had a shortcut for an element that is all ASCII and the shortcut went through the standard library's `lower`, so an ASCII element was walked once to find out it was well formed, walked again to find out it was ASCII, walked a third time into a fresh `String`, and then copied into the column being built before that `String` was dropped. Folding ASCII is lowering it, because all 353 code points that fold to something other than their lower case are above 127, so the one rule that makes folding different from lowering is the one rule that can never apply here. It takes the same single pass `upper` takes now.
-
-`isascii` is the other one. The helper behind it read a byte, compared it and branched, for every byte of every element, and it is the whole of what that kernel does. The top bits are accumulated into a register and asked about once at the end now, which is the same trick the case pass plays. `swapcase` and `title` call the same helper and get it for free.
-
-Measured here over a million elements of thirty two ASCII bytes, alternating the two binaries on a shared machine, with `strings/build_long` carried alongside as the control since it is the same loop with the case work taken out. The control ran 17.223 ms before and 16.145 ms after, which is the width of the noise. `strings/casefold_long` went from 5.668 seconds to 16.605 ms, and since the copy underneath it is 16.145 of those, what is left of the fold is about a nanosecond a row. `strings/ascii_long` went from 12.216 ms to 1.325 ms, which is nine times.
-
-Nothing about the Unicode answers moves. An element with a byte at or above 0x80 is refused by the pass and takes the path it took before, so the 353 folds, the corrections and the bytes that are not UTF-8 all come out as they did.
 
 ### Changed: `upper` and `lower` over ASCII text run sixty times faster
 
