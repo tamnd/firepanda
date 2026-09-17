@@ -283,7 +283,14 @@ class Series:
         """Whether the column is sorted, one way or the other."""
         ...
     def string_text(
-        self, kind: str, arg: str, other: str, start: int | None, stop: int | None, step: int
+        self,
+        kind: str,
+        arg: str,
+        other: str,
+        start: int | None,
+        stop: int | None,
+        step: int,
+        flags: int,
     ) -> Series:
         """One str accessor method that answers text, as a column."""
         ...
@@ -328,7 +335,9 @@ class Series:
     def string_flag(self, kind: str, arg: str, flags: int) -> Series:
         """One str accessor method that answers a mask, as a column."""
         ...
-    def string_number(self, kind: str, arg: str, start: int | None, stop: int | None) -> Series:
+    def string_number(
+        self, kind: str, arg: str, start: int | None, stop: int | None, flags: int
+    ) -> Series:
         """One str accessor method that answers a number, as a column."""
         ...
     def string_is_text(self) -> bool:

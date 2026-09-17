@@ -234,19 +234,22 @@ def test_a_pattern_the_engine_refuses_is_a_value_error(firepanda: ModuleType) ->
         assert pattern in str(caught.value), pattern
 
 
-def test_flags_are_refused_rather_than_ignored(firepanda: ModuleType) -> None:
+def test_flags_move_the_call_to_the_other_engine(firepanda: ModuleType) -> None:
     """`count` takes flags and upstream serves them by handing the pattern to
-    Python's `re`, which is the engine that is not written.
+    Python's `re`, which counts by a different rule from the Arrow kernel this
+    file is otherwise about.
 
-    An ignored argument is the one failure a compatibility layer must not have,
-    so the refusal stands even though the pattern beside it would compile.
+    Both rules are asserted here on one pattern, because the pair is the point.
+    An empty pattern is a match of no width at every position, Arrow steps one
+    byte past one and Python steps one character, so a row holding a two byte
+    letter is counted two different ways one keyword apart.
+    `test_str_count_replace_python_engine.py` has the rest of that engine.
     """
     import re
 
-    mine = made(firepanda)
-    for pattern in ("a.c", "abc"):
-        with pytest.raises(NotImplementedError):
-            mine.str.count(pattern, flags=re.IGNORECASE)
+    mine = made(firepanda, ["\u00df"])
+    assert mine.str.count("").tolist() == [3]
+    assert mine.str.count("", flags=re.IGNORECASE).tolist() == [2]
 
 
 def test_a_pattern_that_is_not_a_string_is_a_type_error(firepanda: ModuleType) -> None:

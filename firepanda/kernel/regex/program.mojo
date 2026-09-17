@@ -258,6 +258,25 @@ struct Program(Movable):
     refusal is this one.
     """
 
+    var python: Bool
+    """Which engine this was built for, with True meaning Python's.
+
+    The instructions are the same either way and this is not read while the
+    program runs. What reads it is the scan around the program, because the two
+    engines walk a row looking for a second match by different rules and the
+    rules belong to whoever compiled the pattern rather than to whoever is
+    walking. `firepanda/kernel/regex/pike.mojo` has both loops and
+    `firepanda/kernel/regex/replace.mojo` has the other two, and a caller that
+    has a program has already been told which pair it wants.
+
+    It also picks the grammar the replacement string is read by, which is the
+    one place where a fact about the pattern decides something about an argument
+    that is not the pattern. That is upstream's arrangement rather than one made
+    here: `re.sub` reads its template Python's way and `replace_substring_regex`
+    reads its rewrite RE2's way, and which of the two a call reaches is the same
+    routing decision that picked the engine.
+    """
+
     var labels: List[String]
     """What each group is called, one entry per group and empty for an unnamed
     one.
@@ -279,6 +298,7 @@ struct Program(Movable):
         self.gap = False
         self.slots = 0
         self.groups = 0
+        self.python = False
         self.labels = []
 
     def sized(self) -> Int:
@@ -1270,6 +1290,7 @@ def compile_program(
     """
     var out = Program()
     var python = engine == ENGINE_PYTHON
+    out.python = python
     if not tree.ok:
         # pandas gives Arrow the pattern as written, and RE2 has syntax Python
         # does not, so `\p{L}` is a working pattern upstream and unreachable

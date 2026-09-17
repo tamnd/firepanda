@@ -8683,18 +8683,20 @@ class StringMixin:
         stop: int | None = None,
         step: int = 1,
         other: str = "",
+        flags: int = 0,
     ) -> Series:
         """Runs a method that answers text.
 
         `other` is last rather than beside `arg` because only `replace` passes
         it and every other call here would have had to write an empty string
-        into the middle of its arguments.
+        into the middle of its arguments, and `flags` is last for the same
+        reason with one name rather than two.
         """
         from ._frame import Series
 
         try:
             return Series._wrap(
-                self._series._inner.string_text(kind, arg, other, start, stop, step)
+                self._series._inner.string_text(kind, arg, other, start, stop, step, flags)
             )
         except Exception as error:
             raise translate(error) from None
@@ -8714,12 +8716,13 @@ class StringMixin:
         arg: str = "",
         start: int | None = None,
         stop: int | None = None,
+        flags: int = 0,
     ) -> Series:
         """Runs a method that answers a number."""
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.string_number(kind, arg, start, stop))
+            return Series._wrap(self._series._inner.string_number(kind, arg, start, stop, flags))
         except Exception as error:
             raise translate(error) from None
 
@@ -8937,30 +8940,24 @@ class StringMixin:
         return text
 
     @staticmethod
-    def _fold_word(case: Any, flags: Any, name: str) -> str:
-        """Picks which of the two searches the pattern runs through.
+    def _no_flags(flags: Any, name: str) -> None:
+        """Refuses a flag for the one name that still cannot carry one.
 
-        `case=False` used to be refused here beside `flags` and is now served,
-        which leaves one refusal rather than two. `flags` still says no for the
-        two names that still come through here, `replace` and `extract`, because
-        a flag beyond ignore case moves the call to Python's engine upstream and
-        that engine runs a different scan for both of them. The four that ask a
-        question rather than answer one go through `_folding` instead.
-
-        The fold a search compares through is not the one `casefold` does. It
-        maps one character to one character, so `STRASSE` does not hold `straße`
-        even though the two casefold to the same word, and document 69 says
-        where that rule was measured from. The word carries the choice because
-        the kernel has a second entry point rather than a flag.
+        That name is `extract`, and the reason is no longer that Python's engine
+        has no scan, since it has all three now. It is that `extract` reaches
+        that engine already and by a different door: it hands back a frame of
+        groups rather than a column, so the flags would have to cross beside the
+        group count rather than beside the pattern, and the door it uses takes
+        neither. The five names that answer with one column go through
+        `_folding` instead and all of them carry flags.
         """
         if flags:
             raise UnsupportedError(
                 f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
             )
-        return "" if case is None or case else "_folded"
 
     @staticmethod
-    def _folding(kind: str, case: Any, flags: Any, regex: bool = True) -> tuple[bool, int]:
+    def _folding(kind: str, case: Any, flags: Any, regex: bool = True) -> tuple[bool, int, bool]:
         """Whether a pattern method folds, which engine it lands on, and how it refuses.
 
         `case=False` and `flags=re.IGNORECASE` are one argument written twice.
@@ -8978,11 +8975,17 @@ class StringMixin:
         rather than a line drawn here. `match` alone compiles the pattern before
         it routes it, so a pattern carrying nothing but ignore case still
         reaches Arrow, while `contains`, `fullmatch`, `count` and `replace` hand
-        any flag straight to Python's engine. Two of those four are served now.
-        `count` and `replace` are not, because Python's engine scans a row for a
-        second match by a different rule than Arrow does and that loop is not
-        written yet, so they are refused below rather than answered out of the
-        wrong one.
+        any flag straight to Python's engine. All four are served now, since the
+        two scans that engine needs are written.
+
+        The third thing this returns is the route, which used to be read off the
+        flags being nonzero and cannot be any more. `replace` reaches Python's
+        engine with no flags at all when its replacement names a group by name
+        or when its pattern is empty, so the route is a fact of its own and is
+        carried as one. `replace` does not come through here, because it has a
+        `regex` argument that changes what its pattern means rather than only
+        where it runs, but the pair of facts is the same pair and the word the
+        kernel gets is built the same way at both ends.
 
         A flag beside `regex=False` is refused as well, and it looks at first
         like the one refusal here with nothing behind it, because upstream reads
@@ -9017,11 +9020,11 @@ class StringMixin:
                 raise InvalidArgumentError(
                     "firepanda:value: Cannot pass flags that do not match pat.flags"
                 )
-            return folded, 0
-        if flags and regex and kind in ("contains", "fullmatch"):
+            return folded, 0, False
+        if flags and regex:
             if case is not None and not case:
                 flags = flags | re.IGNORECASE
-            return False, _door_flags(flags, kind)
+            return False, _door_flags(flags, kind), True
         if flags and not regex:
             raise UnsupportedError(
                 f"firepanda:unsupported: str.{kind} was passed a flag beside regex=False,"
@@ -9029,12 +9032,7 @@ class StringMixin:
                 " that upper cases both sides, which disagrees with a case insensitive"
                 " byte search about a sharp s"
             )
-        if flags:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{kind} hands any flag argument to Python's"
-                " engine upstream, and that engine's scan is not written yet"
-            )
-        return case is not None and not case, 0
+        return case is not None and not case, 0, False
 
     def _searched(self, kind: str, pat: Any, case: Any, flags: Any, na: Any, regex: bool) -> Series:
         """Whether a pattern is in every row, at the front, or the whole row.
@@ -9056,17 +9054,19 @@ class StringMixin:
         the byte search maps one character to one character and would not.
         """
         pat = self._a_pattern(pat)
-        folded, argued = self._folding(kind, case, flags, regex)
+        folded, argued, python = self._folding(kind, case, flags, regex)
         fold = "_folded" if folded else ""
-        if argued or _needs_an_engine(pat, regex):
-            answer = self._matched(kind, pat, folded, argued)
+        if python or _needs_an_engine(pat, regex):
+            answer = self._matched(kind, pat, folded, argued, python)
         else:
             answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
         if na is None:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
 
-    def _matched(self, kind: str, pat: str, folded: bool, argued: int = 0) -> Series:
+    def _matched(
+        self, kind: str, pat: str, folded: bool, argued: int = 0, python: bool = False
+    ) -> Series:
         """Runs a pattern through the regular expression engine.
 
         `case=False` used to stop here and now goes through as a word, because
@@ -9084,12 +9084,25 @@ class StringMixin:
         decision. `firepanda/py/text.mojo` has which pattern and why.
 
         Which anchor that rewrite uses is decided on the other side too, and it
-        depends on the same number this hands over. A call that stayed on Arrow
-        is anchored the way pandas anchors it, and a call that a flag moved to
+        depends on which word this hands over. A call that stayed on Arrow is
+        anchored the way pandas anchors it, and a call that a flag moved to
         Python's engine is not anchored by a rewrite upstream at all, so it gets
         the two positions no flag can move rather than the two pandas writes.
+
+        The engine rides in the word and the flag letters ride in the number,
+        which is one rule rather than the two it started as. The number being
+        nonzero used to be the route, and it stopped being able to say so once
+        `replace` was served, because that name reaches Python's engine with no
+        flags at all on two shapes of call. A word can always say which engine
+        it means and a number cannot, so the word says it for all five names.
         """
-        return self._flag(f"{kind}_regex_folded" if folded else f"{kind}_regex", pat, argued)
+        if python:
+            word = f"{kind}_regex_python"
+        elif folded:
+            word = f"{kind}_regex_folded"
+        else:
+            word = f"{kind}_regex"
+        return self._flag(word, pat, argued)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
         """How many times a pattern matches in every row.
@@ -9108,9 +9121,19 @@ class StringMixin:
         like when it does, are three rules that came out of measuring pandas
         rather than out of reading either engine. `firepanda/kernel/regex/pike.mojo`
         has them and document 79 has where they were measured.
+
+        A flag makes it a fourth rule rather than a variation on the three,
+        because the flag moves the call to Python's engine and that engine
+        counts by walking `finditer`, which never cuts the row down and steps
+        one character rather than one byte past a match of no width. So
+        `count("^")` on a row of three letters is four upstream without a flag
+        and one with `re.M`, and `count("")` on a row holding a sharp s is three
+        without one and two with. Two rules, two scans, and the word says which.
         """
-        self._a_pattern(pat)
-        self._folding("count", None, flags)
+        pat = self._a_pattern(pat)
+        _, argued, python = self._folding("count", None, flags)
+        if python:
+            return self._number("count_regex_python", pat, flags=argued)
         if _needs_an_engine(pat, True):
             return self._number("count_regex", pat)
         return self._number("count", self._literal(pat, True, "count"))
@@ -9133,6 +9156,44 @@ class StringMixin:
         pandas does with one, and `repl` has to be absent when a dict is given
         because the dict holds both halves.
 
+        ### Four shapes of call land on Python's engine
+
+        A flag, a `case=False`, a replacement holding `\\g<` beside `regex=True`,
+        and an empty pattern beside `regex=True` read as one. The first two are
+        the ordinary reason a call moves engines and the last two are not about
+        case at all: pandas reads a replacement naming a group by name out of
+        `re`, and it sends an empty pattern there because pyarrow used not to
+        terminate on one. So the route cannot be read off the flags, which are
+        zero on both of those, and it is worked out here and then said in the
+        word the kernel is given.
+
+        The `\\g<` test is upstream's own and it is written without looking at
+        `regex`, which reads like it moves a literal replacement too and does
+        not. The call it moves lands in a branch that asks `regex or flags or
+        callable(repl)` before it reads the replacement as a template, and a
+        literal call answers no to all three, so it comes back out as a plain
+        `str.replace` with the backslashes meaning themselves. Measured:
+        `replace("X", r"\\g<0>", regex=False)` on `aXb` gives `a\\g<0>b` and the
+        same call with `regex=True` gives `aXb`. So the test is narrowed here to
+        the calls it actually changes.
+
+        `case=False` moves the call rather than picking the folded byte search,
+        which is a change from the four names above and is what upstream does.
+        `_str_replace` turns the argument into `re.IGNORECASE` and compiles the
+        pattern with it, and it escapes the pattern first when `regex` is False
+        rather than taking a different path, so both settings of `regex` end up
+        in the same engine with the same fold. That fold is the regex one, which
+        maps every code point that folds onto a letter rather than one character
+        onto one character, so `replace("k", "#", case=False)` swaps a Kelvin
+        sign upstream and the byte search would have left it alone.
+
+        The count comes out right on that path for a reason worth writing down.
+        `re.sub` takes a count and reads zero as unlimited, which is the opposite
+        of what the Arrow path reads it as, so `n=0` and `n=-1` are one argument
+        here and two there. It is measured, it is pandas, and it is widened on
+        the way out rather than in the kernel, where the number still means what
+        it says.
+
         ### Why a count and a pattern are refused together
 
         `n` of zero or more takes a different path in Arrow, one that finds a
@@ -9150,6 +9211,10 @@ class StringMixin:
         Both halves of that are needed: the pattern has to mean itself and the
         replacement has to mean itself, and either one failing is a call where
         the two paths would answer differently.
+
+        None of that applies once the call is on Python's engine, where a count
+        is a count and the scan stops after it, so `replace(pat, repl, n=2,
+        case=False)` is answered rather than refused.
         """
         if isinstance(pat, dict):
             if repl is not None:
@@ -9167,50 +9232,30 @@ class StringMixin:
             )
         if not isinstance(repl, str):
             raise DTypeError("firepanda:dtype: repl must be a string or callable")
-        fold = self._fold_word(case, flags, "replace")
+        text = self._a_pattern(pat)
         limit = self._width(n, "n")
-        if fold and limit == 0:
-            # `n=0` means no replacements to pandas and all of them to pandas,
-            # depending on `case`, on the same column in the same call. The
-            # Arrow path takes the number at its word and the fallback path
-            # hands it to `re.sub`, where a count of zero has meant unlimited
-            # since long before pandas existed, so turning the search insensitive
-            # silently turns a request for nothing into a request for everything.
-            # It is measured, it is pandas, and matching it is the job, so the
-            # zero is widened here rather than in the kernel, where the number
-            # still means what it says.
-            limit = -1
-        if not fold and isinstance(pat, str) and regex:
-            if r"\g<" in repl:
-                # pandas reads a replacement holding this out of Python's `re`
-                # rather than out of Arrow, whichever way `regex` was written,
-                # and the two grammars name a group differently.
-                raise UnsupportedError(
-                    "firepanda:unsupported: str.replace with a named group in the"
-                    " replacement needs the Python engine and none is written yet"
-                )
-            if pat == "" and "\\" in repl:
-                # An empty pattern is the one shape pandas sends to Python's
-                # engine rather than to Arrow, because pyarrow used not to
-                # terminate on one, so the replacement is read by Python's
-                # grammar there and the two grammars only agree while there is
-                # no backslash in it to disagree about.
-                raise UnsupportedError(
-                    "firepanda:unsupported: str.replace with an empty pattern reads the"
-                    " replacement out of the Python engine upstream and none is written"
-                    " yet"
-                )
+        letters = flags | (re.IGNORECASE if case is not None and not case else 0)
+        if letters or (regex and (r"\g<" in repl or text == "")):
+            argued = _door_flags(letters, "replace") if letters else 0
+            return self._text(
+                "replace_regex_python",
+                text if regex else re.escape(text),
+                None if limit <= 0 else limit,
+                other=repl,
+                flags=argued,
+            )
+        if regex:
             if limit < 0:
-                return self._text("replace_regex", pat, other=repl)
-            if _needs_an_engine(pat, True) or "\\" in repl:
+                return self._text("replace_regex", text, other=repl)
+            if _needs_an_engine(text, True) or "\\" in repl:
                 raise UnsupportedError(
                     "firepanda:unsupported: str.replace with a regular expression and a"
                     " count is a different scan upstream, and the one it runs replaces"
                     " nothing after the first match and raises on a pattern of no width"
                 )
         return self._text(
-            f"replace{fold}",
-            self._literal(pat, bool(regex), "replace"),
+            "replace",
+            self._literal(text, bool(regex), "replace"),
             limit,
             other=repl,
         )
@@ -9386,7 +9431,7 @@ class StringMixin:
 
         if not isinstance(expand, bool):
             raise InvalidArgumentError("firepanda:value: expand must be True or False")
-        self._fold_word(None, flags, "extract")
+        self._no_flags(flags, "extract")
         try:
             names, columns = self._series._inner.string_extract(pat)
         except Exception as error:

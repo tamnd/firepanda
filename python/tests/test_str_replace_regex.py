@@ -272,14 +272,18 @@ def test_a_count_with_a_plain_pattern_still_works(firepanda: ModuleType) -> None
         assert got == want, limit
 
 
-def test_a_named_group_in_the_replacement_is_not_implemented(
+@needs_pandas
+def test_a_named_group_in_the_replacement_moves_the_call(
     firepanda: ModuleType,
 ) -> None:
     """pandas reads a replacement holding one out of Python's `re` rather than
-    out of Arrow, and that engine is not written."""
+    out of Arrow, so the call moves engines with no flag anywhere in it. That is
+    why the engine travels as a word rather than as a flags number, and
+    `test_str_count_replace_python_engine.py` has the rest of it."""
     mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.replace("(a)", "\\g<1>", regex=True)
+    got = mine.str.replace("(a)", "\\g<1>!", regex=True)
+    want = theirs().str.replace("(a)", "\\g<1>!", regex=True)
+    assert without_the_missing(got.tolist()) == without_the_missing(want.tolist())
 
 
 @needs_pandas

@@ -297,10 +297,15 @@ def test_a_flag_beside_the_case_argument_changes_which_engine_answers(
     and that is not enough to make it the same call.
 
     pandas routes a pattern that was handed any flag to Python's engine, so the
-    two spellings land on two engines with two fold tables. Two of the four
-    names take that route now and `test_str_flags_python_engine.py` measures
-    where it leads. `replace` does not, because the engine it would land on
-    replaces by a rule Arrow does not share and that loop is not written.
+    two spellings land on two engines with two fold tables.
+    `test_str_flags_python_engine.py` measures where that leads for the two
+    names that ask for a mask and `test_str_count_replace_python_engine.py`
+    measures it for the two that need a scan around the engine.
+
+    `replace` is the odd one of the four, because `case=False` alone is already
+    enough to move it. Upstream turns that argument into the flag and compiles
+    the pattern with it rather than reaching for a second kernel, so the two
+    spellings are one call there and the fold is the engine's either way.
     """
     import re
 
@@ -308,8 +313,8 @@ def test_a_flag_beside_the_case_argument_changes_which_engine_answers(
     for name in ("contains", "fullmatch"):
         answer = getattr(mine.str, name)("ABCABC", case=False, flags=re.IGNORECASE)
         assert answer.tolist()[0] is True
-    with pytest.raises(firepanda.errors.UnsupportedError):
-        mine.str.replace("a", "#", case=False, flags=re.IGNORECASE)
+    both = mine.str.replace("a", "#", case=False, flags=re.IGNORECASE, regex=True)
+    assert both.tolist() == mine.str.replace("a", "#", case=False, regex=True).tolist()
 
 
 @needs_pandas
