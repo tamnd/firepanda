@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: join ordering reaches a comma FROM that a correlated subquery sits above
+
+`FROM part, supplier, partsupp, nation, region WHERE p_partkey = ps_partkey AND ... AND ps_supplycost = (SELECT min(ps_supplycost) FROM ...)` was refused for a cross join of every part against every supplier, and the same query without the subquery was not. TPC-H q2 is that query. Issue #816.
+
+The pass that takes the product out of a comma `FROM` looks under a filter for the chain of comma joins the equalities belong to. A correlated subquery is decorrelated into a join that is written above the `FROM` it correlates against and below the `WHERE` that reads its answer, so the chain ends up a level down and the pass found the decorrelated join where it was looking for a chain. It gave up there and left the product where the query wrote it.
+
+A join that is not a comma is now stepped through on its left input, which is the side the chain is on, and the same filter is offered to what is under it. Stepping stops at the first comma join, since that one is the top of a chain and has just been read as one. Nothing else changes: the rule for choosing an order is the rule it was, the equalities read are the ones in the filter above, and a chain already in an order with no product in it is still left exactly where it was.
+
+TPC-H q2 answers now and agrees with DuckDB. `pixi run tpch` is eighteen of twenty two, up from seventeen, and the four left are refused in three places rather than four.
+
 ## [0.8.7] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).

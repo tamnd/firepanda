@@ -8,8 +8,10 @@ one form of a shape a reader can check without holding the arena in their head.
 
 The groups are: a chain the pass reorders, the chains it leaves exactly as they
 were and why each one of those is not a bug, the self join where a qualifier
-decides which relation a column belongs to, and the two together with predicate
-pushdown, which is the only pair of them that says what the pass is for.
+decides which relation a column belongs to, a chain a level down from the filter
+because a decorrelated subquery's join sits between the two, and the two together
+with predicate pushdown, which is the only pair of them that says what the pass
+is for.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises
@@ -335,6 +337,83 @@ def test_the_order_the_pass_chose_is_one_the_pushdown_can_key() raises:
     # run it. Reordered, both joins have keys on them.
     assert_equal(_crosses(plan, at), 0, "no product is left in the plan")
     assert_true("JOIN inner" in explain(plan, at), "and the joins are keyed")
+
+
+def test_a_chain_under_a_decorrelated_join_is_reordered_too() raises:
+    # TPC-H q2's shape. The comma FROM is a level down from the filter holding
+    # its equalities, because the join a correlated subquery decorrelates to
+    # sits between the two. The chain is still a chain and the equalities above
+    # still say which relation goes next to which.
+    var plan = Plan()
+    var part = plan.scan("part", List[String](), 0)
+    var supplier = plan.scan("supplier", List[String](), 1)
+    var lineitem = plan.scan("lineitem", List[String](), 2)
+    var chain = _cross(plan, _cross(plan, part, supplier), lineitem)
+    var nation = plan.scan("nation", List[String](), 3)
+    var folded = plan.join(
+        chain,
+        nation,
+        [plan.exprs.column(String("p_partkey"))],
+        [plan.exprs.column(String("n_nationkey"))],
+        JoinKind.LEFT,
+    )
+    var root = plan.filter(
+        folded,
+        _all(
+            plan,
+            _same(plan, "p_partkey", "l_partkey"),
+            _same(plan, "s_suppkey", "l_suppkey"),
+        ),
+    )
+    var sources: List[Schema] = [
+        _part(),
+        _supplier(),
+        _lineitem(),
+        _nation(),
+    ]
+    var at = order(plan, root, sources)
+    var printed = explain(plan, at)
+    assert_true(
+        printed.find("SCAN lineitem") < printed.find("SCAN supplier"),
+        "the lineitem is now the one written next to the part",
+    )
+    assert_true("JOIN left" in printed, "and the join above it is untouched")
+
+
+def test_a_chain_under_a_join_is_left_alone_when_it_has_no_product() raises:
+    # The stepping only looks, and a chain already in an order with no product
+    # in it is not rewritten for being under something.
+    var plan = Plan()
+    var part = plan.scan("part", List[String](), 0)
+    var lineitem = plan.scan("lineitem", List[String](), 2)
+    var supplier = plan.scan("supplier", List[String](), 1)
+    var chain = _cross(plan, _cross(plan, part, lineitem), supplier)
+    var nation = plan.scan("nation", List[String](), 3)
+    var folded = plan.join(
+        chain,
+        nation,
+        [plan.exprs.column(String("p_partkey"))],
+        [plan.exprs.column(String("n_nationkey"))],
+        JoinKind.LEFT,
+    )
+    var root = plan.filter(
+        folded,
+        _all(
+            plan,
+            _same(plan, "p_partkey", "l_partkey"),
+            _same(plan, "s_suppkey", "l_suppkey"),
+        ),
+    )
+    var sources: List[Schema] = [
+        _part(),
+        _supplier(),
+        _lineitem(),
+        _nation(),
+    ]
+    var before = explain(plan, root)
+    var at = order(plan, root, sources)
+    assert_equal(at, root, "nothing was rewritten, so the root is the old one")
+    assert_equal(explain(plan, at), before, "and the plan is the old plan")
 
 
 def test_the_pass_finds_nothing_to_do_on_a_plan_it_has_been_over() raises:

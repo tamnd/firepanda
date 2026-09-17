@@ -27,6 +27,17 @@ nothing else ever runs. Read in the order `part, lineitem, supplier, partsupp,
 orders, nation` each table has an equality with something already joined. q8 is
 the same shape over eight tables.
 
+## Where the chain sits
+
+Usually directly under the filter holding the equalities, and not always. A
+correlated subquery is decorrelated into a join written above the `FROM` it
+correlates against and below the `WHERE` that reads its answer, which puts a
+level between the two. TPC-H q2 is that shape, `part, supplier, partsupp,
+nation, region` under a left join against the subquery's fold, and every
+equality of the five is in the filter above that join. So a join that is not a
+comma is stepped through on its left input, which is the side the chain is on,
+and stepping stops at the first comma join because that one is a chain already.
+
 ## The rule
 
 Keep the first relation where the query put it and then repeatedly take the
@@ -99,6 +110,21 @@ def order(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
 def _walk(mut plan: Plan, at: Int, bound: List[Bound], mut moved: Bool) raises:
     """Looks for a chain under every filter in the plan.
 
+    The chain is not always the filter's own input. A correlated subquery is
+    decorrelated into a join, and that join is written above the `FROM` it
+    correlates against and below the `WHERE` that reads it, so the comma chain
+    the query wrote ends up a level or more down from the filter holding its
+    equalities. TPC-H q2 is that shape: `part, supplier, partsupp, nation,
+    region` under a left join against the subquery's fold, with every equality
+    above the left join. Looking only at the filter's input finds the left join,
+    which is not a chain, and leaves the product between `part` and `supplier`
+    where it was.
+
+    So a join that is not a bare cross join is stepped through on its left
+    input, which is the side the chain is on, and the same filter is offered to
+    what is under it. Stepping stops at the first bare cross join, because that
+    one is the top of a chain and has just been read as one.
+
     The bindings are read after an inner chain may already have been reordered,
     and that is sound because the only question asked of them is whether a
     relation hands out a column of a given name and origin. Reordering a chain
@@ -115,13 +141,14 @@ def _walk(mut plan: Plan, at: Int, bound: List[Bound], mut moved: Bool) raises:
         If an expression is not in the arena.
     """
     if plan.nodes[at].kind == NodeKind.FILTER:
-        _reorder(
-            plan,
-            plan.nodes[at].exprs[0],
-            plan.nodes[at].inputs[0],
-            bound,
-            moved,
-        )
+        var under = plan.nodes[at].inputs[0]
+        while True:
+            _reorder(plan, plan.nodes[at].exprs[0], under, bound, moved)
+            if plan.nodes[under].kind != NodeKind.JOIN:
+                break
+            if _is_chain_join(plan, under):
+                break
+            under = plan.nodes[under].inputs[0]
     var inputs = plan.nodes[at].inputs.copy()
     for i in range(len(inputs)):
         _walk(plan, inputs[i], bound, moved)
@@ -210,6 +237,27 @@ def _reorder(
     moved = True
 
 
+def _is_chain_join(plan: Plan, at: Int) -> Bool:
+    """Whether a node is one link of a comma `FROM`.
+
+    A comma is a join with no condition on it, so that is the whole test, and it
+    is asked in two places: reading a chain down, and deciding where to stop
+    stepping through the joins a decorrelation wrote above one.
+
+    Args:
+        plan: The plan.
+        at: The node.
+
+    Returns:
+        True for a cross join with no condition written on it.
+    """
+    return (
+        plan.nodes[at].kind == NodeKind.JOIN
+        and plan.nodes[at].op == Int(JoinKind.CROSS.code)
+        and len(plan.nodes[at].exprs) == 0
+    )
+
+
 def _chain(plan: Plan, at: Int, mut joins: List[Int], mut leaves: List[Int]):
     """Reads a left deep run of cross joins written with no condition.
 
@@ -219,11 +267,7 @@ def _chain(plan: Plan, at: Int, mut joins: List[Int], mut leaves: List[Int]):
         joins: The join nodes, appended to from the top down.
         leaves: What the chain joins, appended to left to right.
     """
-    if (
-        plan.nodes[at].kind == NodeKind.JOIN
-        and plan.nodes[at].op == Int(JoinKind.CROSS.code)
-        and len(plan.nodes[at].exprs) == 0
-    ):
+    if _is_chain_join(plan, at):
         joins.append(at)
         _chain(plan, plan.nodes[at].inputs[0], joins, leaves)
         leaves.append(plan.nodes[at].inputs[1])
