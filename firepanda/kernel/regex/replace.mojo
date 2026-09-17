@@ -44,16 +44,38 @@ after the `a` is thrown away and the `b` is written out instead. Python's
 `re.sub` keeps that match, which is the single most visible difference between
 the two and is the reason this loop is written out rather than described.
 
+### Python's engine brings a second grammar and a second scan
+
+A call that carries flags, or a `case=False`, or a replacement naming a group by
+name, or an empty pattern, is answered upstream by `re.sub` rather than by
+Arrow. That changes both halves of this file at once, which is why there are
+four functions here rather than two.
+
+The replacement is read by a different grammar. `\\n` is a newline where RE2
+refuses it, `\\0` is a NUL byte where RE2 means the whole match, `\\g<1>` and
+`\\g<name>` exist at all, three octal digits are a character, and an unknown
+letter after a backslash is an error while an unknown punctuation mark is itself
+with the backslash still in front of it. There is no reading of a replacement
+that satisfies both, so `parse_rewrite_python` is a second function and not a
+flag on the first.
+
+The scan is a different loop. Python never cuts the row, moves the cursor in
+characters and keeps a match of no width wherever it finds one, moving on by
+exactly one character afterwards. That is one rule where Arrow has two, which is
+the whole reason `str.replace("a*", "#")` is `#b#c#` upstream today and
+`##b#c#` the moment a flag is added.
+
 ### What is not here
 
-A bounded replace. `str.replace(pat, repl, n)` with `n` zero or more goes down a
-different path in Arrow, one that finds a match and then asks RE2 to replace
-inside the text it found, with no rule about empty matches and no advance at
-all. `str.replace("a*", "#", n=5)` on a row gives five markers at the front of
-the untouched row, and `str.replace(r"\\b", "#", n=1)` raises on every row
-including a row of plain ASCII. Copying that would put wrong answers on the
+A bounded replace on Arrow's path. `str.replace(pat, repl, n)` with `n` zero or
+more goes down a different path in Arrow, one that finds a match and then asks
+RE2 to replace inside the text it found, with no rule about empty matches and no
+advance at all. `str.replace("a*", "#", n=5)` on a row gives five markers at the
+front of the untouched row, and `str.replace(r"\\b", "#", n=1)` raises on every
+row including a row of plain ASCII. Copying that would put wrong answers on the
 board where a refusal puts a gap, so the binding refuses `n` with a pattern and
-says why.
+says why. Python's path has no such problem, since `re.sub` takes a count and
+stops after it, so `n` is answered there rather than refused.
 """
 
 from std.collections.span import Span
@@ -168,6 +190,296 @@ def parse_rewrite(replacement: String, groups: Int) -> Rewrite:
     return out^
 
 
+def _is_digit(b: UInt8) -> Bool:
+    """Whether a byte is one of the ten digits.
+
+    Args:
+        b: The byte.
+
+    Returns:
+        True for `0` through `9`.
+    """
+    return b >= UInt8(ord("0")) and b <= UInt8(ord("9"))
+
+
+def _is_octal(b: UInt8) -> Bool:
+    """Whether a byte is one of the eight octal digits.
+
+    Args:
+        b: The byte.
+
+    Returns:
+        True for `0` through `7`.
+    """
+    return b >= UInt8(ord("0")) and b <= UInt8(ord("7"))
+
+
+def _is_letter(b: UInt8) -> Bool:
+    """Whether a byte is an ASCII letter.
+
+    The one test that decides whether an escape nobody recognises is an error or
+    is itself. Python reserves the letters for escapes it may grow later and
+    leaves the punctuation alone, so `\\s` in a replacement is refused and `\\-`
+    is a backslash followed by a minus sign.
+
+    Args:
+        b: The byte.
+
+    Returns:
+        True for `a` through `z` and `A` through `Z`.
+    """
+    return (b >= UInt8(ord("a")) and b <= UInt8(ord("z"))) or (
+        b >= UInt8(ord("A")) and b <= UInt8(ord("Z"))
+    )
+
+
+def _control(b: UInt8) -> Int:
+    """Which character a letter after a backslash stands for, or minus one.
+
+    The eight Python resolves in a replacement, which are the seven control
+    characters and the backslash itself. They are the same eight Python resolves
+    in a pattern, minus the ones that take an argument: `\\x41` is a pattern
+    escape and is refused in a replacement, which was measured rather than
+    assumed.
+
+    Args:
+        b: The byte after the backslash.
+
+    Returns:
+        The character it stands for, or -1 when it stands for nothing.
+    """
+    if b == UInt8(ord("a")):
+        return 7
+    if b == UInt8(ord("b")):
+        return 8
+    if b == UInt8(ord("f")):
+        return 12
+    if b == UInt8(ord("n")):
+        return 10
+    if b == UInt8(ord("r")):
+        return 13
+    if b == UInt8(ord("t")):
+        return 9
+    if b == UInt8(ord("v")):
+        return 11
+    if b == UInt8(ord("\\")):
+        return 92
+    return -1
+
+
+def _put_point(mut into: List[UInt8], point: Int):
+    """Writes one code point out as UTF-8.
+
+    Only an octal escape reaches this and Python masks one to a byte, so nothing
+    above 255 arrives and two branches are all there are. Writing it as UTF-8
+    rather than as the byte itself is the point: `\\377` is the character U+00FF
+    in a replacement and not the byte 0xFF, and a row is text.
+
+    Args:
+        into: The bytes, appended.
+        point: The code point, which is 0 through 255.
+    """
+    if point < 0x80:
+        into.append(UInt8(point))
+        return
+    into.append(UInt8(0xC0 | (point >> 6)))
+    into.append(UInt8(0x80 | (point & 0x3F)))
+
+
+def parse_rewrite_python(
+    replacement: String, groups: Int, labels: List[String]
+) -> Rewrite:
+    """Reads a replacement string the way Python's `re` reads a template.
+
+    The other reading is above and the module says why there are two. The short
+    of it is that the two grammars agree on `\\\\` and on nothing else that
+    matters: a digit after a backslash may be a group here or may be three octal
+    digits, a letter may be a control character or may be an error, and a name
+    in angle brackets is a group here and is a syntax error there.
+
+    Four kinds of thing can follow the backslash and they are tried in Python's
+    own order. A `g` opens a name in angle brackets, which may hold a number as
+    well as a name. A `0` opens an octal escape of up to three digits. Any other
+    digit is a group number of one or two digits, unless all three of it, the
+    digit after it and the digit after that are octal, in which case it was an
+    octal escape all along. Anything else is a control character if Python has
+    one for it, an error if it is a letter, and itself with the backslash still
+    in front of it otherwise.
+
+    Args:
+        replacement: The replacement as the caller wrote it.
+        groups: How many capturing groups the pattern opened.
+        labels: What each of those groups is called, one entry per group and
+            empty for an unnamed one, which is what `\\g<name>` is resolved
+            against.
+
+    Returns:
+        The replacement, or the reason it cannot be read.
+    """
+    var out = Rewrite()
+    var bytes = replacement.as_bytes()
+    var i = 0
+    var begins = 0
+    while i < len(bytes):
+        var b = bytes[i]
+        if b != UInt8(ord("\\")):
+            out.literal.append(b)
+            i += 1
+            continue
+        if i + 1 >= len(bytes):
+            out.ok = False
+            out.problem = String("a replacement cannot end in a backslash")
+            return out^
+        var after = bytes[i + 1]
+        if after == UInt8(ord("g")):
+            if i + 2 >= len(bytes) or bytes[i + 2] != UInt8(ord("<")):
+                out.ok = False
+                out.problem = String(
+                    "a backslash g in a replacement opens a group name with <"
+                )
+                return out^
+            var shut = i + 3
+            while shut < len(bytes) and bytes[shut] != UInt8(ord(">")):
+                shut += 1
+            if shut >= len(bytes):
+                out.ok = False
+                out.problem = String(
+                    "a group name in a replacement is not closed with >"
+                )
+                return out^
+            var name = String(replacement[byte = i + 3 : shut])
+            if name.byte_length() == 0:
+                out.ok = False
+                out.problem = String("a replacement names a group with no name")
+                return out^
+            var numeric = True
+            for c in name.as_bytes():
+                if not _is_digit(c):
+                    numeric = False
+                    break
+            var which = -1
+            if numeric:
+                which = 0
+                for c in name.as_bytes():
+                    which = which * 10 + (Int(c) - ord("0"))
+                if which > groups:
+                    out.ok = False
+                    out.problem = String(
+                        "the replacement asks for group ",
+                        which,
+                        " and the pattern has ",
+                        groups,
+                    )
+                    return out^
+            else:
+                for k in range(len(labels)):
+                    if labels[k] == name:
+                        which = k + 1
+                        break
+                if which < 0:
+                    out.ok = False
+                    out.problem = String(
+                        "the replacement asks for a group called ",
+                        name,
+                        " and the pattern opens none by that name",
+                    )
+                    return out^
+            out.start.append(Int32(begins))
+            out.stop.append(Int32(len(out.literal)))
+            out.group.append(Int32(which))
+            begins = len(out.literal)
+            i = shut + 1
+            continue
+        if after == UInt8(ord("0")):
+            var value = 0
+            var read = i + 2
+            var taken = 0
+            while taken < 2 and read < len(bytes) and _is_octal(bytes[read]):
+                value = value * 8 + (Int(bytes[read]) - ord("0"))
+                read += 1
+                taken += 1
+            _put_point(out.literal, value & 0xFF)
+            i = read
+            continue
+        if _is_digit(after):
+            var second = i + 2
+            if second < len(bytes) and _is_digit(bytes[second]):
+                var third = i + 3
+                if (
+                    _is_octal(after)
+                    and _is_octal(bytes[second])
+                    and third < len(bytes)
+                    and _is_octal(bytes[third])
+                ):
+                    var value = (
+                        (Int(after) - ord("0")) * 64
+                        + (Int(bytes[second]) - ord("0")) * 8
+                        + (Int(bytes[third]) - ord("0"))
+                    )
+                    if value > 0o377:
+                        out.ok = False
+                        out.problem = String(
+                            "an octal escape in a replacement runs past 377"
+                        )
+                        return out^
+                    _put_point(out.literal, value)
+                    i = third + 1
+                    continue
+                var pair = (Int(after) - ord("0")) * 10 + (
+                    Int(bytes[second]) - ord("0")
+                )
+                if pair > groups:
+                    out.ok = False
+                    out.problem = String(
+                        "the replacement asks for group ",
+                        pair,
+                        " and the pattern has ",
+                        groups,
+                    )
+                    return out^
+                out.start.append(Int32(begins))
+                out.stop.append(Int32(len(out.literal)))
+                out.group.append(Int32(pair))
+                begins = len(out.literal)
+                i = second + 1
+                continue
+            var one = Int(after) - ord("0")
+            if one > groups:
+                out.ok = False
+                out.problem = String(
+                    "the replacement asks for group ",
+                    one,
+                    " and the pattern has ",
+                    groups,
+                )
+                return out^
+            out.start.append(Int32(begins))
+            out.stop.append(Int32(len(out.literal)))
+            out.group.append(Int32(one))
+            begins = len(out.literal)
+            i += 2
+            continue
+        var stands = _control(after)
+        if stands >= 0:
+            out.literal.append(UInt8(stands))
+            i += 2
+            continue
+        if _is_letter(after):
+            out.ok = False
+            out.problem = String(
+                "a backslash in a replacement is followed by a letter Python"
+                " does not know"
+            )
+            return out^
+        out.literal.append(b)
+        out.literal.append(after)
+        i += 2
+    out.start.append(Int32(begins))
+    out.stop.append(Int32(len(out.literal)))
+    out.group.append(-1)
+    return out^
+
+
 def replaced(
     program: Program,
     rewrite: Rewrite,
@@ -265,6 +577,84 @@ def replaced(
             out.append(bytes[k])
 
 
+def replaced_python(
+    program: Program,
+    rewrite: Rewrite,
+    bytes: Span[UInt8, _],
+    points: Span[UInt32, _],
+    mut machine: Machine,
+    mut offsets: List[Int],
+    mut found: List[Int32],
+    mut out: List[UInt8],
+    limit: Int = -1,
+):
+    """Replaces the first `limit` matches in one row the way `re.sub` does.
+
+    The loop above is Arrow's and this one is Python's, and Python's is the
+    shorter of the two because it has one rule where Arrow has three. Look from
+    the cursor. Copy across whatever sits between the end of the last match and
+    the start of this one. Write the replacement. Put the cursor where the match
+    ended, and one character further on when the match had no width.
+
+    The two cursors are what makes that work and are the only subtlety in it.
+    `pos` is the end of the last match and is where untouched text resumes, and
+    `p` is where the next attempt may start. They are the same number except
+    after a match of no width, when `p` is one further on, and the character
+    between them is copied across by the next round's copy rather than by a rule
+    of its own. That is also what makes a limit come out right: a scan stopped by
+    its count writes out the rest of the row from `pos`, so the character it was
+    about to step over is still there. `str.replace("a*", "#", n=2, case=False)`
+    on `abc` is `##bc` upstream and that is the line that gets it.
+
+    Args:
+        program: The pattern, compiled with captures and for Python's engine.
+        rewrite: The replacement, read by Python's grammar.
+        bytes: The row as it is written.
+        points: The same row as code points.
+        machine: The engine's buffers, reused across rows.
+        offsets: Scratch, refilled here.
+        found: Scratch for the slots of a match, refilled by every search.
+        out: Where the answer goes. Emptied first.
+        limit: How many matches to replace, or a negative number for all of
+            them. Zero writes the row out unchanged, which is not what `n=0`
+            means to pandas on this path and is seen to by the binding.
+    """
+    out.clear()
+    offsets.clear()
+    var at = 0
+    for i in range(len(points)):
+        offsets.append(at)
+        at += byte_width(points[i])
+    offsets.append(at)
+
+    var n = len(points)
+    var p = 0
+    var pos = 0
+    var done = 0
+    while p <= n and (limit < 0 or done < limit):
+        var end = machine.search(program, points, p, found)
+        if end < 0:
+            break
+        var start = Int(found[0])
+        for k in range(offsets[pos], offsets[start]):
+            out.append(bytes[k])
+        for part in range(len(rewrite.group)):
+            for k in range(Int(rewrite.start[part]), Int(rewrite.stop[part])):
+                out.append(rewrite.literal[k])
+            var g = Int(rewrite.group[part])
+            if g >= 0:
+                var opened = Int(found[g * 2])
+                var closed = Int(found[g * 2 + 1])
+                if opened >= 0 and closed >= opened:
+                    for k in range(offsets[opened], offsets[closed]):
+                        out.append(bytes[k])
+        pos = end
+        p = end + 1 if start == end else end
+        done += 1
+    for k in range(offsets[pos], len(bytes)):
+        out.append(bytes[k])
+
+
 def replaced_text(
     program: Program, rewrite: Rewrite, text: StringSlice
 ) -> String:
@@ -291,5 +681,42 @@ def replaced_text(
     var out = List[UInt8]()
     replaced(
         program, rewrite, bytes, Span(points), machine, offsets, found, out
+    )
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def replaced_python_text(
+    program: Program, rewrite: Rewrite, text: StringSlice, limit: Int = -1
+) -> String:
+    """Replaces matches in one piece of text the way `re.sub` does.
+
+    The one shot form of `replaced_python`, which is where the rule is.
+
+    Args:
+        program: The pattern, compiled with captures and for Python's engine.
+        rewrite: The replacement, read by Python's grammar.
+        text: The text.
+        limit: How many matches to replace, or a negative number for all.
+
+    Returns:
+        The text with the matches replaced.
+    """
+    var points = List[UInt32]()
+    var bytes = text.as_bytes()
+    decode_into(bytes, points)
+    var machine = Machine(program)
+    var offsets = List[Int]()
+    var found = List[Int32]()
+    var out = List[UInt8]()
+    replaced_python(
+        program,
+        rewrite,
+        bytes,
+        Span(points),
+        machine,
+        offsets,
+        found,
+        out,
+        limit,
     )
     return String(StringSlice(unsafe_from_utf8=Span(out)))

@@ -1757,18 +1757,22 @@ struct Series(Copyable, Movable, Sized, Writable):
         This is the regular expression form of `chars_count` and it takes a
         compiled program for the same reason `chars_matches_regex` does.
 
-        The counting rule is Arrow's rather than Python's, because pandas
-        answers `str.count` out of Arrow. Three things follow from that and all
-        three are visible in ordinary answers: the rest of the row becomes the
-        text after every match, so `^` matches again; the cursor moves in bytes,
-        so an empty pattern counts the bytes of a row and not its characters;
-        and a match of no width found further along the row is counted once
-        where it was found and once more from there.
-        `firepanda/kernel/regex/pike.mojo` has the measurements.
+        Which counting rule it follows is the program's to say, because the two
+        engines count differently and the program knows which engine it was
+        built for. Arrow's is the rule `str.count` follows with no flags beside
+        it, and three things follow from it that are all visible in ordinary
+        answers: the rest of the row becomes the text after every match, so `^`
+        matches again; the cursor moves in bytes, so an empty pattern counts the
+        bytes of a row and not its characters; and a match of no width found
+        further along the row is counted once where it was found and once more
+        from there. Python's rule, which is where a flag sends the call, has
+        none of those: the row stays whole, the cursor moves in characters, and
+        a match of no width is stepped over.
+        `firepanda/kernel/regex/pike.mojo` has both loops and the measurements.
 
         Args:
             program: The pattern, already compiled for the engine that is to run
-                it.
+                it, and compiled with captures when that engine is Python's.
 
         Returns:
             An int64 series of the same height, null wherever this one is null.
@@ -1782,7 +1786,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         )
 
     def chars_replace_regex(
-        self, program: Program, rewrite: Rewrite
+        self, program: Program, rewrite: Rewrite, limit: Int = -1
     ) raises -> Self:
         """Returns each row with every match of a compiled pattern swapped.
 
@@ -1792,19 +1796,26 @@ struct Series(Copyable, Movable, Sized, Writable):
         of its own that can be wrong in three ways, and that refusal belongs
         beside the pattern's rather than inside the loop over the rows.
 
-        The scan is Arrow's and is not the one `chars_count_regex` runs, which
-        is the thing worth knowing before reading either. The text is not cut
-        after a match, so `^` stays the start of the row where counting makes it
-        the start of what is left. The cursor moves a character at a time where
-        counting moves it a byte at a time. And a match of no width landing
-        exactly where the last match ended is thrown away, with one character
-        copied across instead, which is why replacing `a*` in `abc` gives
-        `#b#c#` where Python's `re` gives `##b#c#`.
-        `firepanda/kernel/regex/replace.mojo` has the measurements.
+        Which scan it runs is the program's to say, the way the counting rule
+        is. Arrow's is not the one `chars_count_regex` runs, which is the thing
+        worth knowing before reading either. The text is not cut after a match,
+        so `^` stays the start of the row where counting makes it the start of
+        what is left. The cursor moves a character at a time where counting
+        moves it a byte at a time. And a match of no width landing exactly where
+        the last match ended is thrown away, with one character copied across
+        instead, which is why replacing `a*` in `abc` gives `#b#c#` where
+        Python's `re` gives `##b#c#`. Python's scan is one rule rather than
+        three and it is what a flag, a `case=False` or a named group in the
+        replacement sends the call to.
+        `firepanda/kernel/regex/replace.mojo` has both loops and the
+        measurements.
 
         Args:
             program: The pattern, already compiled with captures.
-            rewrite: The replacement, already read.
+            rewrite: The replacement, already read by whichever of the two
+                grammars belongs to the program's engine.
+            limit: How many matches to replace in each row, or a negative number
+                for all of them.
 
         Returns:
             A text series of the same height, null wherever this one is null.
@@ -1815,7 +1826,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name.copy(),
             AnyArray(
-                text_replace_regex(self.values.strings(), program, rewrite)
+                text_replace_regex(
+                    self.values.strings(), program, rewrite, limit
+                )
             ),
         )
 

@@ -97,7 +97,11 @@ from firepanda.kernel.regex.method import (
 from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.tokens import FLAG_IGNORECASE
-from firepanda.kernel.regex.replace import Rewrite, parse_rewrite
+from firepanda.kernel.regex.replace import (
+    Rewrite,
+    parse_rewrite,
+    parse_rewrite_python,
+)
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, tagged
 
 
@@ -140,6 +144,7 @@ def _text_name(name: String) raises -> String:
         or name == "replace"
         or name == "replace_folded"
         or name == "replace_regex"
+        or name == "replace_regex_python"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -182,6 +187,9 @@ def _flag_name(name: String) raises -> String:
         or name == "contains_regex_folded"
         or name == "match_regex_folded"
         or name == "fullmatch_regex_folded"
+        or name == "contains_regex_python"
+        or name == "match_regex_python"
+        or name == "fullmatch_regex_python"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a mask"))
@@ -205,6 +213,7 @@ def _number_name(name: String) raises -> String:
         or name == "rfind"
         or name == "count"
         or name == "count_regex"
+        or name == "count_regex_python"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a number"))
@@ -289,7 +298,7 @@ def _one_character(fill: String) raises -> String:
 
 
 def _compiled(
-    kind: String, pattern: String, argued: Int32 = 0
+    kind: String, pattern: String, flags: Int32 = 0
 ) raises -> Program:
     """Compiles what a method would run, or raises the refusal that belongs to it.
 
@@ -321,22 +330,37 @@ def _compiled(
     compiled object on, which is why `case=False` and a written `(?i)` answer
     alike there and have to answer alike here.
 
-    A nonzero `argued` is a `flags` argument, which is a different fact from the
-    word ending in `_regex_folded` even when the bits it carries are the same
-    one. `case=False` folds on RE2 and `flags=re.IGNORECASE` folds on Python's
-    engine, because upstream routes on how the caller spelled it rather than on
-    what they asked for, so the two cross this door by two different routes and
-    can answer differently. They do answer differently, on the four Turkish I
-    code points, which is the whole of the measured gap between the two engines'
-    fold tables and is the thing this arrangement exists to keep visible.
+    A word ending in `_python` is the same method on the other engine, which is
+    where upstream sends a call carrying a `flags` argument, a `case=False` on
+    `replace`, a replacement naming a group by name, or an empty pattern. That
+    is a different fact from the word ending in `_regex_folded` even when the
+    bits the two carry are the same one. `case=False` on `contains` folds on RE2
+    and `flags=re.IGNORECASE` folds on Python's engine, because upstream routes
+    on how the caller spelled it rather than on what they asked for, so the two
+    cross this door by two different routes and can answer differently. They do
+    answer differently, on the four Turkish I code points, which is the whole of
+    the measured gap between the two engines' fold tables and is the thing this
+    arrangement exists to keep visible.
+
+    The engine being a word and the letters being a number is the division the
+    door settled on. A route is a choice a caller made by name, in the sense that
+    every caller who lands on Python's engine got there by writing something
+    upstream looks for, so it reads as a word like `_folded` does. The seven flag
+    letters are not: they arrive as a number in any of 128 combinations, and
+    there is no list of words for that anybody would want to read. Document 85
+    had the routing riding in the number being nonzero, which held while only
+    `contains` and `fullmatch` were served and stopped holding the moment
+    `replace` arrived, since a replacement holding `\\g<` moves a call with no
+    flags at all.
 
     Args:
         kind: The word the Python layer sent, which is one of the six that end
-            in `_regex` or one of the three that end in `_regex_folded`.
+            in `_regex`, one of the three that end in `_regex_folded`, or one of
+            the five that end in `_regex_python`.
         pattern: The pattern as the caller wrote it.
-        argued: The flags the caller passed beside the pattern, as `FLAG_` bits,
-            and zero when they passed none. Nonzero moves the call to Python's
-            engine, which is where upstream moves it.
+        flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            and zero when they passed none. They mean what the letters mean and
+            they do not decide the engine.
 
     Returns:
         The compiled program.
@@ -345,10 +369,12 @@ def _compiled(
         Error: Tagged `value` when RE2 would refuse the pattern too, and
             `unsupported` when the refusal is this library's own.
     """
+    var python = kind.endswith("_python")
     var folded = kind.endswith("_folded")
-    var name = String(
-        kind[byte = 0 : kind.byte_length() - 7]
-    ) if folded else kind
+    var name = (
+        String(kind[byte = 0 : kind.byte_length() - 7]) if python
+        or folded else kind
+    )
     var method = METHOD_CONTAINS
     if name == "match_regex":
         method = METHOD_MATCH
@@ -360,25 +386,36 @@ def _compiled(
         method = METHOD_REPLACE
     elif name == "extract_regex":
         method = METHOD_EXTRACT
-    var seeded = argued | (FLAG_IGNORECASE if folded else 0)
-    var program = program_for(method, pattern, seeded, argued=argued != 0)
+    var seeded = flags | (FLAG_IGNORECASE if folded else 0)
+    var program = program_for(method, pattern, seeded, argued=python)
     if program.ok:
         return program^
     var said = String("str: ", program.problem, ", in the pattern ", pattern)
     raise tagged(UNSUPPORTED if program.gap else VALUE, said)
 
 
-def _rewritten(replacement: String, groups: Int) raises -> Rewrite:
+def _rewritten(program: Program, replacement: String) raises -> Rewrite:
     """Reads a replacement string, or raises the way pandas raises.
 
-    Every refusal the grammar makes is one RE2 makes too, and an Arrow error is
-    a `ValueError` in Python, so there is one tag here rather than the two the
-    pattern needs. The wording is this library's for the reason `_compiled`
-    gives.
+    There are two grammars and the program picks which one, because upstream
+    picks with the same decision that picked the engine: a call answered by
+    `replace_substring_regex` has its rewrite read RE2's way and a call answered
+    by `re.sub` has its template read Python's way. So the replacement is not
+    read until the pattern has been compiled, and a caller who changed nothing
+    but the pattern can change what their replacement means.
+
+    Every refusal either grammar makes is one upstream makes too, so there is one
+    tag here rather than the two the pattern needs. It is not the same class in
+    both places: Arrow's refusal is a `ValueError` in Python and `re`'s is a
+    `re.PatternError`, which is not one, and a `ValueError` is what a program
+    written against this library already catches. The wording is this library's
+    for the reason `_compiled` gives.
 
     Args:
+        program: The compiled pattern, which says which engine will run and
+            therefore which grammar the replacement is written in, and how many
+            groups and what they are called.
         replacement: The replacement as the caller wrote it.
-        groups: How many capturing groups the pattern opened.
 
     Returns:
         The replacement, read.
@@ -386,7 +423,9 @@ def _rewritten(replacement: String, groups: Int) raises -> Rewrite:
     Raises:
         Error: Tagged `value` when it cannot be read.
     """
-    var rewrite = parse_rewrite(replacement, groups)
+    var rewrite = parse_rewrite_python(
+        replacement, program.groups, program.labels
+    ) if program.python else parse_rewrite(replacement, program.groups)
     if rewrite.ok:
         return rewrite^
     raise tagged(
@@ -403,6 +442,7 @@ def text(
     start: Optional[Int],
     stop: Optional[Int],
     step: Int,
+    flags: Int = 0,
 ) raises -> Series:
     """Runs one of the methods that answers text, and hands back a column.
 
@@ -419,6 +459,10 @@ def text(
             rather than a position, and how many matches to replace.
         stop: The position to stop before, where the method has one.
         step: How far to move between characters, for `slice` alone.
+        flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            for the one name here that has a pattern and zero for the other
+            twenty three. They say what the letters say and the word says which
+            engine, which is the division `_compiled` explains.
 
     Returns:
         A new column, as tall as the one it read.
@@ -509,15 +553,24 @@ def text(
         # text. pandas answers this one out of Python rather than out of Arrow
         # and the two fold the same way anyway, which document 69 measures.
         return column.chars_replace_folded(arg, other, _whole(start, "n"))
-    if wanted == "replace_regex":
-        # The one name in this door that reaches the engine, and the only one
-        # anywhere that has two things to refuse: the pattern, which is refused
-        # the way the other four regular expression names refuse theirs, and
-        # the replacement, which has a grammar of its own. There is no `n` here
-        # because the binding refuses one, and `replace.mojo` says why.
-        var program = _compiled(wanted, arg)
+    if wanted == "replace_regex" or wanted == "replace_regex_python":
+        # The two names in this door that reach the engine, and the only ones
+        # anywhere that have two things to refuse: the pattern, which is refused
+        # the way the other regular expression names refuse theirs, and the
+        # replacement, which has a grammar of its own and has a different one on
+        # each engine.
+        #
+        # The count is the other difference between the two. Arrow's bounded
+        # replace is a scan this library will not copy, for the reasons
+        # `replace.mojo` gives, so the binding refuses `n` on that path and
+        # nothing here ever sees one. Python's is the same scan with a counter
+        # on it, which is what `re.sub` does, so the number rides in the
+        # position slot the way a width does and the absence of one means all
+        # of them.
+        var program = _compiled(wanted, arg, Int32(flags))
+        var limit = start.value() if start else -1
         return column.chars_replace_regex(
-            program, _rewritten(other, program.groups)
+            program, _rewritten(program, other), limit
         )
     return column.chars_repeat(_whole(start, "repeats"))
 
@@ -737,14 +790,12 @@ def flag(
 ) raises -> Series:
     """Runs one of the methods that answers a mask, and hands back a column.
 
-    The door takes a number as well as two words now, which is the arrangement
-    the text door already had and had for a related reason. A word says which
-    method and a word says whether it folds, because both of those are choices a
-    caller made by name. The flags are not a choice made by name: seven letters
-    in any combination is not a list of words anybody wants to write down, and
-    the only name that matters about them is already carried, which is that they
-    arrived as an argument at all. So the bits ride in a slot and the routing
-    rides in the slot being nonzero.
+    The door takes a number as well as a word, which is the arrangement the text
+    door has too. The word says which method, whether it folds and which engine
+    runs it, because all three of those are choices a caller made by name. The
+    flags are not a choice made by name: seven letters in any combination is not
+    a list of words anybody wants to write down. So the letters ride in a slot
+    and everything else rides in the word.
 
     Args:
         column: The column to read.
@@ -809,6 +860,9 @@ def flag(
         or wanted == "contains_regex_folded"
         or wanted == "match_regex_folded"
         or wanted == "fullmatch_regex_folded"
+        or wanted == "contains_regex_python"
+        or wanted == "match_regex_python"
+        or wanted == "fullmatch_regex_python"
     ):
         return column.chars_matches_regex(_compiled(wanted, arg, Int32(flags)))
     # The same three with `case=False`, which is a word of its own rather than a
@@ -830,6 +884,7 @@ def number(
     arg: String,
     start: Optional[Int],
     stop: Optional[Int],
+    flags: Int = 0,
 ) raises -> Series:
     """Runs one of the methods that answers a number, and hands back a column.
 
@@ -841,6 +896,9 @@ def number(
         start: The first position a match may start at, where the method takes
             one.
         stop: The position to stop searching before, where the method takes one.
+        flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            for the one name here that has a pattern and zero for the other
+            four.
 
     Returns:
         An int64 column, as tall as the one it read.
@@ -855,10 +913,11 @@ def number(
         return column.chars_length()
     if wanted == "count":
         return column.chars_count(arg)
-    # The one name in this door that reaches the engine, and it reaches it
-    # through the same call the three in the door above do, because what a
+    # The two names in this door that reach the engine, and they reach it
+    # through the same call the ones in the door above do, because what a
     # refusal becomes in Python is a fact about the binding rather than about
-    # the question being asked.
-    if wanted == "count_regex":
-        return column.chars_count_regex(_compiled(wanted, arg))
+    # the question being asked. Which of the two words arrived says which engine
+    # runs, and the program carries that on to the scan.
+    if wanted == "count_regex" or wanted == "count_regex_python":
+        return column.chars_count_regex(_compiled(wanted, arg, Int32(flags)))
     return column.chars_find(arg, start, stop, wanted == "rfind")

@@ -2,11 +2,11 @@
 
 A flag written `(?i)` inside the pattern never moves a call between the two
 engines and is in `test_str_fold_regex.py`. A flag passed as an argument moves
-four of the six pattern methods, and this file is the two of those four that are
-served. `contains` and `fullmatch` ask for a mask, which is the one answer both
-engines already know how to give, so they could be wired before either of the
-two scans Python's engine still needs. `count` and `replace` need those scans
-and still refuse.
+four of the six pattern methods, and this file is the two of those four that ask
+for a mask. `contains` and `fullmatch` want the one answer both engines already
+knew how to give, so they were wired before either of the two scans Python's
+engine needed. `count` and `replace` want those scans and are in
+`test_str_count_replace_python_engine.py`.
 
 The move is not cosmetic and this file is mostly about the ways it shows. The
 two engines fold four code points differently, read `\\w` as 63 characters and
@@ -383,16 +383,14 @@ def test_a_flag_beside_a_literal_search_is_refused(firepanda: ModuleType) -> Non
             mine.str.contains("a", flags=flags, regex=False)
 
 
-def test_the_other_four_names_still_refuse_a_flag(firepanda: ModuleType) -> None:
-    """`count` and `replace` go to Python's engine upstream as well and need a
-    scan this library has not written, `extract` is on that engine whatever
-    anybody passes, and `match` keeps its flags on Arrow and has two refusals of
-    its own in `test_str_regex_case_and_flags.py`."""
+def test_one_name_still_refuses_a_flag(firepanda: ModuleType) -> None:
+    """`count` and `replace` are served now and live in
+    `test_str_count_replace_python_engine.py`. `extract` is on Python's engine
+    whatever anybody passes and still refuses, because it hands back a frame of
+    groups rather than a column and the door it crosses by carries no flags.
+    `match` keeps its flags on Arrow and has two refusals of its own in
+    `test_str_regex_case_and_flags.py`."""
     mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.count("a", flags=re.MULTILINE)
-    with pytest.raises(NotImplementedError):
-        mine.str.replace("a", "-", flags=re.MULTILINE, regex=True)
     with pytest.raises(NotImplementedError):
         mine.str.extract("(a)", flags=re.MULTILINE)
 

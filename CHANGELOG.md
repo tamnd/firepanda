@@ -52,6 +52,20 @@ What this is worth in wall clock is not in this entry yet, because the machine i
 
 `text_extract_regex` in the same file and the literal `text_replace` in `pattern.mojo` are both still serial, and `stack_payloads` is the half of the work either of them needs, so each is now a small piece of work rather than a design question.
 
+### Added: `str.count` and `str.replace` under a flag, and four more calls that were refused
+
+`Series.str.count("^", flags=re.MULTILINE)` and `Series.str.replace("a*", "#", flags=re.IGNORECASE)` used to be refused. Both are answered now, out of Python's engine, which is where upstream sends a call carrying any flag. That finishes the scan the two `case` and `flags` entries in 0.8.7 were waiting for. Issue #8 M6.
+
+The loop is the whole of the work. Arrow counts by cutting the row down after every match, stepping one byte past a match of no width, and moving to where a match ended rather than past it. Python does none of those three. So `str.count("^")` on a row of three letters is four and the same call with `re.MULTILINE` is one, and `str.count("")` on a row holding a sharp s is three without a flag and two with. Both numbers are pandas' and both are now this library's.
+
+`str.replace(pat, repl, case=False)` no longer takes the one to one fold the other four pattern methods take. Upstream turns that argument into `re.IGNORECASE` and compiles the pattern with it, escaping the pattern first when `regex` is False rather than taking a different path, so the fold is the engine's for both settings of `regex`. The four Turkish I code points are where that shows: `replace("i", "#", case=False)` swaps a dotted capital I and `contains("i", case=False)` does not find one. A `case=False` literal replacement is a compiled pattern and a scan now where it used to be a byte search, which is correct and is slower.
+
+Three refusals came off that were never about flags. A replacement holding `\g<` beside `regex=True` is answered, because pandas reads that out of `re` and the template grammar is written now. An empty pattern with a backslash in the replacement is answered, for the same reason one step removed. And a count beside either of those is answered, with `n=0` reading as unlimited, which is what `re.sub` has read it as since long before pandas existed and is the opposite of what the Arrow path reads it as.
+
+A bad replacement template raises `InvalidArgumentError`, which is a `ValueError`. Upstream raises `re.PatternError`, which is not one, and an unknown group name comes back from `re` as an `IndexError`. That is a divergence rather than a bug and document 86 says why matching it would be worse.
+
+A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width. `str.extract` still refuses a flag, and the reason is now that it crosses by a door that takes no flags rather than that the scan is missing.
+
 ## [0.8.7] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).

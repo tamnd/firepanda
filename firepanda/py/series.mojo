@@ -1281,6 +1281,7 @@ struct PySeries(Movable, Writable):
         start: PythonObject,
         stop: PythonObject,
         step: PythonObject,
+        flags: PythonObject,
     ) raises -> PythonObject:
         """Runs a `str` method that answers text and hands back a column.
 
@@ -1298,6 +1299,8 @@ struct PySeries(Movable, Writable):
             start: The first position, or `None`, and the index for `get`.
             stop: The position to stop before, or `None`.
             step: How far to move between characters.
+            flags: The regular expression flags, as `FLAG_` bits, and zero for
+                every name here but the one with a pattern.
 
         Returns:
             A new series.
@@ -1317,6 +1320,7 @@ struct PySeries(Movable, Writable):
                         maybe_whole(start, "start"),
                         maybe_whole(stop, "stop"),
                         whole(step, "step"),
+                        whole(flags, "flags"),
                     )
                 )
             )
@@ -1677,6 +1681,7 @@ struct PySeries(Movable, Writable):
         arg: PythonObject,
         start: PythonObject,
         stop: PythonObject,
+        flags: PythonObject,
     ) raises -> PythonObject:
         """Runs a `str` method that answers a number and hands back a column.
 
@@ -1686,6 +1691,8 @@ struct PySeries(Movable, Writable):
             arg: The substring to look for, and the empty string for `len`.
             start: The first position a match may start at, or `None`.
             stop: The position to stop searching before, or `None`.
+            flags: The regular expression flags, as `FLAG_` bits, and zero for
+                every name here but the one with a pattern.
 
         Returns:
             A new series of integers.
@@ -1703,6 +1710,7 @@ struct PySeries(Movable, Writable):
                         words(arg, "arg"),
                         maybe_whole(start, "start"),
                         maybe_whole(stop, "stop"),
+                        whole(flags, "flags"),
                     )
                 )
             )
