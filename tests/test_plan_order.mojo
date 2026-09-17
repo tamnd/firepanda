@@ -8,8 +8,10 @@ one form of a shape a reader can check without holding the arena in their head.
 
 The groups are: a chain the pass reorders, the chains it leaves exactly as they
 were and why each one of those is not a bug, the self join where a qualifier
-decides which relation a column belongs to, and the two together with predicate
-pushdown, which is the only pair of them that says what the pass is for.
+decides which relation a column belongs to, the chain that is a node further
+down than the filter because something was joined on above it, and the two
+together with predicate pushdown, which is the only pair of them that says what
+the pass is for.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises
@@ -335,6 +337,90 @@ def test_the_order_the_pass_chose_is_one_the_pushdown_can_key() raises:
     # run it. Reordered, both joins have keys on them.
     assert_equal(_crosses(plan, at), 0, "no product is left in the plan")
     assert_true("JOIN inner" in explain(plan, at), "and the joins are keyed")
+
+
+def _four() -> List[Schema]:
+    """Returns part, supplier, lineitem and nation in that order.
+
+    Returns:
+        Four schemas, indexed by the relation id the scans carry.
+    """
+    return [_part(), _supplier(), _lineitem(), _nation()]
+
+
+def _under_a_join(mut plan: Plan) raises -> Int:
+    """Returns TPC-H q2's shape in miniature.
+
+    The chain `_written` builds, with something joined on above it the way
+    decorrelating a subquery joins its answer on above the `FROM` it correlates
+    with. So the chain is the left input of that join rather than the node the
+    filter reads, which is the whole of what makes q2 different from q9.
+
+    Args:
+        plan: The plan, added to.
+
+    Returns:
+        The filter at the top of it.
+    """
+    var part = plan.scan("part", List[String](), 0)
+    var supplier = plan.scan("supplier", List[String](), 1)
+    var lineitem = plan.scan("lineitem", List[String](), 2)
+    var chain = _cross(plan, _cross(plan, part, supplier), lineitem)
+    var answer = plan.scan("nation", List[String](), 3)
+    var joined = plan.join(
+        chain,
+        answer,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("n_nationkey")],
+        JoinKind.LEFT,
+    )
+    return plan.filter(
+        joined,
+        _all(
+            plan,
+            _same(plan, "p_partkey", "l_partkey"),
+            _same(plan, "s_suppkey", "l_suppkey"),
+        ),
+    )
+
+
+def test_a_chain_one_node_further_down_is_found_and_reordered() raises:
+    var plan = Plan()
+    var root = _under_a_join(plan)
+    var at = order(plan, root, _four())
+    at = push(plan, at, _four())
+    # TPC-H q2. The relations are in the same bad order q9 writes them in and
+    # the refusal is the same refusal, and the only difference is that a join
+    # sits between the filter and the chain, so looking at what the filter
+    # reads found one node and stopped.
+    assert_equal(_crosses(plan, at), 0, "no product is left in the plan")
+    var printed = explain(plan, at)
+    assert_true(
+        printed.find("SCAN lineitem") < printed.find("SCAN supplier"),
+        "and the lineitem is the one now written next to the part",
+    )
+
+
+def test_a_chain_further_down_that_no_equality_ties_is_left_alone() raises:
+    var plan = Plan()
+    var part = plan.scan("part", List[String](), 0)
+    var supplier = plan.scan("supplier", List[String](), 1)
+    var lineitem = plan.scan("lineitem", List[String](), 2)
+    var chain = _cross(plan, _cross(plan, part, supplier), lineitem)
+    var answer = plan.scan("nation", List[String](), 3)
+    var joined = plan.join(
+        chain,
+        answer,
+        [plan.exprs.column("p_partkey")],
+        [plan.exprs.column("n_nationkey")],
+        JoinKind.LEFT,
+    )
+    # Only the part is tied to anything, so every order of the three has a
+    # product in it and the one the query wrote is as good as any other.
+    var root = plan.filter(joined, _same(plan, "p_partkey", "l_partkey"))
+    var before = explain(plan, root)
+    var at = order(plan, root, _four())
+    assert_equal(explain(plan, at), before, "the plan is the old plan")
 
 
 def test_the_pass_finds_nothing_to_do_on_a_plan_it_has_been_over() raises:

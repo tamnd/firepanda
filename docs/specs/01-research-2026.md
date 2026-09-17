@@ -312,7 +312,7 @@ Full treatment is document 10.
 - Compile-time evaluation, https://mojolang.org/docs/manual/metaprogramming/comptime-evaluation/
 - Proposal: replace `@parameter` with a `comptime` statement modifier, https://forum.modular.com/t/proposal-replace-parameter-with-comptime-statement-modifier/2713
 - RFC: rename the `alias` keyword, https://github.com/modular/modular/issues/171
-- `simd` builtin module, https://mojolang.org/docs/std/builtin/simd/
+- `simd` module, https://mojolang.org/docs/std/simd/
 - Using pointers, https://mojolang.org/docs/manual/pointers/using-pointers/
 - UnsafePointer v2 proposal, https://github.com/modular/modular/blob/main/Mojo/proposals/unsafe-pointer-v2.md
 - Trait objects and dynamic dispatch discussion, https://github.com/modular/modular/discussions/3169

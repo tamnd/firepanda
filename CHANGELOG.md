@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: join ordering looks a node further down, and TPC-H q2 runs
+
+`FROM part, supplier, partsupp, nation, region` has no equality between its first two relations, so the comma chain lowers with a product in the middle of it, and a product of two real tables is refused rather than slow. That is TPC-H q9's shape and the join ordering pass has handled it since it was written, by keeping the first relation where the query put it and then repeatedly taking the first one left that has an equality with something already taken.
+
+q2 is that shape with a correlated subquery in it, and decorrelating a subquery joins its answer on above the `FROM` it correlates with. So the chain was the left input of that join, the pass only ever looked at the node the filter above it read, and what it found there was a single node with nothing to reorder. It gave up on a chain that was one step away.
+
+The chain is now looked for down the left rather than only directly under the filter. Reassociating a product is sound wherever the product sits, because it pairs the same rows into the same multiset either way and the only thing that changes is the column order, which the rebuild at the end of the pass already fixes. The equalities are read for which relations they tie together and for nothing else, so reading them from above a join that is not part of the chain takes nothing away from them.
+
+q2 answers what DuckDB answers now and `pixi run tpch` is eighteen of twenty two. The four that are left are refused in three places rather than four: q20 wants a left join on two key pairs, q11 wants a scalar subquery taken in a `HAVING`, and q13 and q21 want a join condition that is not an equality. What q2's own line on that list used to say was that it wanted an operator pairing every left row with every right row, which it turned out not to want at all.
+
 ### Changed: replacing a regular expression down a column runs on every core
 
 `text_replace_regex` was the one kernel in its file that ran on one thread, and the reason it did is written down in document 80 section 6: the answer is text, how long a row comes out is not known until the pattern has run over it, and a `StringBuilder` is one buffer with one cursor that four threads cannot share. That was a fair trade while the kernel was new and it stopped being one as soon as there was a number on it. ClickBench q28 is one call to this kernel and a group by on what comes out, and the driver's own accounting had it using 0.87 cores on a machine where `text_byte_length`, running next to it in q27 over the same column, used 3.40. Issue #830.
