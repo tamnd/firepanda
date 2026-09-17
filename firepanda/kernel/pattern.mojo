@@ -103,9 +103,17 @@ an accident and is pandas.
 from std.collections.span import Span
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import StringArray, StringBuilder, stack_payloads
+from firepanda.array.strview import (
+    INLINE_CAPACITY,
+    StringView,
+    VIEW_SIZE,
+    make_inline_at,
+    make_long_at,
+)
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.exec import parallel_morsels
+from firepanda.buffer.buffer import Buffer
+from firepanda.exec import MORSEL_ROWS, parallel_morsels
 
 from .mask import repair_range
 from .searchfold import SEARCHED_FROM, SEARCHED_TO
@@ -711,10 +719,17 @@ def text_replace(
     """Writes every element out with a run of bytes swapped for another.
 
     This is the first kernel in the file whose answer is text rather than a
-    number or a flag, and it is the reason it cannot be one: how long a row comes
-    out is not known until the search has run, so the rows are built one at a
-    time into a builder rather than written into a column allocated up front.
-    Nothing else here needed that and nothing else here pays for it.
+    number or a flag, and that used to be the reason it ran on one thread: how
+    long a row comes out is not known until the search has run, so there is no
+    column to allocate up front and fill, and a `StringBuilder` is one buffer
+    with one cursor that four threads cannot share. It runs on every core the
+    way the rest of the file does now, by the route `text_replace_regex` took
+    first. The views are 16 bytes each and there is one per row, so that buffer
+    is sized before anything starts and each thread writes only its own rows of
+    it. The bytes that do not fit in a view go into a `List` that belongs to the
+    morsel, so no two threads write to one allocation, and `stack_payloads` lays
+    those end to end afterwards and moves each long view onto where its morsel
+    landed.
 
     Matches do not overlap, which is the rule `text_count` explains and is the
     same rule for the same reason: the cursor moves by the whole needle after a
@@ -740,52 +755,83 @@ def text_replace(
         A text column of the same height, null wherever the input is null.
 
     Raises:
-        Error: If the builder cannot allocate.
+        Error: Only what the morsel runtime raises.
     """
     var n = len(a)
-    var built = StringBuilder(capacity=n)
+    var validity = Bitmap(copy=a.validity)
+    var views = Buffer(n * VIEW_SIZE)
+    if n == 0:
+        return StringArray(views^, Buffer(1), validity^, 0)
+
     var m = len(needle)
-    var scratch = List[UInt8]()
+    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var parts = List[List[UInt8]](capacity=morsels)
+    for _ in range(morsels):
+        parts.append(List[UInt8]())
 
-    for i in range(n):
-        if not a.is_valid(i):
-            built.append_null()
-            continue
-        var bytes = a.unsafe_bytes(i)
-        if limit == 0:
-            built.append(bytes)
-            continue
-
-        scratch.clear()
-        var left = limit
-        if m == 0:
-            # A character boundary is any byte that is not a UTF-8 continuation
-            # byte, which is the test `starts_character` in chars.mojo makes. It
-            # is written out rather than imported because chars.mojo reads the
-            # search out of this file and the two cannot read each other.
-            for k in range(len(bytes)):
-                if (bytes[k] & 0xC0) != 0x80 and left != 0:
+    def compute(start: Int, stop: Int) {mut parts, mut views, imm}:
+        ref payload = parts[start // MORSEL_ROWS]
+        var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var scratch = List[UInt8]()
+        for i in range(start, stop):
+            # A null's view is written rather than left alone, because a view
+            # that was never written is whatever the allocation held and every
+            # read of this column would follow it.
+            if not a.is_valid(i):
+                dst.unsafe_offset(i)[] = StringView()
+                continue
+            var bytes = a.unsafe_bytes(i)
+            scratch.clear()
+            if limit == 0:
+                scratch.extend(bytes)
+            elif m == 0:
+                # A character boundary is any byte that is not a UTF-8
+                # continuation byte, which is the test `starts_character` in
+                # chars.mojo makes. It is written out rather than imported
+                # because chars.mojo reads the search out of this file and the
+                # two cannot read each other.
+                var left = limit
+                for k in range(len(bytes)):
+                    if (bytes[k] & 0xC0) != 0x80 and left != 0:
+                        scratch.extend(repl)
+                        if left > 0:
+                            left -= 1
+                    scratch.append(bytes[k])
+                if left != 0:
                     scratch.extend(repl)
+            else:
+                var left = limit
+                var from_ = 0
+                while left != 0 and from_ + m <= len(bytes):
+                    var at = find_bytes(bytes, needle, from_)
+                    if at < 0:
+                        break
+                    scratch.extend(bytes[from_:at])
+                    scratch.extend(repl)
+                    from_ = at + m
                     if left > 0:
                         left -= 1
-                scratch.append(bytes[k])
-            if left != 0:
-                scratch.extend(repl)
-        else:
-            var from_ = 0
-            while left != 0 and from_ + m <= len(bytes):
-                var at = find_bytes(bytes, needle, from_)
-                if at < 0:
-                    break
-                scratch.extend(bytes[from_:at])
-                scratch.extend(repl)
-                from_ = at + m
-                if left > 0:
-                    left -= 1
-            scratch.extend(bytes[from_ : len(bytes)])
-        built.append(Span(scratch))
+                scratch.extend(bytes[from_ : len(bytes)])
 
-    return built^.finish()
+            if len(scratch) == 0:
+                dst.unsafe_offset(i)[] = StringView()
+            elif len(scratch) <= INLINE_CAPACITY:
+                dst.unsafe_offset(i)[] = make_inline_at(
+                    Pointer(to=scratch[0]), len(scratch)
+                )
+            else:
+                # The offset written is inside this morsel's own payload and is
+                # moved onto the real one by `stack_payloads`.
+                var at = len(payload)
+                payload.extend(Span(scratch))
+                dst.unsafe_offset(i)[] = make_long_at(
+                    Pointer(to=scratch[0]), len(scratch), 0, at
+                )
+
+    parallel_morsels(compute, n, MORSEL_ROWS)
+
+    var payload = stack_payloads(parts^, views, n, MORSEL_ROWS)
+    return StringArray(views^, payload^, validity^, n)
 
 
 def text_partition(
@@ -1414,12 +1460,14 @@ def text_replace_folded(
 ) raises -> StringArray:
     """Writes every element out with a pattern swapped for another, case ignored.
 
-    Serial and built into a builder for the reason the exact replace is, which
-    is that the length of a row is not known until the search has run on it.
-    The bytes outside a match are copied across untouched, so a row keeps
-    whatever case it was written in everywhere the pattern did not reach, which
-    is what pandas does and is the only thing that could be meant by replacing
-    a pattern rather than folding a column.
+    Split into morsels and joined at the end the way the exact replace is, and
+    for the same reason: the length of a row is not known until the search has
+    run on it, so the long answers go into a payload owned by the morsel and
+    `stack_payloads` lays those end to end afterwards. The bytes outside a match
+    are copied across untouched, so a row keeps whatever case it was written in
+    everywhere the pattern did not reach, which is what pandas does and is the
+    only thing that could be meant by replacing a pattern rather than folding a
+    column.
 
     An empty pattern never reaches here. It has nothing to do with case and the
     exact kernel already has the rule, which counts characters rather than
@@ -1436,7 +1484,7 @@ def text_replace_folded(
         A text column of the same height, null wherever the input is null.
 
     Raises:
-        Error: If the builder cannot allocate.
+        Error: Only what the morsel runtime raises.
     """
     var keys = materialize[SEARCHED_FROM]()
     var answers = materialize[SEARCHED_TO]()
@@ -1445,38 +1493,64 @@ def text_replace_folded(
         return text_replace(a, needle, repl, limit)
 
     var n = len(a)
-    var built = StringBuilder(capacity=n)
-    var scratch = List[UInt8]()
-    for i in range(n):
-        if not a.is_valid(i):
-            built.append_null()
-            continue
-        var bytes = a.unsafe_bytes(i)
-        if limit == 0:
-            built.append(bytes)
-            continue
+    var validity = Bitmap(copy=a.validity)
+    var views = Buffer(n * VIEW_SIZE)
+    if n == 0:
+        return StringArray(views^, Buffer(1), validity^, 0)
 
-        scratch.clear()
-        var left = limit
-        var from_ = 0
-        while left != 0 and from_ <= len(bytes):
-            var at = find_folded(
-                bytes, Span(wanted), Span(keys), Span(answers), from_
-            )
-            if at < 0:
-                break
-            var ends = _folded_ends(
-                bytes, at, Span(wanted), Span(keys), Span(answers)
-            )
-            scratch.extend(bytes[from_:at])
-            scratch.extend(repl)
-            from_ = ends
-            if left > 0:
-                left -= 1
-        scratch.extend(bytes[from_ : len(bytes)])
-        built.append(Span(scratch))
+    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var parts = List[List[UInt8]](capacity=morsels)
+    for _ in range(morsels):
+        parts.append(List[UInt8]())
 
-    return built^.finish()
+    def compute(start: Int, stop: Int) {mut parts, mut views, imm}:
+        ref payload = parts[start // MORSEL_ROWS]
+        var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var scratch = List[UInt8]()
+        for i in range(start, stop):
+            if not a.is_valid(i):
+                dst.unsafe_offset(i)[] = StringView()
+                continue
+            var bytes = a.unsafe_bytes(i)
+            scratch.clear()
+            if limit == 0:
+                scratch.extend(bytes)
+            else:
+                var left = limit
+                var from_ = 0
+                while left != 0 and from_ <= len(bytes):
+                    var at = find_folded(
+                        bytes, Span(wanted), Span(keys), Span(answers), from_
+                    )
+                    if at < 0:
+                        break
+                    var ends = _folded_ends(
+                        bytes, at, Span(wanted), Span(keys), Span(answers)
+                    )
+                    scratch.extend(bytes[from_:at])
+                    scratch.extend(repl)
+                    from_ = ends
+                    if left > 0:
+                        left -= 1
+                scratch.extend(bytes[from_ : len(bytes)])
+
+            if len(scratch) == 0:
+                dst.unsafe_offset(i)[] = StringView()
+            elif len(scratch) <= INLINE_CAPACITY:
+                dst.unsafe_offset(i)[] = make_inline_at(
+                    Pointer(to=scratch[0]), len(scratch)
+                )
+            else:
+                var at = len(payload)
+                payload.extend(Span(scratch))
+                dst.unsafe_offset(i)[] = make_long_at(
+                    Pointer(to=scratch[0]), len(scratch), 0, at
+                )
+
+    parallel_morsels(compute, n, MORSEL_ROWS)
+
+    var payload = stack_payloads(parts^, views, n, MORSEL_ROWS)
+    return StringArray(views^, payload^, validity^, n)
 
 
 def compare_bytes(a: Span[UInt8, _], b: Span[UInt8, _]) -> Int:
