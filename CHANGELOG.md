@@ -17,6 +17,25 @@ That reason stopped being one when `stack_payloads` landed with the entry below.
 The test is the one the regular expression kernel got, asked twice over one column. The same rows are replaced once short enough to fit a single morsel and once doubled past the row count where every core takes a share, and row `i` of the tall answer has to be what row `i` of the short one was, for the exact search and then for the folded one. Three of the sample's rows come out too long to sit inside a view and go into a payload, the rest stay inside one, and two are null. Taking the offset shift out of the join on purpose fails it.
 
 `text_extract_regex` is the last kernel of this shape still running on one thread. It wants the same join done once per capturing group, so it is the same piece of work a few times over.
+## [0.8.8] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A small patch release with two things in it, one for the planner and one for the kernels, and both of them are cases where a refusal or a limit turned out to be smaller than the message in front of it said.
+
+TPC-H q2 answers now, which takes `pixi run tpch` to eighteen of twenty two. What the gap list said q2 wanted was an operator that pairs every left row with every right row, and it wanted no such thing. Printing its plan said the product in the middle of it was an artifact of the order the query writes its `FROM` in, which is the shape the join ordering pass from 0.8.7 already handles. The pass was not firing because q2 has a correlated subquery, and decorrelating one joins the answer on above the `FROM` it correlates with, which puts a node between the filter carrying the equalities and the chain those equalities are about. The pass looked only at what the filter reads, found a single join, and gave up one step away. It now walks the left spine until a chain turns up. That leaves four queries refused in three places rather than five in four, and the same message that stood in front of q7, q8, q9, q19 and q2 has now been wrong about all five of them.
+
+Replacing a regular expression down a column runs on every core. It was the one kernel in its file still on one thread, because the answer is text and how long a row comes out is not known until the pattern has run over it, so the one buffer with one cursor that the other kernels write into is not something four threads can share. The fix is to size the view buffer up front, since there is exactly one view per row and every thread writes only its own morsel's rows, and to give each morsel its own payload list for the bytes that do not fit inside a view. `stack_payloads` then lays those payloads end to end and moves each long view along by where its morsel landed. The join is serial on purpose: it is one `memcpy` per morsel against a regular expression that took microseconds a row to produce the bytes being copied. A twenty second profile of ClickBench q28 has all four workers inside the morsel body where the driver's own accounting used to show the kernel using 0.87 of a core. The wall clock number is not in here because the machine that would have measured it was carrying a load average above ninety, and a number taken there says something about the machine rather than about the kernel.
+
+### Fixed: join ordering looks a node further down, and TPC-H q2 runs
+
+`FROM part, supplier, partsupp, nation, region` has no equality between its first two relations, so the comma chain lowers with a product in the middle of it, and a product of two real tables is refused rather than slow. That is TPC-H q9's shape and the join ordering pass has handled it since it was written, by keeping the first relation where the query put it and then repeatedly taking the first one left that has an equality with something already taken.
+
+q2 is that shape with a correlated subquery in it, and decorrelating a subquery joins its answer on above the `FROM` it correlates with. So the chain was the left input of that join, the pass only ever looked at the node the filter above it read, and what it found there was a single node with nothing to reorder. It gave up on a chain that was one step away.
+
+The chain is now looked for down the left rather than only directly under the filter. Reassociating a product is sound wherever the product sits, because it pairs the same rows into the same multiset either way and the only thing that changes is the column order, which the rebuild at the end of the pass already fixes. The equalities are read for which relations they tie together and for nothing else, so reading them from above a join that is not part of the chain takes nothing away from them.
+
+q2 answers what DuckDB answers now and `pixi run tpch` is eighteen of twenty two. The four that are left are refused in three places rather than four: q20 wants a left join on two key pairs, q11 wants a scalar subquery taken in a `HAVING`, and q13 and q21 want a join condition that is not an equality. What q2's own line on that list used to say was that it wanted an operator pairing every left row with every right row, which it turned out not to want at all.
 
 ### Changed: replacing a regular expression down a column runs on every core
 
@@ -7741,7 +7760,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/tamnd/firepanda/releases/tag/v0.8.8
 [0.8.7]: https://github.com/tamnd/firepanda/releases/tag/v0.8.7
 [0.8.6]: https://github.com/tamnd/firepanda/releases/tag/v0.8.6
 [0.8.5]: https://github.com/tamnd/firepanda/releases/tag/v0.8.5
