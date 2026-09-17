@@ -73,6 +73,8 @@ The machine carries the slots alongside the thread list, and `_queue` became rec
 
 `text_replace_regex` in `firepanda/kernel/regex/column.mojo` runs it down a column. It is the first kernel there that is not split into morsels, because a `StringBuilder` is one buffer with one cursor and handing four threads a share of it is a different design rather than a flag. The literal `text_replace` in `pattern.mojo` is serial for exactly the same reason, so this is the established shape here rather than a new compromise. It also means there is no scalar twin, since the twin next door exists to check the morsel split and the null repair and there is neither of those here.
 
+That last paragraph stopped being true after tamnd/firepanda#830 measured what it cost, and the change is the one section 10 asked for: a payload per morsel written by the thread that owns the morsel, and one pass at the end that puts the payloads end to end and moves the long views onto them. `stack_payloads` in `firepanda/array/strings.mojo` is that pass. There is still no scalar twin, and what stands in for one is a test that runs the same rows short and then tiled past a morsel and asks whether row `i` still says what it said. The literal `text_replace` in `pattern.mojo` is still serial and still waiting for the same helper.
+
 Everything the row costs is still paid once per column. The pattern is compiled once, the replacement is read once, and the machine, the offsets, the slots and the output buffer are made once and handed to every row.
 
 ## 7. The two refusals
@@ -110,6 +112,8 @@ The list from document 79 section 9 with `replace` struck off and captures struc
 A bounded replace is open and may stay open. Section 7 says what Arrow does with one and there is nothing there worth copying, so the honest answer is a gap on the board until somebody decides which of the two loops a caller actually wants.
 
 A parallel replace is open. Section 6 says what stands in the way, which is one builder with one cursor, and the shape that closes it is a builder per morsel and a join at the end. The same change would make the literal `text_replace` parallel, so it is one piece of work for both.
+
+That was written before there was a number on it. The number arrived from ClickBench q28, where this kernel used 0.87 cores on a machine where the kernel next door used 3.40, and the shape above is what landed. Section 6 has the second half. The literal `text_replace` is the part of that paragraph still open, and so is `text_extract_regex`, which builds one column per group and wants the same join done several times over.
 
 ## 11. Observations to file upstream
 

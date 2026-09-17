@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: replacing a regular expression down a column runs on every core
+
+`text_replace_regex` was the one kernel in its file that ran on one thread, and the reason it did is written down in document 80 section 6: the answer is text, how long a row comes out is not known until the pattern has run over it, and a `StringBuilder` is one buffer with one cursor that four threads cannot share. That was a fair trade while the kernel was new and it stopped being one as soon as there was a number on it. ClickBench q28 is one call to this kernel and a group by on what comes out, and the driver's own accounting had it using 0.87 cores on a machine where `text_byte_length`, running next to it in q27 over the same column, used 3.40. Issue #830.
+
+The way out is the one document 80 section 10 asked for and it comes in two halves. The views are 16 bytes each and there is one per row, so that buffer is sized before anything starts and every thread writes only the rows of its own morsel into it. The bytes that do not fit in a view go into a `List` that belongs to the morsel, so no two threads are ever writing to the same allocation. `stack_payloads` in `firepanda/array/strings.mojo` is the second half: it lays the morsels' payloads end to end into one buffer and moves each long view along by where its morsel landed, which is what `StringView.shift_offset` was written for. An element of twelve bytes or fewer lives inside its own view and is finished the moment it is written, so it is skipped rather than shifted, and shifting one would write over its last four data bytes.
+
+The join is serial and that is the point rather than a compromise. It is one `memcpy` per morsel and one predictable branch per row, against a regular expression that took microseconds a row to produce the bytes being copied. Splitting a copy across threads to save a millisecond at the end of a second is how a simple joint turns into a hard one.
+
+There is no scalar twin here, for the reason there never was one: the twin next door exists to check the morsel split and the null repair, and until now this kernel had neither. What stands in for one is a test that runs the same rows twice, once short enough to fit a single morsel and once tiled past the point where every core takes a share, and asks whether row `i` of the tall answer still says what row `i` of the short one said. The rows are chosen so that the question is a real one: one of them is too long to sit inside a view and so goes into a payload, one is short enough to sit inside one, one is empty and two are null. A join that moved the first morsel's offsets and left the rest of them where they were disagrees on 6555 rows of that test, which is what it answered when the shift was taken out on purpose.
+
+What this is worth in wall clock is not in this entry yet, because the machine it would have been measured on was carrying a load average above ninety from other work while the runs were taken, and under that q27 measured 1.28 cores where the same query on the same machine measured 3.40 earlier the same day. A number taken there says something about the machine and nothing about the kernel. What is checked rather than assumed is that the work is now on the workers: a twenty second profile of q28 has all four worker threads inside the morsel body. The wall clock number goes on issue #830 when there is an idle machine to take it on.
+
+`text_extract_regex` in the same file and the literal `text_replace` in `pattern.mojo` are both still serial, and `stack_payloads` is the half of the work either of them needs, so each is now a small piece of work rather than a design question.
+
 ## [0.8.7] - 2026-09-15
 
 Built against Mojo 1.0.0 (ed45d567).
