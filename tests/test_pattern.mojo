@@ -41,6 +41,7 @@ from firepanda.array.strings import (
     StringBuilder,
     strings_from_list,
 )
+from firepanda.array.strview import INLINE_CAPACITY
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.kernel.agg import sum_of
 from firepanda.kernel.compare import not_equal
@@ -615,6 +616,78 @@ def test_replace_keeps_a_missing_row_missing() raises:
     var got = text_replace(col, "green".as_bytes(), "X".as_bytes(), -1)
     assert_false(got.is_valid(2), "a missing row has nothing to replace")
     assert_false(got.is_valid(4), "and neither has the other one")
+
+
+def test_replacing_past_one_morsel_says_what_one_morsel_said() raises:
+    """The answer here is text, so it is built a payload per morsel and joined
+    at the end, and a column short enough to fit one morsel never reaches the
+    join. This runs the same rows twice, once short and once doubled past the
+    row count where every core takes a share, and asks whether row `i` of the
+    tall answer is still what row `i` of the short one was.
+
+    The twin is no use for this one. It answers the same rows the same way and
+    the question is not what a row holds, it is whether a row in the fourth
+    morsel is still pointing at its own bytes after four payloads were laid end
+    to end. The rows the sample already has are what make it a real question:
+    three of them come out too long to sit inside a view and go into a payload,
+    the rest come out short enough to stay in one, and two are null."""
+    var short = text_replace(
+        sample(), "green".as_bytes(), "GREEN".as_bytes(), -1
+    )
+    assert_true(
+        short[7].byte_length() > INLINE_CAPACITY, "a row with a payload"
+    )
+    assert_true(
+        short[3].byte_length() <= INLINE_CAPACITY, "and one without one"
+    )
+
+    var col = sample()
+    while len(col) < MORSEL_ROWS:
+        var pair = List[StringArray]()
+        pair.append(col.copy())
+        pair.append(col.copy())
+        col = concat_strings(pair)
+    var tail = List[StringArray]()
+    tail.append(col^)
+    tail.append(sample())
+    col = concat_strings(tail)
+    assert_true(len(col) > MORSEL_ROWS)
+
+    var tall = text_replace(col, "green".as_bytes(), "GREEN".as_bytes(), -1)
+    tiles(tall, short, "the exact replace")
+
+    # The folded replace is a different search and the same join, so it is asked
+    # the same question over the same column rather than being given a column of
+    # its own to grow. The pattern is written in the case the rows are not, so
+    # the fold is doing the finding.
+    var folded_short = text_replace_folded(
+        sample(), "GREEN".as_bytes(), "x".as_bytes(), -1
+    )
+    var folded_tall = text_replace_folded(
+        col, "GREEN".as_bytes(), "x".as_bytes(), -1
+    )
+    tiles(folded_tall, folded_short, "the folded replace")
+
+
+def tiles(tall: StringArray, short: StringArray, what: String) raises:
+    """Asserts that a tall answer repeats a short one, row for row.
+
+    Args:
+        tall: The answer for the column grown past a morsel.
+        short: The answer for the rows it was grown from.
+        what: What to name in the failure.
+
+    Raises:
+        AssertionError: If any row disagrees.
+    """
+    var wrong = 0
+    for i in range(len(tall)):
+        var want = i % len(short)
+        if tall.is_valid(i) != short.is_valid(want):
+            wrong += 1
+        elif tall.is_valid(i) and tall[i] != short[want]:
+            wrong += 1
+    assert_equal(wrong, 0, what + " disagrees with its one morsel answer")
 
 
 def probe() -> StringArray:
