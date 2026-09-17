@@ -3696,6 +3696,40 @@ def test_the_same_table_twice_in_one_from_is_still_refused() raises:
         _ = run("SELECT qty FROM sales, sales", session())
 
 
+def test_a_qualifier_inside_a_subquery_means_the_subquerys_own_table() raises:
+    # `sales.qty` is written where two relations are called `sales`, and the
+    # one it means is the subquery's. Written out it reads the same as the bare
+    # spelling above, which is the point: the qualifier is not what decides it.
+    same(
+        answer(
+            (
+                "SELECT band FROM sales, tiers WHERE qty = band AND rate >"
+                " (SELECT sum(price) * 100 FROM sales WHERE sales.qty = band)"
+            ),
+            "band",
+        ),
+        [40],
+        "band",
+    )
+
+
+def test_a_name_two_of_the_subquerys_tables_have_is_ambiguous() raises:
+    # `shop` is on both tables the subquery reads and on neither table the
+    # query around it reads, so there is no innermost relation to pin it to and
+    # the ambiguity is the subquery's own. Shadowing decides between two levels
+    # and has nothing to say within one, which is what this holds it to.
+    with assert_raises(
+        contains="is the name of more than one column on one side"
+    ):
+        _ = run(
+            (
+                "SELECT band FROM tiers WHERE rate > (SELECT avg(price) FROM"
+                " sales, shops WHERE shop = 1 AND qty = band)"
+            ),
+            session(),
+        )
+
+
 def test_a_subquery_over_no_table_runs() raises:
     same(
         answer(
