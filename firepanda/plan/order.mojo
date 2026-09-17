@@ -27,6 +27,14 @@ nothing else ever runs. Read in the order `part, lineitem, supplier, partsupp,
 orders, nation` each table has an equality with something already joined. q8 is
 the same shape over eight tables.
 
+TPC-H q2 is the same gap one node further down. Its `FROM` is `part, supplier,
+partsupp, nation, region` and its first two have nothing between them, exactly
+like q9, but it also has a correlated subquery, and decorrelating one joins the
+answer on above the `FROM` it correlates with. So the chain is the left input of
+that join rather than what the filter reads, and looking only at what the filter
+reads found a single node and gave up. `_spine` walks down the left until a
+chain turns up.
+
 ## The rule
 
 Keep the first relation where the query put it and then repeatedly take the
@@ -136,6 +144,9 @@ def _reorder(
 ) raises:
     """Puts the relations of one chain into an order with no product in it.
 
+    Which chain that is comes from `_spine`, because the one a filter's
+    equalities are about is not always the node the filter reads.
+
     Args:
         plan: The plan, whose join nodes are rewired in place.
         restriction: The filter's predicate, which is where the equalities
@@ -147,13 +158,12 @@ def _reorder(
     Raises:
         If an expression is not in the arena.
     """
+    var top = _spine(plan, under)
+    if top < 0:
+        return
     var joins = List[Int]()
     var leaves = List[Int]()
-    _chain(plan, under, joins, leaves)
-    # Two relations are one join and swapping its sides cannot key it, so the
-    # shortest chain worth reading has three.
-    if len(leaves) < 3:
-        return
+    _chain(plan, top, joins, leaves)
 
     var pieces = List[Int]()
     plan.exprs.conjuncts(restriction, pieces)
@@ -208,6 +218,45 @@ def _reorder(
         var left = leaves[picked[0]] if i == 0 else joins[len(joins) - i]
         plan.nodes[join].inputs = [left, leaves[picked[i + 1]]]
     moved = True
+
+
+def _spine(plan: Plan, under: Int) -> Int:
+    """Where the chain a filter's equalities are about actually starts.
+
+    Usually right under the filter, and not always. A decorrelated subquery is
+    joined on above the `FROM` it correlates with, so the `FROM` written as a
+    comma list ends up as the left input of that join and the filter carrying
+    the equalities sits above the pair of them. The chain is still a chain and
+    the equalities still name its relations, and the only thing in the way is
+    that nothing was looking one node further down.
+
+    So the left spine is walked until a chain turns up. Reassociating a product
+    is sound wherever the product sits, because it pairs the same rows in the
+    same multiset either way and only the column order changes, which the
+    rebuild below fixes. The equalities are read for which relations they tie
+    together and for nothing else, so reading them from above a join that is
+    not part of the chain takes nothing away from them.
+
+    Args:
+        plan: The plan.
+        under: The node the filter reads.
+
+    Returns:
+        The top of the first chain of at least three relations on the left
+        spine, or a negative number when there is none. Two relations are one
+        join and swapping its sides cannot key it, so three is the shortest
+        chain worth reading.
+    """
+    var at = under
+    while True:
+        var joins = List[Int]()
+        var leaves = List[Int]()
+        _chain(plan, at, joins, leaves)
+        if len(leaves) >= 3:
+            return at
+        if plan.nodes[at].kind != NodeKind.JOIN:
+            return -1
+        at = plan.nodes[at].inputs[0]
 
 
 def _chain(plan: Plan, at: Int, mut joins: List[Int], mut leaves: List[Int]):
