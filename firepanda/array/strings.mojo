@@ -823,6 +823,74 @@ struct StringBuilder(Movable, Sized):
         return StringArray(views^, payload^, validity^, count)
 
 
+def stack_payloads(
+    var parts: List[List[UInt8]], mut views: Buffer, height: Int, rows: Int
+) -> Buffer:
+    """Stacks a morsel's worth of payload each into one, and moves the views.
+
+    A kernel whose answer is text cannot share one builder across threads,
+    because a builder is one buffer with one cursor. What it can do is give each
+    morsel a buffer of its own, write the long elements into that, and put the
+    pieces end to end afterwards. This is the afterwards. Each morsel's bytes are
+    copied to where they now live, and every long view in that morsel's rows is
+    moved along by the same amount, which is what `StringView.shift_offset`
+    exists for. A short element never enters a payload and is already finished,
+    so it is skipped rather than shifted, and shifting one would write over its
+    last four data bytes.
+
+    This is serial, and it is worth saying why when the point of it is a parallel
+    kernel. Nothing here is work. It is one `memcpy` per morsel over bytes that
+    are about to be read anyway and one predictable branch per row, against a
+    regular expression or a case fold that took milliseconds a row to produce
+    them. Splitting a copy across threads to save a millisecond at the end of a
+    second is how a simple joint turns into a hard one.
+
+    A morsel that wrote nothing is skipped rather than copied from, because an
+    empty `List` has no buffer to name and a `memcpy` of nothing from nowhere is
+    still a read of a pointer that was never allocated.
+
+    Args:
+        parts: One payload per morsel, in morsel order. Consumed.
+        views: The finished views, one per row, with each long one holding the
+            offset it was written at inside its own morsel's payload.
+        height: How many rows there are.
+        rows: How many rows a morsel held, which is how a row is mapped back to
+            the payload it went into.
+
+    Returns:
+        The one payload, sized to what was written.
+    """
+    var total = 0
+    var bases = List[Int](capacity=len(parts))
+    for k in range(len(parts)):
+        bases.append(total)
+        total += len(parts[k])
+
+    # A column whose every element was short has no payload and still needs a
+    # buffer, because a column holding a null one is a column nobody can read.
+    var payload = Buffer(total if total > 0 else 1)
+    var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+    for k in range(len(parts)):
+        ref mine = parts[k]
+        if len(mine) > 0:
+            unsafe_memcpy(
+                dest=payload.unsafe_mut_ptr().unsafe_offset(bases[k]),
+                src=mine.unsafe_ptr(),
+                count=len(mine),
+            )
+        if bases[k] == 0:
+            continue
+        var stop = (k + 1) * rows
+        if stop > height:
+            stop = height
+        for i in range(k * rows, stop):
+            if not dst.unsafe_offset(i)[].is_inline():
+                dst.unsafe_offset(i)[].shift_offset(UInt32(bases[k]))
+
+    payload.set_size(total)
+    return payload^
+
+
 def collapse_into[
     origin: MutOrigin
 ](dest: Pointer[UInt8, origin], bytes: Span[UInt8, _], quote: UInt8) -> Int:

@@ -45,9 +45,17 @@ have in the repository at all.
 from std.collections.span import Span
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import StringArray, StringBuilder, stack_payloads
+from firepanda.array.strview import (
+    INLINE_CAPACITY,
+    StringView,
+    VIEW_SIZE,
+    make_inline_at,
+    make_long_at,
+)
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.exec import parallel_morsels
+from firepanda.buffer.buffer import Buffer
+from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_width
@@ -238,19 +246,28 @@ def text_replace_regex(
 ) raises -> StringArray:
     """Writes every element out with matches of a compiled pattern swapped.
 
-    The third kernel here and the first whose answer is text, which is what
-    makes it the odd one of the three. How long a row comes out is not known
-    until the scan has run, so the rows go into a builder one at a time rather
-    than into a column allocated up front, and that is also why this one is not
-    split into morsels: a builder is one buffer with one cursor, and handing
-    four threads a share of it is a different design rather than a flag. The
-    literal `text_replace` is serial for the same reason and document 80 has
-    the note about what closes it, which is a builder per morsel and a join.
+    The third kernel here and the first whose answer is text, which used to be
+    what kept it on one thread. How long a row comes out is not known until the
+    scan has run, so there is no column to allocate up front and fill, and a
+    `StringBuilder` is one buffer with one cursor that four threads cannot
+    share. Document 80 section 10 named the way out and this is it: a payload
+    per morsel, written by the thread that owns that morsel, and one pass at the
+    end that puts the pieces end to end and moves the long views onto them. The
+    views themselves are 16 bytes each and there is one per row, so they go into
+    a buffer sized before anything starts and every thread writes its own rows
+    of it.
 
-    Everything the row costs is still paid once per column rather than once per
-    row. The pattern is compiled before the first row, the replacement is read
-    before the first row, and the machine, the offsets, the slots and the
-    output buffer are made here and handed to every row.
+    It was worth doing because the kernels either side of it were already
+    parallel and this one was measured at 0.87 cores where `text_byte_length`
+    next door used 3.40, on the same machine in the same run. tamnd/firepanda#830
+    has the profile. The two passes are not the same price: the first runs the
+    pattern and the second is a `memcpy` per morsel, so the part that was serial
+    is now the part that costs nothing.
+
+    Everything the row costs is still paid once per morsel rather than once per
+    row. The pattern is compiled and the replacement is read before any of this,
+    and the machine, the offsets, the slots and the output buffer are made once
+    inside each morsel and handed to every row in it.
 
     Args:
         a: The column.
@@ -267,31 +284,65 @@ def text_replace_regex(
         A text column of the same height, null wherever the input is null.
 
     Raises:
-        Error: If the builder cannot allocate.
+        Error: Only what the morsel runtime raises.
     """
     var n = len(a)
-    var built = StringBuilder(capacity=n)
-    var machine = Machine(program)
-    var points = List[UInt32]()
-    var offsets = List[Int]()
-    var found = List[Int32]()
-    var out = List[UInt8]()
-    for i in range(n):
-        if not a.is_valid(i):
-            built.append_null()
-            continue
-        var bytes = a.unsafe_bytes(i)
-        decode_into(bytes, points)
-        replaced(
-            program,
-            rewrite,
-            bytes,
-            Span(points),
-            machine,
-            offsets,
-            found,
-            out,
-            limit,
-        )
-        built.append(Span(out))
-    return built^.finish()
+    var validity = Bitmap(copy=a.validity)
+    var views = Buffer(n * VIEW_SIZE)
+    if n == 0:
+        return StringArray(views^, Buffer(1), validity^, 0)
+
+    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var parts = List[List[UInt8]](capacity=morsels)
+    for _ in range(morsels):
+        parts.append(List[UInt8]())
+
+    def compute(start: Int, stop: Int) {mut parts, mut views, imm}:
+        ref payload = parts[start // MORSEL_ROWS]
+        var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        # One machine and one of each buffer for the whole morsel rather than
+        # one of each per row, which is what the serial version did per column.
+        var machine = Machine(program)
+        var points = List[UInt32]()
+        var offsets = List[Int]()
+        var found = List[Int32]()
+        var out = List[UInt8]()
+        for i in range(start, stop):
+            # A null's view is written rather than left alone, because a view
+            # that was never written is whatever the allocation held and every
+            # read of this column would follow it.
+            if not a.is_valid(i):
+                dst.unsafe_offset(i)[] = StringView()
+                continue
+            var bytes = a.unsafe_bytes(i)
+            decode_into(bytes, points)
+            replaced(
+                program,
+                rewrite,
+                bytes,
+                Span(points),
+                machine,
+                offsets,
+                found,
+                out,
+                limit,
+            )
+            if len(out) == 0:
+                dst.unsafe_offset(i)[] = StringView()
+            elif len(out) <= INLINE_CAPACITY:
+                dst.unsafe_offset(i)[] = make_inline_at(
+                    Pointer(to=out[0]), len(out)
+                )
+            else:
+                # The offset written is inside this morsel's own payload and is
+                # moved onto the real one by `stack_payloads`.
+                var at = len(payload)
+                payload.extend(Span(out))
+                dst.unsafe_offset(i)[] = make_long_at(
+                    Pointer(to=out[0]), len(out), 0, at
+                )
+
+    parallel_morsels(compute, n, MORSEL_ROWS)
+
+    var payload = stack_payloads(parts^, views, n, MORSEL_ROWS)
+    return StringArray(views^, payload^, validity^, n)

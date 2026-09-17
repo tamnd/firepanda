@@ -27,13 +27,22 @@ from firepanda.array.strings import (
     StringBuilder,
     strings_from_list,
 )
+from firepanda.array.strview import INLINE_CAPACITY
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.kernel.agg import sum_of
 from firepanda.kernel.compare import not_equal
 from firepanda.kernel.concat import concat_strings
-from firepanda.kernel.regex.column import text_matches_regex
-from firepanda.kernel.regex.method import METHOD_CONTAINS, program_for
+from firepanda.kernel.regex.column import (
+    text_matches_regex,
+    text_replace_regex,
+)
+from firepanda.kernel.regex.method import (
+    METHOD_CONTAINS,
+    METHOD_REPLACE,
+    program_for,
+)
 from firepanda.kernel.regex.program import Program
+from firepanda.kernel.regex.replace import parse_rewrite
 from firepanda.kernel.scalar import text_matches_regex_scalar
 
 
@@ -97,6 +106,33 @@ def sample() -> StringArray:
         else:
             builder.append(given[i].as_bytes())
     return builder^.finish()
+
+
+def grown() raises -> StringArray:
+    """The sample repeated until it is taller than one morsel.
+
+    The repeat is a doubling and then one more copy on the end, so the answer
+    is the sample tiled a whole number of times and row `i` of it is row
+    `i % 10` of the sample. Both morsel tests lean on that: it is what lets an
+    answer for a tall column be checked against an answer for a short one
+    without running anything twice.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If a concatenation cannot allocate.
+    """
+    var col = sample()
+    while len(col) < MORSEL_ROWS:
+        var pair = List[StringArray]()
+        pair.append(col.copy())
+        pair.append(col.copy())
+        col = concat_strings(pair)
+    var tail = List[StringArray]()
+    tail.append(col^)
+    tail.append(sample())
+    return concat_strings(tail)
 
 
 def agrees(
@@ -205,16 +241,7 @@ def test_a_column_either_side_of_the_morsel_split_matches_the_twin() raises:
     asked for the whole column in one call, the two answers are compared by a
     kernel and reduced by another, and the only thing crossing back here is a
     count."""
-    var col = sample()
-    while len(col) < MORSEL_ROWS:
-        var pair = List[StringArray]()
-        pair.append(col.copy())
-        pair.append(col.copy())
-        col = concat_strings(pair)
-    var tail = List[StringArray]()
-    tail.append(col^)
-    tail.append(sample())
-    col = concat_strings(tail)
+    var col = grown()
     assert_true(len(col) > MORSEL_ROWS)
 
     var program = compiled("^a+b$")
@@ -229,6 +256,49 @@ def test_a_column_either_side_of_the_morsel_split_matches_the_twin() raises:
     assert_true(mask[0])
     assert_false(mask[1])
     assert_false(mask.is_valid(2))
+
+
+def test_replacing_past_one_morsel_says_what_one_morsel_said() raises:
+    """The replaced column is built a payload per morsel and joined at the end,
+    so a column short enough to fit one morsel never reaches the join at all.
+    This runs the same rows twice, once short and once tiled past the point
+    where every core takes a share, and asks whether row `i` of the tall answer
+    is still what row `i` of the short one was.
+
+    The sample is what makes it a check rather than a shape. It holds a row
+    whose answer is too long to sit inside a view and so goes into a payload, a
+    row short enough to sit inside one, an empty row and two nulls, and the two
+    assertions under the call say so rather than trusting that they do. A join
+    that moved the first morsel's offsets and left the rest where they were
+    would answer the first 131072 rows correctly and read whatever happened to
+    be in front of it after that."""
+    var program = program_for(METHOD_REPLACE, String("a"))
+    if not program.ok:
+        raise Error(String("the pattern did not compile: ", program.problem))
+    var rewrite = parse_rewrite(String("Z"), program.groups)
+    assert_true(rewrite.ok, "the replacement was refused")
+
+    var short = text_replace_regex(sample(), program, rewrite)
+    assert_true(
+        short[0].byte_length() > INLINE_CAPACITY, "a row with a payload"
+    )
+    assert_true(
+        short[3].byte_length() <= INLINE_CAPACITY, "and one without one"
+    )
+
+    var col = grown()
+    assert_true(len(col) > MORSEL_ROWS)
+    var tall = text_replace_regex(col, program, rewrite)
+    assert_equal(len(tall), len(col), "the answer is as tall as the column")
+
+    var wrong = 0
+    for i in range(len(tall)):
+        var want = i % len(short)
+        if tall.is_valid(i) != short.is_valid(want):
+            wrong += 1
+        elif tall.is_valid(i) and tall[i] != short[want]:
+            wrong += 1
+    assert_equal(wrong, 0, "rows disagreeing with the one morsel answer")
 
 
 def main() raises:
