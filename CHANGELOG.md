@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL runs a call written with a dot
+
+`f(x).g(y)` used to be refused by the transformer, and 36 statements in DuckDB's corpus stopped there. They read now, they print back with the dot where it was written, and they lower and run, because `x.f(y)` is the call `f(x, y)` and nothing else. The operand is the first argument and a flag on the call says how it was written, so every stage after the transformer reads it as the ordinary call it is without knowing the flag is there.
+
+A dotted name in front of parentheses is not this. `main.upper('x')` is a call to `upper` in the schema `main` and the grammar settles that before the transformer sees it, so what reaches the new case is a dot on something that cannot be a name at all. That is the same split the field access is on one side of, and this is the other side of it.
+
+The `method-call` entry has left the refusal table, which is the first time an entry has left it. The constants after it moved down by one. The numbers were always an index into that list and nothing outside the file keeps one, so what a caller matches on is the feature name and that has not changed.
+
 ### Changed: a group short enough counts its distinct values without sorting them
 
 A grouped distinct count lays each group's values out in a slab, sorts each group's stretch of it and counts the runs. Sorting is the right shape for a group that is long enough to pay for one and most groups are not. TPC-H has one to seven lines per order, so the loop was calling a general sort on four elements six million times and reading back a run length of one.

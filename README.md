@@ -139,7 +139,6 @@ See https://github.com/tamnd/firepanda/issues/13
 | `is-unknown` | IS UNKNOWN | It means IS NULL over a boolean, which firepanda does have, so write that instead. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `in-bare-value` | IN over an unparenthesized value | firepanda reads the right side of an IN as a list or as a subquery. Put the value in parentheses. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `like-escape` | ESCAPE on an operator that has no escaping form | A LIKE and an ILIKE take one. SIMILAR TO does not, which DuckDB says too. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `method-call` | a method call | firepanda has no node for the x.f(y) spelling. Write f(x, y), which is the same call. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `field-access` | a field access | It reads and prints back. A field belongs to a struct and a firepanda column holds one scalar, so there is nothing here with a field in it to reach into. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `postfix-operator` | a postfix operator | The two firepanda reads after an operand are a cast and a dotted name, and this is neither. | [#13](https://github.com/tamnd/firepanda/issues/13) |

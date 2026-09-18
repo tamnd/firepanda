@@ -30,6 +30,11 @@ number.
 A message may hold one `{}`, which is where the text from the query goes, so
 `{} on a call` refuses `ORDER BY` and `FILTER` in the same entry without either
 one losing its name.
+
+An entry leaves the table when the feature lands, and the constants after it
+move down by one. The numbers are an index into this list and nothing outside
+this file keeps one, so what a caller matches on is the feature name, which is
+why the name is the part that may not change.
 """
 
 
@@ -94,118 +99,115 @@ comptime LIKE_ESCAPE: UInt16 = 4
 """`ESCAPE` after an operator with no escaping form, which is `SIMILAR TO` and
 the regular expression spellings. A `LIKE` and an `ILIKE` become a call."""
 
-comptime METHOD_CALL: UInt16 = 5
-"""`x.f(y)`, the method spelling of a call."""
-
-comptime FIELD_ACCESS: UInt16 = 6
+comptime FIELD_ACCESS: UInt16 = 5
 """`.name` after something that is not a name."""
 
-comptime SUBSCRIPT: UInt16 = 7
+comptime SUBSCRIPT: UInt16 = 6
 """`x[1]` and `x[1:2]`."""
 
-comptime POSTFIX_OPERATOR: UInt16 = 8
+comptime POSTFIX_OPERATOR: UInt16 = 7
 """An operator written after its operand."""
 
-comptime CALL_MODIFIER: UInt16 = 9
+comptime CALL_MODIFIER: UInt16 = 8
 """`WITHIN GROUP` or `EXPORT_STATE` after a call."""
 
-comptime CALL_ARGUMENT: UInt16 = 10
+comptime CALL_ARGUMENT: UInt16 = 9
 """`ORDER BY` or a null treatment inside a call."""
 
-comptime ARRAY_SUBQUERY: UInt16 = 11
+comptime ARRAY_SUBQUERY: UInt16 = 10
 """`ARRAY(SELECT ...)`."""
 
-comptime DOTTED_NAME: UInt16 = 12
+comptime DOTTED_NAME: UInt16 = 11
 """A qualified name where only a plain one fits."""
 
-comptime QUOTED_NAME: UInt16 = 13
+comptime QUOTED_NAME: UInt16 = 12
 """Anything but a bare name where only a bare name fits."""
 
-comptime NOT_SUBQUERY: UInt16 = 14
+comptime NOT_SUBQUERY: UInt16 = 13
 """`NOT (SELECT ...)` where a subquery is the whole operand."""
 
-comptime SELECT_CLAUSE: UInt16 = 15
+comptime SELECT_CLAUSE: UInt16 = 14
 """A clause on a `SELECT` that the query node has no slot for."""
 
-comptime SELECT_SAMPLE: UInt16 = 16
+comptime SELECT_SAMPLE: UInt16 = 15
 """`USING SAMPLE` on a `SELECT`."""
 
-comptime TABLE_SAMPLE: UInt16 = 17
+comptime TABLE_SAMPLE: UInt16 = 16
 """`TABLESAMPLE` or `USING SAMPLE` on one table."""
 
-comptime TABLE_MODIFIER: UInt16 = 18
+comptime TABLE_MODIFIER: UInt16 = 17
 """Something after a table that is neither a join nor a pivot."""
 
-comptime TABLE_AT: UInt16 = 19
+comptime TABLE_AT: UInt16 = 18
 """`AT` after a table, which reads it as of a version or a timestamp."""
 
-comptime ALIAS_COLON: UInt16 = 20
+comptime ALIAS_COLON: UInt16 = 19
 """The `name: table` spelling of a table alias."""
 
-comptime JOIN_FORM: UInt16 = 21
+comptime JOIN_FORM: UInt16 = 20
 """A join written in a form the reference arena has no kind for."""
 
-comptime WITH_ORDINALITY: UInt16 = 22
+comptime WITH_ORDINALITY: UInt16 = 21
 """`WITH ORDINALITY` after a table function."""
 
-comptime WITH_USING_KEY: UInt16 = 23
+comptime WITH_USING_KEY: UInt16 = 22
 """`USING KEY` on a recursive `WITH` entry."""
 
-comptime ESCAPE_STRING: UInt16 = 24
+comptime ESCAPE_STRING: UInt16 = 23
 """An `E'...'` string, which reads backslash escapes."""
 
-comptime STATEMENT_LATER: UInt16 = 25
+comptime STATEMENT_LATER: UInt16 = 24
 """A statement that maps onto something a dataframe already does."""
 
-comptime STATEMENT_NEVER: UInt16 = 26
+comptime STATEMENT_NEVER: UInt16 = 25
 """A statement that asks for something a dataframe library does not have."""
 
-comptime ROW_VALUE: UInt16 = 27
+comptime ROW_VALUE: UInt16 = 26
 """`(a, b)` or `ROW(a, b)`, several values written as one."""
 
-comptime INTERVAL: UInt16 = 28
+comptime INTERVAL: UInt16 = 27
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
-comptime SPECIAL_CALL: UInt16 = 29
+comptime SPECIAL_CALL: UInt16 = 28
 """A function the grammar gives a rule of its own, such as `TRIM`."""
 
-comptime LAMBDA: UInt16 = 30
+comptime LAMBDA: UInt16 = 29
 """`lambda x: x + 1`, a function written in the query."""
 
-comptime LIST_COMPREHENSION: UInt16 = 31
+comptime LIST_COMPREHENSION: UInt16 = 30
 """`[x + 1 FOR x IN l]`, a list built by running an expression."""
 
-comptime NAMED_ARGUMENT: UInt16 = 32
+comptime NAMED_ARGUMENT: UInt16 = 31
 """`f(a := 1)`, an argument passed by name."""
 
-comptime COLUMNS: UInt16 = 33
+comptime COLUMNS: UInt16 = 32
 """`COLUMNS('regex')`, a pattern standing for a set of columns."""
 
-comptime MAP_LITERAL: UInt16 = 34
+comptime MAP_LITERAL: UInt16 = 33
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime GROUPING: UInt16 = 35
+comptime GROUPING: UInt16 = 34
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
-comptime POSITIONAL: UInt16 = 36
+comptime POSITIONAL: UInt16 = 35
 """`#1`, a column named by its place in the select list."""
 
-comptime DEFAULT_VALUE: UInt16 = 37
+comptime DEFAULT_VALUE: UInt16 = 36
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 38
+comptime UNPIVOT_NULLS: UInt16 = 37
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 39
+comptime UNPIVOT_GROUPS: UInt16 = 38
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 40
+comptime QUANTIFIED_VALUE: UInt16 = 39
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 41
+comptime NO_CASE: UInt16 = 40
 """A grammar rule the transformer has no case for at all."""
 
-comptime AGGREGATE_FILTER: UInt16 = 42
+comptime AGGREGATE_FILTER: UInt16 = 41
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
 
@@ -264,15 +266,6 @@ def sql_support() -> List[Refusal]:
             (
                 "A LIKE and an ILIKE take one. SIMILAR TO does not, which"
                 " DuckDB says too."
-            ),
-            SQL_ISSUE,
-        ),
-        Refusal(
-            "method-call",
-            "a method call",
-            (
-                "firepanda has no node for the x.f(y) spelling. Write f(x, y),"
-                " which is the same call."
             ),
             SQL_ISSUE,
         ),
