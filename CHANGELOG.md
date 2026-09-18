@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a compiled pattern can say which characters it cannot tell apart
+
+The alphabet a regular expression runs over is a million code points and a machine that remembers what it did needs a table as wide as the alphabet, so something has to make the alphabet small first. A class is a set of characters one program answers identically about: `abc` has four of them, the `a`, the `b`, the `c` and everything else, wherever in the code points that everything else happens to be. `compile_program` works them out when it is asked to and writes them on the program, as one entry per ASCII character and a searched table for the rest, which is the shape a column of text wants.
+
+The questions a program asks are the character instructions, with a negated class asking the same question as the class it negates, since what the alphabet needs is which characters are told apart rather than what is done with the answer. A full stop asks about the newline and so does a `^` or a `$` that reads a line ending. A word boundary asks about the word class, which is the one that would be easy to leave out: a boundary reads the characters around a position rather than the one at it, and a table built from the character instructions alone would put a letter and a space in one class and answer `\bfoo` wrongly. RE2 asks it against ASCII and Python against every letter there is, so the same pattern has a different alphabet on the two engines.
+
+Nothing reads the table yet, so nothing builds one. It is off unless a caller asks, because building it costs several times what compiling a short pattern costs and a millisecond or two for a pattern holding a Unicode class, and a table nobody reads is not worth that. What will read it is the lazy DFA in issue #863, which is what this is the first piece of.
+
+The test that matters is the property the whole thing rests on, asked of every pair of a hundred and thirty two characters against five patterns: two characters in one class answer every instruction of the program alike, and two in different classes are told apart by at least one of them. The second half is what makes the count as small as it can be rather than merely small.
+
 ## [0.8.11] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).

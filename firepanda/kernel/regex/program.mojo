@@ -360,6 +360,49 @@ struct Program(Movable):
     scan the scan it was before any of this was written.
     """
 
+    var class_count: Int32
+    """How many classes the alphabet was cut into, and zero when there is none.
+
+    A class is a set of characters this program cannot tell apart. Two
+    characters are in the same one when every question the program asks about a
+    character answers the same for both, so `abc` has four classes: the `a`, the
+    `b`, the `c` and everything else, wherever in the code points that everything
+    else happens to be.
+
+    What wants it is a machine that remembers what it did. A table of what a
+    state does next is as wide as the alphabet, and an alphabet of a million
+    code points is not a table anybody can hold, while an alphabet of four is a
+    row of four numbers. So this is the axis a lazy DFA's transition table is
+    laid out on, and until that exists this is a table nothing reads. Issue #863
+    has the order the pieces are being written in and why this one is first.
+
+    Zero for a program compiled without `alphabet`, which is every program
+    compiled today, since a table nothing reads is not worth several times the
+    compile it costs. Zero as well for a program that did not compile, for one
+    that asks more questions than `MAX_CLASS_TESTS` and for one that cuts the
+    code points into more pieces than `MAX_CLASS_PIECES`. A reader has to have
+    the fall back anyway, since the DFA above it has one for the patterns it
+    cannot run.
+    """
+
+    var class_ascii: List[Int32]
+    """The class of each of the 128 ASCII characters, or empty when there is no
+    table.
+
+    A direct index rather than a search, because a column of text is mostly
+    these and the whole point of the class table is that reading a character
+    stops being a binary search.
+    """
+
+    var class_above: List[Int32]
+    """The classes above ASCII, as a start and a class for each piece.
+
+    In order and read by a binary search, the way every other range table here
+    is read. The first piece starts at 128 and the last one runs to the last
+    code point, so every character above ASCII falls in exactly one of them and
+    a program whose pattern is all ASCII has one piece.
+    """
+
     var labels: List[String]
     """What each group is called, one entry per group and empty for an unnamed
     one.
@@ -385,6 +428,9 @@ struct Program(Movable):
         self.anchored = False
         self.first_at = 0
         self.first_count = 0
+        self.class_count = 0
+        self.class_ascii = []
+        self.class_above = []
         self.labels = []
 
     def sized(self) -> Int:
@@ -1592,11 +1638,361 @@ def _first_worth_having(ranges: List[Int32]) -> Bool:
     return held <= 96
 
 
+comptime MAX_CLASS_TESTS: Int = 256
+"""How many different questions about a character a program may ask before it
+is left without a class table.
+
+Every distinct question doubles the number of classes the alphabet could be cut
+into, and the table is built by giving each piece of the alphabet the answers to
+all of them and then grouping the pieces that answered alike. That is a walk per
+piece per question, so a ceiling keeps the compiler's work bounded for a pattern
+nobody meant to write. A repeat is compiled by copying its body and the copies
+ask the same questions, so the count here is the distinct ones: `(?:abcde){1000}`
+is five thousand instructions and five questions.
+"""
+
+
+comptime MAX_CLASS_PIECES: Int = 4096
+"""How many pieces the alphabet may be cut into before the table is given up on.
+
+A Unicode class has hundreds of ranges and a pattern may hold several, so this
+is not a number a real pattern reaches either. It is here for the same reason as
+the ceiling above: the grouping compares a piece against the classes found so
+far, so the work is the pieces times the classes and both of them need a top.
+"""
+
+
+comptime MAX_CLASS_CODE: Int = 20000
+"""How long a program may be before it is left without a table.
+
+`MAX_INSTRUCTIONS` is ten times this, because a counted repeat is compiled by
+copying its body and a pattern is allowed to say `{1000}`. Every copy asks a
+question already on the list and is thrown away, but it is looked at first, so
+the walk is the length of the program and something has to bound it. A program
+this long is not one a DFA would be kept for anyway.
+"""
+
+
+def _class_tests(
+    code: Span[Instruction, _], ranges: Span[Int32, _], mut too_many: Bool
+) -> List[List[Int32]]:
+    """Every different question the program asks about a character.
+
+    A question is a set: the characters that answer it yes. `IN_NOT_SET` asks
+    the same question as the set it negates, since what the alphabet needs to
+    know is which characters the program can tell apart rather than what it does
+    with the answer, and the two instructions tell the same pairs apart. A full
+    stop asks about the newline, a word boundary asks about the word class, and
+    a `^` or `$` that reads a line ending asks about the newline again.
+
+    `IN_ANY_ALL` asks nothing. That is the point of it: `(?s).` reads a
+    character and cannot tell any two of them apart.
+
+    The instructions are collected by where their set is in the table before any
+    of the sets are read out, so the thousand copies a counted repeat made cost
+    a comparison of three numbers each rather than a comparison of their ranges.
+    Two sets that are equal and written twice are still caught, on the way out.
+
+    Args:
+        code: The instructions.
+        ranges: The program's range table.
+        too_many: Set when the program is longer than `MAX_CLASS_CODE` or asks
+            more questions than `MAX_CLASS_TESTS`, which is how a caller tells a
+            program that asks too many from one that asks none.
+
+    Returns:
+        One sorted disjoint set per question, deduplicated, and empty when there
+        are none or when there are too many.
+    """
+    var out = List[List[Int32]]()
+    if len(code) > MAX_CLASS_CODE:
+        too_many = True
+        return out^
+    var kinds = List[UInt8]()
+    var at = List[Int32]()
+    var counts = List[Int32]()
+    var newline = False
+    var word_ascii = False
+    var word_wide = False
+    for i in range(len(code)):
+        var instruction = code[i]
+        var kind = instruction.op
+        if kind == IN_NOT_SET:
+            kind = IN_SET
+        elif kind == IN_ANY:
+            newline = True
+            continue
+        elif kind == IN_AT:
+            var which = UInt8(Int(instruction.a))
+            if which == AT_BOUNDARY or which == AT_NON_BOUNDARY:
+                word_ascii = True
+            elif (
+                which == AT_BOUNDARY_UNICODE or which == AT_NON_BOUNDARY_UNICODE
+            ):
+                word_wide = True
+            elif (
+                which == AT_BEGINNING_LINE
+                or which == AT_END_LINE
+                or which == AT_END
+                or which == AT_END_TEXT
+            ):
+                # RE2's `$` reads nothing and Python's reads the character
+                # before the end, and neither is worth telling apart from the
+                # other here, since one newline in the alphabet costs one class.
+                newline = True
+            continue
+        elif kind != IN_CHAR and kind != IN_SET:
+            continue
+        var seen = False
+        for k in range(len(kinds)):
+            if (
+                kinds[k] == kind
+                and at[k] == instruction.a
+                and counts[k] == instruction.b
+            ):
+                seen = True
+                break
+        if seen:
+            continue
+        kinds.append(kind)
+        at.append(instruction.a)
+        counts.append(instruction.b)
+        if len(kinds) > MAX_CLASS_TESTS:
+            too_many = True
+            return List[List[Int32]]()
+    for i in range(len(kinds)):
+        var held = List[Int32]()
+        if kinds[i] == IN_CHAR:
+            held.append(at[i])
+            held.append(at[i])
+        else:
+            for k in range(Int(counts[i])):
+                held.append(ranges[Int(at[i]) + k * 2])
+                held.append(ranges[Int(at[i]) + k * 2 + 1])
+        var set = _sorted_merged(held^)
+        if not _already_asked(out, set):
+            out.append(set^)
+    if newline:
+        var only = List[Int32]()
+        only.append(0x0A)
+        only.append(0x0A)
+        if not _already_asked(out, only):
+            out.append(only^)
+    if word_ascii:
+        var narrow = List[Int32]()
+        narrow.append(0x30)
+        narrow.append(0x39)
+        narrow.append(0x41)
+        narrow.append(0x5A)
+        narrow.append(0x5F)
+        narrow.append(0x5F)
+        narrow.append(0x61)
+        narrow.append(0x7A)
+        if not _already_asked(out, narrow):
+            out.append(narrow^)
+    if word_wide:
+        var wide = word_ranges_unicode()
+        if not _already_asked(out, wide):
+            out.append(wide^)
+    return out^
+
+
+def _already_asked(asked: List[List[Int32]], set: List[Int32]) -> Bool:
+    """Whether a question is one of the ones already on the list.
+
+    Args:
+        asked: The questions so far.
+        set: The question, sorted and disjoint.
+
+    Returns:
+        True when some entry holds the same ranges.
+    """
+    for i in range(len(asked)):
+        if len(asked[i]) != len(set):
+            continue
+        var same = True
+        for k in range(len(set)):
+            if asked[i][k] != set[k]:
+                same = False
+                break
+        if same:
+            return True
+    return False
+
+
+def _class_table(tests: List[List[Int32]]) -> List[Int32]:
+    """Cuts the code points into classes, as pairs of a start and a class.
+
+    Every question's two ends are a place the alphabet may have to be cut, so
+    the starts are the low end of every range and the code point after every
+    high end, with zero added and sorted. Between two of those nothing can tell
+    one character from another, which is what a class is.
+
+    Two pieces far apart get the same class when they answer every question the
+    same way, which is what keeps `abc` down to four classes rather than five:
+    the characters below `a` and the ones above `c` are the same thing to that
+    program. A transition table is as wide as the class count, so the grouping
+    is worth doing rather than leaving the pieces as they are.
+
+    Args:
+        tests: The questions, as `_class_tests` returned them.
+
+    Returns:
+        A start and a class for each piece, in order, with the first start zero
+        and every code point covered by the piece it falls in. Empty when there
+        are more pieces than `MAX_CLASS_PIECES`.
+    """
+    var starts = List[Int32]()
+    starts.append(0)
+    for i in range(len(tests)):
+        for k in range(len(tests[i]) // 2):
+            var low = tests[i][k * 2]
+            var high = tests[i][k * 2 + 1]
+            if low > 0:
+                starts.append(low)
+            if high < UNICODE_LAST:
+                starts.append(high + 1)
+    starts = _sorted_unique(starts^)
+    if len(starts) > MAX_CLASS_PIECES:
+        return List[Int32]()
+    # The signature of a piece is its answer to every question, one bit each,
+    # and two pieces are the same class when their signatures are equal. The
+    # bits are packed into words so that the comparison is a few integers
+    # rather than a walk over the questions.
+    var out = List[Int32]()
+    if len(tests) == 0:
+        # A program that cannot tell any two characters apart, which is `(?s).`
+        # and nothing else. One class, holding everything.
+        out.append(0)
+        out.append(0)
+        return out^
+    var words = (len(tests) + 63) // 64
+    var signatures = List[UInt64]()
+    var classes = 0
+    for i in range(len(starts)):
+        var here = List[UInt64](length=words, fill=0)
+        for k in range(len(tests)):
+            if in_set(
+                Span(tests[k]),
+                0,
+                Int32(len(tests[k]) // 2),
+                UInt32(Int(starts[i])),
+            ):
+                here[k // 64] |= UInt64(1) << UInt64(k % 64)
+        var found = -1
+        for k in range(classes):
+            var same = True
+            for w in range(words):
+                if signatures[k * words + w] != here[w]:
+                    same = False
+                    break
+            if same:
+                found = k
+                break
+        if found < 0:
+            found = classes
+            classes += 1
+            for w in range(words):
+                signatures.append(here[w])
+        out.append(starts[i])
+        out.append(Int32(found))
+    return out^
+
+
+def _sorted_unique(var values: List[Int32]) -> List[Int32]:
+    """Puts numbers in order and drops the repeats.
+
+    Args:
+        values: The numbers, in any order, consumed.
+
+    Returns:
+        The same numbers, ascending, each appearing once.
+    """
+    sort(values)
+    var out = List[Int32]()
+    for i in range(len(values)):
+        if i == 0 or values[i] != values[i - 1]:
+            out.append(values[i])
+    return out^
+
+
+def _fill_classes(mut program: Program):
+    """Works out the program's alphabet and writes it onto the program.
+
+    The ASCII half is one entry per character and the rest is the pieces above
+    it, which is the shape a column of text asks for: mostly ASCII, read by an
+    index, with a search kept for the characters that need one.
+
+    A program that asks too much is left without a table rather than given a
+    wrong one, and `class_count` staying zero is how it says so.
+
+    Args:
+        program: The compiled program, with its code and ranges already on it.
+    """
+    var too_many = False
+    var tests = _class_tests(Span(program.code), Span(program.ranges), too_many)
+    if too_many:
+        return
+    var table = _class_table(tests)
+    if len(table) == 0:
+        return
+    var count = 0
+    for i in range(len(table) // 2):
+        if Int(table[i * 2 + 1]) + 1 > count:
+            count = Int(table[i * 2 + 1]) + 1
+    program.class_count = Int32(count)
+    var at = 0
+    for point in range(128):
+        while at + 1 < len(table) // 2 and Int(table[(at + 1) * 2]) <= point:
+            at += 1
+        program.class_ascii.append(table[at * 2 + 1])
+    # The piece ASCII ended inside is written again with 128 as its start, so
+    # that the first entry up here is always the one a character just above
+    # ASCII falls in and the search has nothing to say about an empty list.
+    while at + 1 < len(table) // 2 and Int(table[(at + 1) * 2]) <= 128:
+        at += 1
+    program.class_above.append(128)
+    program.class_above.append(table[at * 2 + 1])
+    for i in range(at + 1, len(table) // 2):
+        program.class_above.append(table[i * 2])
+        program.class_above.append(table[i * 2 + 1])
+
+
+def class_of(program: Program, point: UInt32) -> Int32:
+    """Which class of the program's alphabet a character is in.
+
+    Args:
+        program: The compiled program, which has to have a class table for this
+            to mean anything.
+        point: The code point.
+
+    Returns:
+        The class, from zero, and zero for a program with no table at all.
+    """
+    if program.class_count == 0:
+        return 0
+    if point < 128:
+        return program.class_ascii[Int(point)]
+    var value = Int32(Int(point))
+    var low = 0
+    var high = len(program.class_above) // 2 - 1
+    var found = program.class_above[1]
+    while low <= high:
+        var middle = (low + high) // 2
+        if program.class_above[middle * 2] <= value:
+            found = program.class_above[middle * 2 + 1]
+            low = middle + 1
+        else:
+            high = middle - 1
+    return found
+
+
 def compile_program(
     tree: Parsed,
     engine: UInt8,
     captures: Bool = False,
     minor: Int = PYTHON_NEWEST,
+    alphabet: Bool = False,
 ) -> Program:
     """Turns a parsed pattern into a program for one of the two engines.
 
@@ -1614,6 +2010,11 @@ def compile_program(
             Python's engine it decides one rule, which is whether `\\B` matches
             a row with nothing in it, and the default is the newest version
             this library has been measured against.
+        alphabet: Whether to work out which characters the program can tell
+            apart and write the class table on it. Off by default, because
+            nothing reads the table yet and building one costs several times
+            what compiling a short pattern costs and a millisecond or two for a
+            pattern holding a Unicode class. Issue #863 is what turns it on.
 
     Returns:
         The program, or the reason there is not one. A refusal is a value here
@@ -1739,6 +2140,8 @@ def compile_program(
         out.first_count = Int32(len(first) // 2)
         for i in range(len(first)):
             out.ranges.append(first[i])
+    if alphabet:
+        _fill_classes(out)
     out.groups = Int(tree.groups)
     out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
     # The parser keeps the names and the numbers as two lists the length of
