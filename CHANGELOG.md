@@ -57,6 +57,7 @@ So `tools/python_version.py` reads the constants out of the compiler and the sup
 It also refuses a constant above the newest measured version, which is a rule nobody could have measured and so a typo or a guess, and a constant at or below the floor, which is how these are meant to leave. When the floor rises past a threshold every supported interpreter is already above it, the branch behind it can never run, and the constant and its branch and its tests and its paragraphs are all dead with nothing anywhere to say so.
 
 It runs twice, as a pixi task in CI and again inside the accessor test suite, because those two stand in different interpreters and either can be upgraded without the other. That gap is the one that produced the first of these two rules. Document 92.
+
 ### Changed: `contains`, `match` and `fullmatch` read a column through the state cache
 
 The matching kernel builds a cache beside the machine and asks the cache for every row. A pattern the cache refuses never reaches it and the whole column runs on the machine as before, and a row the cache gives up on runs on the machine on its own, so the column comes back the same either way and the fall back costs one branch per row. That is the shape the cache was written for: it is an accelerator with an engine underneath it rather than a second engine callers have to pick between.
@@ -68,6 +69,7 @@ The alphabet is not free and the compiler is not the one who knows whether it is
 Only the three methods that answer whether a row matched are wired up. `count` still runs the machine for every row because it needs where each match ended rather than whether the row matched at all, and a state here is a set of positions with no record of which of them were ever the end of anything. `replace` and `extract` need the same thing and more of it, and are named in #863 as a different piece of work.
 
 The test that ran the kernel against a scalar loop over the same rows was a narrow check before this, since both sides ran the machine. It compiles with the alphabet now, so the two sides are two engines and the comparison is worth what it looks like. The match differential does the same: thirty thousand generated patterns over sixteen texts for each of the three methods now go through both engines, with a disagreement between the two reported on its own line because pandas has no view on which of them is wrong. Five seeds of that report full agreement with pandas and between the engines.
+
 ### Changed: a group by on several keys factorizes them one per worker
 
 A group by on more than one key gives each key its own dense ordinals and then folds the ordinals into one number per row. Those factorizes have nothing to do with each other: no key reads another's ordinals or another's group count, and the first thing that needs any of them is the fold, which needs all of them. They were run one after another anyway, and each one is itself a serial pass until its column is tall enough to be worth splitting, so a group by under those heights ran on a single core however many keys it had and however many cores were free.
