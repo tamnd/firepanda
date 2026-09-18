@@ -28,6 +28,7 @@ from std.collections.span import Span
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.method import METHOD_REPLACE, program_for
+from firepanda.kernel.regex.backtrack import Bounded
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine
 from firepanda.kernel.regex.program import Program
@@ -293,6 +294,7 @@ def bounded(
     var bytes = text.as_bytes()
     decode_into(bytes, points)
     var machine = Machine(program)
+    var back = Bounded(program)
     var offsets = List[Int]()
     var found = List[Int32]()
     var out = List[UInt8]()
@@ -302,6 +304,7 @@ def bounded(
         bytes,
         Span(points),
         machine,
+        back,
         offsets,
         found,
         out,

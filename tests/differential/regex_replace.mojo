@@ -55,6 +55,7 @@ from std.python import Python, PythonObject
 from std.sys import argv
 
 from firepanda.kernel.regex.method import METHOD_REPLACE, program_for
+from firepanda.kernel.regex.backtrack import Bounded
 from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import Machine
 from firepanda.kernel.regex.replace import (
@@ -297,6 +298,7 @@ def main() raises:
             program = program_for(METHOD_REPLACE, pattern, 0, argued=True)
 
         var machine = Machine(program)
+        var bounded = Bounded(program)
         var wrong = False
         for which in range(len(repls)):
             if sweeps[which] == "u":
@@ -328,6 +330,7 @@ def main() raises:
                         Span(bytes[row]),
                         Span(points[row]),
                         machine,
+                        bounded,
                         offsets,
                         found,
                         out,
@@ -339,6 +342,7 @@ def main() raises:
                         Span(bytes[row]),
                         Span(points[row]),
                         machine,
+                        bounded,
                         offsets,
                         found,
                         out,

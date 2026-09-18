@@ -80,6 +80,7 @@ stops after it, so `n` is answered there rather than refused.
 
 from std.collections.span import Span
 
+from firepanda.kernel.regex.backtrack import Bounded, searched
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
 from firepanda.kernel.regex.program import Program
@@ -486,6 +487,7 @@ def replaced(
     bytes: Span[UInt8, _],
     points: Span[UInt32, _],
     mut machine: Machine,
+    mut bounded: Bounded,
     mut offsets: List[Int],
     mut found: List[Int32],
     mut out: List[UInt8],
@@ -522,7 +524,9 @@ def replaced(
         rewrite: The replacement, already read.
         bytes: The row as it is written.
         points: The same row as code points.
-        machine: The engine's buffers, reused across rows.
+        machine: The machine's buffers, reused across rows.
+        bounded: The backtracker's buffers, the same way. It answers most rows
+            and the machine answers the ones it hands back.
         offsets: Scratch, refilled here.
         found: Scratch for the slots of a match, refilled by every search.
         out: Where the answer goes. Emptied first.
@@ -537,7 +541,7 @@ def replaced(
     var lastend = -1
     var done = 0
     while p <= n and (limit < 0 or done < limit):
-        var end = machine.search(program, points, p, found)
+        var end = searched(program, points, p, machine, bounded, found)
         if end < 0:
             break
         var start = Int(found[0])
@@ -582,6 +586,7 @@ def replaced_python(
     bytes: Span[UInt8, _],
     points: Span[UInt32, _],
     mut machine: Machine,
+    mut bounded: Bounded,
     mut offsets: List[Int],
     mut found: List[Int32],
     mut out: List[UInt8],
@@ -610,7 +615,9 @@ def replaced_python(
         rewrite: The replacement, read by Python's grammar.
         bytes: The row as it is written.
         points: The same row as code points.
-        machine: The engine's buffers, reused across rows.
+        machine: The machine's buffers, reused across rows.
+        bounded: The backtracker's buffers, the same way. It answers most rows
+            and the machine answers the ones it hands back.
         offsets: Scratch, refilled here.
         found: Scratch for the slots of a match, refilled by every search.
         out: Where the answer goes. Emptied first.
@@ -626,7 +633,7 @@ def replaced_python(
     var pos = 0
     var done = 0
     while p <= n and (limit < 0 or done < limit):
-        var end = machine.search(program, points, p, found)
+        var end = searched(program, points, p, machine, bounded, found)
         if end < 0:
             break
         var start = Int(found[0])
@@ -672,11 +679,20 @@ def replaced_text(
     var bytes = text.as_bytes()
     decode_into(bytes, points)
     var machine = Machine(program)
+    var bounded = Bounded(program)
     var offsets = List[Int]()
     var found = List[Int32]()
     var out = List[UInt8]()
     replaced(
-        program, rewrite, bytes, Span(points), machine, offsets, found, out
+        program,
+        rewrite,
+        bytes,
+        Span(points),
+        machine,
+        bounded,
+        offsets,
+        found,
+        out,
     )
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
@@ -701,6 +717,7 @@ def replaced_python_text(
     var bytes = text.as_bytes()
     decode_into(bytes, points)
     var machine = Machine(program)
+    var bounded = Bounded(program)
     var offsets = List[Int]()
     var found = List[Int32]()
     var out = List[UInt8]()
@@ -710,6 +727,7 @@ def replaced_python_text(
         bytes,
         Span(points),
         machine,
+        bounded,
         offsets,
         found,
         out,
