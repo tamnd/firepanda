@@ -77,7 +77,7 @@ What it costs is the bitmap, which is one bit per instruction per position and s
 The order is the correctness argument. A split pushes its second arm and then its first, so the first arm comes off the stack first and the path the pattern prefers is the path that is followed. Attempts start at one position after another from the cursor, and the first position that matches wins. Those two together are leftmost first, which is what the machine does and what both RE2 and Python do. The bitmap is deliberately not cleared between attempts at different positions, which is what keeps the whole scan linear and is sound for the same reason the memo is: nothing in the program reads where the attempt began.
 
 The scans that call it are the entry above, and issue #863 has the order the rest go in.
-### Changed: a parallel text gather cuts its work by the slice rather than by the threshold that started it
+
 ### Changed: a text gather asks when to split and how finely as two questions
 
 `_take_strings` had one constant answering both. `PARALLEL_TAKE_ROWS` is the height at which a gather is worth splitting at all, and the split then cut the work into pieces of that same size, which means the second worker only arrives at twice the threshold and the thirty second only at thirty two times it.
