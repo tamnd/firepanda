@@ -480,20 +480,43 @@ struct ChunkedArray(Copyable, Movable, Sized):
         """
         if self.order.is_known() or self.nulls > 0:
             return self.order
-        if len(self) < 2:
-            self.order = Sortedness.CONSTANT
+        self.order = self.sortedness()
+        return self.order
+
+    def sortedness(self) raises -> Sortedness:
+        """Finds out whether the column is sorted, without remembering it.
+
+        The same scan `prove_sorted` runs, for a caller that holds the column by
+        reference and cannot write the answer back. A group by is the caller:
+        the frame is borrowed while its columns are being read, so there is
+        nowhere to put the answer, and the scan is worth running anyway because
+        it is a fraction of the hash table it can replace.
+
+        Asking twice costs two scans, which is the whole difference between this
+        and `prove_sorted` and the reason a caller that can write should use
+        that one instead.
+
+        Returns:
+            What is known about the order, which is `UNKNOWN` only for a column
+            holding a null, since a null is what the flag deliberately says
+            nothing about.
+
+        Raises:
+            If the column's dtype is not one firepanda can order.
+        """
+        if self.order.is_known() or self.nulls > 0:
             return self.order
+        if len(self) < 2:
+            return Sortedness.CONSTANT
         var up = self._is_sorted(descending=False)
         var down = self._is_sorted(descending=True)
         if up and down:
-            self.order = Sortedness.CONSTANT
-        elif up:
-            self.order = Sortedness.ASCENDING
-        elif down:
-            self.order = Sortedness.DESCENDING
-        else:
-            self.order = Sortedness.UNORDERED
-        return self.order
+            return Sortedness.CONSTANT
+        if up:
+            return Sortedness.ASCENDING
+        if down:
+            return Sortedness.DESCENDING
+        return Sortedness.UNORDERED
 
     def _is_sorted(self, descending: Bool) raises -> Bool:
         """Checks one direction without flattening the column.
