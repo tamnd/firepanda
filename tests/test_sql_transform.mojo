@@ -530,6 +530,8 @@ def test_every_shape_here_round_trips() raises:
         "[x + 1 FOR x IN l]",
         "[x FOR x IN l IF x > 2]",
         "[x + y FOR x, y IN l]",
+        "f(x).b.c",
+        "x.b.a[1].c",
         "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
         "mode() WITHIN GROUP (ORDER BY a)",
         "lag(a IGNORE NULLS) OVER ()",
@@ -832,6 +834,37 @@ def test_the_arrow_spelling_is_an_operator_and_not_a_lambda() raises:
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(_printed("x -> x + 1", g, rules), "(x -> (x + 1))")
+
+
+def test_a_dot_on_something_that_is_not_a_name_reaches_a_field() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(x).b", g, rules), "f(x).b")
+    assert_equal(_printed("columns[1].type", g, rules), "columns[1].type")
+    assert_equal(_printed("{'title': x}.title", g, rules), "{'title': x}.title")
+    assert_equal(_printed("(a + 1).b", g, rules), "(a + 1).b")
+
+
+def test_a_dot_on_a_name_is_still_one_longer_name() raises:
+    # Which part of `a.b` is the table and which is the column is a question
+    # for the binder, so a name keeps its parts and does not become a field
+    # access. Parentheses around a name do not change that, since the rule for
+    # them is a pass through and what comes out of it is the name.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a.b", g, rules), "a.b")
+    assert_equal(_printed("(a).b", g, rules), "a.b")
+
+
+def test_a_field_name_takes_every_keyword_bare() raises:
+    # `ColLabel` is the widest class in the language, so a word that would be
+    # quoted as a column stands bare after a dot. A name that was quoted for
+    # any other reason still comes back quoted.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(x).select", g, rules), "f(x).select")
+    assert_equal(_printed('f(x)."B"', g, rules), 'f(x)."B"')
+    assert_equal(_printed('f(x)."odd name"', g, rules), 'f(x)."odd name"')
 
 
 def test_a_comprehension_keeps_its_three_parts() raises:

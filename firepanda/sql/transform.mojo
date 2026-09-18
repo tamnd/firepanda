@@ -129,7 +129,6 @@ from .unsupported import (
     DEFAULT_VALUE,
     DOTTED_NAME,
     ESCAPE_STRING,
-    FIELD_ACCESS,
     GROUPING,
     IN_BARE_VALUE,
     IS_UNKNOWN,
@@ -2588,13 +2587,19 @@ struct Transform(Movable):
             var lead = _first_byte(tree, sql, what)
 
             if lead == _DOT:
-                # `.name` on a name is one longer name. `.name` on anything
-                # else is a struct field access, which needs a kind of its own
-                # and a binder that can tell a field from a column.
+                # `.name` on a name is one longer name, since which part of a
+                # dotted name is the table and which is the column is the
+                # binder's question. `.name` on anything else cannot be a name
+                # at all and is reaching into a field.
                 if _tokens(tree, what) != 2:
                     raise _unsupported(tree, sql, what, METHOD_CALL)
                 if ast.exprs[Int(built)].kind != EXPR_COLUMN:
-                    raise _unsupported(tree, sql, what, FIELD_ACCESS)
+                    built = ast.field(
+                        built,
+                        _identifier(sql, tree.tokens[Int(at) + 1]),
+                        tree.nodes[Int(node)].token_start,
+                    )
+                    continue
                 var names = ast.exprs[Int(built)].children
                 var parts = List[String]()
                 for i in range(ast.length(names)):

@@ -330,6 +330,22 @@ hands back the brackets the query wrote rather than a pair of calls the reader
 would have to turn back into them.
 """
 
+comptime EXPR_FIELD: UInt8 = 27
+"""`(a).b`, a field of something that is not a name.
+
+`a` is the operand and `payload` is the interned field name.
+
+`a.b` where `a` is a name is not this. A dotted name is one name with parts in
+it, and which part is the schema and which is the table and which is the column
+is a question for the binder, so the transformer leaves it as a name. What is
+left over is a dot on something that cannot be a name, a call or a subscript or
+a value in parentheses, and a dot there can only be reaching into a field.
+
+The name is a `ColLabel`, which is the widest class the language has and takes
+every keyword, so `(a).type` needs no quotes even though `type` as a column
+would.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1551,6 +1567,31 @@ struct Ast(Movable):
                 token=token,
                 a=body,
                 payload=self.run(names),
+            )
+        )
+
+    def field(
+        mut self,
+        operand: UInt32,
+        name: StringSlice,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `(a).b`, a field of something that is not a name.
+
+        Args:
+            operand: What the dot is on.
+            name: The name after it.
+            token: The token the operand starts at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_FIELD,
+                token=token,
+                a=operand,
+                payload=self.intern(name),
             )
         )
 
