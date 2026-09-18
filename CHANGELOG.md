@@ -18,6 +18,16 @@ The cut now happens in `run`, where both halves of the question are known: the s
 
 `exec/pipeline_reduce_only_one_chunk` is new and is a reduction over a frame in one chunk. That shape had no benchmark, and `group/pipeline_stream_one_chunk`, which looks like it covers it, did not: while the source cut at construction, the one chunk row was the chunked row under another name and could not move. Issue #918.
 
+### Changed: an anti join on two sorted keys walks them like a semi join does
+
+An anti join asks the same question a semi join asks, which is whether the right side holds a left row's key anywhere, and keeps the other answer. So the walk that a semi join takes when both key columns are sorted answers both, and the only thing that changes is which of the two branches emits. The routing function now admits an anti join and the walk takes a flag for which answer to keep.
+
+Nulls stay declined, and the reason is stronger here than it was for the semi case. A null key matches nothing either way, but an anti join keeps an unmatched left row rather than dropping it, so reading a column that holds a null as sorted would add rows rather than lose them.
+
+This measures flat on TPC-H and it is worth saying why rather than leaving it as a number. The walk needs the probe side and the built side both in order, and the two anti joins in the set each have exactly one side that is not. q22 probes `c_custkey`, which is sorted, against `o_custkey`, which is not. q16 probes `ps_suppkey`, which is not sorted, against a filtered `s_suppkey`, which is. Both are declined at the sortedness check, both go down the ordinary route, and q16 and q22 read 0.018 against 0.018 and 0.022 against 0.022 seconds over three rounds in ABBA order on a 13900K. q3 and q21 are the controls and are level too.
+
+So what this buys is not a number today. It is that the two kinds whose output is a subset of the left rows now share one route instead of one of them having a route and the other waiting for a separate change, and that the tests in front of it cover both.
+
 ### Added: SQL runs a call written with a dot
 
 `f(x).g(y)` used to be refused by the transformer, and 36 statements in DuckDB's corpus stopped there. They read now, they print back with the dot where it was written, and they lower and run, because `x.f(y)` is the call `f(x, y)` and nothing else. The operand is the first argument and a flag on the call says how it was written, so every stage after the transformer reads it as the ordinary call it is without knowing the flag is there.
