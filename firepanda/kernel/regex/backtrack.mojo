@@ -79,6 +79,13 @@ hand it to. Document 95.
 
 from std.collections.span import Span
 
+from firepanda.kernel.regex.lowerdata import (
+    LOWER_DELTA,
+    LOWER_EVEN_ONLY,
+    LOWER_HIGH,
+    LOWER_LOW,
+    LOWER_RUNS,
+)
 from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import (
     Machine,
@@ -97,6 +104,8 @@ from firepanda.kernel.regex.program import (
     IN_REF,
     IN_SAVE,
     IN_SPLIT,
+    REF_NARROW,
+    REF_WIDE,
     Program,
     run_bodies,
     word_ranges_unicode,
@@ -150,44 +159,88 @@ comptime NO_MATCH: Int = -1
 search returns, so a caller that falls back reads one number."""
 
 
-def _reads_again(
-    points: Span[UInt32, _],
-    lead: Int,
-    opened: Int,
-    at: Int,
-    width: Int,
-    folding: Bool,
-) -> Bool:
-    """Whether the text at one position is the text a group matched at another.
+def lower_table() -> List[List[Int32]]:
+    """The simple lowercase runs brought out of the compiler's world.
 
-    The folding half is the ASCII letters and nothing else, which is what
-    upstream compares under `(?ai)`. Under the wide alphabet upstream compares
-    the two characters by their simple lowercase, which is a table this library
-    has not got yet, and the compiler refuses that spelling rather than guessing
-    at it. Document 95 section 8.
-
-    Args:
-        points: The text, as code points.
-        lead: How many unreadable bytes stand in front of them.
-        opened: Where the group started.
-        at: Where the reference is being read.
-        width: How long the group's text is.
-        folding: Whether to drop the case of the twenty six ASCII letters.
+    Three lists, the lows, the highs and the deltas, in that order and the same
+    length. Like the word ranges next door the table only exists while the
+    program is being compiled, so something has to copy it out, and the caller is
+    expected to hold on to what it gets rather than ask again per row. It is two
+    and a half kilobytes, which is why only a program that reads a backreference
+    under the wide alphabet asks at all.
 
     Returns:
-        True when the two runs are the same run.
+        The lows, the highs and the deltas.
     """
-    for i in range(width):
-        var want = point_at(points, lead, opened + i)
-        var have = point_at(points, lead, at + i)
-        if folding:
-            if want >= 0x41 and want <= 0x5A:
-                want += 32
-            if have >= 0x41 and have <= 0x5A:
-                have += 32
-        if want != have:
-            return False
-    return True
+    var lows = materialize[LOWER_LOW]()
+    var highs = materialize[LOWER_HIGH]()
+    var deltas = materialize[LOWER_DELTA]()
+    var out = List[List[Int32]]()
+    out.append(_held(Span(lows)))
+    out.append(_held(Span(highs)))
+    out.append(_held(Span(deltas)))
+    return out^
+
+
+def _held(table: Span[Int32, _]) -> List[Int32]:
+    """One of those arrays as a list.
+
+    Args:
+        table: The array from `lowerdata.mojo`, already materialized.
+
+    Returns:
+        The same numbers as a list.
+    """
+    var out = List[Int32](capacity=len(table))
+    for i in range(len(table)):
+        out.append(table[i])
+    return out^
+
+
+def simple_lower(
+    lows: Span[Int32, _],
+    highs: Span[Int32, _],
+    deltas: Span[Int32, _],
+    point: UInt32,
+) -> UInt32:
+    """The simple lowercase of one code point, which is upstream's `tolower`.
+
+    A binary search of the runs in lowerdata.mojo, laid out the same way the fold
+    table is and read the same way. A code point in no run is its own lowercase,
+    which is every code point but the fourteen hundred odd that move.
+
+    This is the run time half of case insensitivity and the only half of it that
+    exists at run time. Everything else the flag touches is settled while the
+    pattern is being compiled, by widening a literal or a class into a set. A
+    backreference cannot be widened that way because what it will be compared
+    against is not known until the row is being walked, so it is compared here
+    instead, and upstream compares it by this rather than by the fold that the
+    literals beside it were compiled under. Document 97.
+
+    Args:
+        lows: Where each run starts.
+        highs: Where each run ends.
+        deltas: What to add, or `LOWER_EVEN_ONLY`.
+        point: The code point.
+
+    Returns:
+        Its simple lowercase, or the code point itself when it has none.
+    """
+    var key = Int32(point)
+    var at = 0
+    var stop = len(lows)
+    while at < stop:
+        var middle = (at + stop) // 2
+        if highs[middle] < key:
+            at = middle + 1
+        else:
+            stop = middle
+    if at >= len(lows) or lows[at] > key:
+        return point
+    var delta = deltas[at]
+    if delta == LOWER_EVEN_ONLY:
+        return point + 1 if (point & 1) == 0 else point
+    return UInt32(key + delta)
 
 
 struct Bounded(Movable):
@@ -232,6 +285,11 @@ struct Bounded(Movable):
     holds them: the table lives in the compiler's world and coming out of it
     costs a copy of six kilobytes. Empty unless the program asks for one of the
     two Unicode boundaries."""
+
+    var lower: List[List[Int32]]
+    """The simple lowercase runs, held for exactly that reason and empty unless
+    the program reads a backreference under the wide reading of `(?i)`. Three
+    lists, the lows, the highs and the deltas. Document 97."""
 
     var jobs_pc: List[Int32]
     """The stack, as instructions. A negative entry is not an instruction: it is
@@ -301,6 +359,7 @@ struct Bounded(Movable):
         self.jobs_pc = []
         self.jobs_at = []
         self.word = []
+        self.lower = []
         self.memo = not program.refs
         self.stamped = False
         self.marks = []
@@ -318,12 +377,70 @@ struct Bounded(Movable):
                 # Documents 93 and 94.
                 self.ok = False
                 return
+            if instruction.op == IN_REF and instruction.b == REF_WIDE:
+                if len(self.lower) == 0:
+                    self.lower = lower_table()
+                continue
             if instruction.op != IN_AT or len(self.word) > 0:
                 continue
             if instruction.a == Int32(Int(AT_BOUNDARY_UNICODE)) or (
                 instruction.a == Int32(Int(AT_NON_BOUNDARY_UNICODE))
             ):
                 self.word = word_ranges_unicode()
+
+    def _reads_again(
+        self,
+        points: Span[UInt32, _],
+        lead: Int,
+        opened: Int,
+        at: Int,
+        width: Int,
+        folding: Int32,
+    ) -> Bool:
+        """Whether the text at one position is the text a group matched at
+        another.
+
+        Three ways of comparing rather than two, because the two flags that
+        touch case do not ask for the same comparison. `(?ai)` is the twenty six
+        ASCII letters and nothing else. `(?i)` is the simple lowercase of both
+        characters, which is not the fold the literals in the same pattern were
+        compiled under, and the difference shows in ordinary text rather than in
+        a corner. Document 97.
+
+        A pair that is already equal is left alone rather than lowered twice,
+        which is the common case and costs nothing to ask.
+
+        Args:
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of them.
+            opened: Where the group started.
+            at: Where the reference is being read.
+            width: How long the group's text is.
+            folding: `REF_EXACT`, `REF_NARROW` or `REF_WIDE`.
+
+        Returns:
+            True when the two runs are the same run.
+        """
+        for i in range(width):
+            var want = point_at(points, lead, opened + i)
+            var have = point_at(points, lead, at + i)
+            if want == have:
+                continue
+            if folding == REF_NARROW:
+                if want >= 0x41 and want <= 0x5A:
+                    want += 32
+                if have >= 0x41 and have <= 0x5A:
+                    have += 32
+            elif folding == REF_WIDE:
+                want = simple_lower(
+                    self.lower[0], self.lower[1], self.lower[2], want
+                )
+                have = simple_lower(
+                    self.lower[0], self.lower[1], self.lower[2], have
+                )
+            if want != have:
+                return False
+        return True
 
     def _push(mut self, pc: Int32, at: Int32):
         """Puts one entry on the stack.
@@ -495,13 +612,13 @@ struct Bounded(Movable):
                 # one the group took part and matched nothing.
                 if opened >= 0 and closed >= opened:
                     var width = closed - opened
-                    if Int(at) + width <= length and _reads_again(
+                    if Int(at) + width <= length and self._reads_again(
                         points,
                         lead,
                         opened,
                         Int(at),
                         width,
-                        instruction.b == 1,
+                        instruction.b,
                     ):
                         self._push(pc + 1, at + Int32(width))
             elif Int(at) < length and accepts(

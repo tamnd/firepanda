@@ -32,7 +32,7 @@ Two smaller designs were tried on paper and are written down here so that they a
 
 ## 4. The instruction
 
-`IN_REF` is instruction 13. Its `a` is the slot the group opened at, which is `2 * k` for group `k`, so the text to read again lies between `slots[a]` and `slots[a + 1]`. Its `b` is 1 when the two are compared with the ASCII case dropped and 0 when they are compared as they are.
+`IN_REF` is instruction 13. Its `a` is the slot the group opened at, which is `2 * k` for group `k`, so the text to read again lies between `slots[a]` and `slots[a + 1]`. Its `b` says how the two are compared, and when this slice landed it was a flag, zero for as they are and one for with the ASCII case dropped. Document 97 made it three values rather than two.
 
 A group that never took part is a slot pair still at minus one, and the instruction fails rather than matching nothing. That is upstream's answer and it is worth a sentence because the two cases look alike and are not. `re.match(r"(a)?\1b", "b")` is None, because the group was skipped and never took part. `re.match(r"(a?)\1b", "b")` matches, because the group ran and matched nothing, so the reference reads nothing and finds it. The test file carries both.
 
@@ -62,9 +62,9 @@ The plumbing this needed is a `raises` on eight kernel entry points and four mor
 
 A backreference under `(?i)` does not compare the two characters the way a literal under `(?i)` does, and that is measured rather than assumed. A literal is compared by its fold orbit and a reference is compared by simple lowercase, so on CPython 3.13 `(?i)ss` matches the long s and `(?i)(s)\1` does not, `(?i)(σ)\1` does not match sigma followed by final sigma, and `(?i)(é)\1` and `(?i)(İ)\1` and `(?i)(ß)\1` all do match their case pairs.
 
-Under the ASCII alphabet that is a subtraction: `(?ai)(a)\1` matches `aA`, and the twenty six letters are the whole of it. That is what `IN_REF` with `b` set to 1 does and it is written.
+Under the ASCII alphabet that is a subtraction: `(?ai)(a)\1` matches `aA`, and the twenty six letters are the whole of it. That is what `IN_REF` with `REF_NARROW` on it does and it is written.
 
-Under the wide alphabet it wants a simple lowercase table, which is `Py_UNICODE_TOLOWER` over roughly 2927 cased code points. This library carries the fold tables and not that one, and folding where upstream lowers would be answering the question wrongly rather than answering it. So `(?i)(a)\1` is refused as a gap, with `this engine has no backreference under the ignore case flag yet`, and the table is the next slice.
+Under the wide alphabet it wants a simple lowercase table, which is `Py_UNICODE_TOLOWER` over the cased code points. This library carried the fold tables and not that one when this slice landed, so `(?i)(a)\1` was refused as a gap with `this engine has no backreference under the ignore case flag yet`. Document 97 is the table and the refusal is gone.
 
 The flag is read in `_emit_node` rather than in `_check_node`, which is the only construct in the file that does that. The reason is that the flag is scoped and the checking walk enters bodies with a scope already taken off it. `(?i:(a)\1)` has the reference inside the scope and is refused, and `(?i:(a))\1` has it outside and is answered, and only the walk that emits knows which of the two it is standing in.
 
@@ -104,7 +104,7 @@ That is the reason the narrower rule is worth its extra twenty lines rather than
 
 ## 12. What is not here
 
-The simple lowercase table, which is section 7 and is the next slice. It wants a generator beside `tools/gen_regexfold.py` emitting `Py_UNICODE_TOLOWER` over the cased code points, and until it exists the wide reading of `(?i)` beside a backreference is a gap.
+The simple lowercase table, which is section 7 and was the next slice. It is document 97 now and the wide reading of `(?i)` beside a backreference is answered.
 
 The lookaround beside a backreference, which is section 10 and which wants the backtracker to be able to run a nested search, or the two engines to be able to hand a row between them in the middle of a match rather than only at the start of one.
 

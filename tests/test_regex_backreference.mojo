@@ -23,7 +23,7 @@ against a running Python 3.13, including the folding ones, because a
 backreference under the ignore case flag is compared by simple lowercase where a
 literal is compared by the whole fold orbit and the two disagree on real text.
 
-Document 95.
+Documents 95 and 97.
 """
 
 from std.testing import (
@@ -197,40 +197,65 @@ def test_a_loop_over_a_reference_that_matches_nothing_still_answers() raises:
 
 def test_the_ascii_reading_of_the_ignore_case_flag_folds_the_letters() raises:
     """Under `(?ai)` the comparison is the twenty six letters and nothing else,
-    which is a subtraction rather than a table, so it is written here and the
-    wide reading is not."""
+    which is a subtraction rather than a table. It is a rule of its own rather
+    than the wide rule narrowed down, so the last two rows are the ones the
+    lowercase table would have answered the other way."""
     assert_equal(said("(?ai)(a)\\1", ENGINE_PYTHON), "ok")
     assert_true(hits("(?ai)(a)\\1", "aA"))
     assert_true(hits("(?ai)(a)\\1", "Aa"))
     assert_true(hits("(?ai)(a)\\1", "aa"))
     assert_false(hits("(?ai)(a)\\1", "ab"))
     assert_true(hits("(?ai)(ab)\\1", "abAB"))
+    assert_false(hits("(?ai)(k)\\1", "kK"))
+    assert_false(hits("(?ai)(é)\\1", "éÉ"))
 
 
-def test_the_wide_reading_of_the_ignore_case_flag_is_a_gap() raises:
-    """Because upstream compares the two characters here by their simple
-    lowercase where a literal is compared by its whole fold orbit, and those
-    two disagree: `(?i)ss` matches the long s and `(?i)(s)\\1` does not. The
-    tables this library carries are the fold ones, so answering it would be
-    answering it wrongly, and a gap is the honest word."""
-    var refused = String(
-        "!this engine has no backreference under the ignore case flag yet"
-    )
-    assert_equal(said("(?i)(a)\\1", ENGINE_PYTHON), refused)
-    assert_equal(said("(?u)(?i)(a)\\1", ENGINE_PYTHON), refused)
-    var program = compile_program(parse_pattern("(?i)(a)\\1"), ENGINE_PYTHON)
-    assert_false(program.ok)
-    assert_true(program.gap)
+def test_the_wide_ignore_case_flag_lowers_both_characters() raises:
+    """Under `(?i)` upstream compares the two by simple lowercase, which is the
+    table in lowerdata.mojo and is read while the row is walked rather than
+    spent while the pattern is compiled. The rows here are the ones where that
+    table has something to say: the Kelvin sign lowers onto a `k`, the dotted
+    capital I onto an `i`, and the capital sharp s onto the small one."""
+    assert_equal(said("(?i)(a)\\1", ENGINE_PYTHON), "ok")
+    assert_true(hits("(?i)(a)\\1", "aA"))
+    assert_true(hits("(?i)(a)\\1", "Aa"))
+    assert_false(hits("(?i)(a)\\1", "ab"))
+    assert_true(hits("(?i)(ab)\\1", "abAB"))
+    assert_true(hits("(?i)(k)\\1", "kK"))
+    assert_true(hits("(?i)(İ)\\1", "İi"))
+    assert_true(hits("(?i)(é)\\1", "éÉ"))
+    assert_true(hits("(?i)(ß)\\1", "ßẞ"))
+    assert_true(hits("(?i)(А)\\1", "Аа"))
+
+
+def test_a_reference_is_lowered_where_a_literal_beside_it_is_folded() raises:
+    """The whole of why the lowercase table exists beside the fold table. A
+    literal under this flag is widened while the pattern is compiled into
+    everything that folds onto it, and the long s is in the orbit of `s`, so
+    `(?i)ss` reads one. A reference is lowered while the row is walked instead,
+    and the long s lowers to itself, so `(?i)(s)\\1` reads none. Upstream
+    answers those two exactly that way and the sigma pair goes the same way.
+    Document 97."""
+    assert_true(hits("(?i)ss", "sſ"))
+    assert_false(hits("(?i)(s)\\1", "sſ"))
+    assert_true(hits("(?i)σσ", "σς"))
+    assert_false(hits("(?i)(σ)\\1", "σς"))
+    # The dotless i is the same disagreement the other way round. It lowers to
+    # itself, so a plain `i` after it is not a reading back of it, while
+    # `(?i)i` matches it because Python folds all four of that family together.
+    assert_true(hits("(?i)i", "ı"))
+    assert_false(hits("(?i)(ı)\\1", "ıi"))
+    assert_true(hits("(?i)(ı)\\1", "ıı"))
 
 
 def test_the_ignore_case_flag_is_read_where_the_reference_stands() raises:
     """Rather than over the pattern, because the flag is scoped. `(?i:(a)\\1)`
-    has the reference inside the scope and is refused, and `(?i:(a))\\1` has it
-    outside and is not."""
-    assert_equal(
-        said("(?i:(a)\\1)", ENGINE_PYTHON),
-        "!this engine has no backreference under the ignore case flag yet",
-    )
+    has the reference inside the scope and folds, and `(?i:(a))\\1` has it
+    outside and does not, so the second one wants the two characters to be the
+    same character even though the group that caught the first was folding."""
+    assert_equal(said("(?i:(a)\\1)", ENGINE_PYTHON), "ok")
+    assert_true(hits("(?i:(a)\\1)", "AA"))
+    assert_true(hits("(?i:(a)\\1)", "Aa"))
     assert_equal(said("(?i:(a))\\1", ENGINE_PYTHON), "ok")
     assert_true(hits("(?i:(a))\\1", "AA"))
     assert_true(hits("(?i:(a))\\1", "aa"))
