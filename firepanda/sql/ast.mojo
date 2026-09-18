@@ -300,6 +300,20 @@ binder is where that is said, since a name with no call around it has nobody to
 give the name to.
 """
 
+comptime EXPR_LAMBDA: UInt8 = 25
+"""`lambda x: x + 1`, a function written where a value goes.
+
+`a` is the body and `payload` is a run of interned parameter names, one for
+each name written before the colon. There is no node for a parameter, because a
+parameter is a name and nothing else, and the body refers to it the way it
+refers to a column.
+
+The arrow spelling `x -> x + 1` is not this. The grammar reads it as an
+operator at a precedence level of its own, and `->` is also how DuckDB reaches
+into a JSON value, so the two are the same text and the binder is what tells
+them apart.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1493,6 +1507,34 @@ struct Ast(Movable):
                 a=value,
                 b=UInt32(1) if arrow else UInt32(0),
                 payload=self.intern(name),
+            )
+        )
+
+    def closure(
+        mut self,
+        parameters: List[String],
+        body: UInt32,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `lambda x: x + 1`, a function written where a value goes.
+
+        Args:
+            parameters: The names written before the colon, in order.
+            body: The expression after it.
+            token: The token the keyword is at.
+
+        Returns:
+            The node index.
+        """
+        var names = List[UInt32]()
+        for part in parameters:
+            names.append(self.intern(part))
+        return self.add(
+            Expr(
+                kind=EXPR_LAMBDA,
+                token=token,
+                a=body,
+                payload=self.run(names),
             )
         )
 

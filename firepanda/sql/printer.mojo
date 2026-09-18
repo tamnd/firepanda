@@ -43,6 +43,7 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_LAMBDA,
     EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
@@ -760,6 +761,22 @@ def _write_step(
         if phase == 0:
             out += _parameter_name(ast.text(item.payload), grammar)
             out += " => " if item.b == 1 else " := "
+            stack.append(_Step(item.a, 0))
+            return
+        return
+
+    if kind == EXPR_LAMBDA:
+        # The keyword spelling and not the arrow, whichever was written. `->`
+        # is the JSON reach as well as the lambda arrow, so printing the arrow
+        # would hand back text that means one thing here and another thing to
+        # anybody reading it, and the keyword form is never ambiguous.
+        if phase == 0:
+            out += "lambda "
+            for i in range(ast.length(item.payload)):
+                if i > 0:
+                    out += ", "
+                out += quote_name(ast.text(ast.at(item.payload, i)), grammar)
+            out += ": "
             stack.append(_Step(item.a, 0))
             return
         return
