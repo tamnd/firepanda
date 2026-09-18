@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with two threads in it, one that finishes the lookaround and one that finishes the question 0.8.13 left open.
+
+The engine that copies Python reads a lookahead and a lookbehind now, both forms of each, which are the first two constructs RE2 has not got and the last two the held out corpus of 30052 patterns was turning down. A pattern with one in it used to raise from `contains`, `count`, `replace`, `match`, `fullmatch` and `extract` and now answers, with the one refusal Python itself makes, which is a lookbehind whose body does not always read the same number of characters. The lookahead is what surfaced a wrong answer sitting underneath both of them: a pattern that prefers to match nothing where it could have matched something was losing the character after the empty match, so `count("a*?")` on `abc` said four where CPython says five. Both engines learned the rule upstream has used since 3.7.
+
+Issue #889 asked what the decode, the byte offset table and the copy cost inside the replacing kernel, on ClickBench q28's column, and guessed the three of them were about half the work. They are about a tenth and the engine is the rest. The decode got about three times cheaper anyway, by widening a block of ASCII in one go rather than a character at a time, and every copy in the replacing scan is a run copy now, which is worth about a third on a row shape where the copy is most of the work. q28 does not move. What the issue leaves behind is six rows of the benchmark suite that split the kernel into its passes and run on every pull request, and a next question, which is the engine's step count.
+
+Beside those, three things. SQL reads an `INTERVAL` literal rather than stopping at one, which was the largest single reason anything in DuckDB's corpus stopped at all, and the refusal moves to lowering where it belongs. SQL `first` and `last` report the row at the edge rather than the first value that is not null, which is what DuckDB does and what separates them from `any_value`. And a Parquet read assembles half a million rows at a time rather than the whole answer at once, which takes about 460 MB off the peak of a six million row read and makes it slightly faster.
+
 ### Added: SQL reads an INTERVAL literal instead of stopping at one
 
 `INTERVAL '1' DAY` and the spellings around it used to be refused by the transformer, and 697 statements in DuckDB's corpus stopped there, which was the largest single reason anything in it stopped at all. They parse, transform and print now, and a duration arrives at the printer with its amount and its unit intact.
@@ -59,6 +71,7 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+
 ### Changed: the passes a regular expression kernel makes around the engine are measured, and the decode reads a block at a time
 
 Issue #889 asked what the decode, the byte offset table and the copy cost inside the replacing kernel, on the column ClickBench q28 runs over, before changing any of them. That measurement is now six rows of `benchmarks/main.mojo` under `regex/`, over a column of URLs with q28's pattern, and each row contains the one above it so a pass comes out by subtracting.
@@ -8243,7 +8256,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.13...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.14...HEAD
+[0.8.14]: https://github.com/tamnd/firepanda/releases/tag/v0.8.14
 [0.8.13]: https://github.com/tamnd/firepanda/releases/tag/v0.8.13
 [0.8.12]: https://github.com/tamnd/firepanda/releases/tag/v0.8.12
 [0.8.11]: https://github.com/tamnd/firepanda/releases/tag/v0.8.11
