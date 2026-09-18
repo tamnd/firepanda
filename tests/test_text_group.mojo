@@ -56,7 +56,7 @@ from firepanda.hash.factorize import (
     factorize_strings,
 )
 from firepanda.hash.function import DEFAULT_SEED, hash_bytes
-from firepanda.hash.grouping import group_ordinals
+from firepanda.hash.grouping import _worth_spreading, group_ordinals
 from firepanda.hash.scalar import factorize_strings_linear
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.group import AggKind
@@ -358,6 +358,58 @@ def test_a_text_key_combines_with_a_number_key() raises:
     assert_equal(out.column("k").text(0), "a")
     assert_equal(out.column("n").as_typed[DType.int64]()[0], 1)
     assert_equal(out.column("v_sum").as_typed[DType.int64]()[0], 50)
+
+
+def test_two_text_keys_tall_enough_to_fork_agree_with_one_that_is_not() raises:
+    """The same tuples, once over the line that forks the keys and once under it.
+
+    `_worth_spreading` counts rows times a weight per key and leaves out the
+    largest term, so two text keys cross `SPREAD_KEY_WORK` at 16,384 rows and
+    half of that is under it. Both heights below hold the same 8,633 tuples in
+    the same order, because the two keys cycle with coprime periods and 8,633 is
+    their product, so the taller frame is the shorter one repeated and the two
+    groupings have to agree ordinal for ordinal.
+
+    What is being checked is that forking changes nothing. Each key is
+    factorized alone on either route, so there is no merge to get wrong, but the
+    ordinals are written into a list from several workers at once and a route
+    that put one in the wrong slot would pair the wrong keys.
+    """
+    comptime tuples = 97 * 89
+    var tall = List[String](capacity=2 * tuples)
+    var short = List[String](capacity=2 * tuples)
+    var tall_second = List[String](capacity=2 * tuples)
+    var short_second = List[String](capacity=2 * tuples)
+    for i in range(2 * tuples):
+        tall.append(String("first", i % 97))
+        tall_second.append(String("second", i % 89))
+        if i < tuples:
+            short.append(String("first", i % 97))
+            short_second.append(String("second", i % 89))
+
+    var over = List[Series]()
+    over.append(Series("a", text(tall^)))
+    over.append(Series("b", text(tall_second^)))
+    var tall_frame = DataFrame.from_series(over^)
+
+    var under = List[Series]()
+    under.append(Series("a", text(short^)))
+    under.append(Series("b", text(short_second^)))
+    var short_frame = DataFrame.from_series(under^)
+
+    var at: List[Int] = [0, 1]
+    assert_true(_worth_spreading(tall_frame.column_refs(), at, tall_frame.rows))
+    assert_false(
+        _worth_spreading(short_frame.column_refs(), at, short_frame.rows)
+    )
+
+    var forked = group_ordinals(tall_frame.column_refs(), at, tall_frame.rows)
+    var alone = group_ordinals(short_frame.column_refs(), at, short_frame.rows)
+
+    assert_equal(forked.groups, tuples)
+    assert_equal(alone.groups, tuples)
+    for i in range(2 * tuples):
+        assert_equal(Int(forked.codes[i]), Int(alone.codes[i % tuples]))
 
 
 def test_grouping_with_no_reductions_gives_the_distinct_keys() raises:
