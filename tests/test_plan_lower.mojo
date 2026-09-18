@@ -3431,7 +3431,7 @@ def crate_join(mut plan: Plan, kind: JoinKind) raises -> Int:
     )
 
 
-def test_a_join_on_two_keys_asks_the_second_after_pairing() raises:
+def test_a_join_on_two_keys_pairs_on_both_of_them() raises:
     var plan = Plan()
     var root = crate_join(plan, JoinKind.INNER)
     var out = run_frames(plan, root, crate_frames())
@@ -3460,13 +3460,17 @@ def test_a_join_on_two_keys_drops_what_one_key_agrees_on() raises:
     same(read_back(out, "qty"), [5, 5, 20, 3, 3, 40], "one key pairs six rows")
 
 
-def test_a_semi_join_on_two_keys_is_refused() raises:
+def test_a_semi_join_on_two_keys_keeps_the_rows_both_keys_agree_on() raises:
+    # A semi join keeps none of the right side's columns, so the second key
+    # cannot be asked after the pairing the way the inner join above used to
+    # ask it. It pairs on the whole key or it answers the wrong rows.
     var plan = Plan()
     var root = crate_join(plan, JoinKind.SEMI)
-    _ = bind(plan, root, crate_schemas())
+    var out = run_frames(plan, root, crate_frames())
 
-    with assert_raises(contains="2 key pairs would need the ordinal space"):
-        _ = lower(plan, root, crate_frames())
+    assert_equal(out.width(), 2, "the left schema and nothing of the right")
+    same(read_back(out, "qty"), [5, 3, 40], "the rows both keys agree on")
+    same(read_back(out, "shop"), [1, 1, 2], "each one's shop")
 
 
 def main() raises:

@@ -54,6 +54,20 @@ An era is written as a conditional rather than as the number one. A row with no 
 
 Four fields DuckDB has stay refused, and each now says which piece is missing rather than saying nothing is called that. `EPOCH` wants a cast from a date or a timestamp to the number it is stored as. `MILLISECOND` and `MICROSECOND` are the whole of the seconds and the fraction together in DuckDB, and the fraction here lives under a name that means a different thing in SQL, so there is nothing to add the two from yet. The `TIMEZONE` three read an offset off a timestamp that has none to read, and answering zero would be answering a question the column was never asked.
 
+### Added: a streaming join on more than one key column, and TPC-H q20 runs
+
+A join whose condition is two equalities rather than one was refused by the operator a plan lowers to, and the refusal was about where the numbers come from. Matching rows means comparing key tuples, every table here compares one column, so something has to turn a tuple into one value. `align_keys` does that by taking each key's range over both frames at once and laying the keys out in positional notation, which is the better answer where it applies and needs both frames to apply at all, because two sides that pack differently have packed nothing. A streaming join has the build side whole and the probe side arriving a chunk at a time, so it never has both.
+
+The tuple is packed into bytes now rather than into a number. Each key writes what it is stored as, a fixed width value as its own bytes and a string as its length in four bytes followed by its bytes, and the row's key is the concatenation. That is injective, which is the only property the join needs: a reader could tell where one key ends and the next begins, so two rows write the same bytes exactly when they hold the same tuple. Nothing in it reads a value, so nothing in it needs a range, a minimum or a second frame. `firepanda/join/packed.mojo` is the packing and the argument for it.
+
+What happens after that is the text key route the operator already had. Build the table over the right frame's packed column, probe with each chunk's packed column as it arrives, compare the bytes on a hash match. That route exists because a hash is not an exact answer for a string, and a byte string is a string.
+
+An inner join on two keys used to lower to a table built from the first key pair with a comparison and a filter per remaining pair stacked above the join. It answered correctly and it got there by making pairs it then threw away, and it was inner joins only, because a left join has to emit the rows that matched nothing and a filter above the pairing cannot tell those from the rows it is dropping. Both are gone. The join pairs on the whole key.
+
+TPC-H q20 is the query that wanted this. It correlates a scalar subquery on `lineitem` through `l_partkey` and `l_suppkey` together, and decorrelating that gives a left join on two key pairs. q20 answers what DuckDB answers now, and with q11 and q13 closed in the two releases either side of this, `pixi run tpch` is twenty one of twenty two. The one left is q21, which correlates an `EXISTS` through an inequality as well as an equality.
+
+The whole frame `join_on` is untouched and still concatenates both sides for a compound key. The same packing would give it the build on the smaller side and probe the larger shape it has for a single key, and that is written down in `docs/specs/planner/07-operator-selection.md` rather than done here.
+
 ## [0.8.10] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -446,7 +460,6 @@ The qualifier was never lost. The binder writes the relation it picked onto the 
 TPC-H q7 is why this is here. Its `WHERE` pairs `s_nationkey` with `n1.n_nationkey` and `c_nationkey` with `n2.n_nationkey`, and neither equality could become a join key while `n_nationkey` read as a name on both sides, so the product under the filter stayed a product and the query did not run. It now agrees with DuckDB over 4 rows, and `pixi run tpch` covers twelve of the twenty two queries.
 
 q8 is written the same way and still does not run, and now says something different about why. Its `FROM` lists `part, supplier` first and there is no equality between those two, so the left deep order pairs them before anything can key them together. That is join ordering rather than name resolution, which is what q9 wants too.
-
 
 ## [0.8.5] - 2026-09-15
 

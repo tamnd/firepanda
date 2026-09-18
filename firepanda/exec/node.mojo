@@ -104,6 +104,7 @@ from firepanda.join.keys import (
     probe_side,
     probe_side_strings,
 )
+from firepanda.join.packed import pack_keys
 from firepanda.join.pairs import (
     JoinKind,
     ProbeTable,
@@ -4117,24 +4118,31 @@ struct Join(Movable):
 
     ## What it will not do
 
-    Right and outer joins are refused, and so is a key that is more than one
-    column. Both refusals are the same refusal: this node emits a chunk per chunk
-    and nothing else. An outer join has to emit the right rows that nothing
+    Right and outer joins are refused. This node emits a chunk per chunk and
+    nothing else, and an outer join has to emit the right rows that nothing
     matched, which it cannot know until the last chunk has gone past, so it is a
     breaker wearing this node's clothes. A right join is an outer join's left
-    half by the same argument. A composite key needs the ordinal space that
-    `align_keys` builds by concatenating both sides, and concatenating both sides
-    is having them both, which a stream does not.
+    half by the same argument.
 
-    A text key used to be refused for that same reason and is not any more. It
-    only ever needed the concatenation because the table it had stored a hash and
-    a hash is not an exact answer for a string. A table that compares the bytes
-    on a hash match does not need it, and once one side can be built and read
-    without the other, text is an ordinary key here: build over the right frame,
-    probe with each chunk as it arrives, hand the probe the right frame's key
-    column back so it has the bytes to compare against.
+    A text key used to be refused too and is not any more. It only ever needed
+    both sides concatenated because the table it had stored a hash and a hash is
+    not an exact answer for a string. A table that compares the bytes on a hash
+    match does not need it, and once one side can be built and read without the
+    other, text is an ordinary key here: build over the right frame, probe with
+    each chunk as it arrives, hand the probe the right frame's key column back so
+    it has the bytes to compare against.
 
-    Neither refusal loses anything. A planner that meets one of them uses
+    A key of more than one column was refused for the same reason and goes the
+    same way. It was refused because the ordinal space `align_keys` packs a tuple
+    into is taken over both sides at once, and having both sides at once is what
+    a stream does not have. So the tuple is packed into bytes rather than into a
+    number, which needs no range and so needs only the side being packed, and
+    then it is the text key above. `packed.mojo` is the packing and the argument
+    that it is injective. `left_keys` and `right_keys` are where a caller says
+    the tuple, and everything downstream of `bind` sees one key column either
+    way.
+
+    The refusal that is left loses nothing. A planner that meets it uses
     `Materialize` and the whole frame `join_on`, which is what it did before this
     node existed.
     """
@@ -4188,6 +4196,17 @@ struct Join(Movable):
     caller that numbered its columns already knows which one it meant.
     """
 
+    var left_keys: List[Int]
+    """Every key position on the probe side, in key order, or empty for the one
+    key `left_at` and `left_on` name between them.
+
+    A tuple is said by position and never by name, because the caller that has
+    more than one key is the plan lowering and it numbered its columns already.
+    """
+
+    var right_keys: List[Int]
+    """The same on the build side, in the matching order."""
+
     var _left_at: Int
     """Where the key sits in the chunk, settled by `bind`."""
 
@@ -4197,6 +4216,17 @@ struct Join(Movable):
     Kept because a text probe has to be handed the column the table was built
     from, since the views the table kept point into it. A fixed width probe never
     reads it.
+
+    On a packed key this is past the right frame's own columns, because the
+    packed column is appended to `_build` and nothing else indexes that far.
+    """
+
+    var _packed: Bool
+    """Whether the key is a tuple packed into bytes, settled by `bind`.
+
+    `bind` decides it rather than `process` reading `left_keys` again, because
+    what makes the two sides comparable is that they packed the same way and
+    `bind` is where that was checked.
     """
 
     var _side: BuildSide
@@ -4245,6 +4275,8 @@ struct Join(Movable):
         left_at: Int = -1,
         right_at: Int = -1,
         var mark: String = String(),
+        var left_keys: List[Int] = List[Int](),
+        var right_keys: List[Int] = List[Int](),
     ):
         """Constructs a join against a frame.
 
@@ -4266,6 +4298,11 @@ struct Join(Movable):
             right_at: The key's position on the build side, or -1 for by name.
             mark: What a mark join's boolean column is called. Consumed.
                 Required for a mark join and ignored by every other kind.
+            left_keys: Every key position on the probe side, in key order, or
+                empty for the single key the two names and positions above say.
+                Consumed.
+            right_keys: The same on the build side, in the matching order.
+                Consumed.
         """
         self.right = right^
         self.left_on = left_on^
@@ -4277,8 +4314,11 @@ struct Join(Movable):
         self.wanted = wanted^
         self.left_at = left_at
         self.right_at = right_at
+        self.left_keys = left_keys^
+        self.right_keys = right_keys^
         self._left_at = -1
         self._right_at = -1
+        self._packed = False
         self._side = BuildSide()
         self._table = ProbeTable()
         self._absent = List[Bool]()
@@ -4315,28 +4355,61 @@ struct Join(Movable):
                 " has to be called something, so the name is not optional"
             )
 
-        var here = self.left_at
-        var there = self.right_at
-        if here < 0:
-            here = input.index_of(self.left_on)
-        if there < 0:
-            there = self.right.schema.index_of(self.right_on)
-        var dt = self.right.schema[there].dtype.physical
-        # The string test is separate from the dtype test rather than folded into
-        # it, because a string column's physical dtype is its byte type and a
-        # column of bytes has the same one. Without this a text key on one side
-        # and a uint8 key on the other would agree here and then build a table
-        # over the first byte of each view.
-        var mine = self.right.schema[there].dtype.kind == TypeKind.STRING
-        var theirs = input[here].dtype.kind == TypeKind.STRING
-        if input[here].dtype.physical != dt or theirs != mine:
+        var probe_keys = self.left_keys.copy()
+        var build_keys = self.right_keys.copy()
+        if len(probe_keys) == 0:
+            var one = self.left_at
+            if one < 0:
+                one = input.index_of(self.left_on)
+            probe_keys.append(one)
+        if len(build_keys) == 0:
+            var one = self.right_at
+            if one < 0:
+                one = self.right.schema.index_of(self.right_on)
+            build_keys.append(one)
+        if len(probe_keys) != len(build_keys):
             raise Error(
-                "join: this node needs one key of the same dtype on each side;"
-                " got "
-                + ("text" if theirs else String(input[here].dtype.physical))
-                + " and "
-                + ("text" if mine else String(dt))
+                String(
+                    (
+                        "join: a key pairs a column on one side with a column"
+                        " on the other, and this one has "
+                    ),
+                    len(probe_keys),
+                    " on the probe side against ",
+                    len(build_keys),
+                    " on the build side",
+                )
             )
+
+        for k in range(len(probe_keys)):
+            var dt = self.right.schema[build_keys[k]].dtype.physical
+            # The string test is separate from the dtype test rather than folded
+            # into it, because a string column's physical dtype is its byte type
+            # and a column of bytes has the same one. Without this a text key on
+            # one side and a uint8 key on the other would agree here and then
+            # build a table over the first byte of each view.
+            var mine = (
+                self.right.schema[build_keys[k]].dtype.kind == TypeKind.STRING
+            )
+            var theirs = input[probe_keys[k]].dtype.kind == TypeKind.STRING
+            if input[probe_keys[k]].dtype.physical != dt or theirs != mine:
+                raise Error(
+                    "join: this node needs a key of the same dtype on each"
+                    " side; key "
+                    + String(k)
+                    + " is "
+                    + (
+                        "text" if theirs else String(
+                            input[probe_keys[k]].dtype.physical
+                        )
+                    )
+                    + " and "
+                    + ("text" if mine else String(dt))
+                )
+
+        var here = probe_keys[0]
+        var there = build_keys[0]
+        self._packed = len(probe_keys) > 1
 
         var rows = self.right.rows
         self._build = List[AnyArray](capacity=len(self.right.columns))
@@ -4353,6 +4426,13 @@ struct Join(Movable):
                 for p in range(pieces):
                     refs.append(column_ref(self.right.columns[j].chunks[p]))
                 self._build.append(concat_refs_any(refs))
+
+        if self._packed:
+            # Onto the end of the build columns rather than in place of one,
+            # because `_source` numbers the frame's own columns and the packed
+            # key is not one of them. Nothing but `_right_at` reaches this far.
+            self._build.append(pack_keys(self._build, build_keys, rows))
+            there = len(self._build) - 1
 
         var codes = Array[DType.uint32](overwritten=rows)
         var side = _build_key(self._build[there], codes)
@@ -4557,7 +4637,12 @@ struct Join(Movable):
         if rows == 0:
             return None
 
-        ref key = chunk.columns[self._left_at]
+        # A borrow when the key is a column of the chunk, which is the ordinary
+        # case and copies nothing, and the packed tuple when it is not. The
+        # packing is per chunk because the chunk is what arrived.
+        var key = AnyArray(copy=chunk.columns[self._left_at])
+        if self._packed:
+            key = pack_keys(chunk.columns, self.left_keys, rows)
         var codes = Array[DType.uint32](overwritten=rows)
         _probe_key(
             self._side,

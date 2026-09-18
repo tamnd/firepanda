@@ -30,6 +30,8 @@ DuckDB's perfect hash join detects a dense integer key at runtime, after the min
 
 That last route is the gap and it is a large one. It is a whole column pass over left plus right where the dictionary route is a pass over the smaller side and a lookup per row of the larger, and it copies every key column of both sides to build the concatenation it factorizes. A compound key is not an exotic case, it is what a join on a natural key looks like, and it is the shape most of the TPC-H joins would have if they were not all written on a single surrogate key.
 
+The streaming join in `firepanda/exec/node.mojo` is out of that gap and the way it got out says what the whole frame route should do. It cannot concatenate both sides because it only ever has one of them, so it packs the key tuple into one byte string per row instead, which needs no range and so needs no second frame, and then it is a join on one text key and takes the dictionary route. `firepanda/join/packed.mojo` is the packing. What is still owed to `align_keys` is the same move, and what makes it worth doing there too is that the packing pass is over one side rather than over both.
+
 **Sorted input.**
 
 Polars 2.0 ships a streaming sort merge join, chosen when the key is known sorted, and a `SortedGroupBy` chosen the same way, which needs no hash table at all. The critical detail from their own documentation is that known to be sorted means known to the optimizer, not known to you, and `set_sorted` is a declaration rather than a sort.
