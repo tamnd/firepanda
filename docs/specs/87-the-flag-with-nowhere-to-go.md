@@ -70,6 +70,6 @@ Verbose mode in the parser and the ascii flag, which are now the only two letter
 
 A scoped flag group is still refused, which is 525 held-out patterns in the differential. The five constructs the router sends to Python are still refused: lookaround, backreference, conditional, atomic group and possessive quantifier. The RE2 grammar front end is still the largest single gap in the component at 19620 of 30052 corpus patterns.
 
-The replace differential still sets aside 186 sweeps that it no longer needs to set aside, which document 86 section 12 named as the cheapest reach this component has left and which this slice did not take either.
+The replace differential set aside 186 sweeps that it no longer needed to set aside, which document 86 section 12 named as the cheapest reach this component has left and which the first half of this slice did not take either. The second half took it: the harness now reads the route the way the pandas layer reads it, compiles an empty pattern for Python's engine, and compares those sweeps against the engine that actually answered them. All 186 agree, the set aside count for the other engine is gone from the report, and the run is still 10000 in ten thousand with 0 disagreements.
 
 `text_extract_regex` is the one text kernel still running down its rows one at a time. `stack_payloads` is the half of the work it needs and it exists, so this is a smaller job than it was before the two replaces were made parallel.
