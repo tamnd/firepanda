@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release that finishes the regular expression thread 0.8.12 started, and closes issue #863 with it.
+
+0.8.12 taught the engine to remember what it did, which answered the scans that ask whether a row matched. The three that ask where each group matched, which are `replace`, `extract` and `count`, could not use that, because a cache of position sets knows that a row matched and not where. This release adds the engine that answers those. It backtracks, which is the thing this library refuses to do, and it is safe because it writes down every pair of an instruction and a position it has already tried and never tries one twice. That is RE2's BitState, the bound is the same one the machine has, and the machine is still underneath it for any row long enough that the bitmap would not fit.
+
+All three scans run it now. On a million URLs `replace` with the ClickBench q28 pattern goes from about 2.11 s to about 0.75 s and `count` on the same pattern from about 0.94 s to about 0.39 s. On the suite itself, q28 at 1M in memory mode goes from 2.33 s to 0.82 s measured back to back on the same loaded machine, with q27 unmoved beside it and DuckDB at 0.20 s in the same run. That is about four times DuckDB rather than the eight this started at, and what is left of it is the decode and the copy the kernel does around the engine rather than the engine, which is issue #889.
+
+The counting scans moved out of `Machine` while that happened, so a caller that used `Machine.counts` or `counts_text` from the kernel now calls `counted` or `counted_text` from `firepanda/kernel/regex/count.mojo`. Nothing pandas-facing changes.
+
+Beside it, two wrong answers about nothing. A sum over values that are every one null answered zero and now answers null, which is what DuckDB does and what SQL says, and so does a window sum over a partition of nothing but nulls. And a group by on several keys now factorizes them one per worker, which is worth the one TPC-H query firepanda was behind a rival on.
+
 ### Changed: `count` runs the backtracker, and the two counting scans move out of the machine
 
 The last of the three scans that were still on the machine alone. Counting over a million URLs goes from about 0.94 s to about 0.39 s on the ClickBench q28 pattern, from about 1.62 s to about 0.94 s on a two group pattern, and from about 0.28 s to about 0.19 s on a short one.
@@ -63,6 +77,14 @@ What it costs is the bitmap, which is one bit per instruction per position and s
 The order is the correctness argument. A split pushes its second arm and then its first, so the first arm comes off the stack first and the path the pattern prefers is the path that is followed. Attempts start at one position after another from the cursor, and the first position that matches wins. Those two together are leftmost first, which is what the machine does and what both RE2 and Python do. The bitmap is deliberately not cleared between attempts at different positions, which is what keeps the whole scan linear and is sound for the same reason the memo is: nothing in the program reads where the attempt began.
 
 The scans that call it are the entry above, and issue #863 has the order the rest go in.
+
+### Changed: a group by on several keys factorizes them one per worker
+
+A group by on more than one key gives each key its own dense ordinals and then folds them into one number per row. Those factorizes are independent of each other, they were run one after another, and each is a serial pass until the column is tall enough to be worth splitting on its own. So a group by under those heights ran on one core however many keys it had.
+
+TPC-H q10 is what found it, and it was the one query in that suite firepanda was measurably behind a rival on. It groups a four way join on seven columns, five of them text, and at sf1 the intermediate is 114,705 rows, which is under the height any one of those factorizes splits at. On a 13900K with 32 workers the seven keys cost 15.3 ms of the 17.9 ms the whole step spent, and one key per worker brings that to 7.0 ms. End to end q10 goes from 0.065 s to 0.055 s and q3, which goes through the same function on two keys and is the control, does not move.
+
+The route is taken only when no key would have gone parallel inside its own factorize, since a split inside a split is the same cores twice and neither split knows about the other, and only when there is enough work to pay for the fork. Issue #878 has the sweep the threshold was fitted on.
 
 ## [0.8.12] - 2026-09-18
 
@@ -8130,7 +8152,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.12...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.13...HEAD
+[0.8.13]: https://github.com/tamnd/firepanda/releases/tag/v0.8.13
 [0.8.12]: https://github.com/tamnd/firepanda/releases/tag/v0.8.12
 [0.8.11]: https://github.com/tamnd/firepanda/releases/tag/v0.8.11
 [0.8.10]: https://github.com/tamnd/firepanda/releases/tag/v0.8.10
