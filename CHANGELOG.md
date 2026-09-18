@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with three threads in it: the regular expression engine reading fewer positions per row, more of the SQL surface answered, and one more TPC-H query.
+
+The regular expression machine now knows which characters a match can begin with and steps over a position holding anything else, which is worth about twice the run on an unanchored pattern and is the general form of the anchored rule 0.8.10 shipped. Beside it, scoped flag groups are read on either engine, so `(?i:a)bc` is answered rather than refused and that is the end of what the flags work on the string accessor was waiting for. And `\B` on an empty row follows the interpreter the call arrived in, since CPython up to 3.13 fails it there and 3.14 does not, which was a wrong answer under one supported Python and a right one under the next.
+
+TPC-H q20 answers, which takes `pixi run tpch` to twenty one of twenty two. A join on two key pairs used to be refused by the streaming operator because packing a key tuple into a number needs both frames at once and a streaming join never has them. The tuple is packed into bytes instead, which needs nothing but the row, and the query that wanted it correlates a scalar subquery through a part and a supplier together. The one query left is q21.
+
+Two pieces of SQL that were refused are answered. `LIKE ... ESCAPE` reads the character a pattern names to make the byte after it literal, and seven more `EXTRACT` fields are arithmetic over a field that already had a kernel, so a decade is the year over ten and a century is the year one less over a hundred one more.
+
 ### Fixed: `\B` on an empty row now follows the interpreter the call arrived in
 
 `Series.str.contains("\\B", flags=re.MULTILINE)` answered False for a row with nothing in it whatever Python was running. CPython up to 3.13 fails a `\B` on an empty subject and 3.14 took the case out and made `\B` the plain negation of `\b`, which is what RE2 has always had, so the old answer was right under one interpreter and wrong under the next. This library now reads `sys.version_info.minor` at its own door and compiles for the Python it is beside. Issue #8 M6.
@@ -7957,7 +7969,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.10...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.11...HEAD
+[0.8.11]: https://github.com/tamnd/firepanda/releases/tag/v0.8.11
 [0.8.10]: https://github.com/tamnd/firepanda/releases/tag/v0.8.10
 [0.8.9]: https://github.com/tamnd/firepanda/releases/tag/v0.8.9
 [0.8.8]: https://github.com/tamnd/firepanda/releases/tag/v0.8.8
