@@ -58,7 +58,7 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.parse import decode_into
-from firepanda.kernel.regex.pike import Machine, byte_width
+from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite, replaced, replaced_python
 
@@ -253,12 +253,6 @@ def text_extract_regex(
                 continue
             var bytes = a.unsafe_bytes(i)
             decode_into(bytes, points)
-            offsets.clear()
-            var at = 0
-            for k in range(len(points)):
-                offsets.append(at)
-                at += byte_width(points[k])
-            offsets.append(at)
             # The whole row is searched from its first position, which is the
             # one place this differs from the replacing scan: that one walks a
             # cursor and this one asks once and stops.
@@ -267,6 +261,10 @@ def text_extract_regex(
                 for g in range(groups):
                     heads[g].unsafe_offset(i)[] = StringView()
                 continue
+            # After the search rather than before it, because a row that
+            # matched nothing has no piece to hand back and the table is only
+            # ever read to cut one out.
+            fill_byte_offsets(bytes, Span(points), offsets)
             for g in range(groups):
                 var opened = Int(found[(g + 1) * 2])
                 var closed = Int(found[(g + 1) * 2 + 1])
@@ -274,7 +272,9 @@ def text_extract_regex(
                     heads[g].unsafe_offset(i)[] = StringView()
                     continue
                 valid[g].set(i, True)
-                var piece = bytes[offsets[opened] : offsets[closed]]
+                var piece = bytes[
+                    byte_of(offsets, opened) : byte_of(offsets, closed)
+                ]
                 if len(piece) == 0:
                     heads[g].unsafe_offset(i)[] = StringView()
                 elif len(piece) <= INLINE_CAPACITY:
