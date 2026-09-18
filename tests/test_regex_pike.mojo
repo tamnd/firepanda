@@ -18,10 +18,20 @@ answer when it goes wrong. It is a test that never finishes, which is not the
 kind of failure a differential reports.
 """
 
-from std.testing import TestSuite, assert_false, assert_true
+from std.collections.span import Span
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_true,
+)
 
-from firepanda.kernel.regex.parse import parse_pattern
-from firepanda.kernel.regex.pike import matches_text
+from firepanda.kernel.regex.parse import decoded, parse_pattern
+from firepanda.kernel.regex.pike import (
+    byte_of,
+    fill_byte_offsets,
+    matches_text,
+)
 from firepanda.kernel.regex.program import compile_program
 from firepanda.kernel.regex.route import ENGINE_RE2
 
@@ -166,6 +176,36 @@ def test_an_anchored_pattern_answers_what_it_did_before_the_shortcut() raises:
     assert_false(hits("^https?://([^/]+)/", "ftp://example.com/page"))
     assert_true(hits("(?m)^b", "a\nb"))
     assert_true(hits("(?m)^b$", "a\nb\nc"))
+
+
+def test_the_byte_table_is_left_empty_for_a_row_of_one_byte_characters() raises:
+    """An empty table says the two positions are the same number, which is what
+    a row of ASCII means, and it is the row every column this runs over is
+    mostly made of. A row with a wider character in it gets the table written
+    out, and both are read through the same call."""
+    var offsets = List[Int]()
+    var ascii = String("abcdef")
+    var points = decoded(ascii)
+    fill_byte_offsets(ascii.as_bytes(), Span(points), offsets)
+    assert_equal(len(offsets), 0)
+    assert_equal(byte_of(offsets, 0), 0)
+    assert_equal(byte_of(offsets, 4), 4)
+    assert_equal(byte_of(offsets, 6), 6)
+
+    var wide = String("héllo")
+    points = decoded(wide)
+    fill_byte_offsets(wide.as_bytes(), Span(points), offsets)
+    assert_equal(len(offsets), 6)
+    assert_equal(byte_of(offsets, 0), 0)
+    assert_equal(byte_of(offsets, 1), 1)
+    assert_equal(byte_of(offsets, 2), 3)
+    assert_equal(byte_of(offsets, 5), 6)
+
+    var empty = String("")
+    points = decoded(empty)
+    fill_byte_offsets(empty.as_bytes(), Span(points), offsets)
+    assert_equal(len(offsets), 0)
+    assert_equal(byte_of(offsets, 0), 0)
 
 
 def test_a_repeat_whose_body_can_match_nothing_terminates() raises:

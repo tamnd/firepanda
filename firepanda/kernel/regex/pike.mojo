@@ -298,6 +298,61 @@ def byte_width(point: UInt32) -> Int:
     return 4
 
 
+def fill_byte_offsets(
+    bytes: Span[UInt8, _], points: Span[UInt32, _], mut offsets: List[Int]
+):
+    """Fills a table turning a character position into a byte position.
+
+    The scans that hand a piece of the row back work in characters and the row
+    is written in bytes, so a match that ended at character nine has to be told
+    which byte that was. The table has one entry per character and one more for
+    the end, and it is the caller's list so that a column pays for it once
+    rather than once per row.
+
+    A row that is all ASCII is left with an empty table rather than a table
+    holding the numbers zero to its length, because those are the same numbers
+    and `byte_of` reads an empty table as saying so. That is the common row in
+    the columns this runs over, and writing an `Int` per character of it was
+    work that answered nothing.
+
+    It is worth less than it looks. The replacing scan over 200000 URL rows
+    with q28's pattern went from about 221 ms to about 212 ms when this was
+    put in, which is four percent, because the machine step that reads a
+    character costs much more than the entry that was being written beside it.
+    tamnd/firepanda#830 listed this table as one of three costs and this is the
+    measurement that says which of the three it is.
+
+    Args:
+        bytes: The row as it is written.
+        points: The same row as code points.
+        offsets: The table, emptied first and filled only when it is needed.
+    """
+    offsets.clear()
+    if len(bytes) == len(points):
+        return
+    var at = 0
+    for i in range(len(points)):
+        offsets.append(at)
+        at += byte_width(points[i])
+    offsets.append(at)
+
+
+def byte_of(offsets: List[Int], at: Int) -> Int:
+    """Which byte a character position is at.
+
+    Args:
+        offsets: The table `fill_byte_offsets` filled, which is empty for a row
+            whose characters are all one byte.
+        at: The character position, which may be one past the last character.
+
+    Returns:
+        The byte position.
+    """
+    if len(offsets) == 0:
+        return at
+    return offsets[at]
+
+
 def _queue(
     code: List[Instruction],
     mut list: List[Int32],

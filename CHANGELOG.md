@@ -33,11 +33,17 @@ What that missed is that some residuals do not have to go above the join at all.
 A part that reads the left side, or both sides, is still refused, and with the sentence it came back with before. There is nowhere for those to go: a left row that fails one has to come out padded rather than dropped, and neither above the join nor under one of its inputs is a place that can say so.
 
 `pixi run tpch` is twenty of twenty two. The two left stop in two different places, q20 on a left join with two key pairs and q21 on a correlated `EXISTS` that matches through an inequality as well as an equality.
+### Changed: the table that turns a character position into a byte position is only built when it is needed
+
+A row of one byte characters has the same number for both, so the table is left empty for one and `byte_of` reads an empty table as saying the two agree. `text_extract_regex` also builds it after the search rather than before, since a row that matched nothing has no piece to hand back and the table is only ever read to cut one out.
+
+It is worth about four percent and not more. The replacing scan over 200000 URL rows with q28's pattern went from about 221 ms to about 212 ms, because the machine step that reads a character costs much more than the `Int` that was being written beside it. Issue #830 listed this as one of three costs and this is the measurement that says which of the three it is.
+
 ### Changed: a pattern anchored at the start is tried once rather than once a character
 
 The search is unanchored, so the machine starts a fresh attempt at every position of every row. For a pattern beginning with `^` outside multiline mode, or with `\A`, every one of those after the first walks from the first instruction to the anchor, asks whether the position is zero, and stops. The compiler records that shape on the program now and the two scans skip those attempts, so a row that does not match ends at the second position rather than at the last one.
 
-It is worth having because anchored patterns are not a corner. ClickBench q28 reads a column of URLs with one, `str.match` is `str.contains` with the pattern wrapped in `^(...)` by pandas itself, and `match` and `fullmatch` on Python's engine are answered by writing `\A(pattern)\z` around what the caller wrote, so all three have been paying this. Over 200000 synthetic URL rows the q28 replace went from 682 ms to 446 ms on the same machine in the same minute. q28 itself at 1M spent 32.6 s and 32.1 s of user CPU over three runs before the change and 24.6 s and 26.2 s after it, run one after another. There is no wall clock number beside those because the machine was carrying a load average above twenty the whole time. Issue #830.
+It is worth having because anchored patterns are not a corner. ClickBench q28 reads a column of URLs with one, `str.match` is `str.contains` with the pattern wrapped in `^(...)` by pandas itself, and `match` and `fullmatch` on Python's engine are answered by writing `\A(pattern)\z` around what the caller wrote, so all three have been paying this. q28 at 1M is 1.26 s where the 0.8.9 notes had it at 1.95 s, on 3.39 cores where it was on 3.41, with the machine idle for both and q27 run beside it as the control. The byte table entry above is in that number as well and is about four percent of it. DuckDB 1.5.5 answered the same query in 0.154 s in the same minute, so this library is about eight times slower on it rather than about twelve. Issue #830.
 
 A pattern that begins with an alternation is left alone even when both of its arms are anchored, since it compiles to a split first and the flag is a promise about the program rather than about one path through it.
 

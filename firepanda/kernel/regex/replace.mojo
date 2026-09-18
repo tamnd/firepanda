@@ -81,7 +81,7 @@ stops after it, so `n` is answered there rather than refused.
 from std.collections.span import Span
 
 from firepanda.kernel.regex.parse import decode_into
-from firepanda.kernel.regex.pike import Machine, byte_width
+from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
 from firepanda.kernel.regex.program import Program
 
 
@@ -502,9 +502,11 @@ def replaced(
     number and after a character was copied across they are not.
 
     The scan works in characters and the row is bytes, so `offsets` turns a
-    character position back into a byte position. It is the caller's list so
-    that a column pays for it once rather than once per row, and so are the
-    machine, the slots and the output.
+    character position back into a byte position, and every read of it goes
+    through `byte_of` because a row of one byte characters is left with an
+    empty table and the two positions are then the same number. It is the
+    caller's list so that a column pays for it once rather than once per row,
+    and so are the machine, the slots and the output.
 
     The limit is not the bounded replace the module says is not here. That one
     is Arrow's `n`, which finds a match and then replaces inside the text it
@@ -528,12 +530,7 @@ def replaced(
             them. Zero writes the row out unchanged.
     """
     out.clear()
-    offsets.clear()
-    var at = 0
-    for i in range(len(points)):
-        offsets.append(at)
-        at += byte_width(points[i])
-    offsets.append(at)
+    fill_byte_offsets(bytes, points, offsets)
 
     var n = len(points)
     var p = 0
@@ -544,14 +541,14 @@ def replaced(
         if end < 0:
             break
         var start = Int(found[0])
-        for k in range(offsets[p], offsets[start]):
+        for k in range(byte_of(offsets, p), byte_of(offsets, start)):
             out.append(bytes[k])
         if start == lastend and start == end:
             # The refused empty match. There is nothing to copy across when the
             # cursor is already at the end of the row, and the cursor still
             # moves, which is what ends the loop.
             if p < n:
-                for k in range(offsets[p], offsets[p + 1]):
+                for k in range(byte_of(offsets, p), byte_of(offsets, p + 1)):
                     out.append(bytes[k])
             p += 1
             continue
@@ -563,7 +560,9 @@ def replaced(
                 var opened = Int(found[g * 2])
                 var closed = Int(found[g * 2 + 1])
                 if opened >= 0 and closed >= opened:
-                    for k in range(offsets[opened], offsets[closed]):
+                    for k in range(
+                        byte_of(offsets, opened), byte_of(offsets, closed)
+                    ):
                         out.append(bytes[k])
         p = end
         lastend = p
@@ -573,7 +572,7 @@ def replaced(
     # stopped by the limit is inside the row, and the same copy is what carries
     # the rest of it across untouched.
     if p <= n:
-        for k in range(offsets[p], len(bytes)):
+        for k in range(byte_of(offsets, p), len(bytes)):
             out.append(bytes[k])
 
 
@@ -620,12 +619,7 @@ def replaced_python(
             means to pandas on this path and is seen to by the binding.
     """
     out.clear()
-    offsets.clear()
-    var at = 0
-    for i in range(len(points)):
-        offsets.append(at)
-        at += byte_width(points[i])
-    offsets.append(at)
+    fill_byte_offsets(bytes, points, offsets)
 
     var n = len(points)
     var p = 0
@@ -636,7 +630,7 @@ def replaced_python(
         if end < 0:
             break
         var start = Int(found[0])
-        for k in range(offsets[pos], offsets[start]):
+        for k in range(byte_of(offsets, pos), byte_of(offsets, start)):
             out.append(bytes[k])
         for part in range(len(rewrite.group)):
             for k in range(Int(rewrite.start[part]), Int(rewrite.stop[part])):
@@ -646,12 +640,14 @@ def replaced_python(
                 var opened = Int(found[g * 2])
                 var closed = Int(found[g * 2 + 1])
                 if opened >= 0 and closed >= opened:
-                    for k in range(offsets[opened], offsets[closed]):
+                    for k in range(
+                        byte_of(offsets, opened), byte_of(offsets, closed)
+                    ):
                         out.append(bytes[k])
         pos = end
         p = end + 1 if start == end else end
         done += 1
-    for k in range(offsets[pos], len(bytes)):
+    for k in range(byte_of(offsets, pos), len(bytes)):
         out.append(bytes[k])
 
 
