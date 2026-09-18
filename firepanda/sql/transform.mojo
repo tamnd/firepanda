@@ -58,6 +58,7 @@ from .ast import (
     CALL_DISTINCT,
     CALL_EXPORT_STATE,
     CALL_IGNORE_NULLS,
+    CALL_METHOD,
     CALL_RESPECT_NULLS,
     CALL_STAR,
     CALL_WITHIN_GROUP,
@@ -135,7 +136,6 @@ from .unsupported import (
     JOIN_FORM,
     LIKE_ESCAPE,
     MAP_LITERAL,
-    METHOD_CALL,
     NAMED_ARGUMENT,
     NOT_SUBQUERY,
     NO_CASE,
@@ -2590,9 +2590,13 @@ struct Transform(Movable):
                 # `.name` on a name is one longer name, since which part of a
                 # dotted name is the table and which is the column is the
                 # binder's question. `.name` on anything else cannot be a name
-                # at all and is reaching into a field.
+                # at all and is reaching into a field. `.name(...)` is neither,
+                # it is a call with the operand written in front of the dot.
                 if _tokens(tree, what) != 2:
-                    raise _unsupported(tree, sql, what, METHOD_CALL)
+                    built = self._method(
+                        tree, sql, self._only(tree, what), built, ast, work
+                    )
+                    continue
                 if ast.exprs[Int(built)].kind != EXPR_COLUMN:
                     built = ast.field(
                         built,
@@ -2784,38 +2788,16 @@ struct Transform(Movable):
             )
 
         # `FunctionExpressionArguments <- Parens(FunctionExpressionArgumentList)`
-        # and the list rule holds up to four groups: the `DISTINCT` or `ALL` in
-        # front, the arguments themselves, an `ORDER BY` and a null treatment.
-        # These go by rule and not by first word, because `IGNORE` and
-        # `RESPECT` are words a column may be called and `f(ignore)` would read
-        # as a null treatment to anything that only looks at the word.
-        var groups = self._only(tree, self._only(tree, kids[1]))
+        # and the list rule is a node of its own, so the groups are two steps
+        # down rather than one.
         var ordering = within
-        var argument_list = NO_NODE
-        for group in tree.children(groups):
-            var rule = tree.nodes[Int(group)].rule
-            if rule == self.call_order:
-                if ordering != NO_NODE:
-                    # DuckDB says "cannot use multiple ORDER BY clauses with
-                    # WITHIN GROUP" and turns the query down. The grammar takes
-                    # it, so this is where it is turned down here.
-                    raise _unsupported(tree, sql, group, CALL_ARGUMENT, "ORDER")
-                ordering = group
-                continue
-            if rule == self.null_treatment:
-                if _word(tree, sql, group) == "IGNORE":
-                    flags |= CALL_IGNORE_NULLS
-                else:
-                    flags |= CALL_RESPECT_NULLS
-                continue
-            var lead = _word(tree, sql, group)
-            if lead == "DISTINCT":
-                flags |= CALL_DISTINCT
-                continue
-            if lead == "ALL":
-                # The default, so it carries nothing and is not written back.
-                continue
-            argument_list = group
+        var argument_list = self._call_groups(
+            tree,
+            sql,
+            self._only(tree, self._only(tree, kids[1])),
+            flags,
+            ordering,
+        )
 
         var warming = List[UInt32]()
         if over != NO_NODE:
@@ -2905,6 +2887,143 @@ struct Transform(Movable):
                 token=at,
                 a=call_tags(flags, ordered),
                 b=work.value(over) if over != NO_NODE else NO_NODE,
+                children=ast.run(entries),
+                payload=ast.run(names),
+            )
+        )
+
+    def _call_groups(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        groups: UInt32,
+        mut flags: UInt32,
+        mut ordering: UInt32,
+    ) raises -> UInt32:
+        """Reads what stands inside a call's parentheses besides the arguments.
+
+        The list rule holds up to four groups: the `DISTINCT` or `ALL` in front,
+        the arguments themselves, an `ORDER BY` and a null treatment. These go
+        by rule and not by first word, because `IGNORE` and `RESPECT` are words
+        a column may be called and `f(ignore)` would read as a null treatment to
+        anything that only looks at the word.
+
+        The dot spelling of a call has the same four groups in the same order,
+        which is why this is a function rather than a stretch of `_function`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            groups: The argument list rule, with the groups as its children.
+            flags: The call's flags, added to.
+            ordering: Where the call's `ORDER BY` goes, already holding the one
+                a `WITHIN GROUP` wrote if there was one.
+
+        Returns:
+            The arguments, or `NO_NODE` when the parentheses held none.
+
+        Raises:
+            Error: If the call writes an `ORDER BY` twice over.
+        """
+        var argument_list = NO_NODE
+        for group in tree.children(groups):
+            var rule = tree.nodes[Int(group)].rule
+            if rule == self.call_order:
+                if ordering != NO_NODE:
+                    # DuckDB says "cannot use multiple ORDER BY clauses with
+                    # WITHIN GROUP" and turns the query down. The grammar takes
+                    # it, so this is where it is turned down here.
+                    raise _unsupported(tree, sql, group, CALL_ARGUMENT, "ORDER")
+                ordering = group
+                continue
+            if rule == self.null_treatment:
+                if _word(tree, sql, group) == "IGNORE":
+                    flags |= CALL_IGNORE_NULLS
+                else:
+                    flags |= CALL_RESPECT_NULLS
+                continue
+            var lead = _word(tree, sql, group)
+            if lead == "DISTINCT":
+                flags |= CALL_DISTINCT
+                continue
+            if lead == "ALL":
+                # The default, so it carries nothing and is not written back.
+                continue
+            argument_list = group
+        return argument_list
+
+    def _method(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        operand: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `x.f(y)`, which is the call `f(x, y)` written with a dot.
+
+        `DotMethodOperator <- '.' MethodExpression` and `MethodExpression <-
+        ColLabel MethodExpressionArguments`, so the name is the first child and
+        the parentheses are the second. What comes out is an ordinary call with
+        the operand in front of the arguments and a flag saying how it was
+        written, because that is all the difference there is.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `DotMethodOperator` node.
+            operand: The expression the dot was written on.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the arguments.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the call writes an `ORDER BY` twice over.
+        """
+        var call = self._only(tree, node)
+        var kids = tree.children(call)
+        var at = tree.nodes[Int(call)].token_start
+        var flags = CALL_METHOD
+        var ordering = NO_NODE
+        var argument_list = self._call_groups(
+            tree,
+            sql,
+            self._only(tree, self._only(tree, kids[1])),
+            flags,
+            ordering,
+        )
+
+        var warming = List[UInt32]()
+        if ordering != NO_NODE:
+            warming.append(ordering)
+        if argument_list != NO_NODE:
+            warming.extend(self._items(tree, argument_list))
+        if len(warming) != 0:
+            work.warm(warming)
+
+        var arguments: List[UInt32] = [operand]
+        if argument_list != NO_NODE:
+            for item in self._items(tree, argument_list):
+                arguments.append(work.value(item))
+        var sorts = List[UInt32]()
+        if ordering != NO_NODE:
+            sorts = ast.items(work.value(ordering))
+
+        var names: List[UInt32] = [
+            ast.intern(_identifier(sql, tree.tokens[Int(at)]))
+        ]
+        var ordered = len(sorts)
+        var entries = arguments^
+        entries.extend(sorts^)
+        return ast.add(
+            Expr(
+                kind=EXPR_FUNCTION,
+                token=at,
+                a=call_tags(flags, ordered),
+                b=NO_NODE,
                 children=ast.run(entries),
                 payload=ast.run(names),
             )

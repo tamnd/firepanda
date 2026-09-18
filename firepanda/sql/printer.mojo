@@ -68,6 +68,7 @@ from .ast import (
     CALL_DISTINCT,
     CALL_EXPORT_STATE,
     CALL_IGNORE_NULLS,
+    CALL_METHOD,
     CALL_RESPECT_NULLS,
     CALL_STAR,
     CALL_WITHIN_GROUP,
@@ -583,9 +584,17 @@ def _write_step(
         # the list, the struct and the two IN forms below.
         var flags = call_flags(item.a)
         var count = ast.length(item.children) - call_sorts(item.a)
+        # A call written with a dot keeps its operand as the first argument, so
+        # the run is one longer than what stands inside the parentheses and the
+        # arguments start one along.
+        var first = 1 if flags & CALL_METHOD != 0 else 0
         if phase == 0:
             if ast.length(item.payload) == 0:
                 raise Error("a function call with no name on it")
+            if first == 1:
+                stack.append(_Step(node, 1))
+                stack.append(_Step(ast.at(item.children, 0), 0))
+                return
             out += _names(ast, item.payload, grammar, calling=True)
             out += "("
             if flags & CALL_STAR != 0:
@@ -596,11 +605,21 @@ def _write_step(
                 out += "DISTINCT "
             stack.append(_Step(node, 1))
             return
+        if first == 1 and phase == 1:
+            # The name after a dot is a `ColLabel` and takes every keyword, so
+            # it is quoted by shape alone the way a field name is.
+            out += "."
+            out += _label_name(ast.text(ast.at(item.payload, 0)))
+            out += "("
+            if flags & CALL_DISTINCT != 0:
+                out += "DISTINCT "
+            stack.append(_Step(node, 2))
+            return
         if phase == count + 1:
             _write_call_tail(ast, node, grammar, out)
             return
         var argument = phase - 1
-        if argument > 0:
+        if argument > first:
             out += ", "
         stack.append(_Step(node, UInt32(phase + 1)))
         stack.append(_Step(ast.at(item.children, argument), 0))
@@ -1003,7 +1022,10 @@ def _write_call_tail(
     var flags = call_flags(item.a)
     var sorts = call_sorts(item.a)
     var count = ast.length(item.children) - sorts
-    var written = count != 0 or flags & CALL_STAR != 0
+    # The operand of a dot call stands outside the parentheses, so it does not
+    # count as something already written inside them.
+    var first = 1 if flags & CALL_METHOD != 0 else 0
+    var written = count != first or flags & CALL_STAR != 0
     if sorts != 0 and flags & CALL_WITHIN_GROUP == 0:
         out += " ORDER BY " if written else "ORDER BY "
         _write_call_order(ast, node, grammar, out)

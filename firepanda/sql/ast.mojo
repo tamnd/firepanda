@@ -521,6 +521,20 @@ comptime CALL_RESPECT_NULLS: UInt32 = 16
 comptime CALL_EXPORT_STATE: UInt32 = 32
 """`f(x) EXPORT_STATE`, which hands back the fold's state and not its answer."""
 
+comptime CALL_METHOD: UInt32 = 64
+"""`x.f(y)` written with a dot, which is the call `f(x, y)` and nothing else.
+
+The operand is the first argument and the rest follow it, so everything that
+reads a call reads this one without knowing the flag is there. The flag is for
+the printer, which hands the dot back rather than turning the query's words into
+a spelling it did not use.
+
+A dotted name in front of parentheses is not this. `main.upper('x')` is a call
+to `upper` in the schema `main`, and the grammar settles that before the
+transformer sees it, so what reaches here is a dot on something that cannot be a
+name at all.
+"""
+
 
 comptime _CALL_FLAG_FIELD: UInt32 = 0xFFFF
 """The half of a call's `a` the flags live in."""

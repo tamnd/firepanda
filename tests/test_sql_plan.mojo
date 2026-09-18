@@ -1231,6 +1231,21 @@ def test_a_lambda_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT upper(lambda x: x) FROM t")
 
 
+def test_a_call_written_with_a_dot_lowers_as_the_call_it_is() raises:
+    # The dot is a spelling and the operand is the first argument, so there is
+    # nothing here for lowering to know about and the two plans are the same
+    # plan rather than two that happen to agree.
+    assert_equal(
+        _plan("SELECT upper(g).lower() AS c FROM t"),
+        _plan("SELECT lower(upper(g)) AS c FROM t"),
+    )
+
+
+def test_a_call_written_with_a_dot_refuses_by_its_own_name() raises:
+    with assert_raises(contains="no function named nosuch"):
+        _ = _plan("SELECT upper(g).nosuch() FROM t")
+
+
 def test_a_field_access_is_refused_here_not_in_the_transformer() raises:
     # A dot on something that is not a name reads and prints, and what it
     # reaches into is a struct, which a firepanda column does not hold.

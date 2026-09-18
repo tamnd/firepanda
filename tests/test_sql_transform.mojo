@@ -532,6 +532,10 @@ def test_every_shape_here_round_trips() raises:
         "[x + y FOR x, y IN l]",
         "f(x).b.c",
         "x.b.a[1].c",
+        "f(x).g(y).h(z)",
+        "f(x).g(y).b",
+        "f(x).b.g(y)",
+        "[1, 2].list_sort()",
         "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
         "mode() WITHIN GROUP (ORDER BY a)",
         "lag(a IGNORE NULLS) OVER ()",
@@ -865,6 +869,53 @@ def test_a_field_name_takes_every_keyword_bare() raises:
     assert_equal(_printed("f(x).select", g, rules), "f(x).select")
     assert_equal(_printed('f(x)."B"', g, rules), 'f(x)."B"')
     assert_equal(_printed('f(x)."odd name"', g, rules), 'f(x)."odd name"')
+
+
+def test_a_dot_with_a_call_after_it_is_that_call() raises:
+    # `x.f(y)` is `f(x, y)` and the operand is the first argument, so what comes
+    # out is an ordinary call and the dot is only how it was written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(x).g(y)", g, rules), "f(x).g(y)")
+    assert_equal(_printed("f(x).g()", g, rules), "f(x).g()")
+    assert_equal(_printed("f(x).g(y, z)", g, rules), "f(x).g(y, z)")
+    assert_equal(_printed("[1, 2].list_sort()", g, rules), "[1, 2].list_sort()")
+
+
+def test_a_dotted_name_in_front_of_parentheses_is_not_a_method() raises:
+    # `main.upper('x')` is the function `upper` in the schema `main`, and the
+    # grammar settles that before the transformer sees it. What reaches the
+    # method case is a dot on something that cannot be a name at all.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("main.upper('x')", g, rules), "main.upper('x')")
+    assert_equal(_printed("a.b.c(d)", g, rules), "a.b.c(d)")
+    # DuckDB answers the same for both of these, so the parentheses coming off
+    # is the two spellings meeting rather than one of them being lost.
+    assert_equal(_printed("(a).b(c)", g, rules), "a.b(c)")
+
+
+def test_a_method_carries_what_a_call_carries_inside_its_parentheses() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(x).g(DISTINCT y)", g, rules), "f(x).g(DISTINCT y)")
+    assert_equal(
+        _printed("f(x).g(y ORDER BY z)", g, rules), "f(x).g(y ORDER BY z)"
+    )
+    assert_equal(_printed("f(x).g(ORDER BY z)", g, rules), "f(x).g(ORDER BY z)")
+    assert_equal(
+        _printed("f(x).g(y IGNORE NULLS)", g, rules),
+        "f(x).g(y IGNORE NULLS)",
+    )
+
+
+def test_a_method_name_takes_every_keyword_bare() raises:
+    # The name after the dot is a `ColLabel` here too, so it is quoted by what
+    # the text looks like and not by what the word means.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(x).select(1)", g, rules), "f(x).select(1)")
+    assert_equal(_printed('f(x)."odd name"(1)', g, rules), 'f(x)."odd name"(1)')
 
 
 def test_a_comprehension_keeps_its_three_parts() raises:
