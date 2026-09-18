@@ -41,16 +41,24 @@ from firepanda.kernel.regex.method import (
     METHOD_REPLACE,
     program_for,
 )
+from firepanda.kernel.regex.dfa import Cache
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import parse_rewrite
 from firepanda.kernel.scalar import text_matches_regex_scalar
 
 
-def compiled(pattern: String) raises -> Program:
+def compiled(pattern: String, alphabet: Bool = True) raises -> Program:
     """Compiles a pattern for the engine, or fails the test.
+
+    The alphabet is asked for by default, which is what a column tall enough to
+    be worth it gets from the binding, and it is what puts the state cache in
+    front of the machine in the kernel below. So the twin this file compares
+    against is running the other engine for most of what is here, and the tests
+    that want the machine on both sides say so.
 
     Args:
         pattern: The pattern.
+        alphabet: Whether to compile the table the state cache runs on.
 
     Returns:
         The program.
@@ -59,7 +67,7 @@ def compiled(pattern: String) raises -> Program:
         Error: If it did not compile, which in this file is a mistake in the
             test rather than an answer.
     """
-    var program = program_for(METHOD_CONTAINS, pattern)
+    var program = program_for(METHOD_CONTAINS, pattern, alphabet=alphabet)
     if not program.ok:
         raise Error(
             String("pattern ", pattern, " did not compile: ", program.problem)
@@ -188,6 +196,39 @@ def test_a_column_matches_the_twin() raises:
     check(col, "a|b")
     check(col, "[^ab]")
     check(col, "a.b")
+
+
+def test_the_kernel_runs_the_cache_and_the_twin_runs_the_machine() raises:
+    """What makes the comparison above worth more than it used to be. The
+    kernel answers a row from the state cache wherever it can and the twin
+    always runs the machine, so for a pattern the cache takes the two sides are
+    two engines. This asserts that the cache really is taking them, since a
+    pattern it quietly refused would leave the comparison asking the machine
+    about itself, which is what the file used to do and would not notice."""
+    var taken = compiled("^a+b$")
+    assert_true(Cache(taken).ok)
+    var also = compiled("[^ab]")
+    assert_true(Cache(also).ok)
+
+    # And a pattern the cache will not take is still answered, by the machine
+    # underneath it, which is the fall back the whole design rests on.
+    var refused = compiled("\\ba")
+    assert_false(Cache(refused).ok)
+    agrees(
+        text_matches_regex(sample(), refused),
+        text_matches_regex_scalar(sample(), refused),
+        "matches a word boundary",
+    )
+
+    # As is a pattern compiled for a column too short to be worth an alphabet.
+    var plain = compiled("a.b", alphabet=False)
+    assert_equal(plain.class_count, 0)
+    assert_false(Cache(plain).ok)
+    agrees(
+        text_matches_regex(sample(), plain),
+        text_matches_regex_scalar(sample(), plain),
+        "matches without an alphabet",
+    )
 
 
 def test_a_row_is_not_told_what_the_row_before_it_matched() raises:

@@ -88,6 +88,7 @@ from std.python import Python
 from firepanda.frame.series import Series
 from firepanda.kernel.chars import character_count
 from firepanda.kernel.regex.method import (
+    ALPHABET_ROWS,
     METHOD_CONTAINS,
     METHOD_COUNT,
     METHOD_EXTRACT,
@@ -330,7 +331,7 @@ def _python_minor() raises -> Int:
 
 
 def _compiled(
-    kind: String, pattern: String, flags: Int32 = 0
+    kind: String, pattern: String, flags: Int32 = 0, rows: Int = 0
 ) raises -> Program:
     """Compiles what a method would run, or raises the refusal that belongs to it.
 
@@ -393,6 +394,11 @@ def _compiled(
         flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
             and zero when they passed none. They mean what the letters mean and
             they do not decide the engine.
+        rows: How tall the column is, which decides nothing about the answer and
+            only whether the pattern is compiled with the alphabet the state
+            cache runs on. Zero is the answer for a call that has no column to
+            speak of or does not reach the cache, and it means the alphabet is
+            left out.
 
     Returns:
         The compiled program.
@@ -420,7 +426,12 @@ def _compiled(
         method = METHOD_EXTRACT
     var seeded = flags | (FLAG_IGNORECASE if folded else 0)
     var program = program_for(
-        method, pattern, seeded, argued=python, minor=_python_minor()
+        method,
+        pattern,
+        seeded,
+        argued=python,
+        minor=_python_minor(),
+        alphabet=rows >= ALPHABET_ROWS,
     )
     if program.ok:
         return program^
@@ -910,7 +921,9 @@ def flag(
         or wanted == "match_regex_python"
         or wanted == "fullmatch_regex_python"
     ):
-        return column.chars_matches_regex(_compiled(wanted, arg, Int32(flags)))
+        return column.chars_matches_regex(
+            _compiled(wanted, arg, Int32(flags), len(column))
+        )
     # The same three with `case=False`, which is a word of its own rather than a
     # seventh argument on the door, for the reason `strip` and `strip_chars` are
     # two words: the name and what it does with its argument are what a caller

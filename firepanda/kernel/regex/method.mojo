@@ -351,12 +351,30 @@ def python_anchored(
     return String(head, "\\A(", rest, end, ")\\Z")
 
 
+comptime ALPHABET_ROWS: Int = 4096
+"""How tall a column has to be before a pattern is compiled with an alphabet.
+
+The alphabet is what the state cache lays its transitions out on and it is not
+free to work out: four to nine microseconds on top of a compile for a pattern
+over ASCII, and up to three hundred for one over Python's Unicode classes, which
+are the largest range tables in the library. The cache then saves somewhere
+between seventy nanoseconds and a microsecond per row depending on the pattern,
+so the compile pays for itself somewhere between a hundred rows and a few
+thousand, and a bound at the far end of that is the one that never loses.
+
+It has to be decided by the caller rather than by the compiler, because it is a
+trade between what a compile costs once and what a row costs many times and only
+the caller knows how many rows there are.
+"""
+
+
 def program_for(
     method: UInt8,
     pattern: String,
     flags: Int32 = 0,
     argued: Bool = False,
     minor: Int = PYTHON_NEWEST,
+    alphabet: Bool = False,
 ) -> Program:
     """Compiles what one of the five methods would run, or refuses it.
 
@@ -404,12 +422,25 @@ def program_for(
             that reach Python's engine, because which engine a call lands on is
             decided in here and a caller would have to read this function to
             know when the number mattered.
+        alphabet: Whether the column is tall enough to be worth compiling an
+            alphabet for, which is what the state cache runs its transitions on.
+            It is acted on only for the three methods that answer whether a row
+            matched, since those are the ones the cache can answer today, and
+            `ALPHABET_ROWS` is the height a caller is expected to ask about.
 
     Returns:
         The program, or the reason there is not one, with the flag saying whose
         refusal it is. A refusal is a value here rather than a raise for the
         reason `compile_program` gives.
     """
+    # Only the three that answer whether a row matched, because the state cache
+    # answers those and nothing else yet, and a table nothing reads is a compile
+    # nobody asked for.
+    var table = alphabet and (
+        method == METHOD_CONTAINS
+        or method == METHOD_MATCH
+        or method == METHOD_FULLMATCH
+    )
     var tree = parse_pattern(pattern, flags)
     if method == METHOD_EXTRACT:
         return compile_program(tree, ENGINE_PYTHON, captures=True, minor=minor)
@@ -437,6 +468,7 @@ def program_for(
             # itself.
             captures=method == METHOD_REPLACE or method == METHOD_COUNT,
             minor=minor,
+            alphabet=table,
         )
     if holds_unsupported(tree):
         # Routed to Python, and Python's engine has none of the five yet. It is
@@ -458,4 +490,5 @@ def program_for(
         ENGINE_RE2,
         captures=method == METHOD_REPLACE,
         minor=minor,
+        alphabet=table,
     )

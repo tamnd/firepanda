@@ -29,6 +29,17 @@ So `tools/python_version.py` reads the constants out of the compiler and the sup
 It also refuses a constant above the newest measured version, which is a rule nobody could have measured and so a typo or a guess, and a constant at or below the floor, which is how these are meant to leave. When the floor rises past a threshold every supported interpreter is already above it, the branch behind it can never run, and the constant and its branch and its tests and its paragraphs are all dead with nothing anywhere to say so.
 
 It runs twice, as a pixi task in CI and again inside the accessor test suite, because those two stand in different interpreters and either can be upgraded without the other. That gap is the one that produced the first of these two rules. Document 92.
+### Changed: `contains`, `match` and `fullmatch` read a column through the state cache
+
+The matching kernel builds a cache beside the machine and asks the cache for every row. A pattern the cache refuses never reaches it and the whole column runs on the machine as before, and a row the cache gives up on runs on the machine on its own, so the column comes back the same either way and the fall back costs one branch per row. That is the shape the cache was written for: it is an accelerator with an engine underneath it rather than a second engine callers have to pick between.
+
+On a million URLs, `contains` with an anchored pattern of the shape ClickBench q28 uses goes from about 870 ms to about 120 ms, and `[a-z]+[0-9]+[a-z]+`, which the character set skip cannot help at all because almost every row starts with a letter, goes from about 2.7 s to about 180 ms. A pattern matching most rows goes from about 330 ms to about 160 ms and one matching none from about 275 ms to about 200 ms, both of those being rows the skip added in 0.8.11 was already stepping over quickly.
+
+The alphabet is not free and the compiler is not the one who knows whether it is worth it. Working it out costs a few microseconds on an RE2 compile and up to about three hundred on a Python engine compile with Unicode classes in it, against something between seventy nanoseconds and a microsecond of work per row, so the accessor asks for it when the column has at least four thousand rows and not below that. The number is a named constant next to the call, since the only thing that could move it is a measurement.
+
+Only the three methods that answer whether a row matched are wired up. `count` still runs the machine for every row because it needs where each match ended rather than whether the row matched at all, and a state here is a set of positions with no record of which of them were ever the end of anything. `replace` and `extract` need the same thing and more of it, and are named in #863 as a different piece of work.
+
+The test that ran the kernel against a scalar loop over the same rows was a narrow check before this, since both sides ran the machine. It compiles with the alphabet now, so the two sides are two engines and the comparison is worth what it looks like. The match differential does the same: thirty thousand generated patterns over sixteen texts for each of the three methods now go through both engines, with a disagreement between the two reported on its own line because pandas has no view on which of them is wrong. Five seeds of that report full agreement with pandas and between the engines.
 
 ### Added: a cache of the sets of positions the regular expression machine holds
 
@@ -42,7 +53,7 @@ The end of the row is a flag on a state rather than a column in the table. Each 
 
 Over two hundred thousand URLs read three times, with the decode taken off both sides, the cache is worth about eleven times the run on an anchored pattern of the shape ClickBench q28 uses and about twenty two times on an unanchored one whose first character set stops nothing. On a pattern that matches most rows it is a bit over twice, and on one that matches none it is about one and a half, since the character set added in 0.8.11 already steps over most of those rows. The machine and the cache now share one definition of what an instruction accepts, because two functions that looked alike would be two engines answering two different patterns the first time one of them was edited.
 
-Nothing calls it yet. The scan that runs it for `contains`, `count`, `match` and `fullmatch` with the machine kept underneath is the next piece, and issue #863 has the order the rest go in.
+The scan that runs it for three of the accessor methods is the entry above, and issue #863 has the order the rest go in.
 
 ### Fixed: `\z` is refused beside an interpreter that has no such escape
 
