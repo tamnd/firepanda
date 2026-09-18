@@ -299,13 +299,19 @@ def test_an_argued_call_is_anchored_from_outside_the_pattern() raises:
     ones no flag can move, nothing is cropped off either end, and the three
     methods that ask about a whole row rather than its front get the pattern
     back unchanged.
+
+    The closing anchor is spelled `\\Z` and not `\\z`. They are one position and
+    the choice would be free if the two spellings had always been legal in the
+    same places, and they have not: Python got `\\z` in 3.14 and every older one
+    reads it as a bad escape. A pattern written here is written for Python's
+    engine, so it is spelled the way Python has always spelled it. Document 91.
     """
     assert_equal(python_anchored(METHOD_CONTAINS, "a"), "a")
     assert_equal(python_anchored(METHOD_COUNT, "^a$"), "^a$")
     assert_equal(python_anchored(METHOD_MATCH, "a"), "\\A(a)")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "a"), "\\A(a)\\z")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "^a$"), "\\A(^a$)\\z")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "(?i)a"), "(?i)\\A(a)\\z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a"), "\\A(a)\\Z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "^a$"), "\\A(^a$)\\Z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "(?i)a"), "(?i)\\A(a)\\Z")
     assert_equal(python_anchored(METHOD_MATCH, "(?ims)a"), "(?ims)\\A(a)")
 
 
@@ -320,14 +326,14 @@ def test_a_verbose_pattern_is_closed_on_a_line_of_its_own() raises:
     a newline away, so it changes the answer nowhere and saves it here.
     """
     assert_equal(
-        python_anchored(METHOD_FULLMATCH, "a # c", True), "\\A(a # c\n)\\z"
+        python_anchored(METHOD_FULLMATCH, "a # c", True), "\\A(a # c\n)\\Z"
     )
     assert_equal(python_anchored(METHOD_MATCH, "a # c", True), "\\A(a # c\n)")
     assert_equal(
         python_anchored(METHOD_FULLMATCH, "(?x)a # c", True),
-        "(?x)\\A(a # c\n)\\z",
+        "(?x)\\A(a # c\n)\\Z",
     )
-    assert_equal(python_anchored(METHOD_FULLMATCH, "a # c"), "\\A(a # c)\\z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a # c"), "\\A(a # c)\\Z")
     assert_true(
         program_for(METHOD_FULLMATCH, "a # c", FLAG_VERBOSE, argued=True).ok
     )

@@ -230,6 +230,27 @@ struct Parsed(Movable):
     pattern carrying one set of flags either way.
     """
 
+    var zed: Bool
+    """Whether the pattern text held a `\\z`.
+
+    Another fact about the text rather than about the tree, and here for the
+    same reason `re2_refuses` is: both spellings of the end of the string build
+    the same node, so by the time the tree exists there is nothing left to say
+    which one was written.
+
+    It is a version question rather than an engine one, which is what makes it
+    a field of its own. RE2 has always had `\\z` and Python only got it in 3.14,
+    where it is the same position `\\Z` already was, and before that it is a
+    `bad escape \\z`. So a caller who wrote one has written a pattern that is
+    fine on Arrow, fine on a new enough interpreter, and an error on an
+    interpreter this project still supports, and the compiler is where that is
+    decided because the compiler is the thing that knows which interpreter it
+    is beside. Document 91.
+
+    Inside a class it is a bad escape in every version, including 3.14, and
+    that is the ordinary bad escape path rather than anything here.
+    """
+
     var scoped: Int32
     """Every flag any scoped group mentioned, whether it turned it on or off.
 
@@ -258,6 +279,7 @@ struct Parsed(Movable):
         self.approximate = False
         self.re2_refuses = False
         self.re2_differs = False
+        self.zed = False
         self.flags = 0
         self.scoped = 0
 
@@ -353,6 +375,10 @@ struct _Cursor(Movable):
     """Whether a count with no lower bound or a POSIX class has been read. What
     `Parsed.re2_differs` ends up holding."""
 
+    var zed: Bool
+    """Whether a `\\z` has been read outside a class. What `Parsed.zed` ends up
+    holding."""
+
     var scoped: Int32
     """Which flags a scoped group mentioned, on or off. What `Parsed.scoped`
     ends up holding."""
@@ -387,6 +413,7 @@ struct _Cursor(Movable):
         self.pending = []
         self.re2_refuses = False
         self.re2_differs = False
+        self.zed = False
         self.scoped = 0
         self.flagged = 0
         self.guessed = False
@@ -770,6 +797,12 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
             # is RE2's own spelling and needs no rewriting wherever it sits.
             if point == 0x5A and not c.done():
                 c.re2_refuses = True
+            if point == 0x7A:
+                # The same node and a different question. RE2 has always had
+                # this spelling and Python got it in 3.14, so a caller who
+                # wrote one has written something the compiler has to check a
+                # version against rather than an engine. Document 91.
+                c.zed = True
             return c.add(OP_AT, Int32(Int(AT_END_STRING)), 0)
         if point == 0x62:
             return c.add(OP_AT, Int32(Int(AT_BOUNDARY)), 0)
@@ -1924,6 +1957,7 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     var flagged = c.flagged
     var refuses = c.re2_refuses
     var differs = c.re2_differs
+    var zed = c.zed
     var scoped = c.scoped
     var nodes = c.nodes.copy()
     var names = c.names.copy()
@@ -1944,6 +1978,7 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     out.flags = flagged
     out.re2_refuses = refuses
     out.re2_differs = differs
+    out.zed = zed
     out.scoped = scoped
     out.nodes = nodes^
     out.names = names^
