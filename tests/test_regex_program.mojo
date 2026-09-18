@@ -33,8 +33,18 @@ from firepanda.kernel.regex.program import (
     IN_SET,
     IN_SPLIT,
     Program,
+    class_of,
     compile_program,
     in_set,
+    is_word_point,
+    is_word_point_unicode,
+    word_ranges_unicode,
+)
+from firepanda.kernel.regex.tokens import (
+    AT_BOUNDARY,
+    AT_BOUNDARY_UNICODE,
+    AT_NON_BOUNDARY,
+    AT_NON_BOUNDARY_UNICODE,
 )
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
 
@@ -351,6 +361,176 @@ def test_a_pattern_that_could_begin_anywhere_is_left_without_a_set() raises:
     assert_equal(firsts(".x"), 0)
     assert_equal(firsts("[^/]x"), 0)
     assert_equal(firsts("\\b"), 0)
+
+
+def alphabet(pattern: StringSlice, python: Bool = False) -> Program:
+    """A program compiled with its class table on it.
+
+    Args:
+        pattern: The pattern.
+        python: Whether to compile it for Python's engine, which is the one
+            whose word boundary reads the wide class.
+
+    Returns:
+        The program.
+    """
+    var engine = ENGINE_PYTHON if python else ENGINE_RE2
+    return compile_program(parse_pattern(pattern), engine, alphabet=True)
+
+
+def tells_apart(program: Program, one: UInt32, two: UInt32) -> Bool:
+    """Whether some instruction of the program answers differently for two
+    characters.
+
+    Every instruction that reads a character is asked about both, and so is
+    every word boundary, since a boundary reads the characters around a position
+    and a class table that ignored it would put a letter and a space together.
+
+    Args:
+        program: The program.
+        one: The first character.
+        two: The second.
+
+    Returns:
+        True when the two are different characters as far as this program is
+        concerned.
+    """
+    var wide = word_ranges_unicode()
+    for i in range(len(program.code)):
+        var instruction = program.code[i]
+        var first = False
+        var second = False
+        if instruction.op == IN_CHAR:
+            first = Int32(Int(one)) == instruction.a
+            second = Int32(Int(two)) == instruction.a
+        elif instruction.op == IN_SET or instruction.op == IN_NOT_SET:
+            first = in_set(
+                Span(program.ranges), instruction.a, instruction.b, one
+            )
+            second = in_set(
+                Span(program.ranges), instruction.a, instruction.b, two
+            )
+        elif instruction.op == IN_ANY:
+            first = one != 0x0A
+            second = two != 0x0A
+        elif instruction.op == IN_AT:
+            var which = UInt8(Int(instruction.a))
+            if which == AT_BOUNDARY or which == AT_NON_BOUNDARY:
+                first = is_word_point(one)
+                second = is_word_point(two)
+            elif (
+                which == AT_BOUNDARY_UNICODE or which == AT_NON_BOUNDARY_UNICODE
+            ):
+                first = is_word_point_unicode(one, Span(wide))
+                second = is_word_point_unicode(two, Span(wide))
+        if first != second:
+            return True
+    return False
+
+
+def test_the_alphabet_holds_one_class_per_set_of_characters_told_apart() raises:
+    """What the table is for: `abc` has four classes rather than a million, and
+    the characters below `a` and the ones above `c` are one of them, because
+    nothing in that program can tell them apart."""
+    var three = alphabet("abc")
+    assert_equal(three.class_count, 4)
+    assert_equal(class_of(three, UInt32(ord("z"))), class_of(three, UInt32(0)))
+    assert_equal(
+        class_of(three, UInt32(ord("z"))), class_of(three, UInt32(0x3042))
+    )
+    assert_true(
+        class_of(three, UInt32(ord("a"))) != class_of(three, UInt32(ord("b")))
+    )
+
+    var letters = alphabet("[a-z]+")
+    assert_equal(letters.class_count, 2)
+    assert_equal(
+        class_of(letters, UInt32(ord("a"))),
+        class_of(letters, UInt32(ord("z"))),
+    )
+
+    # A full stop reads every character and tells one of them from the rest.
+    var stop = alphabet(".")
+    assert_equal(stop.class_count, 2)
+    assert_true(
+        class_of(stop, UInt32(0x0A)) != class_of(stop, UInt32(ord("a")))
+    )
+
+    # And under `(?s)` it tells nothing from anything, which is one class over
+    # every code point there is.
+    var all = alphabet("(?s).")
+    assert_equal(all.class_count, 1)
+    assert_equal(class_of(all, UInt32(0x0A)), class_of(all, UInt32(0x3042)))
+
+
+def test_a_word_boundary_cuts_the_alphabet_the_way_its_own_class_does() raises:
+    """A boundary reads the characters around a position rather than the one at
+    it, so a table built from the character instructions alone would put a
+    letter and a space in one class and answer `\\bfoo` wrongly."""
+    var narrow = alphabet("\\bfoo")
+    assert_true(
+        class_of(narrow, UInt32(ord("a"))) != class_of(narrow, UInt32(ord(" ")))
+    )
+    # RE2's boundary is ASCII, so a Greek letter is on the space's side of it.
+    assert_equal(
+        class_of(narrow, UInt32(ord(" "))), class_of(narrow, UInt32(0x03B1))
+    )
+
+    # Python's is not, so the same pattern on the other engine puts the Greek
+    # letter with the Latin one.
+    var wide = alphabet("\\bfoo", python=True)
+    assert_equal(
+        class_of(wide, UInt32(ord("a"))), class_of(wide, UInt32(0x03B1))
+    )
+    assert_true(
+        class_of(wide, UInt32(0x03B1)) != class_of(wide, UInt32(ord(" ")))
+    )
+
+
+def test_two_characters_in_one_class_are_one_character_to_the_program() raises:
+    """The property the whole table rests on, asked of every pair of characters
+    a handful of patterns can reach. Two in the same class answer every
+    instruction alike, and two in different classes are told apart by at least
+    one of them, which is what makes the count as small as it can be rather than
+    merely small."""
+    var patterns = List[String]()
+    patterns.append(String("abc"))
+    patterns.append(String("[a-z]+[0-9]*"))
+    patterns.append(String("^https?://(?:www\\.)?([^/]+)/.*$"))
+    patterns.append(String("\\bcat\\b|dog"))
+    patterns.append(String("(?s).x"))
+    var points = List[UInt32]()
+    for point in range(128):
+        points.append(UInt32(point))
+    points.append(UInt32(0x00E9))
+    points.append(UInt32(0x03B1))
+    points.append(UInt32(0x3042))
+    points.append(UInt32(0x10FFFF))
+    for i in range(len(patterns)):
+        var program = alphabet(patterns[i])
+        for one in range(len(points)):
+            for two in range(one + 1, len(points)):
+                var apart = tells_apart(program, points[one], points[two])
+                var same = class_of(program, points[one]) == class_of(
+                    program, points[two]
+                )
+                assert_equal(apart, not same)
+
+
+def test_a_program_is_compiled_without_a_class_table_unless_it_is_asked_for() raises:
+    """Nothing reads the table yet and it costs several times what compiling a
+    short pattern costs, so a caller has to ask. The ceiling on the length of a
+    program is the other way a caller does not get one."""
+    var plain = compile_program(parse_pattern("abc"), ENGINE_RE2)
+    assert_equal(plain.class_count, 0)
+    assert_equal(len(plain.class_ascii), 0)
+    assert_equal(class_of(plain, UInt32(ord("a"))), 0)
+
+    var long = String("(?:abcdefghijklmnopqrstuvwxyz){1000}")
+    var big = alphabet(long)
+    assert_true(big.ok)
+    assert_true(big.sized() > 20000)
+    assert_equal(big.class_count, 0)
 
 
 def test_what_re2_refuses_is_not_counted_as_a_gap() raises:
