@@ -717,8 +717,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
         _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
         _ = _printed("SELECT [x FOR x IN l]", g, rules)
-    with assert_raises(contains="an argument passed by name"):
-        _ = _printed("SELECT f(a := 1)", g, rules)
     with assert_raises(contains="COLUMNS"):
         _ = _printed("SELECT COLUMNS('a')", g, rules)
     with assert_raises(contains="a MAP literal"):
@@ -796,6 +794,22 @@ def test_a_row_value_reaches_the_printer_in_both_spellings() raises:
     )
     assert_equal(
         _printed("SELECT ROW() FROM t", g, rules), "SELECT ROW() FROM t"
+    )
+
+
+def test_an_argument_passed_by_name_reaches_the_printer() raises:
+    # The same rule serves a call in a select list and a table function in a
+    # `FROM`, so both paths are checked here. The second is the one the corpus
+    # is full of, since `read_csv` takes most of its settings by name.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT f(a := 1) FROM t", g, rules),
+        "SELECT f(a := 1) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT * FROM read_csv('x.csv', header := TRUE)", g, rules),
+        "SELECT * FROM read_csv('x.csv', header := TRUE)",
     )
 
 

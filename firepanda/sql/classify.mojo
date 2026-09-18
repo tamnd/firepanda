@@ -56,6 +56,7 @@ from .ast import (
     EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
+    EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
     EXPR_ROW,
@@ -181,6 +182,7 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         or kind == EXPR_CAST
         or kind == EXPR_COLLATE
         or kind == EXPR_INTERVAL
+        or kind == EXPR_NAMED_ARGUMENT
     ):
         out.append(item.a)
         return out^
@@ -712,6 +714,8 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(item.payload)
     if kind == EXPR_SUBSCRIPT or kind == EXPR_ROW:
         return String(item.payload)
+    if kind == EXPR_NAMED_ARGUMENT:
+        return String(item.b, "/", ast.text(item.payload))
     if kind == EXPR_STRUCT:
         var out = String()
         for at in range(0, ast.length(item.children), 2):

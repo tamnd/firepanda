@@ -1187,6 +1187,15 @@ def test_a_row_value_is_refused_here_and_not_in_the_transformer() raises:
         _ = _plan("SELECT ROW(a, b) FROM t")
 
 
+def test_an_argument_by_name_is_refused_here_not_in_the_transformer() raises:
+    # Whether a name is a parameter of the function being called is a question
+    # about the function, and the transformer has no catalog to ask. The call
+    # is one firepanda has a kernel for, so the refusal is about the name and
+    # not about the function not being there.
+    with assert_raises(contains="an argument passed by name"):
+        _ = _plan("SELECT upper(a := 'x') FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage
