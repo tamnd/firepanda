@@ -36,6 +36,15 @@ A pattern is set aside when firepanda's own compiler says the refusal is a gap
 here rather than something RE2 refuses too, and the reasons are tallied in the
 report, exactly as in the other two.
 
+Not every pattern in the corpus is answered by the same engine, which is a thing
+only this differential has to deal with. An empty pattern is sent to Python's
+engine upstream with no flag in sight, because pyarrow used not to terminate on
+one, and there it is scanned by a different loop and its replacement is read by a
+different grammar. So the route is read here the way the pandas layer reads it,
+and the sweeps for an empty pattern are compared against the engine that actually
+answered them rather than set aside. They were set aside until document 87,
+because until document 86 there was no second engine here to answer them with.
+
 Usage:
     pixi run differential-regex-replace
     pixi run differential-regex-replace -- --cases 40000 --seed 7
@@ -48,7 +57,12 @@ from std.sys import argv
 from firepanda.kernel.regex.method import METHOD_REPLACE, program_for
 from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import Machine
-from firepanda.kernel.regex.replace import parse_rewrite, replaced
+from firepanda.kernel.regex.replace import (
+    parse_rewrite,
+    parse_rewrite_python,
+    replaced,
+    replaced_python,
+)
 from regex_corpus import corpus, report
 
 comptime CASES = 30000
@@ -180,21 +194,6 @@ def hexed(bytes: Span[UInt8, _]) -> String:
     return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
-def holds_a_backslash(text: String) -> Bool:
-    """Whether a replacement has anything in it the two grammars read apart.
-
-    Args:
-        text: The replacement.
-
-    Returns:
-        True if there is a backslash in it.
-    """
-    for byte in text.as_bytes():
-        if byte == UInt8(ord("\\")):
-            return True
-    return False
-
-
 def tally(mut reasons: List[String], mut counts: List[Int], reason: String):
     """Counts one held out pattern under the reason it was held out for.
 
@@ -256,7 +255,6 @@ def main() raises:
     var held = 0
     var compared = 0
     var unreadable = 0
-    var elsewhere = 0
 
     var offsets = List[Int]()
     var found = List[Int32]()
@@ -285,21 +283,22 @@ def main() raises:
                 they_refuse.append(pattern)
             continue
 
+        var empty = pattern.byte_length() == 0
+        if empty:
+            # An empty pattern is the one shape pandas sends to Python's engine
+            # with no flag in sight, because pyarrow used not to terminate on
+            # one. So the sweeps for it have to be answered by the engine
+            # upstream used, with the scan that engine runs and the grammar it
+            # reads a replacement by, in which a backslash and a zero is a null
+            # character rather than the whole match. This used to be set aside
+            # for want of a second engine. Document 86 built one and document 87
+            # section 9 named this as the cheapest reach left, and the route is
+            # read here the way `python/firepanda/_pandas.py` reads it.
+            program = program_for(METHOD_REPLACE, pattern, 0, argued=True)
+
         var machine = Machine(program)
         var wrong = False
-        var empty = pattern.byte_length() == 0
         for which in range(len(repls)):
-            if empty and holds_a_backslash(repls[which]):
-                # An empty pattern is the one shape pandas sends to Python's
-                # engine rather than to Arrow, so the replacement is read by
-                # Python's grammar there, in which a backslash and a zero is a
-                # null character rather than the whole match. The two grammars
-                # agree while there is no backslash to disagree about, which is
-                # why only the sweeps holding one are set aside. The binding
-                # refuses this shape rather than answering it, and
-                # `python/firepanda/_pandas.py` says so where it does.
-                elsewhere += 1
-                continue
             if sweeps[which] == "u":
                 # pandas answered and what it answered is not text, which RE2
                 # can do because it reads a zero width assertion between bytes.
@@ -307,7 +306,9 @@ def main() raises:
                 # sweep is set aside and counted.
                 unreadable += 1
                 continue
-            var rewrite = parse_rewrite(repls[which], program.groups)
+            var rewrite = parse_rewrite_python(
+                repls[which], program.groups, program.labels
+            ) if program.python else parse_rewrite(repls[which], program.groups)
             var they_refuse_this = sweeps[which] == "x"
             if not rewrite.ok:
                 if not they_refuse_this:
@@ -320,16 +321,28 @@ def main() raises:
 
             var want = split_on(sweeps[which], " ")
             for row in range(len(points)):
-                replaced(
-                    program,
-                    rewrite,
-                    Span(bytes[row]),
-                    Span(points[row]),
-                    machine,
-                    offsets,
-                    found,
-                    out,
-                )
+                if program.python:
+                    replaced_python(
+                        program,
+                        rewrite,
+                        Span(bytes[row]),
+                        Span(points[row]),
+                        machine,
+                        offsets,
+                        found,
+                        out,
+                    )
+                else:
+                    replaced(
+                        program,
+                        rewrite,
+                        Span(bytes[row]),
+                        Span(points[row]),
+                        machine,
+                        offsets,
+                        found,
+                        out,
+                    )
                 if hexed(Span(out)) != want[row]:
                     differ.append(pattern)
                     wrong = True
@@ -345,9 +358,7 @@ def main() raises:
     print(
         "set aside",
         unreadable,
-        "sweeps pandas wrote as something other than text and",
-        elsewhere,
-        "it answered out of the other engine",
+        "sweeps pandas wrote as something other than text",
     )
     for at in range(len(reasons)):
         print("   ", counts[at], reasons[at])

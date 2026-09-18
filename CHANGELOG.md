@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the replace differential compares the sweeps it used to set aside
+
+`tests/differential/regex_replace.mojo` held 186 sweeps out of its comparison because pandas answered them out of an engine this library did not have. It has had one since the counting and replacing scans landed, so those sweeps are compared now and the set aside count for them is gone from the report.
+
+An empty pattern is the one shape pandas sends to Python's engine with no flag in sight, because pyarrow used not to terminate on one, and there it runs a different scan and reads its replacement by a different grammar. The harness reads that route the way the pandas layer reads it and compiles the pattern for the engine that answered it. All 186 agree. The run is still 10000 in ten thousand with 0 disagreements over 7771 compared patterns. Document 87 section 9.
+
 ### Added: `str.count` and `str.replace` under a flag, and four more calls that were refused
 
 `Series.str.count("^", flags=re.MULTILINE)` and `Series.str.replace("a*", "#", flags=re.IGNORECASE)` used to be refused. Both are answered now, out of Python's engine, which is where upstream sends a call carrying any flag. That finishes the scan the two `case` and `flags` entries in 0.8.7 were waiting for. Issue #8 M6.
@@ -20,7 +26,8 @@ Three refusals came off that were never about flags. A replacement holding `\g<`
 
 A bad replacement template raises `InvalidArgumentError`, which is a `ValueError`. Upstream raises `re.PatternError`, which is not one, and an unknown group name comes back from `re` as an `IndexError`. That is a divergence rather than a bug and document 86 says why matching it would be worse.
 
-A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width. `str.extract` still refuses a flag, and the reason is now that it crosses by a door that takes no flags rather than that the scan is missing.
+A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width.
+A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width.
 
 ### Added: `str.extract` under a flag, which is the last of the six
 
