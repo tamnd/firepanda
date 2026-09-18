@@ -2725,6 +2725,263 @@ def test_a_left_join_on_a_text_key_keeps_a_row_that_matched_nothing() raises:
     assert_equal(len(values), 6, "every left row, matched or not")
 
 
+def pair_fields() raises -> List[Field]:
+    """The schema the two key probe frames share."""
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("a", LogicalType.INT64))
+    fields.append(Field("b", LogicalType.STRING))
+    return fields^
+
+
+def pair_words() raises -> AnyArray:
+    """The six second keys, as text.
+
+    Two of them are past twelve bytes, for the reason `key_words` gives: a long
+    view holds an offset into a payload rather than its own bytes, so it is the
+    one a probe that read the wrong payload gets wrong. A packed key puts the
+    length in front of the bytes and then the whole tuple is one element, which
+    is well past twelve as soon as there is an eight byte key beside it, so the
+    long and the short case both go through the payload here. The short ones are
+    still worth having because they are what a single key join would have kept
+    inside its view.
+    """
+    return AnyArray(
+        strings_from_list(
+            [
+                "x",
+                "x",
+                "y",
+                "a-key-well-past-twelve",
+                "x",
+                "y",
+            ]
+        )
+    )
+
+
+def pair_frame() raises -> DataFrame:
+    """Six rows keyed on an integer and a string together, in one chunk."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([1, 2, 2, 3, 4, 5]))
+    columns.append(pair_words())
+    return DataFrame(Schema(pair_fields()), columns^)
+
+
+def cut_pair_frame() raises -> DataFrame:
+    """The same six rows in chunks of two, three and one.
+
+    The two rows that pair land in different chunks, so a packing that is right
+    for the first chunk and wrong for the rest shows up.
+    """
+    var whole = pair_words()
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2]))
+    n.append(numbers([3, 4, 5]))
+    n.append(numbers([6]))
+    var a = ChunkedArray(LogicalType.INT64)
+    a.append(numbers([1, 2]))
+    a.append(numbers([2, 3, 4]))
+    a.append(numbers([5]))
+    var b = ChunkedArray(LogicalType.STRING)
+    b.append(AnyArray(whole.strings().slice(0, 2)))
+    b.append(AnyArray(whole.strings().slice(2, 5)))
+    b.append(AnyArray(whole.strings().slice(5, 6)))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(a^)
+    columns.append(b^)
+    return DataFrame(Schema(pair_fields()), columns^)
+
+
+def pair_lookup_frame() raises -> DataFrame:
+    """Four rows to join against, keyed on the same pair.
+
+    Laid out so that neither key on its own decides anything. Two build rows
+    share the integer 2 and differ on the string, one shares the string "x" with
+    a build row it does not share the integer with, and the last shares neither
+    with anything that arrives. So a join that paired on the first key alone and
+    a join that paired on the second key alone both answer something other than
+    the two rows that really pair, which are probe rows 2 and 4.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([2, 2, 3, 9]))
+    columns.append(
+        AnyArray(strings_from_list(["x", "z", "a-key-well-past-twelve", "x"]))
+    )
+    columns.append(numbers([20, 40, 60, 80]))
+    var fields = List[Field]()
+    fields.append(Field("a2", LogicalType.INT64))
+    fields.append(Field("b2", LogicalType.STRING))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_join_on_two_keys_gives_what_the_frame_join_gives() raises:
+    var whole = pair_frame().join_on(
+        pair_lookup_frame(), ["a", "b"], ["a2", "b2"], JoinKind.INNER
+    )
+    var pipeline = Pipeline(cut_pair_frame())
+    pipeline.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.INNER,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), len(whole), "the same number of rows")
+    assert_equal(len(values), 2, "and the two rows that pair on both keys")
+    assert_equal(values[0], Int64(2), "the integer and the short string")
+    assert_equal(values[1], Int64(4), "the integer and the long string")
+
+
+def test_a_left_join_on_two_keys_keeps_the_rows_that_matched_nothing() raises:
+    """What TPC-H q20 asks for. A left join on a pair of keys used to be refused
+    outright, because pairing on the first key and testing the second above the
+    join cannot tell a row that matched nothing from a row it is about to drop,
+    and there was nothing else to try."""
+    var pipeline = Pipeline(cut_pair_frame())
+    pipeline.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.LEFT,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 6, "every left row, matched or not")
+
+
+def test_a_semi_join_on_two_keys_keeps_the_rows_that_matched() raises:
+    var pipeline = Pipeline(cut_pair_frame())
+    pipeline.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.SEMI,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 2, "the two rows that pair on both keys")
+    assert_equal(values[0], Int64(2), "the first of them")
+    assert_equal(values[1], Int64(4), "the second")
+
+
+def test_a_two_key_join_over_chunks_agrees_with_one_over_one_chunk() raises:
+    var one = Pipeline(pair_frame())
+    one.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.INNER,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var many = Pipeline(cut_pair_frame())
+    many.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.INNER,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var a = joined_rows(one^)
+    var b = joined_rows(many^)
+    assert_equal(len(a), len(b), "the same height")
+    for i in range(len(a)):
+        assert_equal(a[i], b[i], "row " + String(i))
+
+
+def test_a_null_in_one_of_two_keys_pairs_with_nothing() raises:
+    """A null key matches nothing in SQL whatever the rest of the tuple says, so
+    the packed element is null when any key is, and the node's own null handling
+    drops it from there."""
+    var probe = pair_frame()
+    var key = probe.columns[1].only().as_typed[DType.int64]()
+    key.set_null(1)
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(copy=probe.columns[0].only()))
+    columns.append(AnyArray(key^))
+    columns.append(AnyArray(copy=probe.columns[2].only()))
+    var holed = DataFrame(Schema(pair_fields()), columns^)
+    var pipeline = Pipeline(holed^)
+    pipeline.add(
+        Node(
+            Join(
+                pair_lookup_frame(),
+                "a",
+                "a2",
+                JoinKind.INNER,
+                left_keys=[1, 2],
+                right_keys=[0, 1],
+            )
+        )
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 1, "the row whose integer went null is gone")
+    assert_equal(values[0], Int64(4), "and the other one is still there")
+
+
+def test_a_join_given_a_different_number_of_keys_on_each_side_is_refused() raises:
+    var pipeline = Pipeline(cut_pair_frame())
+    with assert_raises(contains="on the probe side against"):
+        pipeline.add(
+            Node(
+                Join(
+                    pair_lookup_frame(),
+                    "a",
+                    "a2",
+                    JoinKind.INNER,
+                    left_keys=[1, 2],
+                    right_keys=[0],
+                )
+            )
+        )
+
+
+def test_a_two_key_join_whose_second_pair_disagrees_on_dtype_is_refused() raises:
+    var pipeline = Pipeline(cut_pair_frame())
+    with assert_raises(contains="key 1 is text and int64"):
+        pipeline.add(
+            Node(
+                Join(
+                    pair_lookup_frame(),
+                    "a",
+                    "a2",
+                    JoinKind.INNER,
+                    left_keys=[1, 2],
+                    right_keys=[0, 2],
+                )
+            )
+        )
+
+
 def test_a_join_on_keys_of_different_dtypes_is_refused() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="the same dtype on each side"):

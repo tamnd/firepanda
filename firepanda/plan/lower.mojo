@@ -3375,12 +3375,14 @@ def _lower_join(
     that holds it. The work is the same work in either place and it is work
     that has to finish before the first chunk of the left side is read.
 
-    A join on more than one key pair builds the table from the first pair and
-    asks the rest afterwards, as a comparison and a filter per pair over the
-    paired chunk. That is a real plan rather than a stopgap, it is what an
-    engine does with any join condition its table cannot answer, and the cost of
-    it is the pairs it makes and drops. It is inner joins only, for the reason
-    written where it happens.
+    A join on more than one key pair hands the operator both lists of positions
+    and the operator packs the tuple into one byte string per row on each side.
+    It used to build the table from the first pair and ask the rest afterwards,
+    as a comparison and a filter per pair over the paired chunk, which answered
+    the same thing and got there by making pairs it then threw away. It was also
+    inner joins only, because a left join has to emit the rows that matched
+    nothing and a filter after the pairing cannot tell those from the rows it is
+    dropping.
 
     Args:
         plan: The plan.
@@ -3391,8 +3393,8 @@ def _lower_join(
 
     Raises:
         Error: If the join is one the probe operator does not do, if a key is
-            anything but a plain column, if a join on more than one key pair is
-            anything but inner, or whatever the build side itself refuses.
+            anything but a plain column, or whatever the build side itself
+            refuses.
     """
     var kind = JoinKind(UInt8(plan.nodes[at].op))
     if kind == JoinKind.RIGHT or kind == JoinKind.OUTER:
@@ -3419,22 +3421,6 @@ def _lower_join(
                 "lower: a ",
                 kind,
                 " join pairs rows a key agrees on and this one has no key",
-            )
-        )
-    if parts > 1 and kind != JoinKind.INNER:
-        raise Error(
-            String(
-                "lower: this operator builds its table from one column, so a ",
-                kind,
-                " join on ",
-                parts,
-                (
-                    " key pairs would need the ordinal space that concatenating"
-                    " both key columns builds, and concatenating both sides is"
-                    " having them both. An inner join is the one kind that does"
-                    " not need it, because it keeps both sides' columns and so"
-                    " the rest of the key can be asked after the pairing"
-                ),
             )
         )
     for i in range(parts):
@@ -3475,6 +3461,17 @@ def _lower_join(
     var mark = String()
     if kind == JoinKind.MARK:
         mark = plan.nodes[at].names[0].copy()
+    # A tuple is handed over by position and only when there is one. A single
+    # key goes through the two positions above, which is the same thing said
+    # without the two lists.
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    if parts > 1:
+        for i in range(parts):
+            left_keys.append(plan.exprs.nodes[plan.nodes[at].exprs[i]].at)
+            right_keys.append(
+                plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].at
+            )
     pipe.add(
         Node(
             Join(
@@ -3488,33 +3485,11 @@ def _lower_join(
                 plan.exprs.nodes[left_key].at,
                 plan.exprs.nodes[right_key].at,
                 mark^,
+                left_keys^,
+                right_keys^,
             )
         )
     )
-    if parts == 1:
-        return
-    # The first key pair built the table and the rest are asked afterwards, one
-    # comparison and one filter each, over the paired chunk. Asking afterwards
-    # is not the same plan as pairing on the whole key, it pairs on less and
-    # throws the extra pairs away, but it is the same answer: a row survives
-    # only if every pair agreed, and a pair a key is null on answers null and is
-    # dropped, which is what a key that is null does anyway. Which of the pairs
-    # builds the table is what it costs, and until something here counts rows
-    # per value the first one is as good a guess as any other.
-    #
-    # An inner join is the only kind this works for. A left join has to emit the
-    # rows that matched nothing and a filter after the pairing cannot tell those
-    # from the rows it is dropping, and semi, anti and mark keep no right column
-    # to compare against in the first place.
-    var joined = len(pipe.schema)
-    for i in range(1, parts):
-        var here = plan.exprs.nodes[plan.nodes[at].exprs[i]].at
-        var there = width + plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].at
-        pipe.add(Node(Compute(here, there, BinaryOp.EQ, "mask")))
-        var keep = List[Int](capacity=joined)
-        for c in range(joined):
-            keep.append(c)
-        pipe.add(Node(Filter(joined, keep^)))
 
 
 def lower(

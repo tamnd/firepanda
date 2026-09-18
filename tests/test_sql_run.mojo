@@ -4571,9 +4571,9 @@ def test_a_join_on_two_keys_pairs_on_both() raises:
 
 
 def test_a_join_on_two_keys_may_write_them_in_either_order() raises:
-    # The first pair is the one the table is built from and the rest are asked
-    # afterwards, so which pair is written first decides the plan and must not
-    # decide the answer.
+    # The order the pairs are written in is the order they are packed in, and
+    # both sides pack the same way whichever order that is, so the writing
+    # decides the packing and must not decide the answer.
     var got = run(
         (
             "SELECT sales.qty AS qty, held FROM sales JOIN stock"
@@ -4587,9 +4587,9 @@ def test_a_join_on_two_keys_may_write_them_in_either_order() raises:
 
 
 def test_a_join_on_two_keys_may_be_aggregated_over() raises:
-    # A join on two keys is an operator and a filter rather than one operator,
-    # so the thing above it has to see an ordinary chunk. A reduction is the
-    # cheapest way to ask that.
+    # The operator hands a packed key column to its own table and must not hand
+    # it on, so the thing above it has to see an ordinary chunk. A reduction is
+    # the cheapest way to ask that.
     same(
         answer(
             (
@@ -4603,17 +4603,20 @@ def test_a_join_on_two_keys_may_be_aggregated_over() raises:
     )
 
 
-def test_a_semi_join_on_two_keys_is_refused_for_now() raises:
-    # An inner join keeps both sides' columns, so the rest of the key can be
-    # asked after the pairing. A semi join keeps none of them and cannot.
-    with assert_raises(contains="2 key pairs would need the ordinal space"):
-        _ = run(
-            (
-                "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM stock"
-                " WHERE stock.shop = sales.shop AND stock.qty = sales.qty)"
-            ),
-            session(),
-        )
+def test_a_semi_join_on_two_keys_keeps_the_rows_that_matched() raises:
+    # An inner join keeps both sides' columns, so the rest of the key could be
+    # asked after the pairing. A semi join keeps none of them and cannot, so
+    # this one is only right if the operator pairs on the whole key at once.
+    var got = run(
+        (
+            "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM stock"
+            " WHERE stock.shop = sales.shop AND stock.qty = sales.qty)"
+        ),
+        session(),
+    )
+    same(
+        read_back(got, "qty"), [5, 40, 12], "the three rows both keys agree on"
+    )
 
 
 def test_a_qualified_star_runs_one_side_of_a_join() raises:
