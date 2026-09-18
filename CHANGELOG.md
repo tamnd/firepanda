@@ -8,6 +8,56 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-09-19
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with three threads in it. The regular expression engine is finished as far as the held out corpus is concerned, ClickBench q28 is about twice as fast as it was, and the SQL transformer reads four more shapes of syntax.
+
+The backreference is the last of the five constructs the corpus of 30052 patterns was turning down, and it is the one that decided which of the three engines under the compiler is allowed to answer a pattern. Reading one means asking what a group matched on the way here, and only a path knows that, so it runs on the backtracker and nowhere else, under a narrower reading of the bitmap and a bound that is a count of steps. A row that runs out of them raises rather than running forever, which is a divergence from upstream and a deliberate one.
+
+q28 is the query ClickBench readiness was still losing on. The engine was walking about three steps per character because a Thompson program writes a repeat as a split, the body and a jump back to the split, and the backtracker now reads the character at the split itself when the body is a single class. That is 0.847 s down to 0.460 s at 1M in memory mode, against DuckDB's 0.25 s.
+
+The SQL side reads a call's four modifiers, an argument passed by name, a row value and a subscript, which between them are 1898 statements of DuckDB's corpus that used to stop at the transformer. All four round trip and are refused in lowering, where the stage that knows types and the catalog is.
+
+### Added: a backreference, which is the construct that decided which engine answers
+
+`str.contains(r"(\w)\1")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both spellings are in, the numbered one and `(?P=name)`. It is the largest of the five constructs RE2 has not got that Python has, at 839 of the 30052 held out patterns.
+
+This one is about an engine rather than about a construct. There are three under the compiler and two of them are built on one claim: that an instruction and a position say everything about what is left to do. The state cache makes a state out of a set of instructions, and the Pike machine merges two threads the moment they stand at the same instruction and the same position, which is the whole of its bound. A backreference asks what the path that arrived matched, so both of those have to turn it down, and the bounded backtracker, which follows one path at a time, is the only one that can answer it.
+
+The same claim is what the backtracker's bitmap rests on, so the bitmap cannot be read the same way for a program holding one. It is kept under a narrower rule instead: an instruction and a position and the slots do say everything, so everything in the bitmap is forgotten the moment a slot changes value, and only the arrivals with no change between them are dropped. Forgetting is the length of a short list rather than the length of the bitmap, and a write that puts back the number that was already there is not a change, which is what ends a repeat over a body that matches nothing.
+
+The bound underneath that is a count of steps, four million of them, and a row that runs out raises `this pattern is taking too long on this row`. That is a divergence and a deliberate one: upstream in the same place says nothing and does not come back, and a library that can be hung inside a kernel by one cell of one column is worse than one that says it gave up. No pattern in the corpus reaches it.
+
+A group that never took part fails the reference rather than matching nothing, so `(a)?\1b` does not match `b` and `(a?)\1b` does, which is upstream's rule and is the pair that separates a group that was skipped from one that ran and matched nothing.
+
+Two things are still refused. A backreference under the wide reading of the ignore case flag, because upstream compares the two characters there by simple lowercase where it compares a literal by its whole fold orbit, and this library carries the fold tables and not the lowercase one. `(?i)ss` matches the long s and `(?i)(s)\1` does not, which is measured rather than assumed. The ASCII reading, `(?ai)`, is a subtraction rather than a table and is in. And a lookaround beside a backreference, because the two constructs live on different engines here and a pattern holding both has nowhere to go.
+
+### Changed: a class under a plus is one step a character instead of three
+
+ClickBench q28 rewrites a column of URLs with `^https?://(?:www\.)?([^/]+)/.*$`, and the regex engine is about nine tenths of what that query does per row. It was doing 226256004 steps over 921225 rows, which is about 245 steps a row against rows that average 86 characters, and the reason the ratio is close to three is that a Thompson program writes a repeat as a split, the body, and a jump back to the split. Two of those three are bookkeeping, and `.*` on the tail of that pattern is most of the row.
+
+The backtracker now walks a repeat whose body is a single class in one step. It reads the character at the split, and the arm that goes round comes straight back to the split one position along, so the body and the jump behind it are never visited. The decision is still taken once per character, which is what keeps the one visit per instruction per position that the bitmap is there to give. The character class loop RE2 has, which consumes a whole run in one step, is not that and is not here: backing off inside a run visits the run again once per position it was entered at, and a pattern with two of them next to each other would be the row length squared.
+
+Measured on the real Referer column of the 1M file, paired back to back against the same tree with the change reverted, taking the minimum of three pairs on a loaded machine: the backtracker went from 2031 ms to 1126 ms and the kernel around it from 740 ms to 472 ms. The Pike machine is unchanged and measured unchanged.
+
+Which splits are that shape is worked out by `run_bodies`, which reads the shape back out of the compiled program and is called once per program by the backtracker's constructor. The first version wrote it into the program instead, as two opcodes the compiler emitted, and that cost the Pike machine about 1.4 times, going from 4068 to 6166 ms before to 6351 to 6608 ms after: its dispatch chain grew two comparisons in front of the leaf every character instruction falls through, for a note it has no use for. Document 96 has the rest of it.
+
+### Changed: a text column compared against a short constant is settled a block of rows at a time
+
+A filter like `l_returnflag = 'R'` reads a column of sixteen byte views and compares each one against the constant's view, which is four register compares and a branch per row. The comparison itself is the cheap part and the loop around it was most of the cost.
+
+A view is two 64-bit words, so eight of them is one load and one exclusive or against a register holding eight copies of the constant. Deinterleaving the result splits every view's two halves apart again, and a view matched when both of its halves came out zero. The tail, which is shorter than a block, still goes one row at a time.
+
+A long element answers false out of the same instruction rather than needing a branch of its own. Its length field is above twelve and a short constant's is at or below it, so the low word can never agree, and the payload address in its top two words is never read.
+
+On a 13900K at six million rows, four builds a side run in turn, `text/equal_constant_short` reads 351, 314, 326 and 311 microseconds before and 188, 199, 193 and 190 after. That is between 4.27 and 4.82 billion rows a second before and between 7.55 and 7.97 after. The long constant row, which is the same code on both sides, reads 1.113, 1.077, 1.078 and 1.075 milliseconds before against 1.084, 1.092, 1.082 and 1.180 after, which is the control.
+
+Eight views a block rather than four because four measured slower and less evenly, 197, 195, 227 and 271 microseconds over the same four rounds. Sixteen is a shade faster again, 187 to 193, and is not worth a two hundred and fifty six byte load. The two cases also get a loop each rather than one loop asking on every row which of them it is on, because the long case read six per cent slower with the block compare sitting above it in the same body.
+
+Nothing above the kernel changes. Issue #79.
+
 ### Added: SQL reads the four things a call may carry beside its arguments
 
 `WITHIN GROUP (ORDER BY x)`, an `ORDER BY` written inside the parentheses, `IGNORE NULLS` or `RESPECT NULLS`, and `EXPORT_STATE` used to be refused by the transformer. 620 statements in DuckDB's corpus stopped there, and 604 of them now round trip, the other 16 holding a `COLUMNS`, a field access, an escaped string or a `FILTER` on a name that has no fold. All four read, all four print back where they were written, and all four are refused in lowering, which is the stage that has something to say about them: each one asks the fold itself for something firepanda's folds do not do, an order to see the rows in, a rule for what to do with a null, or the fold's own state instead of its answer.
@@ -17,15 +67,6 @@ The two `ORDER BY` spellings share one run of entries. DuckDB turns down a call 
 That makes the argument run a run with two parts in it, so everything that walks a call's arguments now stops where the sort entries start. Eight of them are in `classify.mojo` and `plan.mojo` and the ninth is the printer arm that writes the call out. A sort entry is a statement node and an argument is an expression node, so a walker that ran off the end would be reading one arena with the other one's indices, which is the kind of mistake that gives a wrong answer rather than an error.
 
 `f(ignore)` is why the four groups inside the parentheses are told apart by grammar rule and not by first word. `IGNORE` and `RESPECT` are words a column may be called, and a reader that looks at the word would take that column for a null treatment and drop it.
-### Changed: A class under a plus is one step a character instead of three
-
-ClickBench q28 rewrites a column of URLs with `^https?://(?:www\.)?([^/]+)/.*$`, and the regex engine is about nine tenths of what that query does per row. It was doing 226256004 steps over 921225 rows, which is about 245 steps a row against rows that average 86 characters, and the reason the ratio is close to three is that a Thompson program writes a repeat as a split, the body, and a jump back to the split. Two of those three are bookkeeping, and `.*` on the tail of that pattern is most of the row.
-
-The backtracker now walks a repeat whose body is a single class in one step. It reads the character at the split, and the arm that goes round comes straight back to the split one position along, so the body and the jump behind it are never visited. The decision is still taken once per character, which is what keeps the one visit per instruction per position that the bitmap is there to give. The character class loop RE2 has, which consumes a whole run in one step, is not that and is not here: backing off inside a run visits the run again once per position it was entered at, and a pattern with two of them next to each other would be the row length squared.
-
-Measured on the real Referer column of the 1M file, paired back to back against the same tree with the change reverted, taking the minimum of three pairs on a loaded machine: the backtracker went from 2031 ms to 1126 ms and the kernel around it from 740 ms to 472 ms. The Pike machine is unchanged and measured unchanged.
-
-Which splits are that shape is worked out by `run_bodies`, which reads the shape back out of the compiled program and is called once per program by the backtracker's constructor. The first version wrote it into the program instead, as two opcodes the compiler emitted, and that cost the Pike machine about 1.4 times, going from 4068 to 6166 ms before to 6351 to 6608 ms after: its dispatch chain grew two comparisons in front of the leaf every character instruction falls through, for a note it has no use for. Document 96 has the rest of it.
 
 ### Added: SQL reads an argument passed by name
 
@@ -52,6 +93,12 @@ It is not the struct constructor under another name. A struct names its fields a
 The refusal moved to lowering, the same way the interval literal's did. Which of the three families a subscript belongs to, a list, an array or a string, depends on what the operand turns out to hold, so the first stage with anything to say about it is the one that knows types, and what it says is the refusal that was already in the table.
 
 `a[1]` and `a[1:]` are the pair that makes this more than a pass through. Both have a start, neither has an end, and the colon is the whole of what separates them, so the node carries a flag for whether one was written rather than working it out from which bounds are there. `a[::2]` is not in, because it is not in DuckDB either: the tokenizer reads the two colons as a cast operator and both parsers say so.
+
+### Fixed: the anchoring rewrite no longer renumbers the caller's groups
+
+`match` and `fullmatch` on the Python engine are answered by writing `\A` and `\Z` around the caller's pattern and a bracket around the middle, because upstream anchors from outside the pattern with `re.match` and this library has to put the anchor inside it. That bracket was a capturing one, which numbered every group the caller wrote one higher.
+
+Nothing could reach it while a backreference was refused, and a backreference is the one thing that follows the numbering. `(a)\1` would have come out as `\A((a)\1)\Z`, where the reference names the wrapper, the wrapper is still open where the reference stands, and a group that is still open reads as one that never took part, so the pattern quietly matches nothing at all. The bracket is now `(?:`, which changes nothing anywhere else.
 
 ## [0.8.14] - 2026-09-18
 
@@ -87,26 +134,6 @@ They do not fold a chunk at a time, which is the one design decision here worth 
 
 `FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
 
-### Added: a backreference, which is the construct that decided which engine answers
-
-`str.contains(r"(\w)\1")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both spellings are in, the numbered one and `(?P=name)`. It is the largest of the five constructs RE2 has not got that Python has, at 839 of the 30052 held out patterns.
-
-This one is about an engine rather than about a construct. There are three under the compiler and two of them are built on one claim: that an instruction and a position say everything about what is left to do. The state cache makes a state out of a set of instructions, and the Pike machine merges two threads the moment they stand at the same instruction and the same position, which is the whole of its bound. A backreference asks what the path that arrived matched, so both of those have to turn it down, and the bounded backtracker, which follows one path at a time, is the only one that can answer it.
-
-The same claim is what the backtracker's bitmap rests on, so the bitmap cannot be read the same way for a program holding one. It is kept under a narrower rule instead: an instruction and a position and the slots do say everything, so everything in the bitmap is forgotten the moment a slot changes value, and only the arrivals with no change between them are dropped. Forgetting is the length of a short list rather than the length of the bitmap, and a write that puts back the number that was already there is not a change, which is what ends a repeat over a body that matches nothing.
-
-The bound underneath that is a count of steps, four million of them, and a row that runs out raises `this pattern is taking too long on this row`. That is a divergence and a deliberate one: upstream in the same place says nothing and does not come back, and a library that can be hung inside a kernel by one cell of one column is worse than one that says it gave up. No pattern in the corpus reaches it.
-
-A group that never took part fails the reference rather than matching nothing, so `(a)?\1b` does not match `b` and `(a?)\1b` does, which is upstream's rule and is the pair that separates a group that was skipped from one that ran and matched nothing.
-
-Two things are still refused. A backreference under the wide reading of the ignore case flag, because upstream compares the two characters there by simple lowercase where it compares a literal by its whole fold orbit, and this library carries the fold tables and not the lowercase one. `(?i)ss` matches the long s and `(?i)(s)\1` does not, which is measured rather than assumed. The ASCII reading, `(?ai)`, is a subtraction rather than a table and is in. And a lookaround beside a backreference, because the two constructs live on different engines here and a pattern holding both has nowhere to go.
-
-### Fixed: the anchoring rewrite no longer renumbers the caller's groups
-
-`match` and `fullmatch` on the Python engine are answered by writing `\A` and `\Z` around the caller's pattern and a bracket around the middle, because upstream anchors from outside the pattern with `re.match` and this library has to put the anchor inside it. That bracket was a capturing one, which numbered every group the caller wrote one higher.
-
-Nothing could reach it while a backreference was refused, and a backreference is the one thing that follows the numbering. `(a)\1` would have come out as `\A((a)\1)\Z`, where the reference names the wrapper, the wrapper is still open where the reference stands, and a group that is still open reads as one that never took part, so the pattern quietly matches nothing at all. The bracket is now `(?:`, which changes nothing anywhere else.
-
 ### Added: a lookbehind, which is the other half of the construct below
 
 `str.contains("(?<=a)b")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both forms are in, the positive one and the negative one, and a lookbehind may hold another or hold a lookahead. With this the whole of the lookaround is read on the engine that copies Python, and no pattern in the held out corpus is turned down for one.
@@ -136,20 +163,6 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
-
-### Changed: a text column compared against a short constant is settled a block of rows at a time
-
-A filter like `l_returnflag = 'R'` reads a column of sixteen byte views and compares each one against the constant's view, which is four register compares and a branch per row. The comparison itself is the cheap part and the loop around it was most of the cost.
-
-A view is two 64-bit words, so eight of them is one load and one exclusive or against a register holding eight copies of the constant. Deinterleaving the result splits every view's two halves apart again, and a view matched when both of its halves came out zero. The tail, which is shorter than a block, still goes one row at a time.
-
-A long element answers false out of the same instruction rather than needing a branch of its own. Its length field is above twelve and a short constant's is at or below it, so the low word can never agree, and the payload address in its top two words is never read.
-
-On a 13900K at six million rows, four builds a side run in turn, `text/equal_constant_short` reads 351, 314, 326 and 311 microseconds before and 188, 199, 193 and 190 after. That is between 4.27 and 4.82 billion rows a second before and between 7.55 and 7.97 after. The long constant row, which is the same code on both sides, reads 1.113, 1.077, 1.078 and 1.075 milliseconds before against 1.084, 1.092, 1.082 and 1.180 after, which is the control.
-
-Eight views a block rather than four because four measured slower and less evenly, 197, 195, 227 and 271 microseconds over the same four rounds. Sixteen is a shade faster again, 187 to 193, and is not worth a two hundred and fifty six byte load. The two cases also get a loop each rather than one loop asking on every row which of them it is on, because the long case read six per cent slower with the block compare sitting above it in the same body.
-
-Nothing above the kernel changes. Issue #79.
 
 ### Changed: the passes a regular expression kernel makes around the engine are measured, and the decode reads a block at a time
 
@@ -8335,7 +8348,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.14...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.15...HEAD
+[0.8.15]: https://github.com/tamnd/firepanda/releases/tag/v0.8.15
 [0.8.14]: https://github.com/tamnd/firepanda/releases/tag/v0.8.14
 [0.8.13]: https://github.com/tamnd/firepanda/releases/tag/v0.8.13
 [0.8.12]: https://github.com/tamnd/firepanda/releases/tag/v0.8.12
