@@ -34,6 +34,7 @@ from firepanda.kernel.regex.tokens import (
     FLAG_IGNORECASE,
     FLAG_LOCALE,
     FLAG_MULTILINE,
+    FLAG_VERBOSE,
 )
 
 
@@ -308,6 +309,31 @@ def test_an_argued_call_is_anchored_from_outside_the_pattern() raises:
     assert_equal(python_anchored(METHOD_MATCH, "(?ims)a"), "(?ims)\\A(a)")
 
 
+def test_a_verbose_pattern_is_closed_on_a_line_of_its_own() raises:
+    """The bracket that would otherwise be written into a comment.
+
+    A verbose pattern can end in the middle of a comment, because a comment ends
+    at a newline or at the end of the pattern and both are allowed. Glue a `)`
+    onto the end of one and the bracket is inside the comment, the group is
+    never closed and the grammar refuses a pattern the caller wrote correctly.
+    The newline is the only thing that ends a comment, and verbose mode throws
+    a newline away, so it changes the answer nowhere and saves it here.
+    """
+    assert_equal(
+        python_anchored(METHOD_FULLMATCH, "a # c", True), "\\A(a # c\n)\\z"
+    )
+    assert_equal(python_anchored(METHOD_MATCH, "a # c", True), "\\A(a # c\n)")
+    assert_equal(
+        python_anchored(METHOD_FULLMATCH, "(?x)a # c", True),
+        "(?x)\\A(a # c\n)\\z",
+    )
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a # c"), "\\A(a # c)\\z")
+    assert_true(
+        program_for(METHOD_FULLMATCH, "a # c", FLAG_VERBOSE, argued=True).ok
+    )
+    assert_true(program_for(METHOD_FULLMATCH, "(?x)a # c", 0, argued=True).ok)
+
+
 def test_an_argued_flag_moves_the_call_and_a_written_one_does_not() raises:
     """The same bit, spelled two ways, landing on two engines.
 
@@ -363,15 +389,15 @@ def test_an_argued_fullmatch_will_not_stop_short_of_a_trailing_newline() raises:
 def test_an_argued_call_is_refused_by_pythons_rules_and_not_by_re2s() raises:
     """The letters the two engines will not take are not the same letters.
 
-    `(?a)` is a syntax error to RE2 and a flag Python reads perfectly well, so
-    an argued call carrying it is this library falling short rather than
-    agreeing with anybody, and it says gap. `(?L)` is refused by Python itself
-    on a pattern made of text, which is what every pattern here is made of, so
-    that one is an error on both sides and says so.
+    `(?a)` is a syntax error to RE2 and a flag Python reads perfectly well, and
+    an argued call carrying it used to be this library falling short rather
+    than agreeing with anybody. It is answered now, which leaves one letter of
+    the seven: `(?L)` is refused by Python itself on a pattern made of text,
+    which is what every pattern here is made of, so that one is an error on both
+    sides and says so.
     """
-    var ascii = program_for(METHOD_CONTAINS, "a", FLAG_ASCII, argued=True)
-    assert_false(ascii.ok)
-    assert_true(ascii.gap)
+    var narrow = program_for(METHOD_CONTAINS, "a", FLAG_ASCII, argued=True)
+    assert_true(narrow.ok)
     var locale = program_for(METHOD_CONTAINS, "a", FLAG_LOCALE, argued=True)
     assert_false(locale.ok)
     assert_false(locale.gap)

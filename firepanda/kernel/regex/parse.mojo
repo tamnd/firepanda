@@ -559,6 +559,27 @@ def _is_digit(point: UInt32) -> Bool:
     return point >= 0x30 and point <= 0x39
 
 
+def _is_verbose_space(point: UInt32) -> Bool:
+    """Whether a code point is one verbose mode throws away.
+
+    The six Python names in `WHITESPACE`, written out rather than asked of any
+    general whitespace test, because the set is Python's and not Unicode's and
+    the two differ on characters a caller can write. The file separator at
+    `0x1c` is the one that shows it: Python's `str.isspace` says yes and verbose
+    mode keeps it, so a pattern holding one means something.
+
+    Args:
+        point: The code point.
+
+    Returns:
+        True for a space, a tab, a newline, a vertical tab, a form feed or a
+        carriage return.
+    """
+    if point == 0x20 or point == 0x09 or point == 0x0A:
+        return True
+    return point == 0x0B or point == 0x0C or point == 0x0D
+
+
 def _is_word(point: UInt32) -> Bool:
     """Whether a code point can appear in a group name.
 
@@ -1711,6 +1732,10 @@ def _seq(mut c: _Cursor) -> Int32:
     quantifier on a quantifier is multiple repeat, except for the `?` and the
     `+` that make the one in front lazy or possessive.
 
+    Verbose mode lives here too, for the same reason and in Python's own place
+    for it, which is the top of this loop and nowhere below it. Document 88 is
+    about what follows from that.
+
     Args:
         c: The cursor.
 
@@ -1724,6 +1749,35 @@ def _seq(mut c: _Cursor) -> Int32:
             return -1
         if c.done():
             return node
+
+        if (c.flagged & FLAG_VERBOSE) != 0:
+            # The whole of verbose mode, and it is here rather than anywhere
+            # else because this is where Python puts it: the skip happens at the
+            # top of the item loop and nowhere the item loop calls into. That is
+            # why `[a b]` still matches a space, why `a{1, 2}` is not a repeat,
+            # and why `a * ?` is a multiple repeat rather than a lazy one. The
+            # class loop, the counted scan and the peek for a lazy marker are
+            # all separate reads and none of them skips anything.
+            #
+            # The flag is read off the cursor each time round rather than once
+            # before the loop, because `(?x)` is itself an item and turns it on
+            # partway through the pass. Python restarts the whole parse when it
+            # meets one, which reaches the same answer for the only patterns
+            # that can hold one: a global flag group has to come before anything
+            # that produced a node, so the only thing that can sit behind it is
+            # another group of the same kind or a comment.
+            var here = c.peek()
+            if _is_verbose_space(here):
+                c.at += 1
+                continue
+            if here == 0x23:
+                while not c.done():
+                    var got = c.peek()
+                    c.at += 1
+                    if got == 0x0A:
+                        break
+                continue
+
         var point = c.peek()
         if point == 0x7C or point == 0x29:
             return node

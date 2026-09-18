@@ -60,6 +60,7 @@ ROWS = [
     "aaa",
     "a b",
     "  ",
+    "a\u000bb",
     None,
 ]
 """Rows picked so that every one of the four engine differences has a row.
@@ -69,6 +70,11 @@ wrong, the two Turkish I code points are where the two engines part company, the
 accented letter is where the two word classes part company, and the rows holding
 a newline are where the two dollar signs do. The empty row is there twice over,
 once for the fold and once for `\\B`.
+
+The vertical tab is the row the ascii flag needs and it is the only one in this
+list that discriminates a whole letter on its own. Python's ASCII `\\s` holds one
+and RE2's `\\s` does not, so without this row every cell of the ascii column would
+agree whether or not the narrow sets were right.
 """
 
 PATTERNS = [
@@ -96,8 +102,17 @@ PATTERNS = [
     "i",
     "(?:ab)+",
     "[a-z]{2}",
+    "a b",
+    "[a b]",
+    "a # c",
 ]
-"""Twenty four patterns, every one of them run with every flag combination."""
+"""Twenty seven patterns, every one of them run with every flag combination.
+
+The last three are there for verbose mode and are ordinary patterns under every
+other letter, which is the point of putting them in the sweep rather than in a
+test of their own. A space and a hash mean one thing to six of the letters and
+another thing to the seventh, and both readings are compared against pandas.
+"""
 
 FLAGS = [
     re.IGNORECASE,
@@ -108,10 +123,14 @@ FLAGS = [
     re.UNICODE,
     re.IGNORECASE | re.UNICODE,
     re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    re.ASCII,
+    re.IGNORECASE | re.ASCII,
+    re.VERBOSE,
+    re.VERBOSE | re.ASCII,
 ]
-"""The combinations of the four letters this library reads, plus the one that
-means nothing. `re.ASCII`, `re.VERBOSE` and `re.LOCALE` are not in here because
-they are refused, and each has a test of its own further down."""
+"""The combinations of the six letters this library reads, plus the one that
+means nothing. `re.LOCALE` is not in here because Python itself refuses it on a
+pattern made of text, and it has a test of its own further down."""
 
 
 def made(firepanda: ModuleType, values: list[Any] = ROWS) -> Any:
@@ -145,7 +164,7 @@ def without_the_missing(values: list[Any]) -> list[Any]:
 def test_the_two_masks_answer_what_pandas_answers_under_every_flag(
     firepanda: ModuleType,
 ) -> None:
-    """The sweep, which is 384 columns of booleans compared row for row.
+    """The sweep, which is 648 columns of booleans compared row for row.
 
     A rule stated in a docstring and a rule the engine actually runs are two
     different things, and the only way to tell them apart is to ask both
@@ -333,17 +352,27 @@ def test_the_locale_flag_is_refused_the_way_python_refuses_it(
         assert "locale" in str(caught.value)
 
 
-def test_the_verbose_and_ascii_flags_are_gaps_rather_than_errors(
+def test_the_verbose_and_ascii_flags_answer_rather_than_refuse(
     firepanda: ModuleType,
 ) -> None:
-    """The other two letters. Python reads both perfectly well, so refusing
-    them is this library falling short of an engine that has them, and the
-    refusal has to say that rather than claiming the pattern was bad."""
+    """The other two letters, which were the last two this library turned down.
+
+    They are in the sweep above as well, and this is the pair of rows that says
+    what each of them does rather than that it agrees. Verbose mode throws away
+    a space that would otherwise have to be matched, and the ascii flag takes
+    `\\w` back down from 138558 characters to 63.
+    """
     mine = made(firepanda)
-    for name in ("contains", "fullmatch"):
-        for flags in (re.VERBOSE, re.ASCII):
-            with pytest.raises(NotImplementedError):
-                getattr(mine.str, name)("a", flags=flags)
+    verbose = mine.str.contains("a b", flags=re.VERBOSE).tolist()
+    plain = mine.str.contains("a b", flags=re.MULTILINE).tolist()
+    assert verbose[ROWS.index("abc")] is True
+    assert verbose[ROWS.index("a b")] is False
+    assert plain[ROWS.index("abc")] is False
+    assert plain[ROWS.index("a b")] is True
+    narrow = mine.str.contains("\\w", flags=re.ASCII).tolist()
+    wide = mine.str.contains("\\w", flags=re.UNICODE).tolist()
+    assert narrow[ROWS.index("\u212a")] is False
+    assert wide[ROWS.index("\u212a")] is True
 
 
 def test_a_flag_value_that_names_no_letter_is_refused(firepanda: ModuleType) -> None:

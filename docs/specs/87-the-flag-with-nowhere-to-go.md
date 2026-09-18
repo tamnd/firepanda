@@ -64,7 +64,7 @@ On the conformance board the `flags` parameter is exercised for the last of the 
 
 ## 9. What is not here yet
 
-Verbose mode in the parser and the ascii flag, which are now the only two letters refused for a reason inside this library and are unchanged from document 85 section 12.
+Verbose mode in the parser and the ascii flag, which are now the only two letters refused for a reason inside this library and are unchanged from document 85 section 12. Both of them landed in the slice straight after this one and document 88 is where they are.
 
 `findall` and `extractall`, which are the two names on this accessor with no engine path at all. `findall` wants a list column, which does not exist, and a third scan. `extractall` wants a `MultiIndex` whose names are `[None, 'match']` and drops the rows that did not match. They are the next thing here and they are a bigger slice than this one by a long way.
 
@@ -72,4 +72,4 @@ A scoped flag group is still refused, which is 525 held-out patterns in the diff
 
 The replace differential set aside 186 sweeps that it no longer needed to set aside, which document 86 section 12 named as the cheapest reach this component has left and which the first half of this slice did not take either. The second half took it: the harness now reads the route the way the pandas layer reads it, compiles an empty pattern for Python's engine, and compares those sweeps against the engine that actually answered them. All 186 agree, the set aside count for the other engine is gone from the report, and the run is still 10000 in ten thousand with 0 disagreements.
 
-`text_extract_regex` is the one text kernel still running down its rows one at a time. `stack_payloads` is the half of the work it needs and it exists, so this is a smaller job than it was before the two replaces were made parallel.
+`text_extract_regex` was the one text kernel still running down its rows one at a time when this was written, and it stopped being that the same day in PR #854. It now runs the morsel split `text_replace_regex` runs, once per group, with a validity bitmap each thread writes into bytes no other thread has a row in.

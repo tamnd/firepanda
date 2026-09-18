@@ -355,11 +355,17 @@ def main() raises:
     print("str.replace")
     print("compared", compared, "patterns")
     print("held out", held, "patterns firepanda cannot answer yet")
-    print(
-        "set aside",
-        unreadable,
-        "sweeps pandas wrote as something other than text",
-    )
+    if unreadable != 0:
+        # Printed only when there is one, because a line reading "set aside 0"
+        # invites a reader to go looking for a category that is empty. The
+        # other count above it is printed either way, since a held out pattern
+        # is a standing fact about this library and a sweep pandas wrote as
+        # bytes is an accident of one pattern meeting one replacement.
+        print(
+            "set aside",
+            unreadable,
+            "sweeps pandas wrote as something other than text",
+        )
     for at in range(len(reasons)):
         print("   ", counts[at], reasons[at])
 

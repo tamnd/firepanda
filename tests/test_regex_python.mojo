@@ -235,22 +235,22 @@ def test_syntax_the_two_engines_read_differently_is_read_python_s_way() raises:
     assert_false(ours("[[:alpha:]]", "q]"))
 
 
-def test_the_unicode_flag_asks_for_what_this_engine_already_does() raises:
-    """Three of the four letters RE2 has never heard of mean something on this
-    side. `(?u)` asks for the classes this engine reads anyway and is taken,
-    `(?x)` and `(?a)` are a gap here, and `(?L)` never arrives at all, because
-    Python will not take it on a pattern made of text and this parser is
-    Python's grammar."""
+def test_the_three_letters_re2_never_had_all_mean_something_here() raises:
+    """The four letters RE2 has never heard of are three that this engine reads
+    and one that nothing does. `(?u)` asks for the classes this engine reads
+    anyway, `(?x)` is spent in the parser, `(?a)` narrows the classes back to
+    the ones RE2 uses, and `(?L)` never arrives, because Python will not take it
+    on a pattern made of text and this parser is Python's grammar."""
     assert_true(ours("(?u)\\w", "é"))
     assert_false(compile_program(parse_pattern("(?u)\\w"), ENGINE_RE2).ok)
     var locale = compile_program(parse_pattern("(?L)a"), ENGINE_PYTHON)
     assert_false(locale.ok)
     assert_false(locale.gap)
     assert_equal(locale.problem, "Python's grammar cannot read this pattern")
-    var verbose = compile_program(parse_pattern("(?x)a b"), ENGINE_PYTHON)
-    assert_false(verbose.ok)
-    assert_true(verbose.gap)
-    assert_equal(verbose.problem, "verbose mode is not read yet")
+    assert_true(ours("(?x)a b", "ab"))
+    assert_false(ours("(?a)\\w", "é"))
+    assert_false(compile_program(parse_pattern("(?x)a b"), ENGINE_RE2).ok)
+    assert_false(compile_program(parse_pattern("(?a)\\w"), ENGINE_RE2).ok)
 
 
 def main() raises:

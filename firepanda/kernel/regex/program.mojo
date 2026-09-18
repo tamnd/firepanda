@@ -17,6 +17,14 @@ which engine asked for it. Document 81 is where the first three were measured
 and says which methods take which engine, and document 83 is where the fourth
 was.
 
+Three of those four are questions about which alphabet rather than about which
+engine, and `(?a)` is a caller answering that question for themselves on the
+engine that reads it. A Python program compiled under that letter takes the
+ASCII classes, folds only the twenty six letters, and asks the word boundary
+question against the ASCII class, which puts it beside RE2 on two of the three
+and not on the third: Python's ASCII `\\s` holds a vertical tab and RE2's never
+did. Document 88 is where that was measured.
+
 What is still RE2 only is the constructs. Python has a lookaround, a
 backreference, a conditional, an atomic group and a possessive quantifier and
 this engine has none of them, so a pattern using one is refused for Python as a
@@ -57,6 +65,7 @@ from firepanda.kernel.regex.tokens import (
     AT_END_STRING,
     AT_END_TEXT,
     AT_NON_BOUNDARY,
+    AT_NON_BOUNDARY_ASCII,
     AT_NON_BOUNDARY_UNICODE,
     CATEGORY_DIGIT,
     CATEGORY_NOT_DIGIT,
@@ -359,6 +368,16 @@ struct _Builder(Movable):
     code. Everything downstream of the compiler is the same machine.
     """
 
+    var narrow: Bool
+    """Whether Python's engine was asked for the ASCII alphabet.
+
+    Three of the differences above are questions about which alphabet rather
+    than about which engine, and `(?a)` is the caller answering that question
+    for themselves. It is kept beside the engine rather than read off the flags
+    at each of the three places, because it is only ever true on one engine and
+    a field says that once.
+    """
+
     def __init__(out self, flags: Int32, captures: Bool, python: Bool = False):
         """Starts an empty program.
 
@@ -375,6 +394,7 @@ struct _Builder(Movable):
         self.flags = flags
         self.captures = captures
         self.python = python
+        self.narrow = python and (flags & FLAG_ASCII) != 0
 
     def give_up(mut self, problem: String, gap: Bool = False):
         """Records the first reason the pattern cannot be compiled.
@@ -531,13 +551,14 @@ def word_ranges_unicode() -> List[Int32]:
     return _held(Span(table))
 
 
-def _category_ranges(which: Int32, python: Bool) -> List[Int32]:
+def _category_ranges(which: Int32, python: Bool, narrow: Bool) -> List[Int32]:
     """What one of the six Perl classes means to whichever engine is running it.
 
     These are the measured sets rather than the documented ones. RE2's
-    documentation writes `\\s` as `[\\t\\n\\f\\r ]` and the ASCII half of this
-    agrees with it, which is worth saying because Python's `\\s` also holds a
-    vertical tab and the documentation is the only place the two look alike.
+    documentation writes `\\s` as `[\\t\\n\\f\\r ]` and RE2 agrees with it, which
+    is worth saying because Python's `\\s` holds a vertical tab whichever
+    alphabet it is asked about and the documentation is the only place the two
+    look alike.
 
     RE2's three are ASCII. That is the difference document 76 opens with, and
     it is the reason a column of Arabic Indic digits answers False to
@@ -546,9 +567,17 @@ def _category_ranges(which: Int32, python: Bool) -> List[Int32]:
     document 81 is about: the same letter in the same accessor covers 63
     characters or 138558 of them depending on which method was called.
 
+    Under `(?a)` Python asks about ASCII, which makes three sets here rather
+    than two. Two of the three narrow sets are the same as RE2's and the third
+    is not: `\\s` keeps the vertical tab, because that character is in Python's
+    ASCII class and was never in RE2's. Writing the third one out is the whole
+    reason this cannot be a single flag saying which alphabet to use.
+
     Args:
         which: The `CATEGORY_` value.
         python: Whether the program is being compiled for Python's engine.
+        narrow: Whether that engine was asked for ASCII, which is only ever true
+            when it is Python's.
 
     Returns:
         The ranges as low and high pairs, already in order.
@@ -557,19 +586,23 @@ def _category_ranges(which: Int32, python: Bool) -> List[Int32]:
     var not_digits: Int32 = Int32(Int(CATEGORY_NOT_DIGIT))
     var spaces: Int32 = Int32(Int(CATEGORY_SPACE))
     var not_spaces: Int32 = Int32(Int(CATEGORY_NOT_SPACE))
+    var wide = python and not narrow
     if which == digits or which == not_digits:
-        if python:
+        if wide:
             var table = materialize[DIGIT_RANGES]()
             return _held(Span(table))
         var out: List[Int32] = [0x30, 0x39]
         return out^
     if which == spaces or which == not_spaces:
-        if python:
+        if wide:
             var table = materialize[SPACE_RANGES]()
             return _held(Span(table))
+        if narrow:
+            var out: List[Int32] = [0x09, 0x0D, 0x20, 0x20]
+            return out^
         var out: List[Int32] = [0x09, 0x0A, 0x0C, 0x0D, 0x20, 0x20]
         return out^
-    if python:
+    if wide:
         return word_ranges_unicode()
     var out: List[Int32] = [0x30, 0x39, 0x41, 0x5A, 0x5F, 0x5F, 0x61, 0x7A]
     return out^
@@ -671,6 +704,7 @@ def _fold_one(
     deltas: Span[Int32, _],
     point: Int32,
     python: Bool,
+    narrow: Bool,
 ):
     """Adds the other cases of one code point to a set being built.
 
@@ -681,6 +715,12 @@ def _fold_one(
     carries on, so the plain `I` and `i` still find each other through a group
     that holds two code points RE2 wants nothing to do with.
 
+    Under `(?a)` the table is not consulted at all. Python folds ASCII letters
+    onto ASCII letters and leaves everything else alone, which is the rule
+    rather than a narrowing of the rule: the Kelvin sign does not become a `k`,
+    the long s does not become an `s`, and the two Turkish letters are two
+    letters. So the answer is the thirty two the alphabet is apart, or nothing.
+
     Args:
         out: The set being built, as low and high pairs.
         lows: Where each run starts.
@@ -688,7 +728,16 @@ def _fold_one(
         deltas: What to add, or `FOLD_EVEN_ODD`.
         point: The code point whose other cases are wanted.
         python: Whether this is Python's engine, which folds all four.
+        narrow: Whether that engine was asked for ASCII.
     """
+    if narrow:
+        if point >= 0x41 and point <= 0x5A:
+            out.append(point + 0x20)
+            out.append(point + 0x20)
+        elif point >= 0x61 and point <= 0x7A:
+            out.append(point - 0x20)
+            out.append(point - 0x20)
+        return
     var other = _fold_successor(lows, highs, deltas, point)
     while other != point:
         if python or not _re2_unfolds(point, other):
@@ -697,7 +746,7 @@ def _fold_one(
         other = _fold_successor(lows, highs, deltas, other)
 
 
-def _folded(var ranges: List[Int32], python: Bool) -> List[Int32]:
+def _folded(var ranges: List[Int32], python: Bool, narrow: Bool) -> List[Int32]:
     """The same set of code points with every letter's other cases added.
 
     This is where `(?i)` is spent. A set that has been through here answers the
@@ -710,10 +759,17 @@ def _folded(var ranges: List[Int32], python: Bool) -> List[Int32]:
     `(?i)[\\w]`: the class covers 138558 code points and only 2927 of them have
     another case, so the cost is the table's length rather than the class's.
 
+    The walk over the table is still the walk under `(?a)`, even though nothing
+    outside ASCII can come back from it. Skipping it would mean a second search
+    that knows the same answer, and the table is where the cased code points
+    are whichever alphabet is being asked about.
+
     Args:
         ranges: The set as sorted, merged low and high pairs, consumed.
         python: Whether the program is being compiled for Python's engine, which
             is the one place the two disagree.
+        narrow: Whether that engine was asked for ASCII, which folds only the
+            twenty six letters onto each other.
 
     Returns:
         The set with the folds added, sorted and merged again.
@@ -740,7 +796,7 @@ def _folded(var ranges: List[Int32], python: Bool) -> List[Int32]:
             var first = lows[at] if lows[at] > low else low
             var last = highs[at] if highs[at] < high else high
             for step in range(Int(first), Int(last) + 1):
-                _fold_one(out, lows, highs, deltas, Int32(step), python)
+                _fold_one(out, lows, highs, deltas, Int32(step), python, narrow)
             at += 1
     return _sorted_merged(out^)
 
@@ -825,13 +881,13 @@ def _class_ranges(
             var high = it.b if it.op == OP_RANGE else it.a
             var span: List[Int32] = [it.a, high]
             if folding:
-                span = _folded(span^, b.python)
+                span = _folded(span^, b.python, b.narrow)
             for i in range(len(span)):
                 gathered.append(span[i])
         elif it.op == OP_CATEGORY:
-            var pieces = _category_ranges(it.a, b.python)
+            var pieces = _category_ranges(it.a, b.python, b.narrow)
             if folding:
-                pieces = _folded(pieces^, b.python)
+                pieces = _folded(pieces^, b.python, b.narrow)
             if _category_is_negated(it.a):
                 pieces = _complemented(_sorted_merged(pieces^))
             for i in range(len(pieces)):
@@ -858,6 +914,15 @@ def _at_value(b: _Builder, which: Int32) -> Int32:
     before a newline that ends the text to Python and only at the end to RE2.
     Both are settled here so that nothing downstream has to know.
 
+    The word boundary is also the anchor `(?a)` moves, and the two halves of it
+    do not move to the same place. `\\b` moves onto RE2's, because the ASCII
+    word class is the same set for both engines and RE2's `\\b` asks about
+    nothing else. `\\B` gets a value of its own, because Python fails a `\\B` on
+    an empty row whichever alphabet was asked for and RE2 matches one, so RE2's
+    value would have brought its answer for the empty row along with its
+    alphabet. `$` is not moved at all, since the alphabet has nothing to say
+    about where a line ends.
+
     Args:
         b: The builder, for its flags and its engine.
         which: The `AT_` value the parser wrote.
@@ -866,9 +931,11 @@ def _at_value(b: _Builder, which: Int32) -> Int32:
         The `AT_` value to check at run time.
     """
     if b.python:
-        if which == Int32(Int(AT_BOUNDARY)):
+        if which == Int32(Int(AT_BOUNDARY)) and not b.narrow:
             return Int32(Int(AT_BOUNDARY_UNICODE))
         if which == Int32(Int(AT_NON_BOUNDARY)):
+            if b.narrow:
+                return Int32(Int(AT_NON_BOUNDARY_ASCII))
             return Int32(Int(AT_NON_BOUNDARY_UNICODE))
         if which == Int32(Int(AT_END)):
             if (b.flags & FLAG_MULTILINE) == 0:
@@ -902,7 +969,7 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     if it.op == OP_LITERAL:
         if folding:
             var one: List[Int32] = [it.a, it.a]
-            var group = _folded(one^, b.python)
+            var group = _folded(one^, b.python, b.narrow)
             # A letter with no other case is still one code point after
             # folding, and emitting it as a set of one would make the
             # commonest instruction in the program a binary search.
@@ -914,7 +981,7 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     if it.op == OP_NOT_LITERAL:
         var one: List[Int32] = [it.a, it.a]
         if folding:
-            one = _folded(one^, b.python)
+            one = _folded(one^, b.python, b.narrow)
         b.add_set(one, True)
         return
     if it.op == OP_ANY:
@@ -934,9 +1001,9 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         # matches both on RE2 and `(?i)\\W` matches neither. Python's three are
         # Unicode and are closed, so the same two lines are a no change there
         # and are still worth running rather than branching on the engine.
-        var pieces = _category_ranges(it.a, b.python)
+        var pieces = _category_ranges(it.a, b.python, b.narrow)
         if folding:
-            pieces = _folded(pieces^, b.python)
+            pieces = _folded(pieces^, b.python, b.narrow)
         b.add_set(_sorted_merged(pieces^), _category_is_negated(it.a))
         return
     if it.op == OP_IN:
@@ -1236,14 +1303,14 @@ def _refused_flags(flags: Int32) -> String:
 
 
 def _refused_flags_python(flags: Int32) -> String:
-    """The same question asked about Python's engine, which answers differently
-    for every letter.
+    """The same question asked about Python's engine, which turns down one
+    letter of the seven.
 
-    Three of the four RE2 will not hear of are letters Python reads perfectly
-    well, so refusing them here is this library falling short rather than
-    agreeing with anybody. One of them is not refused at all: `(?u)` asks for
-    what this engine already does, so taking it is more honest than turning it
-    down for a reason that does not exist.
+    The four RE2 will not hear of are all letters Python reads, and three of
+    them are read here now as well. `(?u)` asks for what this engine does
+    anyway, `(?x)` is spent in the parser before a tree reaches this, and `(?a)`
+    is carried on the builder and spent on the classes, the folding and the word
+    boundary. None of the three leaves anything for this to say.
 
     `(?L)` never reaches this, and is answered anyway. Python has the letter and
     will not take it on a pattern made of text, which is the only kind that
@@ -1260,10 +1327,6 @@ def _refused_flags_python(flags: Int32) -> String:
     """
     if (flags & FLAG_LOCALE) != 0:
         return String("a locale flag cannot be used on text")
-    if (flags & FLAG_VERBOSE) != 0:
-        return String("verbose mode is not read yet")
-    if (flags & FLAG_ASCII) != 0:
-        return String("the ascii flag is not carried yet")
     return String("")
 
 
@@ -1337,19 +1400,24 @@ def compile_program(
         out.ok = False
         out.problem = refused^
         # For RE2 the four letters it has never had are a refusal and `(?i)` is
-        # a gap. For Python only the locale letter is a refusal, since Python
-        # turns that one down as well, and the rest are this library falling
-        # short of an engine that reads them.
+        # a gap. For Python the locale letter is the only refusal left and it is
+        # one Python makes too, so nothing that reaches here on that engine is a
+        # shortfall of this library any more. The expression is kept in the shape
+        # that says so rather than written as a constant.
         out.gap = ((tree.flags & FLAG_LOCALE) == 0) if python else (
             (tree.flags & theirs) == 0
         )
         return out^
 
-    # The same four letters are refused in a scoped group, so `(?x:a)` is an
-    # error upstream exactly as `(?x)a` is. The other three are a gap and not an
-    # error, because the parser reads a scoped group and throws the letters
-    # away, and a program built from that tree would answer `(?i:b)` without
-    # folding while RE2 folds. Carrying the flags on the node is what closes
+    # The same four letters are refused in a scoped group on RE2, so `(?x:a)` is
+    # an error upstream exactly as `(?x)a` is. Every letter is a gap rather than
+    # an error on Python's engine, and so is every letter on RE2 that RE2 has,
+    # because the parser reads a scoped group and throws the letters away and a
+    # program built from that tree would answer `(?i:b)` without folding while
+    # both engines fold. Verbose mode is the one that shows it is the letters
+    # being thrown away and not the reading of them: the parser reads `(?x)`
+    # now, and `(?x:a b)` still cannot be answered because the scope is what
+    # there is nowhere to put. Carrying the flags on the node is what closes
     # this, and document 77 section 8 has it.
     var scoped_refused = _refused_flags_python(
         tree.scoped
