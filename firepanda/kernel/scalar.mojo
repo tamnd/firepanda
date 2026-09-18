@@ -2491,7 +2491,9 @@ def _boundaries_scalar(text: String) -> List[Int]:
     return out^
 
 
-def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
+def _matches_pattern_scalar(
+    text: String, pattern: String, escape: Int = -1
+) -> Bool:
     """Whether a string matches a `LIKE` pattern, by trying every division.
 
     A different algorithm from the kernel's and not a slower copy of it, which
@@ -2508,9 +2510,16 @@ def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
     Characters and not bytes, the same as the kernel, which is why the
     boundaries are taken first.
 
+    An escape character takes the piece after it and makes it a literal one,
+    which here is one step of the walk reading two pieces instead of one. The
+    escape is looked for before the two wildcards are, the same order the kernel
+    reads them in and the order that makes `ESCAPE '%'` mean what DuckDB says it
+    means.
+
     Args:
         text: The string being matched.
         pattern: The pattern, wildcards and all.
+        escape: The byte an `ESCAPE` named, or minus one for none.
 
     Returns:
         True if the whole string matches the whole pattern.
@@ -2525,16 +2534,25 @@ def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
     var fits = List[Bool](length=n + 1, fill=False)
     fits[0] = True
 
-    for k in range(m):
-        var width = cols[k + 1] - cols[k]
-        var lead = glob[cols[k]]
+    var k = 0
+    while k < m:
+        var at = cols[k]
+        var width = cols[k + 1] - at
+        var lead = glob[at]
+        var literal = False
+        if escape >= 0 and width == 1 and lead == UInt8(escape) and k + 1 < m:
+            k += 1
+            at = cols[k]
+            width = cols[k + 1] - at
+            literal = True
+
         var next = List[Bool](length=n + 1, fill=False)
-        if width == 1 and lead == UInt8(ord("%")):
+        if not literal and width == 1 and lead == UInt8(ord("%")):
             var seen = False
             for j in range(n + 1):
                 seen = seen or fits[j]
                 next[j] = seen
-        elif width == 1 and lead == UInt8(ord("_")):
+        elif not literal and width == 1 and lead == UInt8(ord("_")):
             for j in range(n):
                 next[j + 1] = fits[j]
         else:
@@ -2543,21 +2561,25 @@ def _matches_pattern_scalar(text: String, pattern: String) -> Bool:
                     continue
                 var same = True
                 for b in range(width):
-                    if subject[rows[j] + b] != glob[cols[k] + b]:
+                    if subject[rows[j] + b] != glob[at + b]:
                         same = False
                         break
                 next[j + 1] = same
         fits = next^
+        k += 1
 
     return fits[n]
 
 
-def text_like_scalar(a: StringArray, pattern: String) -> Array[DType.bool]:
+def text_like_scalar(
+    a: StringArray, pattern: String, escape: Int = -1
+) -> Array[DType.bool]:
     """Whether each element matches a `LIKE` pattern, one element at a time.
 
     Args:
         a: The column.
         pattern: The pattern, wildcards and all.
+        escape: The byte an `ESCAPE` named, or minus one for none.
 
     Returns:
         A bool column, null where the column is null.
@@ -2567,7 +2589,7 @@ def text_like_scalar(a: StringArray, pattern: String) -> Array[DType.bool]:
         if not a.is_valid(i):
             out.set_null(i)
             continue
-        out.set_valid(i, _matches_pattern_scalar(a[i], pattern))
+        out.set_valid(i, _matches_pattern_scalar(a[i], pattern, escape))
     return out^
 
 

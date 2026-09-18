@@ -2148,6 +2148,11 @@ struct Match(Movable):
     and cannot hoist anything out of the loop, and lowering refuses it rather
     than pretending this node can do it.
 
+    An `ESCAPE` rides along as one byte. It only ever reaches the general
+    search, because a pattern that uses its escape is sent there whatever shape
+    it looks like, so the four that read runs are handed exactly what they were
+    handed before.
+
     A null element gives a null answer, which the five kernels already do, so
     nothing here repairs anything.
     """
@@ -2163,6 +2168,11 @@ struct Match(Movable):
 
     var second: String
     """The run that has to follow it, for the search that reads two."""
+
+    var escape: Int
+    """The byte an `ESCAPE` named, or minus one where the query named none. Only
+    the general search ever has one, every other kind having been ruled out by
+    `read_pattern` as soon as a pattern used its escape."""
 
     var name: String
     """The name the appended column gets in the output schema."""
@@ -2192,6 +2202,7 @@ struct Match(Movable):
         self.kind = pattern.kind
         self.first = pattern.first.copy()
         self.second = pattern.second.copy()
+        self.escape = pattern.escape
         self.name = name
 
     def bind(mut self, var input: Schema) raises -> Schema:
@@ -2262,7 +2273,7 @@ struct Match(Movable):
         else:
             # The general search, whose `first` is the whole pattern rather
             # than a run taken out of it.
-            made = text_like(text, self.first.as_bytes())
+            made = text_like(text, self.first.as_bytes(), self.escape)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))

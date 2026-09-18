@@ -1526,6 +1526,8 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "is_null" or name == "is_not_null" or name == "like":
         return True
+    if name == "like_escape":
+        return True
     if name == "regexp_matches" or name == "regexp_replace":
         return True
     return name == "and" or name == "or" or name == "not"
@@ -1595,6 +1597,17 @@ def _check_functions(ast: Ast) raises:
         var name = _function_name(ast, ast.exprs[at].payload)
         if name.byte_length() == 0 or _lowers(name):
             continue
+
+        # `x ILIKE p ESCAPE e` arrives as this call, the escape clause being
+        # what turns the operator into one. It is the same gap `ILIKE` without
+        # an escape has, so it says the same thing rather than naming a
+        # function nobody wrote.
+        if name == "ilike_escape":
+            raise Error(
+                "firepanda matches a LIKE pattern byte for byte, and doing it"
+                " without regard to case needs a case fold it does not have"
+                " yet, so ILIKE is refused rather than answered wrongly"
+            )
 
         var found = registry.find(name)
         if found == NOT_FOUND:

@@ -578,7 +578,10 @@ def _lower_expr(
     if kind == ExprKind.CALL and is_logic_name(exprs.nodes[root].name):
         return _lower_connective(exprs, root, pipe, base, name, memo)
 
-    if kind == ExprKind.CALL and exprs.nodes[root].name == "like":
+    if kind == ExprKind.CALL and (
+        exprs.nodes[root].name == "like"
+        or exprs.nodes[root].name == "like_escape"
+    ):
         return _lower_like(exprs, root, pipe, base, name, memo)
 
     if kind == ExprKind.CALL and exprs.nodes[root].name == "regexp_matches":
@@ -1011,6 +1014,21 @@ def _lower_like(
     unusual but it is legal, and it costs nothing to send it somewhere that
     already exists.
 
+    `like_escape` is the same call with the escape character written out, which
+    is what `x LIKE p ESCAPE e` means and what DuckDB names it too. The escape
+    has to be a constant for the same reason the pattern does, and it has to be
+    one byte, which is DuckDB's rule rather than a limit here: it refuses any
+    escape string that is not empty or a single character, and it means a byte
+    by that, since it refuses a one character escape that takes two bytes.
+
+    An escape at the end of a pattern is refused. There is no byte after it for
+    it to make literal, so the pattern is written wrong, and refusing it while
+    the plan is built is where a query with a mistake in it should stop. DuckDB
+    raises for the same pattern but only on the rows the matcher walks far
+    enough into, so `'ab' LIKE 'ab!' ESCAPE '!'` is false there and refused
+    here. That is the one place the two do not agree, and it is a divergence
+    from an error that depends on the data rather than from an answer.
+
     Args:
         exprs: The arena.
         root: The call, already bound.
@@ -1023,14 +1041,24 @@ def _lower_like(
         The position of the column holding the answer.
 
     Raises:
-        Error: If the call has the wrong number of arguments, if the pattern is
-            not a constant, or if it is null. No pattern is refused for its
-            shape any more, the general search having taken the last of those.
+        Error: If the call has the wrong number of arguments, if the pattern or
+            the escape is not a constant, if the pattern is null, if the escape
+            is longer than a byte, or if the pattern ends with the escape. No
+            pattern is refused for its shape any more, the general search having
+            taken the last of those.
     """
     var args = exprs.nodes[root].children.copy()
-    if len(args) != 2:
+    var wants = 3 if exprs.nodes[root].name == "like_escape" else 2
+    if len(args) != wants:
         raise Error(
-            String("lower: like reads two arguments and was given ", len(args))
+            String(
+                "lower: ",
+                exprs.nodes[root].name,
+                " reads ",
+                wants,
+                " arguments and was given ",
+                len(args),
+            )
         )
 
     if exprs.nodes[args[1]].kind != ExprKind.LITERAL:
@@ -1048,7 +1076,37 @@ def _lower_like(
             " there is no operator that answers a column of nulls yet"
         )
 
-    var pattern = read_pattern(exprs.nodes[args[1]].value.as_string())
+    var escape = -1
+    if wants == 3:
+        escape = _lower_escape(exprs, args[2])
+
+    var written = exprs.nodes[args[1]].value.as_string()
+    if escape >= 0 and written.byte_length() > 0:
+        if written.as_bytes()[written.byte_length() - 1] == UInt8(escape):
+            # Whether it is really an escape depends on what is in front of it,
+            # since `a!!` ends with an escaped escape and not with a loose one,
+            # so the pattern is walked rather than looked at.
+            var loose = False
+            var i = 0
+            var raw = written.as_bytes()
+            while i < len(raw):
+                if raw[i] == UInt8(escape):
+                    if i + 1 == len(raw):
+                        loose = True
+                        break
+                    i += 2
+                    continue
+                i += 1
+            if loose:
+                raise Error(
+                    String(
+                        "lower: the pattern of a LIKE ends with its escape"
+                        " character, which has no byte after it to make"
+                        " literal, so the pattern is written wrong"
+                    )
+                )
+
+    var pattern = read_pattern(written, escape)
     var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
 
     if pattern.kind == MatchKind.EQUALS:
@@ -1069,6 +1127,54 @@ def _lower_like(
 
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
+
+
+def _lower_escape(exprs: Expressions, at: Int) raises -> Int:
+    """Reads the third argument of a `like_escape` into the byte it names.
+
+    Empty is a real answer and means there is no escape, which is DuckDB's rule
+    too: `ESCAPE ''` reads the pattern exactly as `LIKE` without one does. Minus
+    one is what says so here, rather than a byte value, because zero is a byte a
+    pattern is allowed to hold.
+
+    Args:
+        exprs: The arena.
+        at: The escape argument.
+
+    Returns:
+        The escape byte, or minus one where the query named none.
+
+    Raises:
+        Error: If the escape is not written out in the query, if it is null, or
+            if it is more than one byte.
+    """
+    if exprs.nodes[at].kind != ExprKind.LITERAL:
+        raise Error(
+            "lower: the ESCAPE of a LIKE has to be written out, and this one is"
+            " an expression, which would mean reading a new pattern for every"
+            " row and there is no kernel that does that"
+        )
+    if exprs.nodes[at].value.is_null():
+        raise Error(
+            "lower: a LIKE with a null ESCAPE is null for every row, and there"
+            " is no operator that answers a column of nulls yet"
+        )
+
+    var text = exprs.nodes[at].value.as_string()
+    if text.byte_length() == 0:
+        return -1
+    if text.byte_length() != 1:
+        raise Error(
+            String(
+                "lower: the ESCAPE of a LIKE is one character and this one is ",
+                text.byte_length(),
+                (
+                    " bytes, which DuckDB refuses too, a character that takes"
+                    " more than one byte included"
+                ),
+            )
+        )
+    return Int(text.as_bytes()[0])
 
 
 def _lower_constant_text(

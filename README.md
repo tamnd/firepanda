@@ -138,7 +138,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `custom-operator` | OPERATOR(...) as a prefix operator | An operator named this way is resolved against the catalog, and firepanda has no catalog of operators to resolve it against. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `is-unknown` | IS UNKNOWN | It means IS NULL over a boolean, which firepanda does have, so write that instead. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `in-bare-value` | IN over an unparenthesized value | firepanda reads the right side of an IN as a list or as a subquery. Put the value in parentheses. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `like-escape` | ESCAPE on a LIKE | firepanda reads a LIKE pattern with the default escape and takes no other one. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `like-escape` | ESCAPE on an operator that has no escaping form | A LIKE and an ILIKE take one. SIMILAR TO does not, which DuckDB says too. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `method-call` | a method call | firepanda has no node for the x.f(y) spelling. Write f(x, y), which is the same call. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `field-access` | a field access | A dotted name is a name to firepanda, and telling a struct field from a column needs a binder that knows what the columns are. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |

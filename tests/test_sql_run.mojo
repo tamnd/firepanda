@@ -1752,6 +1752,120 @@ def test_a_like_against_a_column_is_refused() raises:
         _ = run("SELECT n FROM words WHERE word LIKE word", session())
 
 
+def _marks(pattern: String, escape: String) raises -> List[Int64]:
+    """Runs one escaped pattern over eight rows written around the wildcards.
+
+    Nothing in `words` holds a `%` or a `_`, which is the whole subject of an
+    escape, so these rows are written here rather than added to a frame five
+    other tests read. Every answer below is DuckDB 1.5.1's over the same eight.
+
+    Args:
+        pattern: The pattern, escapes and wildcards and all.
+        escape: What the `ESCAPE` names.
+
+    Returns:
+        One per row, a one for a match and a nought for none.
+
+    Raises:
+        Error: If the query is refused.
+    """
+    return truths(
+        run(
+            String(
+                "SELECT col0 LIKE '",
+                pattern,
+                "' ESCAPE '",
+                escape,
+                (
+                    "' AS hit FROM (VALUES ('a%b'), ('axb'), ('a_b'), ('a!b'),"
+                    " ('acb'), ('ab%'), ('a%%b'), ('%')) AS t"
+                ),
+            ),
+            session(),
+        ),
+        "hit",
+    )
+
+
+def test_an_escape_makes_a_wildcard_into_a_byte_to_look_for() raises:
+    # The three things an escape is put in front of, and then a byte that was
+    # never a wildcard, where DuckDB drops the escape rather than refusing.
+    same(_marks("a!%b", "!"), [1, 0, 0, 0, 0, 0, 0, 0], "hit")
+    same(_marks("a!_b", "!"), [0, 0, 1, 0, 0, 0, 0, 0], "hit")
+    same(_marks("a!!b", "!"), [0, 0, 0, 1, 0, 0, 0, 0], "hit")
+    same(_marks("a!cb", "!"), [0, 0, 0, 0, 1, 0, 0, 0], "hit")
+
+
+def test_an_escaped_pattern_keeps_the_wildcards_it_did_not_escape() raises:
+    same(_marks("%!%%", "!"), [1, 0, 0, 0, 0, 1, 1, 1], "hit")
+    same(_marks("_!%_", "!"), [1, 0, 0, 0, 0, 0, 0, 0], "hit")
+
+
+def test_an_escape_that_is_itself_a_wildcard_leaves_no_wildcard() raises:
+    # `ESCAPE '%'` is legal and means every `%` in the pattern is an escape, so
+    # `a%%b` is the three bytes `a%b` and not a prefix and a suffix.
+    same(_marks("a%%b", "%"), [1, 0, 0, 0, 0, 0, 0, 0], "hit")
+    same(_marks("a__b", "_"), [0, 0, 1, 0, 0, 0, 0, 0], "hit")
+
+
+def test_an_empty_escape_reads_the_pattern_as_a_plain_one() raises:
+    # Which is DuckDB's rule too, rather than a refusal. The pattern is then
+    # the prefix and the suffix it looks like.
+    same(_marks("a%b", ""), [1, 1, 1, 1, 1, 0, 1, 0], "hit")
+    same(_marks("a!%b", ""), [0, 0, 0, 1, 0, 0, 0, 0], "hit")
+
+
+def test_a_negated_like_takes_an_escape_the_same_way() raises:
+    same(
+        truths(
+            run(
+                "SELECT word NOT LIKE 'a!%' ESCAPE '!' AS hit FROM words",
+                session(),
+            ),
+            "hit",
+        ),
+        [1, 1, 1, 1, 1, -1, 1],
+        "hit",
+    )
+
+
+def test_a_pattern_that_ends_with_its_escape_is_refused() raises:
+    # There is no byte after it to make literal, so the pattern is written
+    # wrong. DuckDB raises for the same pattern but only once a row walks far
+    # enough into it, so `'ab' LIKE 'ab!' ESCAPE '!'` is false there. Refusing
+    # it while the plan is built is the divergence, and it is from an error
+    # that depends on the data rather than from an answer.
+    with assert_raises(contains="ends with its escape character"):
+        _ = _marks("ab!", "!")
+    # And an escaped escape at the end is not one, the last byte having been
+    # spoken for by the one in front of it.
+    same(_marks("a!!%", "!"), [0, 0, 0, 1, 0, 0, 0, 0], "hit")
+
+
+def test_an_escape_that_is_not_one_character_is_refused() raises:
+    with assert_raises(contains="ESCAPE of a LIKE is one character"):
+        _ = _marks("a%b", "!!")
+    with assert_raises(contains="ESCAPE of a LIKE has to be written out"):
+        _ = run(
+            "SELECT n FROM words WHERE word LIKE 'a%' ESCAPE word", session()
+        )
+
+
+def test_an_escape_on_an_operator_that_has_no_escaping_form_is_refused() raises:
+    # DuckDB says the same about this one, a custom escape on a SIMILAR TO
+    # being unimplemented there rather than meaningless.
+    with assert_raises(contains="ESCAPE on an operator"):
+        _ = run(
+            "SELECT n FROM words WHERE word SIMILAR TO 'a' ESCAPE '!'",
+            session(),
+        )
+    # An ILIKE has the form and is refused for the reason an ILIKE always is.
+    with assert_raises(contains="without regard to case"):
+        _ = run(
+            "SELECT n FROM words WHERE word ILIKE 'a!%' ESCAPE '!'", session()
+        )
+
+
 def test_an_is_null_keeps_the_rows_with_nothing_in_them() raises:
     same(
         gapped(

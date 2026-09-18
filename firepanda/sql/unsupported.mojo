@@ -91,7 +91,8 @@ comptime IN_BARE_VALUE: UInt16 = 3
 """`x IN y` with no parentheses around the right side."""
 
 comptime LIKE_ESCAPE: UInt16 = 4
-"""`ESCAPE` after a `LIKE` pattern."""
+"""`ESCAPE` after an operator with no escaping form, which is `SIMILAR TO` and
+the regular expression spellings. A `LIKE` and an `ILIKE` become a call."""
 
 comptime METHOD_CALL: UInt16 = 5
 """`x.f(y)`, the method spelling of a call."""
@@ -256,12 +257,12 @@ def sql_support() -> List[Refusal]:
         ),
         Refusal(
             "like-escape",
-            "ESCAPE on a LIKE",
+            "ESCAPE on an operator that has no escaping form",
             (
-                "firepanda reads a LIKE pattern with the default escape and"
-                " takes no other one."
+                "A LIKE and an ILIKE take one. SIMILAR TO does not, which"
+                " DuckDB says too."
             ),
-            STAGE_ISSUE,
+            SQL_ISSUE,
         ),
         Refusal(
             "method-call",

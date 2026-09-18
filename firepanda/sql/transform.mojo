@@ -2316,9 +2316,7 @@ struct Transform(Movable):
             return ast.in_list(left, candidates, negated, at)
 
         # `LikeClause <- LikeVariations OtherOperatorExpression EscapeClause?`.
-        if len(inner) > 2:
-            raise _unsupported(tree, sql, inner[2], LIKE_ESCAPE)
-        if len(inner) != 2:
+        if len(inner) < 2:
             raise _malformed(tree, sql, which, "a like without an operand")
         var operator = _span(
             tree,
@@ -2326,7 +2324,37 @@ struct Transform(Movable):
             tree.nodes[Int(inner[0])].token_start,
             tree.nodes[Int(inner[1])].token_start,
         )
-        var built = ast.binary(operator, left, work.value(inner[1]), at)
+
+        var built: UInt32
+        if len(inner) > 2:
+            # An `ESCAPE` makes the whole thing a three argument call, which is
+            # what DuckDB names it as well: `like_escape` and `ilike_escape` are
+            # in its function list and mean exactly `x LIKE p ESCAPE e`. The
+            # other members of the family have no such name because DuckDB has
+            # no such function for them either, and `SIMILAR TO ... ESCAPE` is
+            # a refusal there too, so they keep the refusal they had.
+            var called = _escaping_name(operator)
+            if not called:
+                raise _unsupported(tree, sql, inner[2], LIKE_ESCAPE)
+            if operator == "!~~" or operator == "!~~*":
+                # The negated spelling is one token, so the `NOT` a written
+                # `NOT LIKE` gets from the clause above has to be put back on
+                # by hand, which is what the binary path does for it too.
+                negated = not negated
+            var escapes = List[UInt32]()
+            var parts = tree.children(inner[2])
+            escapes.append(parts[len(parts) - 1])
+            escapes.append(inner[1])
+            work.warm(escapes)
+            built = ast.call(
+                called,
+                [left, work.value(inner[1]), work.value(escapes[0])],
+                0,
+                at,
+            )
+        else:
+            built = ast.binary(operator, left, work.value(inner[1]), at)
+
         if negated:
             built = ast.unary("NOT", built, at)
         return built
@@ -5531,6 +5559,30 @@ def _word(tree: Parse, sql: StringSlice, node: UInt32) -> String:
         return String()
     var token = tree.tokens[Int(tree.nodes[Int(node)].token_start)]
     return String(token_text(sql, token)).upper()
+
+
+def _escaping_name(operator: String) -> String:
+    """The function a `LIKE` family operator becomes when an `ESCAPE` follows.
+
+    Two of the family have such a function and the rest do not, which is
+    DuckDB's shape rather than a choice here: `like_escape` and `ilike_escape`
+    are both in its function list, and `SIMILAR TO` with an escape comes back
+    from it saying a custom escape there is not implemented. `GLOB` has no
+    escape clause to write in the first place. So the two that have a name get
+    one and the rest keep the refusal they already had, which says which
+    operator was written rather than naming a function nobody has.
+
+    Args:
+        operator: The operator as the query spelled it, in upper case.
+
+    Returns:
+        The function name, or the empty string for an operator with none.
+    """
+    if operator == "LIKE" or operator == "~~" or operator == "!~~":
+        return String("like_escape")
+    if operator == "ILIKE" or operator == "~~*" or operator == "!~~*":
+        return String("ilike_escape")
+    return String()
 
 
 def _span(tree: Parse, sql: StringSlice, start: UInt32, end: UInt32) -> String:

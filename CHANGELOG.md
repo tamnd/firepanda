@@ -24,6 +24,16 @@ One cell parts company with pandas and it is a CPython defect rather than a diff
 
 RE2 keeps the three letters it has and keeps refusing the four it never had, so `(?x:a b)` and `(?a:\w)` with no flag beside them are an error here exactly as they are upstream. Document 89.
 
+### Added: `LIKE ... ESCAPE`
+
+A pattern can now name a character that makes the byte after it a literal one, so `x LIKE 'a!%b' ESCAPE '!'` looks for a real percent sign rather than for anything at all. `NOT LIKE` takes one the same way. The escape is read before the wildcards are, which is what makes `ESCAPE '%'` legal and leaves a pattern with no wildcards left in it at all.
+
+The pattern reader sends anything that carries an escape to the general search whatever shape it looks like. The four faster readings find their shape by splitting the pattern on `%`, and they would split on an escaped one too, so they are not asked to. Nothing about a pattern with no escape in it changed.
+
+An `ESCAPE` that is not one character, or that is an expression rather than something written out, is refused at plan time, and so is a pattern whose last byte is a loose escape with nothing after it to make literal. DuckDB refuses that last one too, but it does it per row while reading, so `'ab' LIKE 'ab!' ESCAPE '!'` is false there and only a row that gets far enough into the pattern raises. Refusing the whole query is the same answer for every row.
+
+`ILIKE ... ESCAPE` stays refused with the message `ILIKE` already had, since the missing piece is the case fold and not the escape. `SIMILAR TO ... ESCAPE` stays refused, which is what DuckDB does with it as well.
+
 ### Added: the `EXTRACT` fields that are arithmetic over a field firepanda already has
 
 `DECADE`, `CENTURY`, `MILLENNIUM`, `YEARWEEK`, `DAYOFMONTH`, `WEEKDAY` and `ERA`, with DuckDB's plural and abbreviated spellings of each. None of them needed a kernel. A decade is the year over ten, a century is the year one less over a hundred one more, because 1900 is in the nineteenth century and 1901 is in the twentieth, a year week is the ISO year times a hundred plus the ISO week, a day of the month is the day, a weekday is the day of the week that was already there, and an era is one for every row that holds a date. Writing them as arithmetic over the fields that do have kernels is also what makes it impossible for `EXTRACT(DECADE FROM d)` to disagree with `EXTRACT(YEAR FROM d)` on the same row.
