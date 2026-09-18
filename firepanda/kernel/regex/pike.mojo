@@ -335,6 +335,42 @@ def byte_of(offsets: List[Int], at: Int) -> Int:
     return offsets[at]
 
 
+def _first_stop(
+    program: Program,
+    points: Span[UInt32, _],
+    lead: Int,
+    from_at: Int,
+    length: Int,
+) -> Int:
+    """The first position at or after one that could begin a match.
+
+    Only the characters are asked about. A position holding one the program
+    cannot begin with is stepped over without the walk, and so is one of the
+    unreadable bytes a search into the middle of a character puts in front,
+    since no first step of any program accepts one of those either.
+
+    Args:
+        program: The compiled pattern, which has to have a first character set
+            for this to be worth calling.
+        points: The text, as code points.
+        lead: How many unreadable bytes stand in front of them.
+        from_at: Where to start looking.
+        length: One past the last position.
+
+    Returns:
+        The position, or `length` when the rest of the text cannot begin one.
+    """
+    var at = from_at
+    while at < length:
+        var point = _point(points, lead, at)
+        if point != UNREADABLE and in_set(
+            program.ranges, program.first_at, program.first_count, point
+        ):
+            return at
+        at += 1
+    return length
+
+
 def _queue(
     code: List[Instruction],
     mut list: List[Int32],
@@ -590,8 +626,18 @@ struct Machine(Movable):
         self.next.clear()
         var length = len(points)
         var position = 0
+        var skipping = program.first_count > 0
         while position <= length:
             if not (program.anchored and position > 0):
+                if skipping and len(self.here) == 0:
+                    # Nothing is running, so the only thing this position can do
+                    # is begin a match, and the program says which characters
+                    # can begin one. The same rule the other scan gives a
+                    # paragraph to, asked once above because the answer does not
+                    # change while the row is being read.
+                    position = _first_stop(program, points, 0, position, length)
+                    if position >= length:
+                        break
                 _queue(
                     program.code,
                     self.here,
@@ -695,6 +741,7 @@ struct Machine(Movable):
         var length = lead + len(points)
         var end = -1
         var position = first
+        var skipping = program.first_count > 0
         while position <= length:
             if end < 0 and not (program.anchored and position > 0):
                 # A fresh attempt knows nothing about any group, and it is added
@@ -709,6 +756,20 @@ struct Machine(Movable):
                 # and not `first`, because the anchor is asked about the text
                 # and a caller searching from a cursor is asking about a
                 # position the anchor has already ruled out.
+                #
+                # The set of characters a match can begin with is the general
+                # form of the same idea. With nothing running, this position can
+                # only begin a match, and a position holding a character no
+                # first step accepts cannot. Running out of row that way ends it
+                # too, since a program that has a set is a program that has to
+                # read something. An anchored program never has a set, so its
+                # scan is the scan it was before this was written.
+                if skipping and len(self.here) == 0:
+                    position = _first_stop(
+                        program, points, lead, position, length
+                    )
+                    if position >= length:
+                        break
                 for k in range(self.nslots):
                     self.carry[k] = -1
                 _queue(

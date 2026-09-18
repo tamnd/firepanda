@@ -178,6 +178,29 @@ def test_an_anchored_pattern_answers_what_it_did_before_the_shortcut() raises:
     assert_true(hits("(?m)^b$", "a\nb\nc"))
 
 
+def test_a_pattern_with_a_first_character_set_answers_what_it_did_before() raises:
+    """The scan steps over a position whose character cannot begin a match, so
+    everything here is a case where that could be got wrong: a match that starts
+    late in the row, a match at the last position, a row that holds the first
+    character and matches nothing anyway, a character outside ASCII as the first
+    one, and a row of nothing but characters that can never start."""
+    assert_true(hits("foo", "the foo here"))
+    assert_false(hits("foo", "the bar here"))
+    assert_true(hits("x", "aaax"))
+    assert_true(hits("x$", "aaax"))
+    assert_false(hits("x$", "aaaxb"))
+    assert_true(hits("[0-9]{4}", "abc 1234 xyz"))
+    assert_false(hits("[0-9]{4}", "abc 123 xyz"))
+    assert_true(hits("\\bcat\\b", "a cat here"))
+    assert_false(hits("\\bcat\\b", "concatenate"))
+    assert_true(hits("fox", "the fo fox"))
+    assert_false(hits("fox", "the fo fo"))
+    assert_true(hits("é", "héllo"))
+    assert_false(hits("é", "hello"))
+    assert_true(hits("a|c", "bbbc"))
+    assert_false(hits("a|c", "bbbb"))
+
+
 def test_the_byte_table_is_left_empty_for_a_row_of_one_byte_characters() raises:
     """An empty table says the two positions are the same number, which is what
     a row of ASCII means, and it is the row every column this runs over is
