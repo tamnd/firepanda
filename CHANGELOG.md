@@ -20,6 +20,16 @@ So the route was taken back out and the measurement written into `firepanda/join
 
 Two tests came out of it that are worth keeping on the route that ships. A compound key with a text part had no test in `tests/test_join_keys.mojo`, and the null and two dtype cases now say which route answers them rather than only that the answer is right.
 
+### Added: the next release of Python is a red light on purpose
+
+The regular expression compiler copies CPython's `re`, and `re` is not the same module in every version of Python this project supports. Two of its rules have already moved inside that range, and each one is written down in the compiler as a version number the compiler compares the interpreter against. A number like that fails quietly. When the next release moves a third rule nothing raises, the library goes on answering with the rules of whatever version was current when somebody last measured, and the wrong answers are ordinary looking columns.
+
+So `tools/python_version.py` reads the constants out of the compiler and the supported floor out of `pixi.toml` and fails when the interpreter it is standing in is newer than the newest one anybody has measured. The message says what to do about it, which is to run the corpus sweep across versions, write down what moved, add a constant for each rule that did, and raise the number.
+
+It also refuses a constant above the newest measured version, which is a rule nobody could have measured and so a typo or a guess, and a constant at or below the floor, which is how these are meant to leave. When the floor rises past a threshold every supported interpreter is already above it, the branch behind it can never run, and the constant and its branch and its tests and its paragraphs are all dead with nothing anywhere to say so.
+
+It runs twice, as a pixi task in CI and again inside the accessor test suite, because those two stand in different interpreters and either can be upgraded without the other. That gap is the one that produced the first of these two rules. Document 92.
+
 ### Added: a cache of the sets of positions the regular expression machine holds
 
 The machine holds every position a pattern could be in at once and walks the whole set for every character it reads, and it works that set out again at every position of every row. A column of a million rows over a program of forty instructions asks the same question about the same set an enormous number of times, so there is now a cache that answers it once. A state is one of those sets, a transition is a state and one character giving the next state, and both are built the first time they are reached rather than up front, which is the only way to have them at all for a pattern with more states than anyone would want to enumerate.

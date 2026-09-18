@@ -92,6 +92,15 @@ build-extension = "bash tools/build_extension.sh"
 # only rewrites in place. tools/format_check.sh does the copy-format-diff dance.
 format-check = "bash tools/format_check.sh"
 
+# One of the two regular expression engines copies CPython's `re`, and `re` is
+# not the same module in every version this project supports. The rules that
+# moved are written down as version constants in the compiler, and the failure
+# mode of a constant like that is quiet: nothing raises when the world moves
+# past it. This is the thing that raises. It runs under the pixi interpreter
+# rather than under uv's, because the pixi one is what the differential sweeps
+# measure against and is therefore the one whose `re` is the oracle.
+python-version = "python tools/python_version.py"
+
 # The bitmap is checked against a `List[Bool]` reference written with no bit
 # twiddling at all, every kernel is checked against its scalar twin in
 # firepanda/kernel/scalar.mojo, factorize is checked against the quadratic one in
