@@ -778,6 +778,17 @@ def test_an_interval_reaches_the_printer_and_is_refused_further_on() raises:
     )
 
 
+def test_a_subscript_reaches_the_printer_too() raises:
+    # Same as the interval above it. The syntax is read and the stage that
+    # would have to know what the operand holds is the one that refuses.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a[1:2] FROM t", g, rules),
+        "SELECT a[1:2] FROM t",
+    )
+
+
 def test_a_typed_literal_is_the_cast_it_means() raises:
     # `DATE '2020-01-01'` is a type name in front of a string, and the type is
     # what decides how the string is read, which is the whole of what a cast

@@ -61,8 +61,10 @@ from .ast import (
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
+    EXPR_SUBSCRIPT,
     EXPR_UNARY,
     EXPR_WINDOW,
+    NO_NODE,
 )
 from .catalog import fold
 
@@ -180,6 +182,13 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         or kind == EXPR_INTERVAL
     ):
         out.append(item.a)
+        return out^
+    if kind == EXPR_SUBSCRIPT:
+        out.append(item.a)
+        for i in range(ast.length(item.children)):
+            var bound = ast.at(item.children, i)
+            if bound != NO_NODE:
+                out.append(bound)
         return out^
     if kind == EXPR_BINARY or kind == EXPR_FRAME:
         out.append(item.a)
@@ -695,6 +704,8 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
     if kind == EXPR_PARAMETER:
         return String(ast.text(item.b), "/", ast.text(item.payload))
     if kind == EXPR_BETWEEN or kind == EXPR_IN or kind == EXPR_IN_SUBQUERY:
+        return String(item.payload)
+    if kind == EXPR_SUBSCRIPT:
         return String(item.payload)
     if kind == EXPR_STRUCT:
         var out = String()

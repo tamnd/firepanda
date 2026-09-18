@@ -255,6 +255,22 @@ duration, and firepanda has no column type for a duration, so this gets as far
 as the printer and no further.
 """
 
+comptime EXPR_SUBSCRIPT: UInt8 = 22
+"""`x[1]` and `x[1:2]`, an element of something or a run of them.
+
+`a` is the operand. `children` is a run of exactly three, the start, the end
+and the step, and a bound the query left out is 0, so `x[:2]` has no start and
+`x[1:]` has no end. `payload` is 1 when a colon was written and 0 when it was
+not, which is the whole of what tells `x[1]` from `x[1:]`, since both have a
+start and neither has an end.
+
+Three bounds and a flag rather than two kinds, because the grammar makes one
+rule of them and DuckDB reads `x[a]` and `x[a:b]` as two calls of one family.
+Which family depends on what the operand turns out to hold, a list, an array or
+a string, and that is a question for a stage that knows types. This gets as far
+as the printer.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1285,6 +1301,44 @@ struct Ast(Movable):
                 a=operand,
                 children=run,
                 payload=UInt32(1) if negated else UInt32(0),
+            )
+        )
+
+    def subscript(
+        mut self,
+        operand: UInt32,
+        start: UInt32,
+        end: UInt32,
+        step: UInt32,
+        sliced: Bool,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `x[1]` or `x[1:2]`.
+
+        Args:
+            operand: What is being indexed.
+            start: The first bound, or 0 for a slice that left it out.
+            end: The second bound, or 0.
+            step: The third bound, or 0.
+            sliced: Whether a colon was written, which is what tells `x[1]`
+                from `x[1:]`.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var bounds = List[UInt32]()
+        bounds.append(start)
+        bounds.append(end)
+        bounds.append(step)
+        var run = self.run(bounds)
+        return self.add(
+            Expr(
+                kind=EXPR_SUBSCRIPT,
+                token=token,
+                a=operand,
+                children=run,
+                payload=UInt32(1) if sliced else UInt32(0),
             )
         )
 
