@@ -26,8 +26,9 @@ A pattern is set aside when firepanda's own compiler says the refusal is a gap
 here rather than something Python refuses too, and the reasons are tallied so
 that setting a pattern aside is a number somebody watches. The reasons are
 shorter than the RE2 ones and every one of them is this library falling short of
-an engine that reads the pattern: a lookaround, a backreference, a conditional,
-an atomic group, a possessive quantifier and a named character.
+an engine that reads the pattern: a lookaround beside one of the two constructs
+only the backtracker runs, a conditional, a named character, a repeat counted
+higher than this compiler will unroll and a capture inside a lookahead.
 
 Usage:
     pixi run differential-regex-python
@@ -200,11 +201,12 @@ def main() raises:
         var slots = List[Int32]()
         for which in range(len(points)):
             # The column kernel picks the same way. A program holding a
-            # backreference is one the machine cannot read, so it goes to the
-            # engine that keeps a path, and the choosing is by the program
-            # rather than by the row. Document 95.
+            # backreference is one the machine cannot read and a program
+            # holding an atomic group is one it cannot obey, so either of them
+            # goes to the engine that keeps a path, and the choosing is by the
+            # program rather than by the row. Documents 95 and 99.
             var ours: Bool
-            if program.refs:
+            if program.refs or program.cuts:
                 try:
                     ours = (
                         searched(

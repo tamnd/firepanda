@@ -155,21 +155,21 @@ def test_a_pattern_the_engine_can_run_compiles_for_all_three() raises:
 
 
 def test_a_pattern_the_other_engine_would_run_is_a_gap_here() raises:
-    """An atomic group goes to Python's `re` upstream and this library's Python
-    engine has not got one, so the refusal is its own and names the construct
-    rather than naming the engine. It used to say the engine was not written at
-    all, which was true until document 81 wrote it and which threw away the one
-    thing the caller could act on.
+    """A conditional group goes to Python's `re` upstream and this library's
+    Python engine has not got one, so the refusal is its own and names the
+    construct rather than naming the engine. It used to say the engine was not
+    written at all, which was true until document 81 wrote it and which threw
+    away the one thing the caller could act on.
 
-    This row used to ask about a lookaround and then about a backreference, all
-    of which are answered now, so it asks about one of the three that are left.
-    The lookahead in front of it is what routes the call, since an atomic group
-    is not one of the constructs the router walks for. Documents 93, 94 and
-    95."""
-    var program = program_for(METHOD_MATCH, "(?=a)(?>a)b")
+    This row used to ask about a lookaround, then about a backreference and
+    then about an atomic group, all of which are answered now, so it asks about
+    the one that is left. The lookahead in front of it is what routes the call,
+    since a conditional group is not one of the constructs the router walks
+    for. Documents 93, 94, 95 and 99."""
+    var program = program_for(METHOD_MATCH, "(?=a)(a)(?(1)b|c)")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no atomic group yet")
+    assert_equal(program.problem, "this engine has no conditional group yet")
 
 
 def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:

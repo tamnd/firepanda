@@ -246,7 +246,10 @@ def test_the_constructs_that_are_still_refused_are_refused_the_same_way() raises
     )
     var atomic = program_for(METHOD_COUNT, "(?=a)(?>a)b", 0, False, 14)
     assert_false(atomic.ok)
-    assert_equal(atomic.problem, "this engine has no atomic group yet")
+    assert_equal(
+        atomic.problem,
+        "this engine has no lookaround beside an atomic group yet",
+    )
 
 
 def main() raises:

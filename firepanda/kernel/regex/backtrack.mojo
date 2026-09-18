@@ -75,6 +75,17 @@ such a program keeps its bitmap and forgets everything in it the moment a slot
 changes value, and a count of steps is the bound underneath that. It is the one
 shape here that is never handed back, because there is nothing underneath to
 hand it to. Document 95.
+
+The atomic group is the second shape that is never handed back, and it is here
+for the opposite reason. A backreference is a question the machine cannot
+answer. A cut is an answer the machine cannot give, because throwing a choice
+away means nothing where every choice is being followed at once, and it is
+answered here because an explicit stack of choices is a thing you can throw part
+of away. It leaves the bitmap alone: what the group matched from a position is
+the same whatever path arrived there, so a pair may still be dropped outright,
+and the only thing the cut changes is that a row too long for the bitmap runs
+under the step count rather than going to a machine that could not run it.
+Document 99.
 """
 
 from std.collections.span import Span
@@ -98,8 +109,10 @@ from firepanda.kernel.regex.pike import (
 from firepanda.kernel.regex.program import (
     IN_AT,
     IN_BEHIND,
+    IN_CUT,
     IN_JUMP,
     IN_LOOK,
+    IN_MARK,
     IN_MATCH,
     IN_REF,
     IN_SAVE,
@@ -140,6 +153,25 @@ visits the bitmap allows, because a program that needs a bound at all is one
 nobody should be able to hang the process with and not one anybody should be
 able to notice on an ordinary row. Document 95 section 6 has why there is no
 third engine to hand such a row to and what a caller is told instead.
+
+It is also what is left when a row is too long for the bitmap and the program is
+one no other engine can run, which is the atomic group's case. There the bitmap
+is not narrowed, it is absent, and the count is the only bound there is.
+Document 99 section 5.
+"""
+
+comptime MARKED: Int32 = -0x40000000
+"""The stack entry an atomic group leaves where it began.
+
+The stack already holds two kinds of thing, an instruction to walk and a slot to
+put back, and the second is written as a negative number so that one test at the
+top of the loop tells them apart. This is a third kind and it is written the same
+way, far below any slot a program could have, so that the same test catches it
+and the loop costs no second comparison on the path that has no atomic group in
+it at all.
+
+Popping one means the group ran out of ways to match and the pattern is leaving
+it backwards, so there is nothing to do but drop it. Document 99.
 """
 
 comptime GAVE_UP: Int = -2
@@ -262,10 +294,11 @@ struct Bounded(Movable):
     hands straight back, because a lookaround is a search inside a search and
     there is one stack and one bitmap here to run it on.
 
-    The traffic runs the other way for a backreference. That is the one shape
-    this engine takes and the machine cannot, so a program holding one arrives
-    here and is never handed back, which is why the compiler refuses a pattern
-    holding a lookaround and a backreference at once. Document 95."""
+    The traffic runs the other way for a backreference and for an atomic group.
+    Those are the two shapes this engine takes and the machine cannot, so a
+    program holding either arrives here and is never handed back, which is why
+    the compiler refuses a pattern holding a lookaround beside one of them.
+    Documents 95 and 99."""
 
     var seen: List[UInt64]
     """One bit per instruction per position, `pc * (length + 1) + at`. Cleared
@@ -294,7 +327,8 @@ struct Bounded(Movable):
     var jobs_pc: List[Int32]
     """The stack, as instructions. A negative entry is not an instruction: it is
     the slot `-pc - 1` waiting to be put back, and the number beside it is what
-    to put back into it."""
+    to put back into it. The one negative entry that is neither is `MARKED`,
+    which is where an atomic group began."""
 
     var jobs_at: List[Int32]
     """The positions of the entries in `jobs_pc`, or the values to restore."""
@@ -308,7 +342,27 @@ struct Bounded(Movable):
     place are two different questions and dropping the second one is dropping an
     answer. With this off the bitmap is still kept, under the narrower rule
     `stamped` below has, and `MAX_STEPS` is what bounds the walk. Document 95.
-    """
+
+    An atomic group does not turn this off. What the group matches from a
+    position is the same whichever path arrived there, so the second arrival is
+    the same question as the first and is still worth nothing. Document 99
+    section 5."""
+
+    var alone: Bool
+    """Whether there is no engine underneath this one for the program in hand.
+
+    True for a backreference, which the machine cannot answer, and for an atomic
+    group, which the machine cannot obey. The two reasons have nothing in common
+    and the consequence is the same one: the row that is too long for the bitmap
+    cannot be handed anywhere, so it is run here without a bitmap and the step
+    count is the whole of the bound. Documents 95 and 99."""
+
+    var bitmap: Bool
+    """Whether the bitmap is in use for the row in hand at all.
+
+    Set per row rather than per program, since what it answers is whether the
+    row fits. False only when `alone` is true and the row did not fit, because
+    every other program in that position is handed back instead."""
 
     var stamped: Bool
     """Whether the bitmap is in use under that narrower rule, which is the mode a
@@ -318,9 +372,17 @@ struct Bounded(Movable):
     when a backreference can read a slot, but an instruction and a position and
     the slots do. So the bitmap is kept and everything in it is forgotten the
     moment a slot changes value, which leaves only the arrivals that really are
-    the same state. Set per row rather than per program, because a row too long
-    for the bitmap has to run without one and there is no second engine to hand
-    such a row to. Document 95 section 3."""
+    the same state. Set per row for the same reason `bitmap` is, since a row
+    running without a bitmap is not running under a narrower rule about one.
+    Document 95 section 3."""
+
+    var counting: Bool
+    """Whether the step count is bounding this row.
+
+    Which is whenever the bitmap is not bounding it outright, so either the
+    bitmap is being forgotten under `stamped` or there is no bitmap at all. The
+    test is lifted out of the loop and into a field for the same reason the
+    others are, which is that the ordinary program pays nothing for it."""
 
     var marks: List[Int32]
     """The cells set since the last slot changed, so that forgetting them is the
@@ -328,9 +390,9 @@ struct Bounded(Movable):
     `stamped`."""
 
     var steps: Int
-    """How much of that bound this search has spent, counted only when `memo` is
-    off since that is the only case where anything but the bitmap bounds the
-    walk."""
+    """How much of that bound this search has spent, counted only when
+    `counting` is on since that is the only case where anything but the bitmap
+    bounds the walk."""
 
     var overrun: Bool
     """Whether the last search ran out of steps rather than finding an answer.
@@ -361,7 +423,10 @@ struct Bounded(Movable):
         self.word = []
         self.lower = []
         self.memo = not program.refs
+        self.alone = program.refs or program.cuts
+        self.bitmap = False
         self.stamped = False
+        self.counting = False
         self.marks = []
         self.steps = 0
         self.overrun = False
@@ -481,6 +546,38 @@ struct Bounded(Movable):
             self.seen[cell >> 6] &= ~(UInt64(1) << UInt64(cell & 63))
         self.marks.clear()
 
+    def _cut(mut self):
+        """Throws away every choice the group that is closing could have made.
+
+        The group's own part of the stack is everything above the nearest
+        `MARKED`, which is always the group's own mark: a group nested inside
+        this one either reached its own cut, which took its mark off, or failed,
+        which popped its mark off, and either way it is gone before this runs.
+        So there is nothing to number and no group identifier to carry.
+
+        What is thrown away is the choices and what is kept is the saves, in the
+        order they were made. A choice is a way the group could have matched
+        instead and is exactly what an atomic group says there is no going back
+        to. A save is not a choice, it is what a slot held before the group
+        wrote to it, and it is still owed to the pattern outside: the group as a
+        whole can still fail, because what follows it can fail, and the groups
+        it captured have to go back to what they were when it does. The stack is
+        compacted in place rather than copied, since the saves keep their order
+        and only move down. Document 99 section 4.
+        """
+        var mark = len(self.jobs_pc) - 1
+        while mark >= 0 and self.jobs_pc[mark] != MARKED:
+            mark -= 1
+        var write = mark if mark >= 0 else 0
+        for i in range(mark + 1, len(self.jobs_pc)):
+            if self.jobs_pc[i] < 0:
+                self.jobs_pc[write] = self.jobs_pc[i]
+                self.jobs_at[write] = self.jobs_at[i]
+                write += 1
+        while len(self.jobs_pc) > write:
+            _ = self.jobs_pc.pop()
+            _ = self.jobs_at.pop()
+
     def _attempt(
         mut self,
         program: Program,
@@ -513,11 +610,17 @@ struct Bounded(Movable):
             var pc = self.jobs_pc.pop()
             var at = self.jobs_at.pop()
             if pc < 0:
+                if pc == MARKED:
+                    # An atomic group being left backwards, which is the group
+                    # failing. Everything it could have tried was above this and
+                    # has already been popped, so the mark is dropped and the
+                    # pattern goes on failing past it.
+                    continue
                 # The way out of a save. Everything the save protected has been
                 # walked, so the slot goes back to what it held before it.
                 self._write(Int(-pc - 1), at)
                 continue
-            if self.memo or self.stamped:
+            if self.bitmap:
                 var cell = Int(pc) * (length + 1) + Int(at)
                 var word_at = cell >> 6
                 var bit = UInt64(1) << UInt64(cell & 63)
@@ -526,11 +629,11 @@ struct Bounded(Movable):
                 self.seen[word_at] |= bit
                 if self.stamped:
                     self.marks.append(Int32(cell))
-            if not self.memo:
-                # The bitmap speaks for less here, so the count is what really
-                # bounds this. The step is charged at the pop rather than at the
-                # push, because what is being bounded is the walking and a push
-                # that is never popped costs nothing.
+            if self.counting:
+                # The bitmap speaks for less here, or for nothing at all, so the
+                # count is what really bounds this. The step is charged at the
+                # pop rather than at the push, because what is being bounded is
+                # the walking and a push that is never popped costs nothing.
                 self.steps += 1
                 if self.steps > MAX_STEPS:
                     self.overrun = True
@@ -601,6 +704,16 @@ struct Bounded(Movable):
                     self._push(Int32(-slot - 1), self.slots[slot])
                     self._write(slot, at)
                     self._push(pc + 1, at)
+            elif instruction.op == IN_MARK:
+                # Where the stack stood when the group opened, so that the cut
+                # at the other end of it knows how much of the stack is the
+                # group's own. The position beside it is never read and is put
+                # there so that the two lists stay the same length.
+                self._push(MARKED, at)
+                self._push(pc + 1, at)
+            elif instruction.op == IN_CUT:
+                self._cut()
+                self._push(pc + 1, at)
             elif instruction.op == IN_REF:
                 var slot = Int(instruction.a)
                 var opened = Int(self.slots[slot])
@@ -675,11 +788,13 @@ struct Bounded(Movable):
         self.marks.clear()
         if cells > MAX_CELLS:
             # A row too long for the bitmap goes to the machine, and a program
-            # holding a backreference is one the machine cannot be handed at
-            # all. So that one runs the row without a bitmap and the step count
-            # is the whole of the bound. Document 95 section 3.
-            if self.memo:
+            # holding a backreference or an atomic group is one the machine
+            # cannot be handed at all. So that one runs the row without a bitmap
+            # and the step count is the whole of the bound. Document 95 section
+            # 3 and document 99 section 5.
+            if not self.alone:
                 return GAVE_UP
+            self.bitmap = False
             self.stamped = False
         else:
             var words = (cells + 63) // 64
@@ -688,7 +803,9 @@ struct Bounded(Movable):
             else:
                 for i in range(words):
                     self.seen[i] = 0
+            self.bitmap = True
             self.stamped = not self.memo
+        self.counting = not self.bitmap or self.stamped
         for k in range(self.nslots):
             self.slots[k] = -1
 
@@ -765,7 +882,7 @@ def searched(
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference can do.
+            backreference or an atomic group can do.
     """
     var end = bounded.search(program, points, 0, first, found, advance)
     if bounded.overrun:
@@ -780,11 +897,12 @@ def held_text(program: Program, text: StringSlice) raises -> Bool:
 
     The same question `matches_text` next door answers and the same answer for
     every program that one can read, and here rather than there because a
-    program holding a backreference is one the machine cannot read at all. That
-    machine is written on threads that merge, this engine is the one that keeps
-    a path, and a backreference is a question about the path. So the choosing
-    has to live on this side of the two, since this is the side that can see
-    both. Document 95.
+    program holding a backreference or an atomic group is one the machine cannot
+    read at all. That machine is written on threads that merge, this engine is
+    the one that keeps a path, and a backreference is a question about the path
+    while a cut is an answer only a path can give. So the choosing has to live
+    on this side of the two, since this is the side that can see both. Documents
+    95 and 98.
 
     The one shot form, which builds both sets of buffers, uses them once and
     drops them. A caller with a column to walk wants to keep them instead.
@@ -798,9 +916,9 @@ def held_text(program: Program, text: StringSlice) raises -> Bool:
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference can do.
+            backreference or an atomic group can do.
     """
-    if not program.refs:
+    if not program.refs and not program.cuts:
         return matches_text(program, text)
     var points = decoded(text)
     var machine = Machine(program)
@@ -840,8 +958,9 @@ def located(
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference can do and which this door never sees, since a
-            backreference is refused on the engine that comes through here.
+            backreference or an atomic group can do and which this door never
+            sees, since both of those are refused on the engine that comes
+            through here.
     """
     var end = bounded.search(program, points, lead, 0, found)
     if bounded.overrun:
