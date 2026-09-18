@@ -214,10 +214,10 @@ comptime IN_REF: UInt8 = 13
 """Read again whatever a group matched earlier.
 
 `a` is the slot the group opened at, which is `2 * k` for group `k`, so the text
-to read again is between `slots[a]` and `slots[a + 1]`. `b` is 1 when the letters
-are compared with the ASCII case dropped and 0 when they are compared as they
-are. A group that never took part is a slot pair of minus one and the
-instruction fails, which is upstream's answer as well.
+to read again is between `slots[a]` and `slots[a + 1]`. `b` is one of the three
+`REF_` constants below and says how the two runs are compared. A group that never
+took part is a slot pair of minus one and the instruction fails, which is
+upstream's answer as well.
 
 This is the one instruction here whose answer depends on something other than
 the program and the position, and that is the whole of why it took a document of
@@ -227,10 +227,26 @@ standing at the same instruction and the same position are no longer the same
 question, and both the machine next door and the bitmap in the backtracker are
 built on those two being the same question.
 
-So a program holding one of these is run by the backtracker with the bitmap
-switched off, bounded by a count of steps rather than by one visit per
-instruction per position. Document 95.
+So a program holding one of these is run by the backtracker under a narrower
+rule: it keeps its bitmap and forgets everything in it the moment a slot changes
+value, and a count of steps is the bound underneath that. Document 95.
 """
+
+comptime REF_EXACT: Int32 = 0
+"""Compare the two runs code point by code point, which is what a reference under
+no flag at all does."""
+
+comptime REF_NARROW: Int32 = 1
+"""Compare them with the twenty six ASCII letters treated as thirteen, which is
+what `(?ai)` does. Nothing outside the alphabet moves, so the Kelvin sign is not
+a `k` and the long s is not an `s`."""
+
+comptime REF_WIDE: Int32 = 2
+"""Compare them by simple lowercase, which is what `(?i)` does.
+
+It is not the fold the literals in the same pattern were compiled under, and
+that is upstream's arrangement rather than a shortcut here: `(?i)ss` matches
+`sſ` and `(?i)(s)\\1` does not. Document 96."""
 
 
 comptime MAX_INSTRUCTIONS: Int = 200000
@@ -1352,23 +1368,14 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         # are scoped, so `(?i:(a)\1)` folds and `(?i:(a))\1` does not, and only
         # the walk that emits knows which scope it is standing in.
         #
-        # Under the ASCII alphabet the comparison is the twenty six letters and
-        # nothing else, which is a subtraction rather than a table. Under the
+        # Which comparison rather than whether to compare, and the two that fold
+        # are not narrowings of one rule. Under the ASCII alphabet it is the
+        # twenty six letters and nothing else, which is a subtraction. Under the
         # wide one upstream compares the two characters by their simple
-        # lowercase, which is neither the fold this compiler already has nor a
-        # table this library carries yet: `(?i)(s)\1` does not match `sſ` while
-        # `(?i)ss` does, because a literal is folded and a backreference is
-        # lowered. Answering that wants the lowercase table and is the next
-        # slice rather than this one. Document 95.
-        if folding and not b.narrow:
-            b.give_up(
-                String(
-                    "this engine has no backreference under the ignore case"
-                    " flag yet"
-                ),
-                True,
-            )
-            return
+        # lowercase, which is not the fold the literals in this same pattern were
+        # compiled under: `(?i)(s)\1` does not match `sſ` while `(?i)ss` does,
+        # because a literal is widened into its orbit and a reference is lowered.
+        # Document 96.
         if not b.captures:
             # Unreachable, and here because the alternative to a refusal is an
             # instruction reading a slot that was never written. The compiler
@@ -1376,7 +1383,10 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
             # the caller asked for.
             b.give_up(String("a backreference needs the groups kept"))
             return
-        _ = b.emit(IN_REF, it.a * 2, Int32(1) if folding else Int32(0))
+        var how = REF_EXACT
+        if folding:
+            how = REF_NARROW if b.narrow else REF_WIDE
+        _ = b.emit(IN_REF, it.a * 2, how)
         return
 
     b.give_up(String("unsupported pattern"))

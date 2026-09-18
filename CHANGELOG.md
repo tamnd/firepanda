@@ -68,6 +68,16 @@ They do not fold a chunk at a time, which is the one design decision here worth 
 
 `FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
 
+### Added: a backreference under the ignore case flag, which is a second case table
+
+`str.contains(r"(\w)\1", case=False)` used to raise and now answers, which is the last of the three things the entry below left refused.
+
+It wanted a table because `(?i)` means two different things and upstream implements it twice. A literal under the flag is widened while the pattern is compiled, into the set of everything that folds onto it, so `(?i)s` becomes `s`, `S` and the long s. A backreference cannot be widened that way, because what it is going to be compared against is not known until the row is being walked, so upstream compares the two characters at run time by lowering each of them and asking whether the results are equal. Those two relations disagree: `(?i)ss` matches `sſ` and `(?i)(s)\1` does not, and the sigma pair goes the same way. It is measured against a running CPython rather than reasoned about, and it is upstream's arrangement rather than a defect in it.
+
+So there are two case tables now. `folddata.mojo` is the orbits and `lowerdata.mojo` is the simple lowercase, written by `tools/gen_regexlower.py` beside the fold generator and against the same interpreter, CPython 3.13.12 with Unicode 15.1.0. 1433 code points move, in 214 runs, which takes a marker of its own: the fold table's says a run alternates up and down because folding is a cycle, and this one says the even code point steps up and the odd one stays, because lowering is not. Without it the same table is 668 runs. The generator walks its own runs over every code point in Unicode and checks each against `_sre.unicode_tolower`, so a release that moves an answer fails there rather than drifting.
+
+The table is read by one function and held on the engine rather than copied per row, and only a program that actually holds a reference under the wide flag asks for it at all. `(?ai)` is a third rule rather than the wide one narrowed: it is the twenty six ASCII letters and nothing else, so the Kelvin sign is not a `k` there. The Python differential moves from 28729 patterns compared to 28739, which is the ten that were held out for this, and stays at zero disagreements. Document 96.
+
 ### Added: a backreference, which is the construct that decided which engine answers
 
 `str.contains(r"(\w)\1")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both spellings are in, the numbered one and `(?P=name)`. It is the largest of the five constructs RE2 has not got that Python has, at 839 of the 30052 held out patterns.
@@ -80,7 +90,7 @@ The bound underneath that is a count of steps, four million of them, and a row t
 
 A group that never took part fails the reference rather than matching nothing, so `(a)?\1b` does not match `b` and `(a?)\1b` does, which is upstream's rule and is the pair that separates a group that was skipped from one that ran and matched nothing.
 
-Two things are still refused. A backreference under the wide reading of the ignore case flag, because upstream compares the two characters there by simple lowercase where it compares a literal by its whole fold orbit, and this library carries the fold tables and not the lowercase one. `(?i)ss` matches the long s and `(?i)(s)\1` does not, which is measured rather than assumed. The ASCII reading, `(?ai)`, is a subtraction rather than a table and is in. And a lookaround beside a backreference, because the two constructs live on different engines here and a pattern holding both has nowhere to go.
+Two things were still refused when this landed. A backreference under the wide reading of the ignore case flag, which the entry above is about and which is now in. And a lookaround beside a backreference, because the two constructs live on different engines here and a pattern holding both has nowhere to go, which is still refused.
 
 ### Fixed: the anchoring rewrite no longer renumbers the caller's groups
 

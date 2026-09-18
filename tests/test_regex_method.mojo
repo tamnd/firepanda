@@ -184,17 +184,18 @@ def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
     construct is now the only shortfall left in this pattern and the refusal is
     the one the caller can act on.
 
-    The construct here was a lookaround until documents 93 and 94 answered both
-    halves of it. Document 95 then answered the backreference everywhere except
-    under the wide reading of this very flag, which leaves the pattern saying
-    exactly what this row wants it to say and saying it about the construct
-    rather than about the rewrite."""
-    var program = program_for(METHOD_FULLMATCH, "(?i)(a)\\1")
+    The construct here has been three of them. It was a lookaround until
+    documents 93 and 94 answered both halves, then a backreference under the
+    wide reading of this very flag until document 96 answered that, and it is
+    now the one pair that is still refused on this engine, a lookaround
+    standing beside a backreference. Each time the row kept its point, which is
+    that the refusal names the construct rather than the rewrite."""
+    var program = program_for(METHOD_FULLMATCH, "(?i)(?=a)(b)\\1")
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(
         program.problem,
-        "this engine has no backreference under the ignore case flag yet",
+        "this engine has no lookaround beside a backreference yet",
     )
 
 

@@ -19,7 +19,7 @@ empty `flags` and would have reached Arrow without the reference in them.
 The rows compare against pandas rather than against a written down answer,
 because the claim of the slice is agreement and not correctness in the abstract.
 
-Document 95.
+Documents 95 and 96.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ repeats and one where it does not. The third has the repeat somewhere other than
 the front, so a scan has to walk to it. The fourth has two of them. The fifth
 repeats a pair rather than a letter, which is the row where the width the
 reference reads is not one. The sixth is the same letter in two cases, which is
-the row the ignore case flag would decide and which no row here passes that flag
-for. The empty row and the missing one are the two every text file here carries.
+the row the ignore case flag decides. The empty row and the missing one are the
+two every text file here carries.
 """
 
 
@@ -187,21 +187,28 @@ def test_extract_takes_a_reference_beside_the_group_it_reads(
 
 
 @needs_pandas
-def test_the_ignore_case_flag_is_still_a_gap(firepanda: ModuleType) -> None:
+def test_the_ignore_case_flag_reads_the_two_characters_lowered(
+    firepanda: ModuleType,
+) -> None:
     """Upstream compares the two characters here by simple lowercase where it
     compares a literal by its whole fold orbit, and the two disagree on real
-    text. This library carries the fold tables and not the lowercase one, so
-    answering would be answering wrongly and the refusal is a gap.
+    text. Both tables are carried now, so both questions are answered, and the
+    row that settles it is the sixth: the same letter in two cases.
 
-    pandas answers it, which is what makes it a gap rather than agreement, and
-    the row checks that pandas answers it so that the day this lands there is
-    something to compare against.
+    The two rows after it are the disagreement itself. A column holding the long
+    s answers True to `(?i)ss` and False to `(?i)(s)\\1`, and pandas answers it
+    the same two ways, because upstream is where the two rules came from.
+    Document 96.
     """
     mine, them = made(firepanda), theirs()
     assert mask_of(them.str.contains(r"(\w)\1", case=False))[5] is True
-    with pytest.raises(NotImplementedError) as caught:
-        mine.str.contains(r"(\w)\1", case=False)
-    assert "ignore case" in str(caught.value)
+    assert mask_of(mine.str.contains(r"(\w)\1", case=False))[5] is True
+    assert mask_of(mine.str.contains(r"(\w)\1", case=False))[1] is False
+    odd = ["s\u017f"]  # a long s, which folds onto s and lowers to itself
+    assert mask_of(theirs(odd).str.contains(r"ss", case=False))[0] is True
+    assert mask_of(made(firepanda, odd).str.contains(r"ss", case=False))[0] is True
+    assert mask_of(theirs(odd).str.contains(r"(s)\1", case=False))[0] is False
+    assert mask_of(made(firepanda, odd).str.contains(r"(s)\1", case=False))[0] is False
 
 
 @needs_pandas
