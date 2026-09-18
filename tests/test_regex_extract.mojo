@@ -292,11 +292,12 @@ def test_a_named_group_is_a_group_that_also_has_a_label() raises:
 def test_a_pattern_python_refuses_is_refused_here_in_pythons_voice() raises:
     """This method never reaches RE2, so a construct neither engine has yet is
     a shortfall here rather than agreement with upstream, and the flag on the
-    refusal says so."""
-    var program = program_for(METHOD_EXTRACT, "(a)\\1(b)")
+    refusal says so. The construct was a backreference until document 95
+    answered it."""
+    var program = program_for(METHOD_EXTRACT, "(?>a)(b)")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no backreference yet")
+    assert_equal(program.problem, "this engine has no atomic group yet")
 
 
 def test_syntax_only_re2_refuses_is_compiled_rather_than_refused() raises:

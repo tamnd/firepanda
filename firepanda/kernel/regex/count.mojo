@@ -55,7 +55,7 @@ def counted(
     mut machine: Machine,
     mut bounded: Bounded,
     mut found: List[Int32],
-) -> Int:
+) raises -> Int:
     """How many times a compiled pattern matches in the text, Arrow's way.
 
     The three rules in the module docstring are all in the loop below, and none
@@ -73,6 +73,10 @@ def counted(
 
     Returns:
         How many matches, which is zero for a program that did not compile.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     if not program.ok:
         return 0
@@ -121,7 +125,7 @@ def counted_python(
     mut machine: Machine,
     mut bounded: Bounded,
     mut found: List[Int32],
-) -> Int:
+) raises -> Int:
     """How many times a compiled pattern matches in the text, Python's way.
 
     Look from the cursor, count the match, put the cursor where the match ended.
@@ -146,6 +150,10 @@ def counted_python(
 
     Returns:
         How many matches, which is zero for a program that did not compile.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     if not program.ok:
         return 0
@@ -164,7 +172,7 @@ def counted_python(
     return seen
 
 
-def counted_text(program: Program, text: StringSlice) -> Int:
+def counted_text(program: Program, text: StringSlice) raises -> Int:
     """How many times a compiled pattern matches in a piece of text.
 
     The one shot form of `counted`, which is where the rules are.
@@ -175,6 +183,9 @@ def counted_text(program: Program, text: StringSlice) -> Int:
 
     Returns:
         How many matches.
+
+    Raises:
+        Error: Only what the engines raise.
     """
     var points = decoded(text)
     var machine = Machine(program)
@@ -183,7 +194,7 @@ def counted_text(program: Program, text: StringSlice) -> Int:
     return counted(program, Span(points), machine, bounded, found)
 
 
-def counted_python_text(program: Program, text: StringSlice) -> Int:
+def counted_python_text(program: Program, text: StringSlice) raises -> Int:
     """How many times a compiled pattern matches in a piece of text, Python's
     way.
 
@@ -195,6 +206,9 @@ def counted_python_text(program: Program, text: StringSlice) -> Int:
 
     Returns:
         How many matches.
+
+    Raises:
+        Error: Only what the engines raise.
     """
     var points = decoded(text)
     var machine = Machine(program)

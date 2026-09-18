@@ -69,6 +69,7 @@ from std.collections.span import Span
 from std.python import Python, PythonObject
 from std.sys import argv
 
+from firepanda.kernel.regex.backtrack import Bounded, searched
 from firepanda.kernel.regex.dfa import Cache, SCAN_GAVE_UP, SCAN_YES
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
@@ -235,8 +236,23 @@ def sweep(
 
         var machine = Machine(program)
         var cache = Cache(program)
+        var bounded = Bounded(program)
+        var slots = List[Int32]()
         for which in range(len(points)):
-            var ours = machine.matches(program, Span(points[which]))
+            # The column kernel picks the same way. A program holding a
+            # backreference is one neither the machine nor the cache can read,
+            # so it goes to the third engine, and the choosing is by the
+            # program rather than by the row. Document 95.
+            var ours: Bool
+            if program.refs:
+                ours = (
+                    searched(
+                        program, Span(points[which]), 0, machine, bounded, slots
+                    )
+                    >= 0
+                )
+            else:
+                ours = machine.matches(program, Span(points[which]))
             # The state cache is asked the same question as the machine, and a
             # pattern it refuses or a row it gave up on is not a disagreement,
             # it is the kernel falling back the way it does in the column.

@@ -300,6 +300,16 @@ def python_anchored(
     first of the two because `regex.match` says where a match may start and says
     nothing about where it ends.
 
+    The bracket is not a capturing one, and that is worth saying because it used
+    to be. A capturing bracket around the whole pattern numbers every group the
+    caller wrote one higher, so `(a)\\1` comes out as `\\A((a)\\1)\\Z` and the
+    backreference in it now names the wrapper rather than the group beside it.
+    That is a wrong answer and not a refusal, since the wrapper is still open
+    where the reference stands and a group that is still open reads as one that
+    never took part, so the pattern quietly stops matching anything. It never
+    showed while a backreference was refused on both engines and it stopped
+    being harmless the day one of them could read it. Document 95.
+
     The closing one used to be `\\z`, which is RE2's spelling of the same
     position and is a `bad escape \\z` to every CPython before 3.14. It never
     showed, because this library's own parser reads both spellings and the
@@ -347,8 +357,8 @@ def python_anchored(
     var rest = String(pattern[byte=cut:])
     var end = String("\n") if verbose else String("")
     if method == METHOD_MATCH:
-        return String(head, "\\A(", rest, end, ")")
-    return String(head, "\\A(", rest, end, ")\\Z")
+        return String(head, "\\A(?:", rest, end, ")")
+    return String(head, "\\A(?:", rest, end, ")\\Z")
 
 
 comptime ALPHABET_ROWS: Int = 4096
@@ -470,21 +480,17 @@ def program_for(
         if method == METHOD_MATCH or method == METHOD_FULLMATCH:
             # The two methods that rewrite are asked about the pattern as the
             # caller wrote it first, and the rewrite is only reached when that
-            # answers yes. The rewrite puts a group around the whole pattern, so
-            # every group in it is numbered one higher than the caller wrote it
-            # and a backreference in there now names the wrapper, which the
-            # grammar refuses because the wrapper is still open where the
-            # backreference stands. Upstream never meets that, since it anchors
-            # from outside the pattern with `regex.match` and writes no bracket
-            # at all.
+            # answers yes. So a refusal is worded over what the caller wrote,
+            # rather than over a pattern with a bracket round it that the caller
+            # never asked for and cannot see in the message.
             #
-            # Nothing reaches that today, because a backreference is refused on
-            # both engines, and the whole of this branch is so that it goes on
-            # being refused with the message and the flag it earned rather than
-            # with a parse error the rewrite invented. A `ValueError` saying the
-            # grammar cannot read a pattern the grammar reads perfectly well is
-            # a worse answer than a `NotImplementedError`, and pandas answers
-            # the pattern, so a gap is the honest word. Document 93.
+            # The bracket the rewrite writes is a non capturing one, which is
+            # what keeps the two compiles asking the same question now that a
+            # backreference is one of the things they can be asked. A capturing
+            # bracket numbers every group one higher and the reference follows
+            # the numbering, so the second compile would answer a different
+            # pattern from the one the first agreed to. `python_anchored` says
+            # more. Document 95.
             var own = compile_program(tree, ENGINE_PYTHON, wants, minor)
             if not own.ok:
                 return own^

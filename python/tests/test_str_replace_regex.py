@@ -227,11 +227,12 @@ def test_a_replacement_re2_cannot_read_is_a_value_error(firepanda: ModuleType) -
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A backreference goes to Python's `re` upstream, and both halves of the
-    lookaround that used to be on this list are answered now. Documents 93 and
-    94."""
+    """An atomic group goes to Python's `re` upstream. Both halves of the
+    lookaround used to be on this list and so did the backreference, and all
+    three are answered now. Documents 93, 94 and 95. The lookahead in front of
+    each pattern below is what routes the call."""
     mine = made(firepanda)
-    for pattern in (r"(a)\1", r"(a)(b)\2"):
+    for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
         with pytest.raises(NotImplementedError) as caught:
             mine.str.replace(pattern, "#", regex=True)
         assert pattern in str(caught.value), pattern

@@ -25,10 +25,11 @@ question against the ASCII class, which puts it beside RE2 on two of the three
 and not on the third: Python's ASCII `\\s` holds a vertical tab and RE2's never
 did. Document 88 is where that was measured.
 
-What is still RE2 only is most of the constructs. Python has a lookaround, a
+What is still RE2 only is some of the constructs. Python has a lookaround, a
 backreference, a conditional, an atomic group and a possessive quantifier, and of
-those this engine now has the lookahead half of the first one. The rest are
-refused for Python as a gap here rather than as something Python cannot do.
+those this engine now has both halves of the first one and the second one. The
+three that are left are refused for Python as a gap here rather than as something
+Python cannot do.
 
 The refusals are worth reading as a group, because they are not a list of things
 that were too hard. Every one of them is a construct RE2 itself refuses, which
@@ -209,6 +210,28 @@ machine being run.
 Document 94.
 """
 
+comptime IN_REF: UInt8 = 13
+"""Read again whatever a group matched earlier.
+
+`a` is the slot the group opened at, which is `2 * k` for group `k`, so the text
+to read again is between `slots[a]` and `slots[a + 1]`. `b` is 1 when the letters
+are compared with the ASCII case dropped and 0 when they are compared as they
+are. A group that never took part is a slot pair of minus one and the
+instruction fails, which is upstream's answer as well.
+
+This is the one instruction here whose answer depends on something other than
+the program and the position, and that is the whole of why it took a document of
+its own. Every other instruction can be looked at knowing only where the machine
+is standing. This one reads what the path that arrived took, so two paths
+standing at the same instruction and the same position are no longer the same
+question, and both the machine next door and the bitmap in the backtracker are
+built on those two being the same question.
+
+So a program holding one of these is run by the backtracker with the bitmap
+switched off, bounded by a count of steps rather than by one visit per
+instruction per position. Document 95.
+"""
+
 
 comptime MAX_INSTRUCTIONS: Int = 200000
 """How large a program may get before the compiler gives up.
@@ -358,6 +381,22 @@ struct Program(Movable):
     machine reads this to size its thread state, so a program and a machine built
     for it are the same call away from each other and neither has to be told
     twice.
+
+    A pattern holding a backreference is the one shape that carries slots
+    without anybody having asked for them, because the backreference reads one
+    and there is nowhere else for it to read. So a caller asking whether a row
+    holds `(\\w)\\1` pays for the slots anyway, which is a cost the pattern
+    brings rather than one the question does. Document 95.
+    """
+
+    var refs: Bool
+    """Whether the program reads back something a group matched earlier.
+
+    True when the code holds an `IN_REF`, which only Python's engine ever
+    compiles. What reads it is the pair of engines below the compiler: the
+    backtracker switches its bitmap off for such a program and the machine and
+    the state cache will not take one at all, so this is the flag that decides
+    which of the three is allowed to answer. Document 95.
     """
 
     var groups: Int
@@ -496,6 +535,7 @@ struct Program(Movable):
         self.problem = String("")
         self.gap = False
         self.slots = 0
+        self.refs = False
         self.groups = 0
         self.python = False
         self.anchored = False
@@ -1307,6 +1347,37 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         # already says.
         b.add_set(List[Int32](), False)
         return
+    if it.op == OP_GROUPREF:
+        # The flags are read here rather than in the checking walk because they
+        # are scoped, so `(?i:(a)\1)` folds and `(?i:(a))\1` does not, and only
+        # the walk that emits knows which scope it is standing in.
+        #
+        # Under the ASCII alphabet the comparison is the twenty six letters and
+        # nothing else, which is a subtraction rather than a table. Under the
+        # wide one upstream compares the two characters by their simple
+        # lowercase, which is neither the fold this compiler already has nor a
+        # table this library carries yet: `(?i)(s)\1` does not match `sſ` while
+        # `(?i)ss` does, because a literal is folded and a backreference is
+        # lowered. Answering that wants the lowercase table and is the next
+        # slice rather than this one. Document 95.
+        if folding and not b.narrow:
+            b.give_up(
+                String(
+                    "this engine has no backreference under the ignore case"
+                    " flag yet"
+                ),
+                True,
+            )
+            return
+        if not b.captures:
+            # Unreachable, and here because the alternative to a refusal is an
+            # instruction reading a slot that was never written. The compiler
+            # turns the slots on for any pattern holding one of these, whatever
+            # the caller asked for.
+            b.give_up(String("a backreference needs the groups kept"))
+            return
+        _ = b.emit(IN_REF, it.a * 2, Int32(1) if folding else Int32(0))
+        return
 
     b.give_up(String("unsupported pattern"))
 
@@ -1396,6 +1467,35 @@ def _holds_group(nodes: List[Node], node: Int32) -> Bool:
         if it.op == OP_SUBPATTERN:
             return True
         if _holds_group(nodes, it.first):
+            return True
+        at = it.next
+    return False
+
+
+def _holds_ref(nodes: List[Node], node: Int32) -> Bool:
+    """Whether a subtree reads back something a group matched.
+
+    Asked before anything is written, because the answer decides whether the
+    program carries slots and that has to be settled before the first save is
+    emitted. It is the whole tree rather than the part that gets written, so
+    `(a)(?P=1){0}` turns the slots on for a backreference that is then never
+    emitted. That is a few wasted slots rather than a wrong answer, and the
+    alternative is deciding the shape of the program from something the walk
+    that writes it has not reached yet.
+
+    Args:
+        nodes: The arena.
+        node: Where to start, which may be a whole list of siblings.
+
+    Returns:
+        True when there is a backreference anywhere under it.
+    """
+    var at = node
+    while at >= 0:
+        var it = nodes[Int(at)]
+        if it.op == OP_GROUPREF:
+            return True
+        if _holds_ref(nodes, it.first):
             return True
         at = it.next
     return False
@@ -1594,7 +1694,14 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
             )
             return
     if it.op == OP_GROUPREF:
-        _refuse_construct(b, String("backreference"))
+        if not b.python:
+            _refuse_construct(b, String("backreference"))
+            return
+        # Nothing to refuse on this side any more. The one thing about a
+        # backreference this engine still turns down is the Unicode reading of
+        # the ignore case flag, and that is refused where the instruction is
+        # written rather than here, because the flag is scoped and this walk
+        # enters bodies a scope has already been taken off. Document 95.
         return
     if it.op == OP_GROUPREF_EXISTS:
         _refuse_construct(b, String("conditional group"))
@@ -2427,23 +2534,49 @@ def compile_program(
         )
         return out^
 
-    var b = _Builder(tree.flags, captures, python, minor)
+    # A backreference reads a slot, and a caller asking whether a row holds one
+    # has not asked for slots. So the pattern turns them on for itself, which is
+    # the one place the shape of the program is decided by the pattern rather
+    # than by the question. Document 95.
+    var slotted = captures or _holds_ref(tree.nodes, tree.root)
+
+    var b = _Builder(tree.flags, slotted, python, minor)
     _check_node(b, tree.nodes, tree.root, MAX_REPEAT_COUNT)
     if b.failed:
         out.ok = False
         out.problem = b.problem.copy()
         out.gap = b.gap
         return out^
-    if captures:
+    if slotted:
         _ = b.emit(IN_SAVE, 0, 0)
     _emit_node(b, tree.nodes, tree.root)
-    if captures:
+    if slotted:
         _ = b.emit(IN_SAVE, 1, 0)
     _ = b.emit(IN_MATCH, 0, 0)
     if b.failed:
         out.ok = False
         out.problem = b.problem.copy()
         out.gap = b.gap
+        return out^
+    # Asked of the instructions rather than of the tree, because a construct
+    # under a repeat of zero is in the tree and not in the program. A pattern
+    # holding both is refused: the backtracker is the only engine that can read
+    # a backreference and it has one stack and one bitmap, so a lookaround,
+    # which is a search inside a search, is a walk it has nowhere to put.
+    var saw_look = False
+    for i in range(len(b.code)):
+        var op = b.code[i].op
+        if op == IN_REF:
+            out.refs = True
+        elif op == IN_LOOK or op == IN_BEHIND:
+            saw_look = True
+    if out.refs and saw_look:
+        out.ok = False
+        out.refs = False
+        out.problem = String(
+            "this engine has no lookaround beside a backreference yet"
+        )
+        out.gap = True
         return out^
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
@@ -2467,7 +2600,7 @@ def compile_program(
     if alphabet:
         _fill_classes(out)
     out.groups = Int(tree.groups)
-    out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
+    out.slots = 2 * (Int(tree.groups) + 1) if slotted else 0
     # The parser keeps the names and the numbers as two lists the length of
     # however many groups were named, and what a caller labelling columns wants
     # is one entry per group whether it was named or not.

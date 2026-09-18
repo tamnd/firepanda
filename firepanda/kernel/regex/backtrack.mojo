@@ -52,15 +52,28 @@ Captures come out of the same walk. A save writes a position into a slot on the
 way in and puts back what it found on the way out, which on an explicit stack is
 a second kind of entry pushed under the path it protects. So the slots are right
 at the moment a match is reached and nowhere else, which is all anybody needs.
+
+That last paragraph is why this file, and not the one next door, is where a
+backreference lives. Reading one means asking what a group matched on the way
+here, and a path is the only thing that knows. It also takes most of the bitmap
+away, since the reason a pair may be dropped was that an instruction and a
+position say everything about what is left to do, and with a backreference in
+the program they no longer do. What still does is the pair and the slots, so
+such a program keeps its bitmap and forgets everything in it the moment a slot
+changes value, and a count of steps is the bound underneath that. It is the one
+shape here that is never handed back, because there is nothing underneath to
+hand it to. Document 95.
 """
 
 from std.collections.span import Span
 
+from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import (
     Machine,
     accepts,
     first_stop,
     holds,
+    matches_text,
     point_at,
 )
 from firepanda.kernel.regex.program import (
@@ -69,6 +82,7 @@ from firepanda.kernel.regex.program import (
     IN_JUMP,
     IN_LOOK,
     IN_MATCH,
+    IN_REF,
     IN_SAVE,
     IN_SPLIT,
     Program,
@@ -94,12 +108,73 @@ a bitmap the size of a cache is a clear that costs more than the row it is
 clearing, not because anything breaks above it.
 """
 
+comptime MAX_STEPS: Int = 1 << 22
+"""How many instructions one search may walk when the bitmap speaks for less.
+
+A pattern holding a backreference keeps its bitmap but is made to forget it
+every time a slot changes, so the bound above stops being a bound on the walk
+and this one is what is left. Four million, which is sixteen times the number of
+visits the bitmap allows, because a program that needs a bound at all is one
+nobody should be able to hang the process with and not one anybody should be
+able to notice on an ordinary row. Document 95 section 6 has why there is no
+third engine to hand such a row to and what a caller is told instead.
+"""
+
 comptime GAVE_UP: Int = -2
 """The row was too long for the bitmap. Run the machine on it."""
+
+comptime _TOO_LONG: StaticString = "this pattern is taking too long on this row"
+"""What a caller is told when a search runs out of steps.
+
+A sentence about the pair rather than about the pattern, because a backreference
+that is cheap on most rows and ruinous on one is the ordinary case rather than
+the odd one. Upstream says nothing at all here and keeps going, which on the
+same pair is a call that does not come back. Document 95 section 6.
+"""
 
 comptime NO_MATCH: Int = -1
 """There is no match at or after the cursor. The same value the machine's own
 search returns, so a caller that falls back reads one number."""
+
+
+def _reads_again(
+    points: Span[UInt32, _],
+    lead: Int,
+    opened: Int,
+    at: Int,
+    width: Int,
+    folding: Bool,
+) -> Bool:
+    """Whether the text at one position is the text a group matched at another.
+
+    The folding half is the ASCII letters and nothing else, which is what
+    upstream compares under `(?ai)`. Under the wide alphabet upstream compares
+    the two characters by their simple lowercase, which is a table this library
+    has not got yet, and the compiler refuses that spelling rather than guessing
+    at it. Document 95 section 8.
+
+    Args:
+        points: The text, as code points.
+        lead: How many unreadable bytes stand in front of them.
+        opened: Where the group started.
+        at: Where the reference is being read.
+        width: How long the group's text is.
+        folding: Whether to drop the case of the twenty six ASCII letters.
+
+    Returns:
+        True when the two runs are the same run.
+    """
+    for i in range(width):
+        var want = point_at(points, lead, opened + i)
+        var have = point_at(points, lead, at + i)
+        if folding:
+            if want >= 0x41 and want <= 0x5A:
+                want += 32
+            if have >= 0x41 and have <= 0x5A:
+                have += 32
+        if want != have:
+            return False
+    return True
 
 
 struct Bounded(Movable):
@@ -117,13 +192,19 @@ struct Bounded(Movable):
     """Whether this can be asked anything at all, which is whether the program
     compiled and whether it holds a question about the text ahead. The
     assertions and the captures it answers itself, unlike the state cache, and
-    the row being too long is its other way out. A lookahead is the one shape it
-    hands straight back, because a lookahead is a search inside a search and
-    there is one stack and one bitmap here to run it on."""
+    the row being too long is its other way out. A lookaround is the one shape it
+    hands straight back, because a lookaround is a search inside a search and
+    there is one stack and one bitmap here to run it on.
+
+    The traffic runs the other way for a backreference. That is the one shape
+    this engine takes and the machine cannot, so a program holding one arrives
+    here and is never handed back, which is why the compiler refuses a pattern
+    holding a lookaround and a backreference at once. Document 95."""
 
     var seen: List[UInt64]
     """One bit per instruction per position, `pc * (length + 1) + at`. Cleared
-    per row, which is the reason the bound above is a small number."""
+    per row, which is the reason the bound above is a small number, and cleared
+    again inside a row whenever `stamped` and a slot changes."""
 
     var slots: List[Int32]
     """Where each group opened and closed on the path being walked, which is the
@@ -147,6 +228,46 @@ struct Bounded(Movable):
     var jobs_at: List[Int32]
     """The positions of the entries in `jobs_pc`, or the values to restore."""
 
+    var memo: Bool
+    """Whether arriving twice at an instruction and a position may be dropped
+    outright.
+
+    True for every program but one holding a backreference. That instruction
+    reads what the path that arrived took, so two paths standing in the same
+    place are two different questions and dropping the second one is dropping an
+    answer. With this off the bitmap is still kept, under the narrower rule
+    `stamped` below has, and `MAX_STEPS` is what bounds the walk. Document 95.
+    """
+
+    var stamped: Bool
+    """Whether the bitmap is in use under that narrower rule, which is the mode a
+    program holding a backreference runs in.
+
+    An instruction and a position do not say everything about what is left to do
+    when a backreference can read a slot, but an instruction and a position and
+    the slots do. So the bitmap is kept and everything in it is forgotten the
+    moment a slot changes value, which leaves only the arrivals that really are
+    the same state. Set per row rather than per program, because a row too long
+    for the bitmap has to run without one and there is no second engine to hand
+    such a row to. Document 95 section 3."""
+
+    var marks: List[Int32]
+    """The cells set since the last slot changed, so that forgetting them is the
+    length of that list rather than the length of the bitmap. Empty unless
+    `stamped`."""
+
+    var steps: Int
+    """How much of that bound this search has spent, counted only when `memo` is
+    off since that is the only case where anything but the bitmap bounds the
+    walk."""
+
+    var overrun: Bool
+    """Whether the last search ran out of steps rather than finding an answer.
+
+    Read by the caller rather than by anything here, because the answer to an
+    overrun is an error and this is several layers below the one that raises.
+    """
+
     def __init__(out self, program: Program):
         """Sizes everything for a program.
 
@@ -160,6 +281,11 @@ struct Bounded(Movable):
         self.jobs_pc = []
         self.jobs_at = []
         self.word = []
+        self.memo = not program.refs
+        self.stamped = False
+        self.marks = []
+        self.steps = 0
+        self.overrun = False
         for i in range(len(program.code)):
             var instruction = program.code[i]
             if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
@@ -187,6 +313,35 @@ struct Bounded(Movable):
         """
         self.jobs_pc.append(pc)
         self.jobs_at.append(at)
+
+    def _write(mut self, slot: Int, value: Int32):
+        """Puts a value in a slot and forgets the bitmap if that changed it.
+
+        Every write to a slot goes through here, the one that opens a group and
+        the one that puts back what a group held before it, because the bitmap
+        in `stamped` mode is only allowed to speak for as long as the slots
+        stand still.
+
+        The comparison matters rather than being a saving. A loop whose body
+        matches nothing writes the same two numbers into the same two slots on
+        every turn of it, and a write counted as a change on each turn would
+        forget the bitmap on each turn and leave the loop with nothing to stop
+        it. Document 95 section 3.
+
+        Args:
+            slot: Which one.
+            value: What to put in it.
+        """
+        if self.stamped and self.slots[slot] != value:
+            self._forget()
+        self.slots[slot] = value
+
+    def _forget(mut self):
+        """Clears the cells set since the last slot changed."""
+        for i in range(len(self.marks)):
+            var cell = Int(self.marks[i])
+            self.seen[cell >> 6] &= ~(UInt64(1) << UInt64(cell & 63))
+        self.marks.clear()
 
     def _attempt(
         mut self,
@@ -222,14 +377,26 @@ struct Bounded(Movable):
             if pc < 0:
                 # The way out of a save. Everything the save protected has been
                 # walked, so the slot goes back to what it held before it.
-                self.slots[Int(-pc - 1)] = at
+                self._write(Int(-pc - 1), at)
                 continue
-            var cell = Int(pc) * (length + 1) + Int(at)
-            var word_at = cell >> 6
-            var bit = UInt64(1) << UInt64(cell & 63)
-            if (self.seen[word_at] & bit) != 0:
-                continue
-            self.seen[word_at] |= bit
+            if self.memo or self.stamped:
+                var cell = Int(pc) * (length + 1) + Int(at)
+                var word_at = cell >> 6
+                var bit = UInt64(1) << UInt64(cell & 63)
+                if (self.seen[word_at] & bit) != 0:
+                    continue
+                self.seen[word_at] |= bit
+                if self.stamped:
+                    self.marks.append(Int32(cell))
+            if not self.memo:
+                # The bitmap speaks for less here, so the count is what really
+                # bounds this. The step is charged at the pop rather than at the
+                # push, because what is being bounded is the walking and a push
+                # that is never popped costs nothing.
+                self.steps += 1
+                if self.steps > MAX_STEPS:
+                    self.overrun = True
+                    return NO_MATCH
             var instruction = program.code[Int(pc)]
             if instruction.op == IN_MATCH:
                 if advance and Int(at) == start:
@@ -264,8 +431,28 @@ struct Bounded(Movable):
                 else:
                     var slot = Int(instruction.a)
                     self._push(Int32(-slot - 1), self.slots[slot])
-                    self.slots[slot] = at
+                    self._write(slot, at)
                     self._push(pc + 1, at)
+            elif instruction.op == IN_REF:
+                var slot = Int(instruction.a)
+                var opened = Int(self.slots[slot])
+                var closed = Int(self.slots[slot + 1])
+                # A group that never took part, which is a slot pair still at
+                # minus one, fails the reference rather than matching nothing.
+                # That is upstream's answer: `re.match(r"(a)?\1b", "b")` is None
+                # and `re.match(r"(a?)\1b", "b")` matches, because in the second
+                # one the group took part and matched nothing.
+                if opened >= 0 and closed >= opened:
+                    var width = closed - opened
+                    if Int(at) + width <= length and _reads_again(
+                        points,
+                        lead,
+                        opened,
+                        Int(at),
+                        width,
+                        instruction.b == 1,
+                    ):
+                        self._push(pc + 1, at + Int32(width))
             elif Int(at) < length and accepts(
                 instruction, program.ranges, point_at(points, lead, Int(at))
             ):
@@ -313,16 +500,27 @@ struct Bounded(Movable):
         """
         if not self.ok:
             return GAVE_UP
+        self.overrun = False
+        self.steps = 0
         var length = lead + len(points)
         var cells = program.sized() * (length + 1)
+        self.marks.clear()
         if cells > MAX_CELLS:
-            return GAVE_UP
-        var words = (cells + 63) // 64
-        if len(self.seen) < words:
-            self.seen = List[UInt64](length=words, fill=0)
+            # A row too long for the bitmap goes to the machine, and a program
+            # holding a backreference is one the machine cannot be handed at
+            # all. So that one runs the row without a bitmap and the step count
+            # is the whole of the bound. Document 95 section 3.
+            if self.memo:
+                return GAVE_UP
+            self.stamped = False
         else:
-            for i in range(words):
-                self.seen[i] = 0
+            var words = (cells + 63) // 64
+            if len(self.seen) < words:
+                self.seen = List[UInt64](length=words, fill=0)
+            else:
+                for i in range(words):
+                    self.seen[i] = 0
+            self.stamped = not self.memo
         for k in range(self.nslots):
             self.slots[k] = -1
 
@@ -356,6 +554,11 @@ struct Bounded(Movable):
             )
             if end != NO_MATCH:
                 return end
+            if self.overrun:
+                # Nothing later in the row is going to be cheaper than what has
+                # already been given up on, and the caller is about to raise
+                # anyway, so the rest of the positions are not tried.
+                return NO_MATCH
             position += 1
         return NO_MATCH
 
@@ -368,7 +571,7 @@ def searched(
     mut bounded: Bounded,
     mut found: List[Int32],
     advance: Bool = False,
-) -> Int:
+) raises -> Int:
     """The leftmost first match at or after a cursor, from whichever engine can
     answer.
 
@@ -391,11 +594,51 @@ def searched(
 
     Returns:
         Where the match ends, or -1 when there is none at or after the cursor.
+
+    Raises:
+        Error: If the row ran out of steps, which only a pattern holding a
+            backreference can do.
     """
     var end = bounded.search(program, points, 0, first, found, advance)
+    if bounded.overrun:
+        raise Error(_TOO_LONG)
     if end != GAVE_UP:
         return end
     return machine.search(program, points, first, found, advance)
+
+
+def held_text(program: Program, text: StringSlice) raises -> Bool:
+    """Whether a compiled pattern matches somewhere in a piece of text.
+
+    The same question `matches_text` next door answers and the same answer for
+    every program that one can read, and here rather than there because a
+    program holding a backreference is one the machine cannot read at all. That
+    machine is written on threads that merge, this engine is the one that keeps
+    a path, and a backreference is a question about the path. So the choosing
+    has to live on this side of the two, since this is the side that can see
+    both. Document 95.
+
+    The one shot form, which builds both sets of buffers, uses them once and
+    drops them. A caller with a column to walk wants to keep them instead.
+
+    Args:
+        program: The compiled pattern.
+        text: The text.
+
+    Returns:
+        True when some part of it matches.
+
+    Raises:
+        Error: If the row ran out of steps, which only a pattern holding a
+            backreference can do.
+    """
+    if not program.refs:
+        return matches_text(program, text)
+    var points = decoded(text)
+    var machine = Machine(program)
+    var bounded = Bounded(program)
+    var found = List[Int32]()
+    return searched(program, Span(points), 0, machine, bounded, found) >= 0
 
 
 def located(
@@ -405,7 +648,7 @@ def located(
     mut machine: Machine,
     mut bounded: Bounded,
     mut found: List[Int32],
-) -> Int:
+) raises -> Int:
     """Where the leftmost first match ends, from whichever engine can answer.
 
     The other half of the arrangement above, for the caller that cuts its text
@@ -426,8 +669,15 @@ def located(
 
     Returns:
         Where the match ends, or -1 when there is none.
+
+    Raises:
+        Error: If the row ran out of steps, which only a pattern holding a
+            backreference can do and which this door never sees, since a
+            backreference is refused on the engine that comes through here.
     """
     var end = bounded.search(program, points, lead, 0, found)
+    if bounded.overrun:
+        raise Error(_TOO_LONG)
     if end != GAVE_UP:
         return end
     return machine.find(program, points, lead)

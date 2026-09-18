@@ -78,6 +78,7 @@ from firepanda.kernel.regex.program import (
     IN_LOOK,
     IN_MATCH,
     IN_NOT_SET,
+    IN_REF,
     IN_SAVE,
     IN_SET,
     IN_SPLIT,
@@ -560,6 +561,20 @@ def _queue(
                 nslots,
                 word,
             )
+    elif instruction.op == IN_REF:
+        # The thread dies, and the reason it dies rather than being answered is
+        # the reason this machine is safe. Two threads standing at the same
+        # instruction and the same position are merged here, which is what makes
+        # the work the length of the row times the size of the program, and a
+        # backreference is a question those two threads can answer differently.
+        # So the merge would have to go, and with it the bound.
+        #
+        # No program holding one of these reaches here. The compiler sets a flag
+        # on it, the backtracker takes every such program and never hands one
+        # back, and the state cache and this machine both turn it down. This
+        # branch is the third of those refusals written where a reader of the
+        # walk will meet it. Document 95.
+        pass
     elif instruction.op == IN_SAVE:
         if nslots == 0:
             # A caller asking a program with saves in it a question that has no
