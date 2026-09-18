@@ -95,8 +95,15 @@ PATTERNS = [
     "(?:ab)+",
     "a|b",
     "\u00df",
+    "a b",
+    "[a b]",
 ]
-"""Twenty two patterns, every one of them run with every flag combination."""
+"""Twenty four patterns, every one of them run with every flag combination.
+
+The last two are there for verbose mode, which reads one of them as two
+characters and the other as three because the skip happens outside a class and
+not inside one. Every other letter reads both of them as written.
+"""
 
 FLAGS = [
     re.IGNORECASE,
@@ -106,8 +113,12 @@ FLAGS = [
     re.IGNORECASE | re.MULTILINE,
     re.UNICODE,
     re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    re.ASCII,
+    re.IGNORECASE | re.ASCII,
+    re.VERBOSE,
+    re.VERBOSE | re.ASCII,
 ]
-"""The combinations of the four letters this library reads, plus the one that
+"""The combinations of the six letters this library reads, plus the one that
 asks for what this engine does anyway."""
 
 
@@ -366,18 +377,16 @@ def test_a_pattern_that_is_not_text_is_refused_before_the_flag_is_read(
 
 
 def test_a_flag_value_that_names_no_letter_is_refused(firepanda: ModuleType) -> None:
-    """The same three letters are gaps here as for the mask methods, and the
-    same stray bit is refused, because all of it happens while the pattern
-    compiles and the scan is downstream of that."""
+    """The stray bits, which are refused rather than dropped. `re.DEBUG` is a
+    letter `re` names and answers by printing the parsed pattern on the way
+    past, and the other two are numbers that belong to nothing. All of it
+    happens while the pattern compiles and the scan is downstream of that."""
     mine = made(firepanda)
-    for flags in (re.VERBOSE, re.ASCII, re.DEBUG):
+    for flags in (re.DEBUG, 1024, 1 << 30):
         with pytest.raises(NotImplementedError):
             mine.str.count("a", flags=flags)
         with pytest.raises(NotImplementedError):
             mine.str.replace("a", "-", flags=flags, regex=True)
-    for flags in (re.VERBOSE, re.ASCII, re.DEBUG):
-        with pytest.raises(NotImplementedError):
-            mine.str.count("a", flags=flags)
 
 
 def test_the_locale_flag_is_refused_the_way_python_refuses_it(

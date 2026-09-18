@@ -138,9 +138,21 @@ against every letter there is rather than against the ASCII 63."""
 comptime AT_NON_BOUNDARY_UNICODE: UInt8 = 11
 """`\\B` read the way Python reads it.
 
-This one has no ASCII twin that works. `AT_NON_BOUNDARY` is refused, because
-RE2 asks the question between bytes and this engine walks characters, and there
-is no such trouble here: Python asks it between characters and so does this."""
+`AT_NON_BOUNDARY` is not its ASCII twin, even though `AT_BOUNDARY` is
+`AT_BOUNDARY_UNICODE`'s. That one is RE2's, which asks the question between
+bytes and is refused for it, and which also has none of the special case below.
+`AT_NON_BOUNDARY_ASCII` is the twin."""
+
+comptime AT_NON_BOUNDARY_ASCII: UInt8 = 12
+"""`\\B` read the way Python reads it under `(?a)`, which is the same question
+asked against the ASCII word class.
+
+`\\b` needs no such value, because RE2's `\\b` already asks against exactly the
+characters Python's ASCII `\\w` holds and has no special case attached to it.
+`\\B` does, and the special case is the reason this exists: Python fails a `\\B`
+on an empty row whichever alphabet was asked for, and RE2 matches one. Reusing
+`AT_NON_BOUNDARY` for the narrow reading would have taken RE2's answer for the
+empty row along with the alphabet, and document 88 is where that was caught."""
 
 
 comptime CATEGORY_DIGIT: UInt8 = 1

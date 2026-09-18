@@ -76,9 +76,11 @@ PATTERNS = (
     r"(a)(x)?",
     r"(a*)b",
     r"(.)",
+    r"( \w ) (\d)",
 )
-"""Seven patterns: two groups, one group, a class, a name, an optional group, an empty match and a
-group that matches anything."""
+"""Eight patterns: two groups, one group, a class, a name, an optional group, an empty match, a
+group that matches anything, and one written with spaces in it so that verbose mode has something
+to throw away and every other flag has a pattern that needs the spaces matched."""
 
 
 def made(firepanda: ModuleType, values: list[Any] = ROWS) -> Any:
@@ -308,8 +310,18 @@ is a letter. The fifth is the dot row, where the only thing between an `a` and a
 The sixth and seventh are the fold rows, a Kelvin sign and a capital F.
 """
 
-FLAGS = (0, re.IGNORECASE, re.MULTILINE, re.DOTALL, re.UNICODE, re.IGNORECASE | re.DOTALL)
-"""The four letters that go through, alone and in one pair, with no flags at the front of the list
+FLAGS = (
+    0,
+    re.IGNORECASE,
+    re.MULTILINE,
+    re.DOTALL,
+    re.UNICODE,
+    re.IGNORECASE | re.DOTALL,
+    re.ASCII,
+    re.IGNORECASE | re.ASCII,
+    re.VERBOSE,
+)
+"""The six letters that go through, alone and in two pairs, with no flags at the front of the list
 so that every sweep below also runs the unflagged call it is being compared against."""
 
 
@@ -325,7 +337,7 @@ def their_flagged(pattern: str, flags: int = 0) -> list[list[Any]]:
 
 @needs_pandas
 def test_every_pattern_under_every_flag_matches_pandas(firepanda: ModuleType) -> None:
-    """Seven patterns under six flag settings over eight rows, which is 336 cells.
+    """Eight patterns under nine flag settings over eight rows, which is 576 cells.
 
     The sweep is the assertion that matters here. Each test below it names one flag and one row
     where that flag changes the answer, and those are worth reading, but they are three cells out
@@ -390,13 +402,23 @@ def test_the_locale_flag_is_a_value_error_on_both_sides(firepanda: ModuleType) -
         their_flagged(r"([a-z])", re.LOCALE)
 
 
-def test_the_two_letters_this_library_cannot_read_say_so(firepanda: ModuleType) -> None:
-    """Verbose mode is not read by the parser and the ascii flag is not carried, and both of those
-    are gaps in this library rather than anything upstream does, so they answer there and refuse
-    here. A bit belonging to none of the seven letters is refused as well rather than dropped."""
-    for flags in (re.VERBOSE, re.ASCII):
-        with pytest.raises(NotImplementedError):
-            flagged(firepanda, r"([a-z])", flags)
+@needs_pandas
+def test_the_last_two_letters_answer_here_now(firepanda: ModuleType) -> None:
+    """Verbose mode and the ascii flag were the two this method could not read, and they were the
+    two nothing on the accessor could read. Each gets the row where it changes the answer: a
+    pattern written with spaces in it under one, and a Kelvin sign that stops being a `k` under the
+    other."""
+    assert flagged(firepanda, r"( [a-z] )", re.VERBOSE)[1] == ["a"]
+    assert flagged(firepanda, r"( [a-z] )")[1] == [None]
+    assert flagged(firepanda, r"([a-z])", re.IGNORECASE)[5] == ["\u212a"]
+    assert flagged(firepanda, r"([a-z])", re.IGNORECASE | re.ASCII)[5] == [None]
+    assert their_flagged(r"( [a-z] )", re.VERBOSE)[1] == ["a"]
+    assert their_flagged(r"([a-z])", re.IGNORECASE | re.ASCII)[5] == [None]
+
+
+def test_a_flag_value_that_names_no_letter_is_still_refused(firepanda: ModuleType) -> None:
+    """A bit belonging to none of the seven letters is refused rather than dropped, which is the
+    rule document 85 set and the one a defect found in document 87 had been breaking."""
     with pytest.raises(firepanda.errors.UnsupportedError, match="flag value"):
         flagged(firepanda, r"([a-z])", 1024)
 

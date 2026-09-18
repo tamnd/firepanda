@@ -60,6 +60,7 @@ from firepanda.kernel.regex.route import (
     ENGINE_RE2,
     holds_unsupported,
 )
+from firepanda.kernel.regex.tokens import FLAG_VERBOSE
 
 
 comptime METHOD_CONTAINS: UInt8 = 0
@@ -275,7 +276,9 @@ def anchored(method: UInt8, pattern: String) -> String:
     return String(head, start, "(", out, ")")
 
 
-def python_anchored(method: UInt8, pattern: String) -> String:
+def python_anchored(
+    method: UInt8, pattern: String, verbose: Bool = False
+) -> String:
     """Rewrites a pattern the way a call that landed on Python's engine needs it.
 
     The function above copies a rewrite pandas does. This one copies a rewrite
@@ -303,9 +306,22 @@ def python_anchored(method: UInt8, pattern: String) -> String:
     the same, because the alternative to a line nobody runs is a wrong anchor
     the day somebody does.
 
+    Under verbose mode a newline goes in ahead of the closing bracket, and it
+    is there because a pattern is allowed to end in the middle of a comment. `a
+    # c` is a perfectly good verbose pattern, and gluing `)` onto the end of it
+    puts the bracket inside the comment, where the grammar never sees it and
+    the group is never closed. A newline is the only thing that ends a comment,
+    and under verbose mode a newline outside a class is thrown away, so it
+    costs nothing anywhere else. Upstream has no such trouble because
+    `regex.fullmatch` anchors from outside the pattern and never writes a
+    bracket at all. Document 88 is where this was found, by a sweep, on the one
+    pattern in it that ends in a comment.
+
     Args:
         method: Which of the six asked.
         pattern: The pattern as the caller wrote it.
+        verbose: Whether the pattern is being read under verbose mode, counting
+            both the letter passed beside it and a `(?x)` written into it.
 
     Returns:
         The pattern the engine is to be given.
@@ -315,9 +331,10 @@ def python_anchored(method: UInt8, pattern: String) -> String:
     var cut = leading_flags(pattern)
     var head = String(pattern[byte=0:cut])
     var rest = String(pattern[byte=cut:])
+    var end = String("\n") if verbose else String("")
     if method == METHOD_MATCH:
-        return String(head, "\\A(", rest, ")")
-    return String(head, "\\A(", rest, ")\\z")
+        return String(head, "\\A(", rest, end, ")")
+    return String(head, "\\A(", rest, end, ")\\z")
 
 
 def program_for(
@@ -381,7 +398,12 @@ def program_for(
             # choice decides is which pattern the message quotes.
             return compile_program(tree, ENGINE_PYTHON)
         return compile_program(
-            parse_pattern(python_anchored(method, pattern), flags),
+            parse_pattern(
+                python_anchored(
+                    method, pattern, (tree.flags & FLAG_VERBOSE) != 0
+                ),
+                flags,
+            ),
             ENGINE_PYTHON,
             # `count` asks for captures on this engine and not on the other one,
             # which is the one place the two scans disagree about what they need
