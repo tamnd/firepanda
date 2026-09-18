@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: an outer join takes a condition about its right side, so TPC-H q13 answers
+
+`FROM customer LEFT JOIN orders ON c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%'` was refused. It runs now, and TPC-H q13 with it. Issue #816.
+
+The join node carries key pairs rather than a predicate, so a written condition is split on `AND` and each part is asked which sides it reads. A part that is an equality with one side on the left and the other on the right is a key pair. Anything else is a residual, and a residual over an inner join is a filter above the pairing, which answers the same query because every pairing the join produced is a pairing the condition asked about. Over an outer join it is not the same, since a left row that matched nothing is padded and kept and a filter above the join would then test the padding and throw the row away, so a residual there was refused.
+
+What that missed is that some residuals do not have to go above the join at all. A part that reads the right side and nothing else is saying which right rows are worth matching against, and a left, a semi and an anti join each ask their right side one question, which is whether a row there matches. A right row the condition throws away was never going to be the answer to that question, so throwing it away first is the same answer. The part goes under the right input, before the pairing is built, and the left rows are padded or dropped exactly as they were.
+
+A part that reads the left side, or both sides, is still refused, and with the sentence it came back with before. There is nowhere for those to go: a left row that fails one has to come out padded rather than dropped, and neither above the join nor under one of its inputs is a place that can say so.
+
+`pixi run tpch` is twenty of twenty two. The two left stop in two different places, q20 on a left join with two key pairs and q21 on a correlated `EXISTS` that matches through an inequality as well as an equality.
+
 ## [0.8.9] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).

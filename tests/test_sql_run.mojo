@@ -2868,6 +2868,64 @@ def test_an_anti_join_keeps_the_left_rows_that_did_not() raises:
     same(read_back(out, "qty"), [1, 5, 8, 12, 15, 25, 30], "qty")
 
 
+def test_an_outer_join_takes_a_condition_about_its_right_side() raises:
+    # Three bands charge more than 250 and band 20 is not one of them, so the
+    # row that band would have matched is padded instead. That is the whole of
+    # it: the condition throws away right rows before the pairing and the left
+    # rows come through either way, which is what an outer join promises.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales LEFT JOIN tiers ON qty = band AND rate"
+            " > 250 ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [1, 3, 5, 8, 12, 15, 20, 25, 30, 40], "qty")
+    same(
+        gapped(out, "rate"),
+        [-1, 300, -1, -1, -1, -1, -1, -1, -1, 400],
+        "rate",
+    )
+
+
+def test_a_semi_and_an_anti_join_take_one_too() raises:
+    # The same condition in the same place over the two joins that ask the
+    # right side whether a row matched. Bands 3 and 40 are the ones left after
+    # it, so the two answers are the ten rows split on those.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales SEMI JOIN tiers ON qty = band AND rate >"
+                " 250 ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 40],
+        "qty",
+    )
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales ANTI JOIN tiers ON qty = band AND rate >"
+                " 250 ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 5, 8, 12, 15, 20, 25, 30],
+        "qty",
+    )
+
+
+def test_an_outer_condition_about_the_left_side_is_still_refused() raises:
+    # A left row that fails this one is still a row the join has to answer for,
+    # padded rather than dropped, and there is nowhere to test it that keeps it.
+    with assert_raises(contains="left join on equalities"):
+        _ = run(
+            "SELECT qty FROM sales LEFT JOIN tiers ON qty = band AND price > 5",
+            session(),
+        )
+
+
 def test_a_semi_join_writes_a_left_row_once_however_many_matched() raises:
     # Band 3 is in the dupes frame twice. An inner join would answer with two
     # rows here and a semi join answers whether there was a match at all, so the

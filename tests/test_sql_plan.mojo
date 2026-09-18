@@ -1336,6 +1336,49 @@ def test_the_rest_of_an_outer_condition_is_refused_rather_than_moved() raises:
         _ = _plan("SELECT a FROM t LEFT JOIN u ON t.a = u.k AND t.b > 1")
 
 
+def test_a_right_only_part_of_an_outer_condition_goes_under_it() raises:
+    # A part that reads the right side and nothing else is picking which right
+    # rows are worth matching against, so it can be tested before the join
+    # rather than after it. The left rows it leaves with no match are padded by
+    # the join, which is what the query asked for.
+    assert_equal(
+        _plan("SELECT a FROM t LEFT JOIN u ON t.a = u.k AND u.k > 1"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN left [a = k]\n"
+            "    SCAN t []\n"
+            "    FILTER k > 1\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_semi_and_an_anti_join_take_the_same_part_the_same_way() raises:
+    # All three of these ask the right side one question, which is whether a row
+    # there matches, so all three answer the same with the rows that were never
+    # going to match thrown away first.
+    assert_equal(
+        _plan("SELECT a FROM t SEMI JOIN u ON t.a = u.k AND u.k > 1"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [a = k]\n"
+            "    SCAN t []\n"
+            "    FILTER k > 1\n"
+            "      SCAN u []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT a FROM t ANTI JOIN u ON t.a = u.k AND u.k > 1"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN anti [a = k]\n"
+            "    SCAN t []\n"
+            "    FILTER k > 1\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
 def test_two_equalities_are_two_key_pairs() raises:
     assert_true(
         "JOIN inner [b = b, a = k]"
