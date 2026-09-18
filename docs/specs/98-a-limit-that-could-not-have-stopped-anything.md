@@ -10,7 +10,7 @@ SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10;
 
 At 1M, ninety five rows out of a million survive the filter and ten of those are the answer, with all 105 columns coming back. The issue said the planner route was building the frame of ninety five rows and 105 columns in the middle and that the fix was a rule folding the filter, the sort and the limit into `filter_sort_limit`, which is the call the hand written port in firepanda-bench makes and which carries positions instead.
 
-That reading is half of it. The middle frame is real and it does cost something, which section 4 measures at about five milliseconds of the twenty four the query took. But the larger half is bigger than that and is nowhere near the width. A filter over a million rows was running on one core, and it was running there because of the `LIMIT 10` on the end of a statement whose limit could not have stopped a single chunk from being read.
+That reading is part of it. The middle frame is real and section 7 measures it at about three milliseconds. But the larger part is bigger than that and is nowhere near the width. A filter over a million rows was running on one core, and it was running there because of the `LIMIT 10` on the end of a statement whose limit could not have stopped a single chunk from being read.
 
 That half is one line in the pipeline driver. This document is about that line. The width is still open and section 7 says what is now known about it.
 
@@ -55,9 +55,11 @@ Four statements over the same table, the same 1M partition, five runs each, the 
 
 The hand written port, which is one `filter_sort_limit` call, answered the published q23 in 7.49 ms in the same batch. q20 is `COUNT(*)` over the same predicate with no limit anywhere and answered in 7.89 ms through the planner.
 
-Reading the rows. D is the scan and the predicate and nothing else, and it is the floor at 6.6 ms. B adds the sort of the surviving ninety five rows and costs 4.8 ms more, which is the middle frame: `Sort.process` flattens the selection the filter handed it, so ninety five rows across 105 columns are gathered before anything is ordered. A adds the limit and costs 12.3 ms more than B, for an operator that discards eighty five rows. C says the same thing from the other side: one column instead of 105 takes 4.4 ms off A and leaves 19.4, so the width is a fifth of the gap and the limit is the rest.
+Reading the rows. A adds the limit to B and costs 12.3 ms more for an operator whose job is to discard eighty five rows. C says the same thing from the other side: one column instead of 105 takes 4.4 ms off A and leaves 19.4, so the width is a fifth of the gap and the limit is the rest.
 
 Twelve milliseconds to throw away eighty five rows is not a cost the limit is paying. It is the cost of everything under the limit moving to one core.
+
+The gap between B and D is the only row here that did not survive being taken again. This batch says the sort of the ninety five survivors is worth 4.8 ms and a later batch on a quieter machine says it is worth about 1. The four statements were run back to back so the comparison that matters, which is A against the other three, holds, but a difference of a millisecond between two rows of this table is the machine and not the query. Section 7 has the decomposition taken again with fifteen runs a row and two rounds, which is the one to read for anything that small.
 
 ## 5. What it is worth
 
@@ -78,7 +80,7 @@ The first three rows are the change. q22 is the same shape as q23 with a narrowe
 
 The last five rows are the controls and the differences in them are the machine rather than the change. q20 and variants B and D have no limit in them at all, and the hand written route is one `filter_sort_limit` call that never reaches the pipeline driver, so none of the four can be touched by this. q24 is `SELECT SearchPhrase FROM hits WHERE SearchPhrase <> '' ORDER BY EventTime LIMIT 10`, which is the shape the change is for and does take the new route, but it reads two columns where q23 reads 105 and was already at the floor, so there was nothing in it to win.
 
-q23 through the planner is now 13.56 against 6.93 for the hand written route. Section 7 is about the 6.6 milliseconds between them.
+q23 through the planner is now 13.56 against 6.93 for the hand written route in this batch. Section 7 is about what is between them, taken again with more runs on a quieter machine, where the two are about nine and about six.
 
 ## 6. Why this is not only q23
 
@@ -88,8 +90,31 @@ It is also not only ClickBench. The shape is any aggregate or ordered query with
 
 ## 7. What is left
 
-The rule in #682 as it was written, which is one operator carrying positions from the filter through the sort so the wide gather happens once at ten rows instead of once at ninety five, is still worth something and is now the only thing left in q23. After the change the planner is at 13.56 and variant C, which is the same query one column wide, is at 7.62, so the 105 columns are costing about six milliseconds and the rest of the query is costing about seven. That six is the middle frame the issue was opened about.
+The middle frame #682 was opened about is what is left, and it is worth about three milliseconds of the nine that q23 now takes. Here is where they go, on the same binary in one batch, fifteen runs a row and two rounds, the smallest run of each row since a minimum is the row least disturbed by whatever else the machine was doing. All six are the same predicate over the same million rows and they differ in what they ask for after it.
 
-Two things to know before building it. The first is that the gather is ninety five rows wide, not a million, so what costs six milliseconds is 105 allocations and 105 offset walks rather than any volume of data, and a rule that fuses the three operators is not the only way to stop paying it. The second is that the measurement to take is C against A on the same binary in the same batch, since that is the pair that isolates the width, and not a hand written route against a planned one, which mixes the width in with everything else the planner does differently.
+| | statement | rows out | round 1 | round 2 |
+|---|---|---|---|---|
+| q20 | `COUNT(*)` | 1 of 1 column | 6.73 ms | 5.55 ms |
+| hand | the published q23, one `filter_sort_limit` call | 10 of 105 columns | 6.46 ms | 5.97 ms |
+| C | the published q23, projected to `EventTime` | 10 of 1 column | 6.29 ms | 6.43 ms |
+| D | no `ORDER BY` and no `LIMIT` | 95 of 105 columns | 8.30 ms | 8.12 ms |
+| B | no `LIMIT 10` | 95 of 105 columns | 8.96 ms | 9.93 ms |
+| A | the published q23 | 10 of 105 columns | 9.23 ms | 9.24 ms |
+
+The rows split in two. Everything that hands back ten rows or one column costs about six, and everything that hands back ninety five rows across 105 columns costs about nine, and which of the two a statement lands in has nothing to do with whether it sorts. C sorts and limits and costs what a count costs. D neither sorts nor limits and costs three more. The sort of the ninety five is about one millisecond, from B against D, and the limit above it is free, from A against B.
+
+So the three milliseconds are one thing: the ninety five rows that survive the filter are written out across 105 columns, and then ten of them are kept. The hand written route is in the cheap half of the table because `filter_sort_limit` carries positions and gathers once, at the end, for the ten rows it returns. That is what the box left open on #682 asks for and the table is the argument for it.
+
+Where the write happens depends on the statement, which is worth knowing because it decides where a fix goes. In D there is no sort, so the filter's selection reaches `Collect` and is flattened there. In A and B there is, and `Sort.process` flattens each chunk as it arrives, because what it holds has to be something a permutation can reach into. A fix has to keep the selection alive through the sort, which means a bounded sort holding what it was given rather than rows it has copied, and the final gather reading positions out of chunks. It is not the stacking of those chunks in `_order`, which was tried on its own and is measured below.
+
+## 8. What was tried and did not work
+
+One change was written and thrown away, and it is recorded because the reasoning behind it looked right.
+
+A bounded sort only needs its key columns contiguous, since `top_rows` scans them, and it reads everything else exactly once at the end for the rows that survived. So the version that was tried left every non key column in its chunks, stacked only the keys, and gathered the rest through a binary search per row at the end. On q23 that is 104 columns not stacked and ten rows searched for.
+
+It answered correctly, it passed the suite with three tests added for it, and it was between two and five percent slower than stacking, in three rounds of fifteen runs with the same binary pair each time. Stacking ninety five rows that have already been copied once is cheap, and the search costs more than it saves. The copy that is worth removing is the first one, the flatten in `process`, and removing the second one without the first buys nothing.
+
+## 9. What is left after that
 
 What this document does not answer is whether the batch size is right once a pipeline with a limit in it is allowed on the cores. A limit under a breaker still forces one chunk at a time, and that is correct. A limit above one now reads `worker_count()` times `BATCH_CHUNKS_PER_WORKER` chunks ahead, which is the same number every other pipeline reads, and nothing here measured whether that number is right for a line whose second half is serial.
