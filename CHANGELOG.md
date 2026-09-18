@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-09-19
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with two threads in it. The SQL transformer reads three more shapes of syntax, which clears the largest entries that were left in the refusal histogram, and two things that were running slower than they had to are not any more.
+
+The three shapes are a lambda, a list comprehension and a field access. Between them 531 statements in DuckDB's corpus used to stop at the transformer and 514 of them round trip now, with the rest holding something else that is still turned down. All three moved their refusal to lowering, where the sentence is about what firepanda can run rather than about what it can read, and that is the right place for it.
+
+The two speedups are both a route being chosen badly rather than a route being slow. A query with a limit on the end ran everything under the limit on one core, including the cases where a sort or a group by under it meant the limit could not have stopped the scan, which is twenty two of the 43 ClickBench statements. And a group by on a key that happened to be in order built a hash table anyway, because being in order was something a column had to be told rather than something anybody checked, which is TPC-H q21 twice over.
+
 ### Added: SQL reads a field access
 
 `(a).b` and `f(x).b` used to be refused by the transformer, and 114 statements in DuckDB's corpus stopped there. All 114 round trip now and none of them moved to another refusal. The refusal moved to lowering, where the sentence it says is that a field belongs to a struct and a firepanda column holds one scalar, so there is nothing here with a field in it to reach into.
@@ -23,6 +33,7 @@ The name after the dot is a `ColLabel`, which is the widest identifier class in 
 The node holds four things: the element written before `FOR`, a run of interned names, the source written after `IN`, and the condition an `IF` put on the end when one was written. The names are read as text the way a lambda's parameters are and for the same reason, which is that a name in that position is being bound rather than looked up, and the element and the condition both refer to it the way they refer to a column.
 
 DuckDB reads this as calls. `[x + 1 FOR x IN l]` is `list_apply(l, lambda x: x + 1)` in its own parse tree, and the form with a condition grows a `list_filter` and a pair of `struct_pack` calls under that. That is what a comprehension means rather than what it says, and this keeps what it says, so the printer hands back the brackets the query wrote instead of a nest of calls a reader would have to turn back into brackets.
+
 ### Changed: a limit above a sort no longer takes the query off the cores
 
 The pipeline driver runs the leading row local operators on every core, and it gave that up for the whole line when there was a limit anywhere in it. The reason was right: the parallel route reads a batch of chunks before it pushes any of them, and reading ahead on behalf of ten cores is reading rows a limit was about to make unnecessary.
@@ -8401,7 +8412,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.15...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.16...HEAD
+[0.8.16]: https://github.com/tamnd/firepanda/releases/tag/v0.8.16
 [0.8.15]: https://github.com/tamnd/firepanda/releases/tag/v0.8.15
 [0.8.14]: https://github.com/tamnd/firepanda/releases/tag/v0.8.14
 [0.8.13]: https://github.com/tamnd/firepanda/releases/tag/v0.8.13
