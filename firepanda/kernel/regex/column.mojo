@@ -45,7 +45,7 @@ have in the repository at all.
 from std.collections.span import Span
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder, stack_payloads
+from firepanda.array.strings import StringArray, stack_payloads
 from firepanda.array.strview import (
     INLINE_CAPACITY,
     StringView,
@@ -173,15 +173,21 @@ def text_extract_regex(
     answers for a row holding `a`.
 
     A null row is null everywhere, the same as every other kernel here, and it
-    is written rather than repaired at the end because these are builders and a
-    builder has to be told what a row is before it can be told the next one.
+    is written rather than repaired at the end, because a row can be null here
+    for three reasons and only one of them is the input being null.
 
-    This one is serial for the same reason `text_replace_regex` is. The answers
-    go into builders, a builder is one buffer with one cursor, and handing four
-    threads a share of one is a different design rather than a flag. What is
-    paid once per column rather than once per row is everything else: the
-    pattern is compiled before the first row, and the machine, the offsets and
-    the slots are made here and handed to every row.
+    This is the same morsel split `text_replace_regex` runs, done once per
+    group. Each group gets a view buffer sized before anything starts, since
+    there is one 16 byte view per row whatever the pattern finds, and a payload
+    per morsel for the answers too long to live inside a view. `stack_payloads`
+    lays those end to end afterwards and moves the long views onto them.
+
+    The validity is the one thing here that no other kernel in this file has to
+    build, because everywhere else a row is null exactly when the input was. A
+    group's bitmap starts empty and a thread sets the bit of every row its group
+    took part in. Two threads never touch the same byte of it: a morsel holds
+    131072 rows, which is a whole number of bytes, so the bit a thread writes is
+    in a byte no other thread has a row in.
 
     Args:
         a: The column.
@@ -196,50 +202,103 @@ def text_extract_regex(
         layer refuses before reaching here because pandas refuses it too.
 
     Raises:
-        Error: If a builder cannot allocate.
+        Error: Only what the morsel runtime raises.
     """
     var n = len(a)
     var groups = program.groups
-    var built = List[StringBuilder]()
+    var views = List[Buffer](capacity=groups)
+    var valid = List[Bitmap](capacity=groups)
     for _ in range(groups):
-        built.append(StringBuilder(capacity=n))
+        views.append(Buffer(n * VIEW_SIZE))
+        valid.append(Bitmap(n, all_valid=False))
 
-    var machine = Machine(program)
-    var points = List[UInt32]()
-    var offsets = List[Int]()
-    var found = List[Int32]()
-    for i in range(n):
-        if not a.is_valid(i):
-            for g in range(groups):
-                built[g].append_null()
-            continue
-        var bytes = a.unsafe_bytes(i)
-        decode_into(bytes, points)
-        offsets.clear()
-        var at = 0
-        for k in range(len(points)):
-            offsets.append(at)
-            at += byte_width(points[k])
-        offsets.append(at)
-        # The whole row is searched from its first position, which is the one
-        # place this differs from the replacing scan: that one walks a cursor
-        # and this one asks once and stops.
-        var end = machine.search(program, Span(points), 0, found)
-        if end < 0:
-            for g in range(groups):
-                built[g].append_null()
-            continue
-        for g in range(groups):
-            var opened = Int(found[(g + 1) * 2])
-            var closed = Int(found[(g + 1) * 2 + 1])
-            if opened < 0 or closed < opened:
-                built[g].append_null()
+    var out = List[StringArray](capacity=groups)
+    if n == 0 or groups == 0:
+        # An empty column answers empty columns and a pattern with no groups
+        # answers no columns at all. Neither is worth starting a morsel for.
+        for _ in range(groups):
+            out.append(StringArray(views.pop(0), Buffer(1), valid.pop(0), 0))
+        return out^
+
+    # A payload per morsel per group, laid out so that one group's morsels sit
+    # next to each other, which is the order the join below wants them in.
+    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var parts = List[List[UInt8]](capacity=morsels * groups)
+    for _ in range(morsels * groups):
+        parts.append(List[UInt8]())
+
+    def compute(start: Int, stop: Int) {mut parts, mut valid, mut views, imm}:
+        var mine = start // MORSEL_ROWS
+        # The pointer to each group's views is taken once for the morsel rather
+        # than once per row, which is what every other kernel that writes views
+        # does as well.
+        var first = views[0].unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var heads = List[type_of(first)](capacity=groups)
+        heads.append(first)
+        for g in range(1, groups):
+            heads.append(views[g].unsafe_mut_ptr().unsafe_bitcast[StringView]())
+        # One machine and one of each buffer for the whole morsel rather than
+        # one of each per row, which is what the serial version did per column.
+        var machine = Machine(program)
+        var points = List[UInt32]()
+        var offsets = List[Int]()
+        var found = List[Int32]()
+        for i in range(start, stop):
+            # A null's views are written rather than left alone, because a view
+            # that was never written is whatever the allocation held and every
+            # read of these columns would follow it.
+            if not a.is_valid(i):
+                for g in range(groups):
+                    heads[g].unsafe_offset(i)[] = StringView()
                 continue
-            built[g].append(bytes[offsets[opened] : offsets[closed]])
+            var bytes = a.unsafe_bytes(i)
+            decode_into(bytes, points)
+            offsets.clear()
+            var at = 0
+            for k in range(len(points)):
+                offsets.append(at)
+                at += byte_width(points[k])
+            offsets.append(at)
+            # The whole row is searched from its first position, which is the
+            # one place this differs from the replacing scan: that one walks a
+            # cursor and this one asks once and stops.
+            var end = machine.search(program, Span(points), 0, found)
+            if end < 0:
+                for g in range(groups):
+                    heads[g].unsafe_offset(i)[] = StringView()
+                continue
+            for g in range(groups):
+                var opened = Int(found[(g + 1) * 2])
+                var closed = Int(found[(g + 1) * 2 + 1])
+                if opened < 0 or closed < opened:
+                    heads[g].unsafe_offset(i)[] = StringView()
+                    continue
+                valid[g].set(i, True)
+                var piece = bytes[offsets[opened] : offsets[closed]]
+                if len(piece) == 0:
+                    heads[g].unsafe_offset(i)[] = StringView()
+                elif len(piece) <= INLINE_CAPACITY:
+                    heads[g].unsafe_offset(i)[] = make_inline_at(
+                        Pointer(to=piece[0]), len(piece)
+                    )
+                else:
+                    # The offset written is inside this morsel's own payload
+                    # and is moved onto the real one by `stack_payloads`.
+                    ref payload = parts[g * morsels + mine]
+                    var spot = len(payload)
+                    payload.extend(piece)
+                    heads[g].unsafe_offset(i)[] = make_long_at(
+                        Pointer(to=piece[0]), len(piece), 0, spot
+                    )
 
-    var out = List[StringArray]()
+    parallel_morsels(compute, n, MORSEL_ROWS)
+
     for _ in range(groups):
-        out.append(built.pop(0).finish())
+        var held = List[List[UInt8]](capacity=morsels)
+        for _ in range(morsels):
+            held.append(parts.pop(0))
+        var payload = stack_payloads(held^, views[0], n, MORSEL_ROWS)
+        out.append(StringArray(views.pop(0), payload^, valid.pop(0), n))
     return out^
 
 

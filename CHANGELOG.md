@@ -47,7 +47,19 @@ That reason stopped being one when `stack_payloads` landed in 0.8.8. Both kernel
 
 The test is the one the regular expression kernel got, asked twice over one column. The same rows are replaced once short enough to fit a single morsel and once doubled past the row count where every core takes a share, and row `i` of the tall answer has to be what row `i` of the short one was, for the exact search and then for the folded one. Three of the sample's rows come out too long to sit inside a view and go into a payload, the rest stay inside one, and two are null. Taking the offset shift out of the join on purpose fails it.
 
-`text_extract_regex` is the last kernel of this shape still running on one thread. It wants the same join done once per capturing group, so it is the same piece of work a few times over.
+`text_extract_regex` was the last kernel of this shape still running on one thread when this landed. It wants the same join done once per capturing group, which is what the extract entry in this release does.
+
+### Changed: pulling capture groups out of a column runs on every core
+
+`text_extract_regex` is the fourth and last kernel to take the route `stack_payloads` opened in 0.8.8, and it is the one that answers more than one column. `str.extract` gives back a column per capturing group, each as tall as the column it read, so the work is the same work as the three replaces with one join per group at the end of it rather than one. Each group gets a view buffer sized before anything starts, since there is one 16 byte view per row whatever the pattern finds, and a payload per morsel for the groups too long to sit inside a view. The payloads are laid out so a group's morsels sit next to each other, which is the order the join wants to read them in.
+
+The one thing here that the three replaces did not have to do is build a validity bitmap. Everywhere else in that file a row of the answer is missing exactly when the input row was, so the input's bitmap is copied and the work is done. A row of this answer is missing for three reasons: the input was null, the row matched nothing, or the group took no part in the match its row was in, which is what `(a)(x)?` says about a row holding `a`. So each group's bitmap starts empty and a thread sets the bit for the rows it owns. Two threads never touch the same byte of one, because a morsel is 131072 rows and that is a whole number of bytes, which is the same argument `repair_range` has been making about its own writes since it was written.
+
+Nothing about the answer moves. The match is still the leftmost one anywhere in the row, a row with no match is still missing in every column so that the columns of a row agree about whether there was a match at all, and a group that matched the empty string is still empty text rather than missing.
+
+The test is the one the other three got. The same five rows are extracted once inside a single morsel and once tiled past the row count where every core takes a share, and row `i` of each tall column has to say what row `i` of the short one said. The tile is chosen so the question is a real one: one row is long enough that both of its groups go into a payload, one sits inside its views, one leaves the second group out, one matches nothing, and one is null. Laying the payloads out per morsel per group and then reading them back in the other order fails it.
+
+There is no ClickBench query on this path, so this one has no number from the suite and is not claimed to have one. What it has is the same shape as its three neighbours, and the reason for doing it is that it was the last kernel in the package whose docstring still explained why it ran on one thread.
 
 ## [0.8.8] - 2026-09-18
 
