@@ -77,6 +77,7 @@ from firepanda.kernel.regex.program import (
     IN_JUMP,
     IN_LOOK,
     IN_MATCH,
+    IN_REF,
     IN_SAVE,
     IN_SPLIT,
     Program,
@@ -298,6 +299,16 @@ struct Cache(Movable):
             if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
                 self.ok = False
                 self.problem = String("the pattern asks about the text around")
+                return
+            if instruction.op == IN_REF:
+                # A state here is a set of instructions and nothing else, which
+                # is the whole idea, and a backreference is a question about
+                # what the path took to get here. There is no path to ask.
+                # Document 95.
+                self.ok = False
+                self.problem = String(
+                    "the pattern asks about what it matched before"
+                )
                 return
             if instruction.op != IN_AT:
                 continue

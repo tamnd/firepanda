@@ -27,8 +27,8 @@ from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 from .pattern import fold_point
+from .regex.backtrack import held_text
 from .regex.count import counted_text
-from .regex.pike import matches_text
 from .regex.program import Program
 from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
@@ -3174,7 +3174,7 @@ def text_contains_folded_scalar(
 
 def text_matches_regex_scalar(
     a: StringArray, program: Program
-) -> Array[DType.bool]:
+) raises -> Array[DType.bool]:
     """Whether each element matches a compiled pattern, one row at a time.
 
     The twin runs the same engine the real kernel does, which makes it a
@@ -3190,19 +3190,23 @@ def text_matches_regex_scalar(
 
     Returns:
         A bool column, null where the column is null.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     var out = Array[DType.bool](len(a))
     for i in range(len(a)):
         if not a.is_valid(i):
             out.set_null(i)
             continue
-        out.set_valid(i, matches_text(program, a[i]))
+        out.set_valid(i, held_text(program, a[i]))
     return out^
 
 
 def text_count_regex_scalar(
     a: StringArray, program: Program
-) -> Array[DType.int64]:
+) raises -> Array[DType.int64]:
     """How many times a compiled pattern matches in each element, one at a time.
 
     The twin of the counting kernel and the same narrow check the one above is,
@@ -3215,6 +3219,10 @@ def text_count_regex_scalar(
 
     Returns:
         An int64 column, null where the column is null.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     var out = Array[DType.int64](len(a))
     for i in range(len(a)):

@@ -70,7 +70,7 @@ def hits(pattern: StringSlice, text: StringSlice) -> Bool:
     return matches_text(program, text)
 
 
-def found(pattern: StringSlice, text: StringSlice) -> Int:
+def found(pattern: StringSlice, text: StringSlice) raises -> Int:
     """How many times a pattern is found in a text, Python's way of counting.
 
     Args:
@@ -79,6 +79,9 @@ def found(pattern: StringSlice, text: StringSlice) -> Int:
 
     Returns:
         The count.
+
+    Raises:
+        Error: If the row ran out of steps, which no row in this file does.
     """
     var program = compile_program(
         parse_pattern(pattern), ENGINE_PYTHON, captures=True

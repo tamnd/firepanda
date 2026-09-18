@@ -496,7 +496,7 @@ def replaced(
     mut found: List[Int32],
     mut out: List[UInt8],
     limit: Int = -1,
-):
+) raises:
     """Replaces the first `limit` matches in one row, or all of them.
 
     The three rules this loop follows are on the module, and the one worth
@@ -541,6 +541,10 @@ def replaced(
         out: Where the answer goes. Emptied first.
         limit: How many matches to replace, or a negative number for all of
             them. Zero writes the row out unchanged.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     out.clear()
     fill_byte_offsets(bytes, points, offsets)
@@ -601,7 +605,7 @@ def replaced_python(
     mut found: List[Int32],
     mut out: List[UInt8],
     limit: Int = -1,
-):
+) raises:
     """Replaces the first `limit` matches in one row the way `re.sub` does.
 
     The loop above is Arrow's and this one is Python's, and Python's is the
@@ -638,6 +642,10 @@ def replaced_python(
         limit: How many matches to replace, or a negative number for all of
             them. Zero writes the row out unchanged, which is not what `n=0`
             means to pandas on this path and is seen to by the binding.
+
+    Raises:
+        Error: Only what the engines raise, which is a row a backreference ran
+            out of steps on.
     """
     out.clear()
     fill_byte_offsets(bytes, points, offsets)
@@ -676,7 +684,7 @@ def replaced_python(
 
 def replaced_text(
     program: Program, rewrite: Rewrite, text: StringSlice
-) -> String:
+) raises -> String:
     """Replaces every match in one piece of text.
 
     The one shot form, which builds everything a scan needs, uses it once and
@@ -690,6 +698,9 @@ def replaced_text(
 
     Returns:
         The text with every match replaced.
+
+    Raises:
+        Error: Only what the engines raise.
     """
     var points = List[UInt32]()
     var bytes = text.as_bytes()
@@ -715,7 +726,7 @@ def replaced_text(
 
 def replaced_python_text(
     program: Program, rewrite: Rewrite, text: StringSlice, limit: Int = -1
-) -> String:
+) raises -> String:
     """Replaces matches in one piece of text the way `re.sub` does.
 
     The one shot form of `replaced_python`, which is where the rule is.
@@ -728,6 +739,9 @@ def replaced_python_text(
 
     Returns:
         The text with the matches replaced.
+
+    Raises:
+        Error: Only what the engines raise.
     """
     var points = List[UInt32]()
     var bytes = text.as_bytes()

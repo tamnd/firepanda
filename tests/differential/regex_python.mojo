@@ -38,6 +38,7 @@ from std.collections.span import Span
 from std.python import Python, PythonObject
 from std.sys import argv
 
+from firepanda.kernel.regex.backtrack import Bounded, searched
 from firepanda.kernel.regex.parse import decoded, parse_pattern
 from firepanda.kernel.regex.pike import Machine
 from firepanda.kernel.regex.program import compile_program
@@ -164,6 +165,7 @@ def main() raises:
     var we_refuse = List[String]()
     var they_refuse = List[String]()
     var differ = List[String]()
+    var gave_up = List[String]()
     var reasons = List[String]()
     var counts = List[Int]()
     var held = 0
@@ -194,8 +196,35 @@ def main() raises:
             continue
 
         var machine = Machine(program)
+        var bounded = Bounded(program)
+        var slots = List[Int32]()
         for which in range(len(points)):
-            var ours = machine.matches(program, Span(points[which]))
+            # The column kernel picks the same way. A program holding a
+            # backreference is one the machine cannot read, so it goes to the
+            # engine that keeps a path, and the choosing is by the program
+            # rather than by the row. Document 95.
+            var ours: Bool
+            if program.refs:
+                try:
+                    ours = (
+                        searched(
+                            program,
+                            Span(points[which]),
+                            0,
+                            machine,
+                            bounded,
+                            slots,
+                        )
+                        >= 0
+                    )
+                except:
+                    # A row the step bound stopped. It is a give up rather than
+                    # a wrong answer, so it is counted where the refusals are
+                    # counted and not where the disagreements are.
+                    gave_up.append(pattern)
+                    break
+            else:
+                ours = machine.matches(program, Span(points[which]))
             var theirs = answer[byte=which] == "y"
             if ours != theirs:
                 differ.append(pattern)
@@ -212,6 +241,7 @@ def main() raises:
     report("firepanda answers and pandas raises:", we_refuse, compared)
     report("pandas answers and firepanda refuses:", they_refuse, compared)
     report("both answer and the answers differ:", differ, compared)
+    report("firepanda ran out of steps on a row:", gave_up, compared)
 
     print(
         "agreement",

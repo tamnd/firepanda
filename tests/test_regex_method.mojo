@@ -155,18 +155,21 @@ def test_a_pattern_the_engine_can_run_compiles_for_all_three() raises:
 
 
 def test_a_pattern_the_other_engine_would_run_is_a_gap_here() raises:
-    """A backreference goes to Python's `re` upstream and this library's Python
+    """An atomic group goes to Python's `re` upstream and this library's Python
     engine has not got one, so the refusal is its own and names the construct
     rather than naming the engine. It used to say the engine was not written at
     all, which was true until document 81 wrote it and which threw away the one
     thing the caller could act on.
 
-    This row used to ask about a lookaround, which both halves of now answer, so
-    it asks about the largest construct that is left. Documents 93 and 94."""
-    var program = program_for(METHOD_MATCH, "(a)\\1")
+    This row used to ask about a lookaround and then about a backreference, all
+    of which are answered now, so it asks about one of the three that are left.
+    The lookahead in front of it is what routes the call, since an atomic group
+    is not one of the constructs the router walks for. Documents 93, 94 and
+    95."""
+    var program = program_for(METHOD_MATCH, "(?=a)(?>a)b")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no backreference yet")
+    assert_equal(program.problem, "this engine has no atomic group yet")
 
 
 def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
@@ -182,11 +185,17 @@ def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
     the one the caller can act on.
 
     The construct here was a lookaround until documents 93 and 94 answered both
-    halves of it, and a pattern this row wants is one nothing answers."""
+    halves of it. Document 95 then answered the backreference everywhere except
+    under the wide reading of this very flag, which leaves the pattern saying
+    exactly what this row wants it to say and saying it about the construct
+    rather than about the rewrite."""
     var program = program_for(METHOD_FULLMATCH, "(?i)(a)\\1")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no backreference yet")
+    assert_equal(
+        program.problem,
+        "this engine has no backreference under the ignore case flag yet",
+    )
 
 
 def test_a_pattern_re2_refuses_is_refused_rather_than_held_out() raises:
@@ -314,11 +323,11 @@ def test_an_argued_call_is_anchored_from_outside_the_pattern() raises:
     """
     assert_equal(python_anchored(METHOD_CONTAINS, "a"), "a")
     assert_equal(python_anchored(METHOD_COUNT, "^a$"), "^a$")
-    assert_equal(python_anchored(METHOD_MATCH, "a"), "\\A(a)")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "a"), "\\A(a)\\Z")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "^a$"), "\\A(^a$)\\Z")
-    assert_equal(python_anchored(METHOD_FULLMATCH, "(?i)a"), "(?i)\\A(a)\\Z")
-    assert_equal(python_anchored(METHOD_MATCH, "(?ims)a"), "(?ims)\\A(a)")
+    assert_equal(python_anchored(METHOD_MATCH, "a"), "\\A(?:a)")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a"), "\\A(?:a)\\Z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "^a$"), "\\A(?:^a$)\\Z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "(?i)a"), "(?i)\\A(?:a)\\Z")
+    assert_equal(python_anchored(METHOD_MATCH, "(?ims)a"), "(?ims)\\A(?:a)")
 
 
 def test_a_verbose_pattern_is_closed_on_a_line_of_its_own() raises:
@@ -332,14 +341,14 @@ def test_a_verbose_pattern_is_closed_on_a_line_of_its_own() raises:
     a newline away, so it changes the answer nowhere and saves it here.
     """
     assert_equal(
-        python_anchored(METHOD_FULLMATCH, "a # c", True), "\\A(a # c\n)\\Z"
+        python_anchored(METHOD_FULLMATCH, "a # c", True), "\\A(?:a # c\n)\\Z"
     )
-    assert_equal(python_anchored(METHOD_MATCH, "a # c", True), "\\A(a # c\n)")
+    assert_equal(python_anchored(METHOD_MATCH, "a # c", True), "\\A(?:a # c\n)")
     assert_equal(
         python_anchored(METHOD_FULLMATCH, "(?x)a # c", True),
-        "(?x)\\A(a # c\n)\\Z",
+        "(?x)\\A(?:a # c\n)\\Z",
     )
-    assert_equal(python_anchored(METHOD_FULLMATCH, "a # c"), "\\A(a # c)\\Z")
+    assert_equal(python_anchored(METHOD_FULLMATCH, "a # c"), "\\A(?:a # c)\\Z")
     assert_true(
         program_for(METHOD_FULLMATCH, "a # c", FLAG_VERBOSE, argued=True).ok
     )

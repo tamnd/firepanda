@@ -85,6 +85,10 @@ def text_matches_regex(
     cache can give up part way down a column and the row it gave up on still
     has to be answered.
 
+    A third engine stands beside them for the one program neither of those can
+    run, which is one holding a backreference, and that one is chosen by the
+    program rather than by the row. Document 95.
+
     Args:
         a: The column.
         program: The pattern, already compiled. A program that did not compile
@@ -95,14 +99,15 @@ def text_matches_regex(
         A bool column, null wherever the input is null.
 
     Raises:
-        Error: Only what the morsel runtime raises.
+        Error: What the morsel runtime raises, and a row a backreference ran
+            out of steps on.
     """
     var n = len(a)
     # Every row is written below, so the zeroing allocation is a wasted pass.
     var out = Array[DType.bool](overwritten=n)
     var validity = Bitmap(copy=a.validity)
 
-    def compute(start: Int, stop: Int) {mut out, imm}:
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         # One machine, one cache and one decode buffer for the whole morsel
         # rather than one of each per row. The cache is per morsel rather than
@@ -110,15 +115,29 @@ def text_matches_regex(
         # of a morsel are what pay for the states the rest of them read.
         var machine = Machine(program)
         var cache = Cache(program)
+        var bounded = Bounded(program)
         var points = List[UInt32]()
+        var slots = List[Int32]()
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
-            var said = cache.scan(program, Span(points))
             var found: Bool
-            if said == SCAN_GAVE_UP:
-                found = machine.matches(program, Span(points))
+            if program.refs:
+                # The one kind of program neither of the two above can run, so
+                # the question is put to the third engine rather than being
+                # asked and handed on. It is the only kernel here that had no
+                # backtracker in it already, because whether a row matches is
+                # the one question a state machine answers better than anything
+                # else and a backreference is what takes that away. Document 95.
+                found = (
+                    searched(program, Span(points), 0, machine, bounded, slots)
+                    >= 0
+                )
             else:
-                found = said == SCAN_YES
+                var said = cache.scan(program, Span(points))
+                if said == SCAN_GAVE_UP:
+                    found = machine.matches(program, Span(points))
+                else:
+                    found = said == SCAN_YES
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
         repair_range(out, validity, start, stop)
 
@@ -152,13 +171,14 @@ def text_count_regex(
         An int64 column, null wherever the input is null.
 
     Raises:
-        Error: Only what the morsel runtime raises.
+        Error: What the morsel runtime raises, and a row a backreference ran
+            out of steps on.
     """
     var n = len(a)
     var out = Array[DType.int64](overwritten=n)
     var validity = Bitmap(copy=a.validity)
 
-    def compute(start: Int, stop: Int) {mut out, imm}:
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         var machine = Machine(program)
         var bounded = Bounded(program)
@@ -231,7 +251,8 @@ def text_extract_regex(
         layer refuses before reaching here because pandas refuses it too.
 
     Raises:
-        Error: Only what the morsel runtime raises.
+        Error: What the morsel runtime raises, and a row a backreference ran
+            out of steps on.
     """
     var n = len(a)
     var groups = program.groups
@@ -256,7 +277,9 @@ def text_extract_regex(
     for _ in range(morsels * groups):
         parts.append(List[UInt8]())
 
-    def compute(start: Int, stop: Int) {mut parts, mut valid, mut views, imm}:
+    def compute(
+        start: Int, stop: Int
+    ) raises {mut parts, mut valid, mut views, imm}:
         var mine = start // MORSEL_ROWS
         # The pointer to each group's views is taken once for the morsel rather
         # than once per row, which is what every other kernel that writes views
@@ -384,7 +407,8 @@ def text_replace_regex(
         A text column of the same height, null wherever the input is null.
 
     Raises:
-        Error: Only what the morsel runtime raises.
+        Error: What the morsel runtime raises, and a row a backreference ran
+            out of steps on.
     """
     var n = len(a)
     var validity = Bitmap(copy=a.validity)
@@ -397,7 +421,7 @@ def text_replace_regex(
     for _ in range(morsels):
         parts.append(List[UInt8]())
 
-    def compute(start: Int, stop: Int) {mut parts, mut views, imm}:
+    def compute(start: Int, stop: Int) raises {mut parts, mut views, imm}:
         ref payload = parts[start // MORSEL_ROWS]
         var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
         # One of each engine and one of each buffer for the whole morsel

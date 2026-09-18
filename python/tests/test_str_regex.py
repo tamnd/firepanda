@@ -212,20 +212,23 @@ def test_a_missing_row_stays_missing_and_na_fills_it(firepanda: ModuleType) -> N
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A backreference goes to Python's `re` upstream, and this engine has not
+    """An atomic group goes to Python's `re` upstream, and this engine has not
     got it.
 
     pandas answers these, so the refusal is a gap rather than a difference of
     opinion, and `NotImplementedError` is what a gap is spelled. The message
     says which gap it is and quotes the pattern back.
 
-    Both halves of the lookaround used to be on this list. Documents 93 and 94
-    answered them, and the rows that used to be here are now in
-    `test_str_lookahead.py` and `test_str_lookbehind.py` asking the opposite
-    question.
+    Both halves of the lookaround used to be on this list and so did the
+    backreference. Documents 93, 94 and 95 answered them, and the rows that
+    used to be here are now in `test_str_lookahead.py`,
+    `test_str_lookbehind.py` and `test_str_backreference.py` asking the
+    opposite question. The lookahead in front of each pattern below is what
+    routes the call, since an atomic group and a possessive quantifier are not
+    constructs the router walks for.
     """
     mine = made(firepanda)
-    for pattern in (r"(a)\1", r"(a)(b)\2"):
+    for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
         for name in ("contains", "match", "fullmatch"):
             with pytest.raises(NotImplementedError) as caught:
                 getattr(mine.str, name)(pattern)

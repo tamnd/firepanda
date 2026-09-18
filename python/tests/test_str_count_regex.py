@@ -213,17 +213,18 @@ def test_a_missing_row_stays_missing(firepanda: ModuleType) -> None:
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A backreference goes to Python's `re` upstream.
+    """An atomic group goes to Python's `re` upstream.
 
     Upstream routes `count` by the same rule it routes the other three by, so
     the same patterns leave Arrow, and this engine has not got this one.
 
-    Both halves of the lookaround used to be on this list and both are answered
-    now, which is what documents 93 and 94 did. The route did not change, only
-    what waits at the end of it.
+    Both halves of the lookaround used to be on this list and so did the
+    backreference, and all three are answered now, which is what documents 93,
+    94 and 95 did. The route did not change, only what waits at the end of it,
+    and the lookahead in front of each pattern below is what routes it.
     """
     mine = made(firepanda)
-    for pattern in (r"(a)\1", r"(a)(b)\2"):
+    for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
         with pytest.raises(NotImplementedError) as caught:
             mine.str.count(pattern)
         assert pattern in str(caught.value), pattern

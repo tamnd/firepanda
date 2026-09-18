@@ -68,7 +68,7 @@ def hits(pattern: StringSlice, text: StringSlice) -> Bool:
     return matches_text(program, text)
 
 
-def found(pattern: StringSlice, text: StringSlice) -> Int:
+def found(pattern: StringSlice, text: StringSlice) raises -> Int:
     """How many times a pattern is found in a text, Python's way of counting.
 
     The captures are on because Python's counting rule reads where a match
@@ -81,6 +81,9 @@ def found(pattern: StringSlice, text: StringSlice) -> Int:
 
     Returns:
         The count.
+
+    Raises:
+        Error: If the row ran out of steps, which no row in this file does.
     """
     var program = compile_program(
         parse_pattern(pattern), ENGINE_PYTHON, captures=True
@@ -236,9 +239,11 @@ def test_the_constructs_that_are_still_refused_are_refused_the_same_way() raises
     change what a caller hears about a construct that has not landed. The
     message names the construct rather than the rewrite, because the walk that
     finds it reads the whole tree and the anchors are not part of it."""
-    var back = program_for(METHOD_MATCH, "(a)\\1", 0, False, 14)
+    var back = program_for(METHOD_MATCH, "(?=a)(b)\\1", 0, False, 14)
     assert_false(back.ok)
-    assert_equal(back.problem, "this engine has no backreference yet")
+    assert_equal(
+        back.problem, "this engine has no lookaround beside a backreference yet"
+    )
     var atomic = program_for(METHOD_COUNT, "(?=a)(?>a)b", 0, False, 14)
     assert_false(atomic.ok)
     assert_equal(atomic.problem, "this engine has no atomic group yet")
