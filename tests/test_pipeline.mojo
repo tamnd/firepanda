@@ -1716,6 +1716,55 @@ def test_a_limit_over_many_chunks_still_reads_one_chunk() raises:
     assert_equal(out.columns[0].num_chunks(), 1, "chunks read")
 
 
+def test_a_limit_above_a_breaker_leaves_the_prefix_on_every_core() raises:
+    """A limit takes a pipeline off the cores because it can stop the source in
+    the middle of a batch. Put a sort under it and it cannot: the sort holds
+    every row and emits nothing until the source has run out, so the limit
+    counts its first row after the last chunk has been read.
+
+    The assertion is against the same pipeline without the limit rather than
+    against a number, because how many operators run in parallel depends on how
+    many workers the machine has and whether the limit is there does not."""
+    var bounded = Pipeline(many_chunk_frame())
+    bounded.add(Node(Filter(1)))
+    bounded.add(Node(Sort([0], [False], [False])))
+    bounded.add(Node(Limit(3)))
+    var plain = Pipeline(many_chunk_frame())
+    plain.add(Node(Filter(1)))
+    plain.add(Node(Sort([0], [False], [False])))
+    assert_equal(
+        bounded._parallel_lead(),
+        plain._parallel_lead(),
+        "the limit above the sort decides nothing about the filter below it",
+    )
+
+
+def test_a_limit_with_nothing_holding_the_rows_under_it_still_stops() raises:
+    """The other half of the rule. Nothing here holds a row, so the limit is
+    reached while the source is still being read and reading a batch ahead would
+    be reading rows it was about to make unnecessary."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Limit(3)))
+    assert_equal(pipeline._parallel_lead(), 0, "on the calling thread")
+
+
+def test_a_filter_under_a_sort_under_a_limit_answers_the_same() raises:
+    """The shape the rule is for, run for its rows rather than for its route.
+    Every third row is dropped by the mask, the rest are ordered downwards, and
+    three come back, so the answer is the three largest that survived."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Sort([0], [True], [False], bound=3)))
+    pipeline.add(Node(Limit(3)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 3, "rows")
+    assert_equal(got[0], 200, "the largest that survived the mask")
+    assert_equal(got[1], 199, "then the next")
+    assert_equal(got[2], 197, "and 198 is a multiple of three")
+
+
 def test_only_the_operators_that_do_arithmetic_are_worth_a_task() raises:
     """A task costs about as much to create as a projection costs to run, so the
     driver asks what the prefix computes before it hands it out."""

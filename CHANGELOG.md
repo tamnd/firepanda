@@ -23,6 +23,13 @@ The name after the dot is a `ColLabel`, which is the widest identifier class in 
 The node holds four things: the element written before `FOR`, a run of interned names, the source written after `IN`, and the condition an `IF` put on the end when one was written. The names are read as text the way a lambda's parameters are and for the same reason, which is that a name in that position is being bound rather than looked up, and the element and the condition both refer to it the way they refer to a column.
 
 DuckDB reads this as calls. `[x + 1 FOR x IN l]` is `list_apply(l, lambda x: x + 1)` in its own parse tree, and the form with a condition grows a `list_filter` and a pair of `struct_pack` calls under that. That is what a comprehension means rather than what it says, and this keeps what it says, so the printer hands back the brackets the query wrote instead of a nest of calls a reader would have to turn back into brackets.
+### Changed: a limit above a sort no longer takes the query off the cores
+
+The pipeline driver runs the leading row local operators on every core, and it gave that up for the whole line when there was a limit anywhere in it. The reason was right: the parallel route reads a batch of chunks before it pushes any of them, and reading ahead on behalf of ten cores is reading rows a limit was about to make unnecessary.
+
+It asks a narrower question now. A breaker holds every row it is given and emits nothing until its input has run out, so a limit with a sort or a group by under it counts its first row after the last chunk has already been read, and the batch the parallel route reads ahead is a batch the breaker was going to be handed anyway. The search for a limit therefore stops at the first breaker. A limit with nothing holding rows under it still puts the line on the calling thread, and a join is not a breaker for this, because rows flow through it while the source is being read.
+
+ClickBench q23 is what found it. `SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT 10` at 1M was 23.8 milliseconds through the planner and the same statement without the `LIMIT 10` was 11.5, on the same rows through the same operators, because the limit was running a search down a million rows on one core. It is 13.6 with this, and q22, which is the same shape with a narrower projection, goes from 21.5 to 12.0. Nothing without a limit above a breaker moves: q20, q24 and the two variants of q23 that drop the limit are all within a few tenths of where they were. Twenty two of the 43 ClickBench statements end in a limit and almost all of them have a group by or an order by under it. Issue #682, document 98.
 
 ### Added: a backreference under the ignore case flag, which is a second case table
 
