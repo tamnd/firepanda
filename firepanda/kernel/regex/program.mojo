@@ -25,18 +25,21 @@ question against the ASCII class, which puts it beside RE2 on two of the three
 and not on the third: Python's ASCII `\\s` holds a vertical tab and RE2's never
 did. Document 88 is where that was measured.
 
-What is still RE2 only is the constructs. Python has a lookaround, a
-backreference, a conditional, an atomic group and a possessive quantifier and
-this engine has none of them, so a pattern using one is refused for Python as a
-gap here rather than as something Python cannot do.
+What is still RE2 only is most of the constructs. Python has a lookaround, a
+backreference, a conditional, an atomic group and a possessive quantifier, and of
+those this engine now has the lookahead half of the first one. The rest are
+refused for Python as a gap here rather than as something Python cannot do.
 
 The refusals are worth reading as a group, because they are not a list of things
 that were too hard. Every one of them is a construct RE2 itself refuses, which
 was measured rather than assumed: a lookaround, a backreference, a conditional,
 an atomic group, a possessive quantifier, and the four inline flag letters out of
-seven that RE2 has never heard of. A pattern this compiler turns down is a
-pattern pyarrow turns down, and that correspondence is the thing
-`tests/differential/regex_match.mojo` checks over the generated corpus.
+seven that RE2 has never heard of. A pattern this compiler turns down for RE2 is
+a pattern pyarrow turns down, and that correspondence is the thing
+`tests/differential/regex_match.mojo` checks over the generated corpus. What
+changed with the lookahead is that the two engines now refuse different lists,
+which they always did for the flags and now do for a construct as well, and the
+differential that reads the Python side is a different one.
 """
 
 from std.collections.span import Span
@@ -156,6 +159,30 @@ A program carrying these is larger and slower to run than the same pattern
 without them, which is why `contains` and the two anchored questions and `count`
 are compiled without and only `replace` is compiled with. The cost is not the
 instruction, it is that every thread then carries a copy of the slots.
+"""
+
+comptime IN_LOOK: UInt8 = 11
+"""Ask whether another program matches here, without reading anything.
+
+`a` is where that other program starts and `b` is 1 for `(?=...)` and 0 for
+`(?!...)`. It is a position test like `IN_AT` is, and the machine treats it as
+one: the thread goes on to the next instruction when the answer agrees with `b`
+and dies when it does not, and either way the position does not move.
+
+The body is written into the same instruction list as everything else, ending in
+its own `IN_MATCH`, with a jump written over it so that nothing walks into it
+from in front. Nothing reaches those instructions except through this one.
+
+This is the only instruction here whose cost is more than a comparison. A
+thread that arrives at one runs a whole second machine over the rest of the row,
+so a row of a thousand characters against a pattern holding a lookahead is a
+thousand runs of the body in the worst case. That is polynomial rather than
+exponential, which is the property the whole file is built to keep, and it is
+why RE2 refuses the construct outright rather than paying for it. This engine
+pays for it because pandas answers these patterns with `re` and a refusal here
+is a column a caller does not get.
+
+Document 93.
 """
 
 
@@ -1245,8 +1272,49 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     if it.op == OP_MIN_REPEAT:
         _emit_repeat(b, nodes, node, False)
         return
+    if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
+        _emit_lookahead(b, nodes, node, it.op == OP_ASSERT)
+        return
+    if it.op == OP_FAILURE:
+        # A set with no ranges in it, which nothing is a member of. The parser
+        # writes this node for `(?!)` and for nothing else, and upstream reads
+        # that as a pattern that never matches rather than as an error. An
+        # instruction of its own would be a second way to say what an empty set
+        # already says.
+        b.add_set(List[Int32](), False)
+        return
 
     b.give_up(String("unsupported pattern"))
+
+
+def _emit_lookahead(
+    mut b: _Builder, nodes: List[Node], node: Int32, positive: Bool
+):
+    """Writes a lookahead and the body it asks about.
+
+    The body goes into the same instruction list as everything else, with a jump
+    written over it so that the walk that runs the pattern never falls into it
+    from in front. The only way in is the `IN_LOOK`, which does not step there
+    but hands the position to a second machine.
+
+    The order is the whole of the trick and it is worth reading once. The look
+    instruction is written first so that the thread reaching it is at the right
+    position, the jump over the body is written second so that the look falls
+    through to it when the answer agrees, and the body and its match come last
+    so that the jump has somewhere to land.
+
+    Args:
+        b: The builder.
+        nodes: The arena.
+        node: The assertion.
+        positive: Whether the body has to match rather than has to not match.
+    """
+    var look = b.emit(IN_LOOK, 0, Int32(1) if positive else Int32(0))
+    var over = b.emit(IN_JUMP, 0, 0)
+    b.patch_a(look, b.here())
+    _emit_children(b, nodes, node)
+    _ = b.emit(IN_MATCH, 0, 0)
+    b.patch_a(over, b.here())
 
 
 def _refuse_construct(mut b: _Builder, what: String):
@@ -1268,6 +1336,31 @@ def _refuse_construct(mut b: _Builder, what: String):
         b.give_up(String("this engine has no ", what, " yet"), True)
         return
     b.give_up(String("RE2 has no ", what))
+
+
+def _holds_group(nodes: List[Node], node: Int32) -> Bool:
+    """Whether a subtree opens a bracket somebody could refer to.
+
+    Every `OP_SUBPATTERN` the parser leaves behind is a capturing one, because a
+    non capturing group is inlined, so this is a search for the node rather than
+    a search for a number on it.
+
+    Args:
+        nodes: The arena.
+        node: Where to start, which may be a whole list of siblings.
+
+    Returns:
+        True when there is a capturing group anywhere under it.
+    """
+    var at = node
+    while at >= 0:
+        var it = nodes[Int(at)]
+        if it.op == OP_SUBPATTERN:
+            return True
+        if _holds_group(nodes, it.first):
+            return True
+        at = it.next
+    return False
 
 
 def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
@@ -1301,8 +1394,32 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         return
     var it = nodes[Int(node)]
     if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
-        _refuse_construct(b, String("lookaround"))
-        return
+        if not b.python:
+            _refuse_construct(b, String("lookaround"))
+            return
+        if it.a < 0:
+            # A lookbehind is a different question from a lookahead and not a
+            # harder version of the same one. Python reads one by trying the
+            # body at a position in front of where the machine has got to, which
+            # means the body has to have a width the compiler knows, which means
+            # a width analysis over the tree and the refusal Python raises for a
+            # body that has not got one. None of that is here yet and none of it
+            # is needed for the half that is. Document 93.
+            _refuse_construct(b, String("lookbehind"))
+            return
+        if b.captures and _holds_group(nodes, it.first):
+            # A group inside a lookahead keeps what it matched upstream, so
+            # `re.match(r"(?=(a))a", "a").group(1)` is `a`. The body here is run
+            # by a second machine that carries no slots, so the parent thread
+            # would come back with the group empty, which is a wrong answer
+            # rather than a refusal. Only a caller who asked for captures can
+            # see the difference, which is why the question is asked of the
+            # builder rather than of the tree alone.
+            b.give_up(
+                String("this engine has no capture inside a lookahead yet"),
+                True,
+            )
+            return
     if it.op == OP_GROUPREF:
         _refuse_construct(b, String("backreference"))
         return
@@ -1316,7 +1433,9 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         _refuse_construct(b, String("possessive quantifier"))
         return
     if it.op == OP_FAILURE:
-        _refuse_construct(b, String("empty negative lookaround"))
+        if not b.python:
+            _refuse_construct(b, String("empty negative lookaround"))
+            return
         return
     if it.op == OP_AT and it.a == Int32(Int(AT_NON_BOUNDARY)) and not b.python:
         # RE2 asks the word boundary question between bytes rather than between

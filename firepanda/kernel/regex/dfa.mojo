@@ -34,7 +34,7 @@ the groups are a property of the path. So `replace` and `extract` are not
 callers of this and never will be. Issue #863 has the order the pieces go in and
 what carries the capturing scans.
 
-Two shapes of pattern are refused outright rather than run slowly.
+Three shapes of pattern are refused outright rather than run slowly.
 
 A program with no class table is refused, because there is no alphabet to lay
 the transitions out on. Nothing is compiled with one unless a caller asks, so
@@ -49,6 +49,11 @@ last one. RE2 answers those by folding the neighbouring character into the state
 and it is a real design, just a larger one than this box. `^`, `\\A`, `\\z` and
 RE2's `$` are all answered, since the first two are the start and the last two
 are the end.
+
+A program holding a lookahead is refused for a plainer reason. That instruction
+runs a second machine over the rest of the row before deciding whether a thread
+goes on, so the answer at a position depends on text this box has not read and
+will not read again, and there is nothing to fold into a state. Document 93.
 
 The end of the row is a flag on a state rather than a column in the transition
 table. A state is built twice, once asking what it reaches with the end of the
@@ -69,6 +74,7 @@ from firepanda.kernel.regex.pike import accepts
 from firepanda.kernel.regex.program import (
     IN_AT,
     IN_JUMP,
+    IN_LOOK,
     IN_MATCH,
     IN_SAVE,
     IN_SPLIT,
@@ -288,6 +294,10 @@ struct Cache(Movable):
             return
         for i in range(len(program.code)):
             var instruction = program.code[i]
+            if instruction.op == IN_LOOK:
+                self.ok = False
+                self.problem = String("the pattern asks about the text ahead")
+                return
             if instruction.op != IN_AT:
                 continue
             if (

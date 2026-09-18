@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a lookahead, which is the first construct RE2 has not got
+
+`str.contains("a(?=b)")` used to raise and now answers, and so do `count`, `replace`, `match`, `fullmatch` and `extract`. Both forms are in, the positive one and the negative one, and a lookahead may hold another. This is the first piece of syntax to land that only one of the two engines reads. Everything before it on this engine was a flag, and a flag modifies syntax both engines already have.
+
+pandas routes a pattern holding a lookaround away from Arrow and answers it with `re`, because RE2 has never had one. This library routed it the same way and then refused it, so 700 of the 30052 patterns in the held out corpus were a column the caller did not get, plus 13 more for `(?!)`, which is a negative lookahead with nothing in it and so a pattern that never matches. That one now compiles to a character class with no members in it.
+
+The instruction is a position test like the word boundary is. The thread goes on when the body matches starting exactly where the pattern has got to and dies when it does not, and either way the position does not move, so the width of a lookahead is nothing and the count says so. The body is run by a second machine over the whole row rather than over the part of it after the position, which is what keeps an anchor inside one honest: `a(?=b$)` matches `ab` and does not match `abc`.
+
+Two shapes are refused rather than answered. A lookbehind is a different question, since reading one means working out the width of the body at compile time and reproducing the error Python raises when it has not got one. A capturing group inside a lookahead is refused only when the caller asked for the groups, which through the accessor means only `extract`, because the second machine carries no slots and reporting nothing would be a wrong answer rather than a refusal.
+
+The cache of position sets added above refuses any pattern holding one outright, because that instruction reads text the cache has not read and will not read again, and there is nothing to fold into a state. The backtracker added below hands one back for a reason of the same kind: it follows one path with one stack and one bitmap, and a search inside a search has nowhere to go. Those rows go to the machine, which is the arrangement a row too long for the bitmap already had.
+
+### Fixed: what happens after a match of no width on Python's engine
+
+`str.count(pat, flags=...)` and `str.replace(pat, repl, flags=..., regex=True)` gave a count that was too small and a row with text left in it for any pattern that prefers to match nothing where it could have matched something. `count("a*?")` on `abc` answered four where upstream answers five, and `replace(r"(?!x)|\s", "#")` on `a b` left the space where it was.
+
+The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
+
+The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+
 ## [0.8.13] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).

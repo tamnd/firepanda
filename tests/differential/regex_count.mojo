@@ -41,7 +41,7 @@ from std.python import Python, PythonObject
 from std.sys import argv
 
 from firepanda.kernel.regex.backtrack import Bounded
-from firepanda.kernel.regex.count import counted
+from firepanda.kernel.regex.count import counted, counted_python
 from firepanda.kernel.regex.method import METHOD_COUNT, program_for
 from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import Machine
@@ -216,7 +216,18 @@ def main() raises:
         var bounded = Bounded(program)
         var found = List[Int32]()
         for which in range(len(points)):
-            var ours = counted(
+            # Which of the two counting rules to follow is the program's to
+            # say, the same way it is in `chars_count_regex`, because the two
+            # engines count differently and the program knows which one it was
+            # built for. This used to call Arrow's scan unconditionally, which
+            # was right for as long as a call with no flags beside it always
+            # landed on Arrow. A lookahead ended that: it is the first
+            # construct that routes to Python and then answers, so a pattern
+            # holding one now arrives here compiled for the other engine and
+            # counted by the other rule. Document 93.
+            var ours = counted_python(
+                program, Span(points[which]), machine, bounded, found
+            ) if program.python else counted(
                 program, Span(points[which]), machine, bounded, found
             )
             if ours != want[which]:

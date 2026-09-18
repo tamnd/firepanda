@@ -227,9 +227,10 @@ def test_a_replacement_re2_cannot_read_is_a_value_error(firepanda: ModuleType) -
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A lookaround or a backreference goes to Python's `re` upstream."""
+    """A lookbehind or a backreference goes to Python's `re` upstream, and the
+    lookahead that used to be on this list is answered now. Document 93."""
     mine = made(firepanda)
-    for pattern in ("a(?=b)", "a(?!b)", r"(a)\1", "(?<=a)b"):
+    for pattern in (r"(a)\1", "(?<=a)b", "(?<!a)b"):
         with pytest.raises(NotImplementedError) as caught:
             mine.str.replace(pattern, "#", regex=True)
         assert pattern in str(caught.value), pattern

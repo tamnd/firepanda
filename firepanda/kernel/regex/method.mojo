@@ -380,9 +380,9 @@ def program_for(
 
     The routing decision is made first and on the pattern as written, which is
     this file's docstring and is pandas' order. A pattern routed to Python is
-    refused here rather than compiled, because refusing it through the compiler
-    would mean compiling the rewritten pattern to find out something that was
-    already known about the original.
+    then rewritten and compiled exactly as an argued call is, because the two
+    are the same situation once the engine is settled and the only difference
+    between them is what settled it.
 
     The `\\Z` rewrite comes next and the anchoring last, which is upstream's
     order as well and is not an order either step is indifferent to.
@@ -444,13 +444,50 @@ def program_for(
     var tree = parse_pattern(pattern, flags)
     if method == METHOD_EXTRACT:
         return compile_program(tree, ENGINE_PYTHON, captures=True, minor=minor)
-    if argued:
-        if not tree.ok or holds_unsupported(tree):
+    if argued or holds_unsupported(tree):
+        # One branch for the two ways a call lands on Python's engine, which it
+        # has not always been. A routed call used to be compiled here over the
+        # caller's own tree and unanchored, because every construct that routes
+        # was refused and a refusal does not care where the anchors are. The
+        # lookahead ended that: a routed call can now come back with a program
+        # in it, and a program for `match` with no `\\A` in front of it answers
+        # a different question from the one that was asked. Document 93.
+        if not tree.ok:
             # Refused over the pattern the caller wrote rather than over the
             # anchored one, for the reason the `not tree.ok` branch below gives.
             # The engine is the same either way here, so the only thing the
-            # choice decides is which pattern the message quotes.
+            # choice decides is which pattern the message quotes. Only an argued
+            # call reaches this, since a pattern the grammar cannot read is not
+            # routed anywhere by a walk over a tree that does not exist.
             return compile_program(tree, ENGINE_PYTHON, minor=minor)
+        # `count` asks for captures on this engine and not on the other one,
+        # which is the one place the two scans disagree about what they need
+        # rather than about what they do. Python's rule for where to look next
+        # is written in terms of where the match started, since a match of no
+        # width is one whose two ends agree wherever it was found, and Arrow's
+        # rule only ever compares the end against a cursor it kept itself.
+        var wants = method == METHOD_REPLACE or method == METHOD_COUNT
+        if method == METHOD_MATCH or method == METHOD_FULLMATCH:
+            # The two methods that rewrite are asked about the pattern as the
+            # caller wrote it first, and the rewrite is only reached when that
+            # answers yes. The rewrite puts a group around the whole pattern, so
+            # every group in it is numbered one higher than the caller wrote it
+            # and a backreference in there now names the wrapper, which the
+            # grammar refuses because the wrapper is still open where the
+            # backreference stands. Upstream never meets that, since it anchors
+            # from outside the pattern with `regex.match` and writes no bracket
+            # at all.
+            #
+            # Nothing reaches that today, because a backreference is refused on
+            # both engines, and the whole of this branch is so that it goes on
+            # being refused with the message and the flag it earned rather than
+            # with a parse error the rewrite invented. A `ValueError` saying the
+            # grammar cannot read a pattern the grammar reads perfectly well is
+            # a worse answer than a `NotImplementedError`, and pandas answers
+            # the pattern, so a gap is the honest word. Document 93.
+            var own = compile_program(tree, ENGINE_PYTHON, wants, minor)
+            if not own.ok:
+                return own^
         return compile_program(
             parse_pattern(
                 python_anchored(
@@ -459,23 +496,10 @@ def program_for(
                 flags,
             ),
             ENGINE_PYTHON,
-            # `count` asks for captures on this engine and not on the other one,
-            # which is the one place the two scans disagree about what they need
-            # rather than about what they do. Python's rule for where to look
-            # next is written in terms of where the match started, since a match
-            # of no width is one whose two ends agree wherever it was found, and
-            # Arrow's rule only ever compares the end against a cursor it kept
-            # itself.
-            captures=method == METHOD_REPLACE or method == METHOD_COUNT,
+            captures=wants,
             minor=minor,
             alphabet=table,
         )
-    if holds_unsupported(tree):
-        # Routed to Python, and Python's engine has none of the five yet. It is
-        # compiled rather than refused in a sentence of this file's own so that
-        # the caller is told which construct is missing, which is what the
-        # compiler's own refusal says and what this used to throw away.
-        return compile_program(tree, ENGINE_PYTHON, minor=minor)
     if not tree.ok:
         # A pattern the grammar cannot read is refused over what the caller
         # wrote rather than over the rewrite, because the rewrite can make a
