@@ -294,11 +294,21 @@ def python_anchored(
     away: `re.fullmatch("a", "a\\n")` finds nothing, and `^(a)$` with the
     multiline flag on matches the first line of it.
 
-    So the anchors written here are `\\A` and `\\z`, which are the two positions
+    So the anchors written here are `\\A` and `\\Z`, which are the two positions
     no flag can move, rather than the `^` and `$` the Arrow rewrite uses. That
     is the whole of the difference for `fullmatch`, and `match` needs only the
     first of the two because `regex.match` says where a match may start and says
     nothing about where it ends.
+
+    The closing one used to be `\\z`, which is RE2's spelling of the same
+    position and is a `bad escape \\z` to every CPython before 3.14. It never
+    showed, because this library's own parser reads both spellings and the
+    pattern written here is never handed to an interpreter, and it was still
+    wrong: this function writes a pattern for Python's engine and Python's
+    engine is the thing that has not always had that spelling. Document 91 is
+    where it was found, by the slice that had to tell the two spellings apart
+    for the caller's sake and could not while this one was writing one of
+    them.
 
     A pattern opening with a global flag group keeps that group at the front for
     the reason `anchored` gives, which is that Python's grammar will not have
@@ -338,7 +348,7 @@ def python_anchored(
     var end = String("\n") if verbose else String("")
     if method == METHOD_MATCH:
         return String(head, "\\A(", rest, end, ")")
-    return String(head, "\\A(", rest, end, ")\\z")
+    return String(head, "\\A(", rest, end, ")\\Z")
 
 
 def program_for(

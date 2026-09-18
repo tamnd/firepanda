@@ -220,6 +220,20 @@ has always had the plain reading. Document 90.
 """
 
 
+comptime PYTHON_ZED_ESCAPE: Int = 14
+"""The first CPython that reads `\\z` at all.
+
+Before that it is a `bad escape \\z` wherever it appears, and from 3.14 it is
+the end of the string, which is the position `\\Z` already was and still is. So
+nothing gained a meaning that was not already sayable and a spelling stopped
+being an error, which is the whole of the change and is why this refusal is a
+refusal rather than a second reading.
+
+The second rule in one release, after the one above, and the reason the builder
+carries a version number rather than a flag per rule. Document 91.
+"""
+
+
 @fieldwise_init
 struct Instruction(Copyable, ImplicitlyCopyable, Movable):
     """One instruction, which is an op code and two payloads.
@@ -2056,6 +2070,16 @@ def compile_program(
         out.ok = False
         out.problem = String("RE2 reads this syntax differently")
         out.gap = True
+        return out^
+    if tree.zed and python and minor < PYTHON_ZED_ESCAPE:
+        # A spelling RE2 has always had and Python did not have until 3.14, so
+        # this is the one refusal here that is neither about an engine nor
+        # about a feature. The pattern is fine on Arrow, fine on a new enough
+        # interpreter, and a `bad escape \\z` on one this project still
+        # supports, and the only thing that can tell those apart is the number
+        # the builder carries. Not a gap, because upstream refuses it too.
+        out.ok = False
+        out.problem = String("this Python has no \\z escape")
         return out^
     if tree.approximate:
         out.ok = False

@@ -22,6 +22,16 @@ Over two hundred thousand URLs read three times, with the decode taken off both 
 
 Nothing calls it yet. The scan that runs it for `contains`, `count`, `match` and `fullmatch` with the machine kept underneath is the next piece, and issue #863 has the order the rest go in.
 
+### Fixed: `\z` is refused beside an interpreter that has no such escape
+
+`Series.str.contains("a\\z", flags=re.MULTILINE)` answered a column whatever Python was running. RE2 spells the end of the string `\z`, Python spells the same position `\Z` and read `\z` as a `bad escape \z` until 3.14, which added it, so a flagged call goes to Python's engine and upstream raises there on every interpreter this project supports except the newest. The parse now records whether the caller wrote one and the compiler refuses it below 3.14, beside the version rule added above and reading the same number. Issue #8 M6.
+
+The same pattern with no flags beside it still answers, on every interpreter, because the call goes to Arrow and RE2 has always had the spelling. That is upstream's answer as well, and it means a keyword argument that says nothing about escapes decides whether a pattern is an error.
+
+`\Z` is unchanged and legal everywhere, and `[\z]` is a bad escape in every version including 3.14, since 3.14 added an anchor and a character class holds characters.
+
+Found on the way: this library was writing `\A(` and `)\z` around a pattern it builds for Python's engine, which is RE2's spelling in a Python dialect. It never gave a wrong answer, because this library's own parser reads both spellings and the pattern is never handed to a real interpreter, and it was still wrong. The anchoring writes `\Z` now, which is the same position and is legal in every version, so the only `\z` in a pattern reaching the compiler by that route is one the caller wrote.
+
 ### Added: a compiled pattern can say which characters it cannot tell apart
 
 The alphabet a regular expression runs over is a million code points and a machine that remembers what it did needs a table as wide as the alphabet, so something has to make the alphabet small first. A class is a set of characters one program answers identically about: `abc` has four of them, the `a`, the `b`, the `c` and everything else, wherever in the code points that everything else happens to be. `compile_program` works them out when it is asked to and writes them on the program, as one entry per ASCII character and a searched table for the rest, which is the shape a column of text wants.
