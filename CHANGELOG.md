@@ -71,7 +71,7 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
-### Changed: a text column compared against a short constant is settled four rows at a time
+
 ### Changed: a text column compared against a short constant is settled a block of rows at a time
 
 A filter like `l_returnflag = 'R'` reads a column of sixteen byte views and compares each one against the constant's view, which is four register compares and a branch per row. The comparison itself is the cheap part and the loop around it was most of the cost.
