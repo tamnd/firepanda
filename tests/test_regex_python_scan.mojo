@@ -24,7 +24,7 @@ that shows both says which one a call gets.
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.parse import parse_pattern
-from firepanda.kernel.regex.pike import counts_python_text, counts_text
+from firepanda.kernel.regex.count import counted_python_text, counted_text
 from firepanda.kernel.regex.program import Program, compile_program
 from firepanda.kernel.regex.replace import (
     parse_rewrite_python,
@@ -95,9 +95,9 @@ def test_the_counting_scan_steps_one_character_past_an_empty_match() raises:
     bytes. Arrow's loop moves on by one byte and counts a sharp s twice, which
     is measured next door and is the reason there are two loops rather than a
     flag."""
-    assert_equal(counts_python_text(built("a*"), "abc"), 4)
-    assert_equal(counts_python_text(built(""), "ßx"), 3)
-    assert_equal(counts_text(built(""), "ßx"), 4)
+    assert_equal(counted_python_text(built("a*"), "abc"), 4)
+    assert_equal(counted_python_text(built(""), "ßx"), 3)
+    assert_equal(counted_text(built(""), "ßx"), 4)
 
 
 def test_the_counting_scan_never_cuts_the_row() raises:
@@ -106,9 +106,9 @@ def test_the_counting_scan_never_cuts_the_row() raises:
     letters is four, one of them being the front of an empty piece of text left
     over at the end. Python searches from an offset into the whole row, so the
     front is the front once."""
-    assert_equal(counts_python_text(built("^"), "abc"), 1)
-    assert_equal(counts_text(built("^"), "abc"), 4)
-    assert_equal(counts_python_text(built("^", FLAG_MULTILINE), "a\nb\nc"), 3)
+    assert_equal(counted_python_text(built("^"), "abc"), 1)
+    assert_equal(counted_text(built("^"), "abc"), 4)
+    assert_equal(counted_python_text(built("^", FLAG_MULTILINE), "a\nb\nc"), 3)
 
 
 def test_the_counting_scan_reads_a_boundary_against_the_whole_row() raises:
@@ -117,10 +117,10 @@ def test_the_counting_scan_reads_a_boundary_against_the_whole_row() raises:
     has one position in it and the scan asks about that one, so the count there
     is whatever a single `\\B` says, which document 90 has depending on which
     CPython the call arrived in and which is one for the newest of them."""
-    assert_equal(counts_python_text(built("\\B"), "  a  "), 4)
-    assert_equal(counts_python_text(built("\\B"), ""), 1)
-    assert_equal(counts_python_text(built("k", FLAG_IGNORECASE), "KaKb"), 2)
-    assert_equal(counts_python_text(built("(a)"), "aaa"), 3)
+    assert_equal(counted_python_text(built("\\B"), "  a  "), 4)
+    assert_equal(counted_python_text(built("\\B"), ""), 1)
+    assert_equal(counted_python_text(built("k", FLAG_IGNORECASE), "KaKb"), 2)
+    assert_equal(counted_python_text(built("(a)"), "aaa"), 3)
 
 
 def test_the_replacing_scan_follows_the_same_rule_as_the_counting_one() raises:

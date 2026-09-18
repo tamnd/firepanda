@@ -38,13 +38,14 @@ one row and fails on the second.
 The matching twin has since become a wider check than that without being
 rewritten. It runs the machine, and the kernel beside it now runs the state
 cache for any pattern the cache will take, so for those patterns the two sides
-of the comparison are two engines rather than one. The counting twin is still
-the narrow check it always was, since nothing counts with the cache yet.
+of the comparison are two engines rather than one. The counting twin still runs
+what the kernel runs, but it builds a set of buffers per row where the kernel
+keeps one per morsel, and there are two engines' worth of buffers to get wrong
+now rather than one.
 
-What checks the engine is `tests/differential/regex_match.mojo`, which asks
-pandas about thirty thousand generated patterns. A twin that was a second engine
-would be a backtracking one, which is the thing document 77 section 2 refuses to
-have in the repository at all.
+What checks the engines against something that is not this library is
+`tests/differential/regex_match.mojo` and the two beside it, which ask pandas
+about thirty thousand generated patterns each.
 """
 
 from std.collections.span import Span
@@ -63,6 +64,7 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.backtrack import Bounded, searched
+from firepanda.kernel.regex.count import counted, counted_python
 from firepanda.kernel.regex.dfa import Cache, SCAN_GAVE_UP, SCAN_YES
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
@@ -159,12 +161,16 @@ def text_count_regex(
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         var machine = Machine(program)
+        var bounded = Bounded(program)
         var points = List[UInt32]()
+        var found = List[Int32]()
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
-            var seen = machine.counts_python(
-                program, Span(points)
-            ) if program.python else machine.counts(program, Span(points))
+            var seen = counted_python(
+                program, Span(points), machine, bounded, found
+            ) if program.python else counted(
+                program, Span(points), machine, bounded, found
+            )
             dst.unsafe_offset(i).unsafe_write(Int64(seen))
         repair_range(out, validity, start, stop)
 

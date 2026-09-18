@@ -47,11 +47,12 @@ the row. And it answers where every group matched as well as where the whole
 match did, which is a slot vector carried by every thread and is the reason a
 program is compiled with saves in it or without them.
 
-`counts` is neither of those. It is a loop around `find`, and the loop is
-Arrow's rather than either engine's: three rules about where to look next after
-a match, none of which is what a reader would guess, all of which were measured
-out of pandas rather than read anywhere. They are written out on `counts` and
-document 79 has where each of them came from.
+What is not here is a scan. Counting is a loop around `find` and replacing is a
+loop around `search`, and both loops belong to the caller rather than to either
+engine: the rules about where to look next after a match were measured out of
+pandas and are not what a reader would guess. They also pick between two engines
+now, which is a thing a loop cannot do from inside one of them. So they live in
+`count.mojo` and `replace.mojo`.
 
 Four things here have no underscore in front of them and are read by the other
 two engines rather than by this one. `accepts` says whether an instruction takes
@@ -897,124 +898,6 @@ struct Machine(Movable):
         """
         return self._run(program, points, 0, first, found)
 
-    def counts(mut self, program: Program, points: Span[UInt32, _]) -> Int:
-        """How many times a compiled pattern matches in the text.
-
-        This is the scan Arrow runs and not the one Python's `re` runs, and the
-        two differ in three ways that are all visible in ordinary answers. It is
-        written to Arrow's because pandas answers `str.count` out of Arrow.
-
-        The text is cut rather than searched from an offset. After a match, the
-        rest of the row becomes the text, so `^`, `\\A` and `\\b` are judged
-        against the rest and not against the row: `str.count("^a")` on `aaa` is
-        three, because each of the three searches starts a text of its own.
-
-        The cursor moves in bytes. After a match of no width it moves one byte,
-        which is a third of the way through a three byte character, so an empty
-        pattern against a row with an accented letter in it counts the bytes and
-        not the characters. The literal path counts an empty pattern the same
-        way and document 66 measured it there first.
-
-        The cursor moves to where the match ended unless the match ended where
-        the cursor was. That is not the same rule as moving on after a match of
-        no width: a match of no width found further along the row moves the
-        cursor to it rather than past it, and the same position is then counted
-        a second time from there. `str.count("\\b")` on `  a  ` is two in pandas
-        for that reason, where Python answers two by finding two different
-        boundaries and Arrow answers two by finding one of them twice.
-
-        Args:
-            program: The compiled pattern.
-            points: The text, as code points.
-
-        Returns:
-            How many matches, which is zero for a program that did not compile.
-        """
-        if not program.ok:
-            return 0
-        var bytes = 0
-        for i in range(len(points)):
-            bytes += byte_width(points[i])
-        var seen = 0
-        var cursor = 0
-        var at = 0
-        var lead = 0
-        while cursor <= bytes:
-            var end = self.find(program, points[at:], lead)
-            if end < 0:
-                break
-            seen += 1
-            var step = end
-            if end > lead:
-                step = lead
-                for i in range(end - lead):
-                    step += byte_width(points[at + i])
-            if step == 0:
-                step = 1
-            cursor += step
-            if step <= lead:
-                lead -= step
-            else:
-                var rest = step - lead
-                lead = 0
-                # The cursor can be moved one byte past the end by the rule
-                # above, which is where a scan that matched nothing at the end
-                # of the row stops. There is no character there to walk over.
-                while rest > 0 and at < len(points):
-                    var width = byte_width(points[at])
-                    at += 1
-                    if rest >= width:
-                        rest -= width
-                    else:
-                        lead = width - rest
-                        rest = 0
-        return seen
-
-    def counts_python(
-        mut self, program: Program, points: Span[UInt32, _]
-    ) -> Int:
-        """How many times a compiled pattern matches in the text, Python's way.
-
-        The scan above is Arrow's and this one is `re.findall`'s, and the three
-        rules that made the other one worth spelling out are all absent from this
-        one. The text is never cut, so `^`, `\\A` and `\\b` are judged against
-        the row the caller has: `count("^a")` on `aaa` is one here and three
-        there. The cursor moves in characters, so an empty pattern against a row
-        holding an accented letter counts the letters rather than the bytes. And
-        a match of no width moves the cursor exactly one character on, wherever
-        it was found, so nothing is ever counted twice.
-
-        That leaves a loop of three lines, which is the whole of Python's rule:
-        look from the cursor, put the cursor where the match ended, and move it
-        one further when the match had no width. The replacing scan in
-        `firepanda/kernel/regex/replace.mojo` follows the same rule, which is the
-        other half of the difference between the two engines, since Arrow's two
-        scans follow two rules that are not each other.
-
-        Args:
-            program: The compiled pattern, which has to have been compiled with
-                captures, since the rule needs to know where a match started and
-                not only where it ended.
-            points: The text, as code points.
-
-        Returns:
-            How many matches, which is zero for a program that did not compile.
-        """
-        if not program.ok:
-            return 0
-        var n = len(points)
-        var found = List[Int32]()
-        var seen = 0
-        var p = 0
-        while p <= n:
-            var end = self.search(program, points, p, found)
-            if end < 0:
-                break
-            seen += 1
-            var start = Int(found[0])
-            p = end + 1 if start == end else end
-        return seen
-
 
 def runs(program: Program, points: Span[UInt32, _]) -> Bool:
     """Whether a compiled pattern matches anywhere in the text.
@@ -1045,37 +928,3 @@ def matches_text(program: Program, text: StringSlice) -> Bool:
     """
     var points = decoded(text)
     return runs(program, Span(points))
-
-
-def counts_text(program: Program, text: StringSlice) -> Int:
-    """How many times a compiled pattern matches in a piece of text.
-
-    The one shot form of `Machine.counts`, which is where the rules are.
-
-    Args:
-        program: The compiled pattern.
-        text: The text.
-
-    Returns:
-        How many matches.
-    """
-    var points = decoded(text)
-    var machine = Machine(program)
-    return machine.counts(program, Span(points))
-
-
-def counts_python_text(program: Program, text: StringSlice) -> Int:
-    """How many times a compiled pattern matches in a piece of text, Python's way.
-
-    The one shot form of `Machine.counts_python`, which is where the rules are.
-
-    Args:
-        program: The compiled pattern, compiled with captures.
-        text: The text.
-
-    Returns:
-        How many matches.
-    """
-    var points = decoded(text)
-    var machine = Machine(program)
-    return machine.counts_python(program, Span(points))
