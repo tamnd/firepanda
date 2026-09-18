@@ -19,6 +19,18 @@
 #
 # `FIREPANDA_TEST_JOBS` overrides the width. Set it to 1 to get the old
 # behaviour when a failure is confusing enough to want a clean serial log.
+#
+# The logs go under `build/` rather than under `TMPDIR`, which they used to. On
+# macOS `TMPDIR` is a per-session directory under `/var/folders` that the system
+# is free to reap, and it does: a run of this script reported twenty four of a
+# hundred and fifty five files failed with every one of those twenty four saying
+# only that its log did not exist, and the next run reported all hundred and
+# fifty five the same way, with the tests themselves passing when run one at a
+# time straight afterwards. A tally that says a test failed when the test passed
+# is worse than no tally, so the logs now live somewhere nothing else prunes.
+#
+# A missing log is also reported as what it is. It is not a test failure and
+# saying so sent someone looking at the wrong thing for an afternoon.
 
 set -uo pipefail
 
@@ -44,8 +56,11 @@ if [ ! -e "${files[0]}" ]; then
   exit 1
 fi
 
-# BSD mktemp wants a template, so the macOS job needs one too.
-logs=$(mktemp -d "${TMPDIR:-/tmp}/firepanda.XXXXXXXX")
+# The process id is in the name because two runs of this in the same checkout at
+# once is a normal thing to want and they must not share a log directory.
+logs=build/testlogs.$$
+rm -rf "$logs"
+mkdir -p "$logs"
 trap 'rm -rf "$logs"' EXIT
 
 echo "running ${#files[@]} test files, $jobs at a time"
@@ -63,14 +78,25 @@ printf '%s\0' "${files[@]}" \
   | xargs -0 -P "$jobs" -I {} bash -c 'run_one "$1" "$2"' _ {} "$logs"
 
 failed=0
+lost=0
 for file in "${files[@]}"; do
   base=${file##*/}
   echo "=== $file"
-  cat "$logs/$base.log"
-  [ -e "$logs/$base.ok" ] || failed=$((failed + 1))
+  if [ -e "$logs/$base.log" ]; then
+    cat "$logs/$base.log"
+    [ -e "$logs/$base.ok" ] || failed=$((failed + 1))
+  else
+    echo "no output was captured for this file, so it did not run to a result"
+    lost=$((lost + 1))
+  fi
 done
 
 echo
+if [ "$lost" -ne 0 ]; then
+  echo "$lost of ${#files[@]} test files produced no log, so this run says nothing"
+  echo "the log directory was $logs"
+  exit 1
+fi
 if [ "$failed" -ne 0 ]; then
   echo "$failed of ${#files[@]} test files failed"
   exit 1

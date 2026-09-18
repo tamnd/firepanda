@@ -34,6 +34,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.select import _take_strings
 
 
 def long_text(seed: String) -> String:
@@ -120,8 +121,9 @@ def test_take_gathers_text_and_a_negative_index_is_a_null() raises:
 
 
 def test_a_text_take_past_the_split_gathers_only_short_values() raises:
-    # Past `PARALLEL_TAKE_ROWS` the gather runs on every core, and a column with
-    # nothing in its payload takes the arm that skips the counting pass and
+    # Past `PARALLEL_TAKE_TEXT_ROWS` the gather runs on several cores, and a
+    # column with nothing in its payload takes the arm that skips the counting
+    # pass and
     # copies the sixteen bytes of the view straight across. This is what a group
     # by's key gather does, since a label fits inside its own view. The length is
     # one past a multiple of sixty four so the last worker is left holding a
@@ -195,6 +197,52 @@ def test_a_text_take_past_the_split_carries_the_payload_across() raises:
             break
     assert_equal(wrong, -1, String("a gathered value is wrong at row ", wrong))
     assert_equal(taken.null_count(), 1)
+
+
+def test_a_text_take_on_several_workers_gathers_what_one_worker_gathers() raises:
+    # The two tests above each check one arm of the split against what the value
+    # should be. This checks both arms in the same column against the other
+    # route: a quarter of the rows are too long for their views, a half are null,
+    # and the two calls below are handed the same indices, so the comparison is
+    # row for row rather than against a rule and a worker that wrote its payload
+    # at somebody else's base fails it.
+    #
+    # The height is nine slices, which is more workers than either test above
+    # gets, and it is deliberately not a multiple of the slice so the last worker
+    # is short and holding a partial validity word on the way out.
+    var builder = StringBuilder(capacity=2048)
+    for i in range(2048):
+        if i % 4 == 0:
+            builder.append(String("a-long-value-number-", i).as_bytes())
+        elif i % 4 == 1:
+            builder.append(String("s", i).as_bytes())
+        else:
+            builder.append_null()
+    var col = builder^.finish()
+
+    var picks = List[Int](capacity=147_457)
+    for i in range(147_457):
+        picks.append((i * 2039) % 2048)
+    picks[32_768] = -1
+    picks[98_304] = -1
+
+    var spread = _take_strings(col, picks, True)
+    var alone = _take_strings(col, picks, False)
+    assert_equal(len(spread), len(picks))
+    assert_equal(len(alone), len(picks))
+
+    var wrong = -1
+    for i in range(len(picks)):
+        if spread.is_valid(i) != alone.is_valid(i):
+            wrong = i
+            break
+        if spread.is_valid(i) and spread.unsafe_bytes(i) != alone.unsafe_bytes(
+            i
+        ):
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("the two routes differ at row ", wrong))
+    assert_equal(spread.null_count(), alone.null_count())
 
 
 def test_take_past_the_end_is_an_error_rather_than_a_null() raises:
