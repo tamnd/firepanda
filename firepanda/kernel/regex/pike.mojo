@@ -324,6 +324,15 @@ def fill_byte_offsets(
     tamnd/firepanda#830 listed this table as one of three costs and this is the
     measurement that says which of the three it is.
 
+    The entries are appended rather than written into a table grown to its size
+    first, which is the opposite of what `decode_into` next door does, and the
+    difference was measured rather than chosen. Growing the list costs a fill
+    of everything the last row did not use, and the row that empties it is the
+    ASCII row, which is most of them. So a column pays the fill on every row
+    that needs a table and saves a capacity check per entry, and on the URL
+    column in `benchmarks/main.mojo` that came out slower than what is here.
+    tamnd/firepanda#889 has the numbers.
+
     Args:
         bytes: The row as it is written.
         points: The same row as code points.
