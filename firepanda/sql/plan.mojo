@@ -492,6 +492,7 @@ from firepanda.plan.node import (
 
 from .ast import (
     Ast,
+    Expr,
     CLAUSE_FROM,
     CLAUSE_GROUP,
     CLAUSE_HAVING,
@@ -518,7 +519,13 @@ from .ast import (
     EXPR_SUBSCRIPT,
     EXPR_UNARY,
     CALL_DISTINCT,
+    CALL_EXPORT_STATE,
+    CALL_IGNORE_NULLS,
+    CALL_RESPECT_NULLS,
     CALL_STAR,
+    CALL_WITHIN_GROUP,
+    call_flags,
+    call_sorts,
     GROUP_ALL,
     GROUP_EXPRESSION,
     LIMIT_PERCENT,
@@ -558,6 +565,8 @@ from .star import (
 from .table import Grammar
 from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 from .unsupported import (
+    CALL_ARGUMENT,
+    CALL_MODIFIER,
     INTERVAL,
     NAMED_ARGUMENT,
     ROW_VALUE,
@@ -2783,10 +2792,11 @@ def _lower_expr(
         return built
 
     if node.kind == EXPR_FUNCTION:
+        _call_modifiers(ast, node)
         var name = fold(_one_name(ast, node.payload, "a function"))
         if node.b != NO_NODE:
             return _lower_over(ast, at, name, plan, walk, scope, grouped)
-        var args = ast.items(node.children)
+        var args = _call_arguments(ast, node)
         if _is_aggregate(name):
             if not grouped:
                 raise Error(
@@ -2798,9 +2808,9 @@ def _lower_expr(
                         ),
                     )
                 )
-            var distinct = (node.a & CALL_DISTINCT) != 0
+            var distinct = (call_flags(node.a) & CALL_DISTINCT) != 0
             var over: Int
-            if name == "count" and (node.a & CALL_STAR) != 0:
+            if name == "count" and (call_flags(node.a) & CALL_STAR) != 0:
                 if distinct:
                     raise Error(
                         "count(DISTINCT *) has no column to count the distinct"
@@ -3146,6 +3156,57 @@ def _lower_in(
     return built
 
 
+def _call_arguments(ast: Ast, node: Expr) -> List[UInt32]:
+    """The arguments of a call, without the `ORDER BY` entries behind them.
+
+    A call keeps its own `ORDER BY` on the end of the same run its arguments
+    are in, and those entries are statement nodes rather than expression ones,
+    so anything that walks the arguments has to stop where they start. Nothing
+    here ever sees any, because `_call_modifiers` turns such a call down before
+    lowering gets this far, but the walkers that run before lowering do.
+
+    Args:
+        ast: The arenas.
+        node: The `EXPR_FUNCTION`.
+
+    Returns:
+        One index per argument, in the order they were written.
+    """
+    var out = List[UInt32]()
+    for i in range(ast.length(node.children) - call_sorts(node.a)):
+        out.append(ast.at(node.children, i))
+    return out^
+
+
+def _call_modifiers(ast: Ast, node: Expr) raises:
+    """Turns down the four things a call may carry that change what it reads.
+
+    The transformer reads all four and the printer writes all four back, so a
+    query holding one still round trips. They stop here because each of them
+    asks the fold itself for something firepanda's folds do not do: an order to
+    see the rows in, or a rule for what to do with a null, or the fold's own
+    state instead of its answer.
+
+    Args:
+        ast: The arenas.
+        node: The `EXPR_FUNCTION`.
+
+    Raises:
+        Error: If the call carries any of them.
+    """
+    var flags = call_flags(node.a)
+    if flags & CALL_WITHIN_GROUP != 0:
+        raise not_implemented(CALL_MODIFIER, "WITHIN GROUP", "")
+    if flags & CALL_EXPORT_STATE != 0:
+        raise not_implemented(CALL_MODIFIER, "EXPORT_STATE", "")
+    if call_sorts(node.a) != 0:
+        raise not_implemented(CALL_ARGUMENT, "ORDER BY", "")
+    if flags & CALL_IGNORE_NULLS != 0:
+        raise not_implemented(CALL_ARGUMENT, "IGNORE NULLS", "")
+    if flags & CALL_RESPECT_NULLS != 0:
+        raise not_implemented(CALL_ARGUMENT, "RESPECT NULLS", "")
+
+
 def _lower_over(
     ast: Ast,
     at: UInt32,
@@ -3229,10 +3290,10 @@ def _lower_over(
             )
         )
 
-    var args = ast.items(node.children)
-    var distinct = (node.a & CALL_DISTINCT) != 0
+    var args = _call_arguments(ast, node)
+    var distinct = (call_flags(node.a) & CALL_DISTINCT) != 0
     var over: Int
-    if name == "count" and (node.a & CALL_STAR) != 0:
+    if name == "count" and (call_flags(node.a) & CALL_STAR) != 0:
         if distinct:
             raise Error(
                 "count(DISTINCT *) has no column to count the distinct values"
@@ -3340,7 +3401,7 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
             for key in ast.items(window.children):
                 if _has_aggregate(ast, key):
                     return True
-        for arg in ast.items(node.children):
+        for arg in _call_arguments(ast, node):
             if _has_aggregate(ast, arg):
                 return True
         return False
@@ -3386,7 +3447,7 @@ def _has_over(ast: Ast, at: UInt32) -> Bool:
     if node.kind == EXPR_FUNCTION:
         if node.b != NO_NODE:
             return True
-        for arg in ast.items(node.children):
+        for arg in _call_arguments(ast, node):
             if _has_over(ast, arg):
                 return True
         return False
@@ -3465,7 +3526,7 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]) raises:
             var window = ast.exprs[Int(node.b)]
             for key in ast.items(window.children):
                 _taken(ast, key, kind, found)
-        for arg in ast.items(node.children):
+        for arg in _call_arguments(ast, node):
             _taken(ast, arg, kind, found)
         return
     if node.kind == EXPR_BINARY:
@@ -5556,7 +5617,7 @@ def _written_names(
             var window = ast.exprs[Int(node.b)]
             for key in ast.items(window.children):
                 _written_names(ast, key, found, plain)
-        for arg in ast.items(node.children):
+        for arg in _call_arguments(ast, node):
             _written_names(ast, arg, found, plain)
         return
     if node.kind == EXPR_BINARY:
