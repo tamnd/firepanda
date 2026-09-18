@@ -37,7 +37,7 @@ from firepanda.kernel.compare import not_equal
 from firepanda.kernel.concat import concat_strings
 from firepanda.kernel.regex.column import text_count_regex
 from firepanda.kernel.regex.method import METHOD_COUNT, program_for
-from firepanda.kernel.regex.pike import counts_text
+from firepanda.kernel.regex.count import counted_text
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.scalar import text_count_regex_scalar
 
@@ -76,7 +76,7 @@ def seen(pattern: StringSlice, text: StringSlice) raises -> Int:
     Raises:
         Error: If the pattern did not compile.
     """
-    return counts_text(compiled(String(pattern)), text)
+    return counted_text(compiled(String(pattern)), text)
 
 
 def test_counts_a_literal() raises:

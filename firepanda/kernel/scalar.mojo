@@ -27,7 +27,8 @@ from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 from .pattern import fold_point
-from .regex.pike import counts_text, matches_text
+from .regex.count import counted_text
+from .regex.pike import matches_text
 from .regex.program import Program
 from .searchfold import SEARCHED_FROM, SEARCHED_TO
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
@@ -3175,7 +3176,7 @@ def text_count_regex_scalar(
         if not a.is_valid(i):
             out.set_null(i)
             continue
-        out.set_valid(i, Int64(counts_text(program, a[i])))
+        out.set_valid(i, Int64(counted_text(program, a[i])))
     return out^
 
 

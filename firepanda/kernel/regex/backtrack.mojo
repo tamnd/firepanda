@@ -355,3 +355,38 @@ def searched(
     if end != GAVE_UP:
         return end
     return machine.search(program, points, first, found)
+
+
+def located(
+    program: Program,
+    points: Span[UInt32, _],
+    lead: Int,
+    mut machine: Machine,
+    mut bounded: Bounded,
+    mut found: List[Int32],
+) -> Int:
+    """Where the leftmost first match ends, from whichever engine can answer.
+
+    The other half of the arrangement above, for the caller that cuts its text
+    down after every match rather than moving a cursor along one row. It asks
+    about the text it was handed from the start of it, and the unreadable bytes
+    in front of that text are how a cut through the middle of a character says
+    so. Nothing here needs the groups, but a program compiled with them fills
+    them anyway, so the caller passes a list rather than this allocating one per
+    match.
+
+    Args:
+        program: The compiled pattern.
+        points: The text as it stands now, as code points.
+        lead: How many unreadable bytes stand in front of it.
+        machine: The machine's buffers, which the caller keeps across rows.
+        bounded: The backtracker's, the same way.
+        found: Scratch, filled when the program carries slots.
+
+    Returns:
+        Where the match ends, or -1 when there is none.
+    """
+    var end = bounded.search(program, points, lead, 0, found)
+    if end != GAVE_UP:
+        return end
+    return machine.find(program, points, lead)

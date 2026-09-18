@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `count` runs the backtracker, and the two counting scans move out of the machine
+
+The last of the three scans that were still on the machine alone. Counting over a million URLs goes from about 0.94 s to about 0.39 s on the ClickBench q28 pattern, from about 1.62 s to about 0.94 s on a two group pattern, and from about 0.28 s to about 0.19 s on a short one.
+
+Both counting loops moved to a new file, `firepanda/kernel/regex/count.mojo`, and they are no longer methods on the machine. A scan is a loop that runs the pattern, does something with the match and looks again, and both halves of that are Arrow's rules or Python's rather than the engine's. Now that a scan also picks between two engines, it cannot be written inside one of them. The replacing scan was already arranged that way and this is the counting scan catching up, so `Machine` is the machine and nothing else.
+
+`counts` and `counts_python` are gone from `Machine` and `counts_text` and `counts_python_text` are gone from `firepanda/kernel/regex/pike.mojo`. The replacements are `counted`, `counted_python`, `counted_text` and `counted_python_text` in the new file, and the two one shot forms take the same arguments they took before. Nothing pandas-facing changes and no answer moves.
+
+The count differential now runs the whole generated corpus through both engines, which was the last of the three that did not.
+
 ### Changed: `replace` and `extract` run the backtracker
 
 The backtracker in the entry below is wired under the two kernels that read the groups out of a match. Every search goes through one function that asks it first and asks the machine for the rows it hands back, so a caller never learns which of the two answered and there is one place in the library where that is decided.

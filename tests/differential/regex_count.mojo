@@ -40,6 +40,8 @@ from std.collections.span import Span
 from std.python import Python, PythonObject
 from std.sys import argv
 
+from firepanda.kernel.regex.backtrack import Bounded
+from firepanda.kernel.regex.count import counted
 from firepanda.kernel.regex.method import METHOD_COUNT, program_for
 from firepanda.kernel.regex.parse import decoded
 from firepanda.kernel.regex.pike import Machine
@@ -211,8 +213,12 @@ def main() raises:
 
         var want = numbers(answer)
         var machine = Machine(program)
+        var bounded = Bounded(program)
+        var found = List[Int32]()
         for which in range(len(points)):
-            var ours = machine.counts(program, Span(points[which]))
+            var ours = counted(
+                program, Span(points[which]), machine, bounded, found
+            )
             if ours != want[which]:
                 differ.append(pattern)
                 break
