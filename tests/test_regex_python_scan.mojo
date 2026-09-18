@@ -114,9 +114,11 @@ def test_the_counting_scan_never_cuts_the_row() raises:
 def test_the_counting_scan_reads_a_boundary_against_the_whole_row() raises:
     """Four boundaries in five characters, because the two spaces on each side
     of the letter are one word character away from a run of spaces. An empty row
-    has no boundary at all, which is Python's answer and not RE2's."""
+    has one position in it and the scan asks about that one, so the count there
+    is whatever a single `\\B` says, which document 90 has depending on which
+    CPython the call arrived in and which is one for the newest of them."""
     assert_equal(counts_python_text(built("\\B"), "  a  "), 4)
-    assert_equal(counts_python_text(built("\\B"), ""), 0)
+    assert_equal(counts_python_text(built("\\B"), ""), 1)
     assert_equal(counts_python_text(built("k", FLAG_IGNORECASE), "KaKb"), 2)
     assert_equal(counts_python_text(built("(a)"), "aaa"), 3)
 

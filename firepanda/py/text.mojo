@@ -83,6 +83,8 @@ unimplemented on the board and a refusing one reads as a failure, and the second
 is a lie about a method nobody has written yet.
 """
 
+from std.python import Python
+
 from firepanda.frame.series import Series
 from firepanda.kernel.chars import character_count
 from firepanda.kernel.regex.method import (
@@ -297,6 +299,36 @@ def _one_character(fill: String) raises -> String:
     )
 
 
+def _python_minor() raises -> Int:
+    """Which CPython this call arrived in, as the minor number alone.
+
+    The thing this library copies on one of its two engines is the `re` module,
+    and `re` is not the same module in every version of Python this project
+    supports. `\\B` on a row with nothing in it is the rule that changed: three
+    versions fail it and 3.14 matches it. pandas answers a `findall` or a call
+    carrying a `flags` argument by running `re` in this process, so the answer
+    that agrees with pandas is the answer this interpreter would have given and
+    not the answer the newest one would have.
+
+    Read here rather than passed in from Python, because it is not a thing a
+    caller chose. The door takes a word for the engine and a number for the flag
+    letters and both of those are the caller speaking. This is the room the call
+    is standing in.
+
+    Read on every compile rather than once and kept, because a module level
+    value that is filled in on first use is a thing to get right in a language
+    with no module level mutable state, and the cost is one attribute read
+    beside the building of a program.
+
+    Returns:
+        The minor version, so 13 for CPython 3.13.
+
+    Raises:
+        Error: If `sys` cannot be reached, which it can.
+    """
+    return Int(py=Python.import_module("sys").version_info.minor)
+
+
 def _compiled(
     kind: String, pattern: String, flags: Int32 = 0
 ) raises -> Program:
@@ -387,7 +419,9 @@ def _compiled(
     elif name == "extract_regex":
         method = METHOD_EXTRACT
     var seeded = flags | (FLAG_IGNORECASE if folded else 0)
-    var program = program_for(method, pattern, seeded, argued=python)
+    var program = program_for(
+        method, pattern, seeded, argued=python, minor=_python_minor()
+    )
     if program.ok:
         return program^
     var said = String("str: ", program.problem, ", in the pattern ", pattern)

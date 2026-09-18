@@ -54,7 +54,11 @@ about the binding.
 """
 
 from firepanda.kernel.regex.parse import parse_pattern
-from firepanda.kernel.regex.program import Program, compile_program
+from firepanda.kernel.regex.program import (
+    PYTHON_NEWEST,
+    Program,
+    compile_program,
+)
 from firepanda.kernel.regex.route import (
     ENGINE_PYTHON,
     ENGINE_RE2,
@@ -338,7 +342,11 @@ def python_anchored(
 
 
 def program_for(
-    method: UInt8, pattern: String, flags: Int32 = 0, argued: Bool = False
+    method: UInt8,
+    pattern: String,
+    flags: Int32 = 0,
+    argued: Bool = False,
+    minor: Int = PYTHON_NEWEST,
 ) -> Program:
     """Compiles what one of the five methods would run, or refuses it.
 
@@ -381,6 +389,11 @@ def program_for(
         argued: Whether those flags came from a `flags` argument, which is what
             moves the call to Python's engine. False is the ordinary call and
             leaves everything below exactly as it was.
+        minor: Which CPython the answer is to agree with, as the minor number
+            alone. It is passed to every compile rather than only to the ones
+            that reach Python's engine, because which engine a call lands on is
+            decided in here and a caller would have to read this function to
+            know when the number mattered.
 
     Returns:
         The program, or the reason there is not one, with the flag saying whose
@@ -389,14 +402,14 @@ def program_for(
     """
     var tree = parse_pattern(pattern, flags)
     if method == METHOD_EXTRACT:
-        return compile_program(tree, ENGINE_PYTHON, captures=True)
+        return compile_program(tree, ENGINE_PYTHON, captures=True, minor=minor)
     if argued:
         if not tree.ok or holds_unsupported(tree):
             # Refused over the pattern the caller wrote rather than over the
             # anchored one, for the reason the `not tree.ok` branch below gives.
             # The engine is the same either way here, so the only thing the
             # choice decides is which pattern the message quotes.
-            return compile_program(tree, ENGINE_PYTHON)
+            return compile_program(tree, ENGINE_PYTHON, minor=minor)
         return compile_program(
             parse_pattern(
                 python_anchored(
@@ -413,13 +426,14 @@ def program_for(
             # Arrow's rule only ever compares the end against a cursor it kept
             # itself.
             captures=method == METHOD_REPLACE or method == METHOD_COUNT,
+            minor=minor,
         )
     if holds_unsupported(tree):
         # Routed to Python, and Python's engine has none of the five yet. It is
         # compiled rather than refused in a sentence of this file's own so that
         # the caller is told which construct is missing, which is what the
         # compiler's own refusal says and what this used to throw away.
-        return compile_program(tree, ENGINE_PYTHON)
+        return compile_program(tree, ENGINE_PYTHON, minor=minor)
     if not tree.ok:
         # A pattern the grammar cannot read is refused over what the caller
         # wrote rather than over the rewrite, because the rewrite can make a
@@ -428,9 +442,10 @@ def program_for(
         # reads the pattern as written when it picks an engine and never gets
         # past that, so answering here would be answering a question that was
         # already over.
-        return compile_program(tree, ENGINE_RE2)
+        return compile_program(tree, ENGINE_RE2, minor=minor)
     return compile_program(
         parse_pattern(anchored(method, preprocessed(pattern)), flags),
         ENGINE_RE2,
         captures=method == METHOD_REPLACE,
+        minor=minor,
     )

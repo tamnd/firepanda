@@ -138,7 +138,13 @@ comptime AT_BOUNDARY: UInt8 = 7
 """`\\b`, between a word character and something that is not one."""
 
 comptime AT_NON_BOUNDARY: UInt8 = 8
-"""`\\B`, anywhere `\\b` is not."""
+"""`\\B`, anywhere `\\b` is not, asked against the ASCII word class.
+
+Both engines write this one. It is RE2's `\\B` whole, and it is Python's under
+`(?a)` as well, because the ASCII word class is the same set of characters for
+both of them. What Python used to have on top of it is `AT_TEXT_NOT_EMPTY`,
+which is a separate instruction rather than a separate value here, for the
+reason that value's own docstring gives."""
 
 comptime AT_END_TEXT: UInt8 = 9
 """`$` outside multiline mode when the pattern is being read the way Python
@@ -155,23 +161,29 @@ comptime AT_BOUNDARY_UNICODE: UInt8 = 10
 against every letter there is rather than against the ASCII 63."""
 
 comptime AT_NON_BOUNDARY_UNICODE: UInt8 = 11
-"""`\\B` read the way Python reads it.
+"""`\\B` asked against Python's word class, which is every letter there is
+rather than the ASCII 63.
 
-`AT_NON_BOUNDARY` is not its ASCII twin, even though `AT_BOUNDARY` is
-`AT_BOUNDARY_UNICODE`'s. That one is RE2's, which asks the question between
-bytes and is refused for it, and which also has none of the special case below.
-`AT_NON_BOUNDARY_ASCII` is the twin."""
+The plain negation of `AT_BOUNDARY_UNICODE` and nothing else, the way
+`AT_NON_BOUNDARY` is the plain negation of `AT_BOUNDARY`. The two pairs differ
+only in which characters count as word characters."""
 
-comptime AT_NON_BOUNDARY_ASCII: UInt8 = 12
-"""`\\B` read the way Python reads it under `(?a)`, which is the same question
-asked against the ASCII word class.
+comptime AT_TEXT_NOT_EMPTY: UInt8 = 12
+"""The row holds at least one character.
 
-`\\b` needs no such value, because RE2's `\\b` already asks against exactly the
-characters Python's ASCII `\\w` holds and has no special case attached to it.
-`\\B` does, and the special case is the reason this exists: Python fails a `\\B`
-on an empty row whichever alphabet was asked for, and RE2 matches one. Reusing
-`AT_NON_BOUNDARY` for the narrow reading would have taken RE2's answer for the
-empty row along with the alphabet, and document 88 is where that was caught."""
+No engine spells this and no caller can write it. It exists because CPython up
+to 3.13 fails a `\\B` on an empty row, whichever alphabet was asked for, and
+3.14 took the case out and made `\\B` the plain negation of `\\b` the way every
+other engine has it. The compiler puts one of these in front of a `\\B` when it
+is compiling beside an interpreter that has the case and leaves it out when it
+is not, so a version of Python is settled while the pattern is compiled rather
+than once per position of every row.
+
+The case was two position codes before, one per alphabet, which said that the
+answer for an empty row is a fact about which characters are word characters. It
+is not. `(?a)` narrows which characters count and says nothing at all about a
+row that holds none, and writing the case as an instruction of its own is what
+lets `\\b` and `\\B` be a pair again under both alphabets. Document 90."""
 
 
 comptime CATEGORY_DIGIT: UInt8 = 1

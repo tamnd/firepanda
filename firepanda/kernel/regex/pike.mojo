@@ -86,8 +86,8 @@ from firepanda.kernel.regex.tokens import (
     AT_END_STRING,
     AT_END_TEXT,
     AT_NON_BOUNDARY,
-    AT_NON_BOUNDARY_ASCII,
     AT_NON_BOUNDARY_UNICODE,
+    AT_TEXT_NOT_EMPTY,
 )
 
 
@@ -151,15 +151,14 @@ def _holds(
 
     `AT_BOUNDARY_UNICODE` and `AT_NON_BOUNDARY_UNICODE` are the same story about
     the word boundary. RE2 asks it against 63 characters and Python asks it
-    against 138558, and document 81 is where that was measured. The second of
-    the two is also the one anchor in here that is not the negation of its
-    partner, for a reason the body gives where it happens.
+    against 138558, and document 81 is where that was measured. Under `(?a)`
+    Python asks against the 63 as well, so both halves land on the pair above
+    and neither needs a value of its own.
 
-    `AT_NON_BOUNDARY_ASCII` is Python's `\\B` under `(?a)`, which is that same
-    special case asked against the narrow class. There is no matching value for
-    `\\b`, because RE2's is already the right question under that letter, and
-    document 88 is where the difference between the two halves is written
-    down.
+    `AT_TEXT_NOT_EMPTY` is nothing any engine spells. CPython up to 3.13 fails a
+    `\\B` on an empty row and 3.14 does not, so the compiler writes one of these
+    in front of a `\\B` when it is answering beside one of the older ones.
+    Document 90.
 
     `AT_END_STRING` is `\\z`, and `\\Z` arrives here as the same thing because
     pandas rewrites a trailing `\\Z` to `\\z` on the way to Arrow. A `\\Z` that
@@ -199,29 +198,12 @@ def _holds(
         if at != length - 1:
             return False
         return _point(points, lead, at) == NEWLINE
-    if (
-        which == Int32(Int(AT_NON_BOUNDARY_UNICODE))
-        or which == Int32(Int(AT_NON_BOUNDARY_ASCII))
-    ) and length == 0:
-        # Python's `\\B` is the one anchor that is not simply the opposite of
-        # its partner. It fails on an empty row rather than succeeding there,
-        # which is a special case written into CPython in 3.12 and is not a
-        # consequence of any rule about word characters. RE2 has no such case
-        # and matches, so `str.contains(r"\\B")` on an empty row answers True
-        # and the same call with a flag beside it answers False, in pandas as
-        # much as here. Measured rather than read, and then read to check.
-        #
-        # Both readings of Python's `\\B` are here, because the special case is
-        # about an empty row and not about an alphabet. `(?a)` narrows which
-        # characters are word characters and says nothing at all about a row
-        # that holds none.
-        return False
-    if which == Int32(Int(AT_NON_BOUNDARY_ASCII)):
-        # The ASCII word class, which is RE2's, reached through RE2's test
-        # rather than through a binary search over two ranges.
-        var was = at > 0 and is_word_point(_point(points, lead, at - 1))
-        var next = at < length and is_word_point(_point(points, lead, at))
-        return was == next
+    if which == Int32(Int(AT_TEXT_NOT_EMPTY)):
+        # Nobody writes this and the compiler puts it in front of a `\\B` when
+        # the interpreter beside it is one of the ones that fails a `\\B` on an
+        # empty row. It is a question about the row rather than about the
+        # position, which is why it reads `length` and not `at`.
+        return length != 0
     if which == Int32(Int(AT_BOUNDARY_UNICODE)) or which == Int32(
         Int(AT_NON_BOUNDARY_UNICODE)
     ):
