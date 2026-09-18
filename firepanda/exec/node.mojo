@@ -5079,6 +5079,62 @@ def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
     return AnyArray(out^)
 
 
+def _sum_counts(
+    kind: AggKind, marked: Bool, source: LogicalType, nullable: Bool
+) -> Bool:
+    """Whether a sum has to count what it added to know whether it added any.
+
+    A sum reads no validity. A null holds a zero and a NaN is made to hold one,
+    so both spellings of missing add nothing and neither has to be looked up,
+    which is the invariant `firepanda/kernel/group.mojo` spends and the reason a
+    grouped sum is as fast as it is. The price is that a group whose values were
+    all missing and a group whose values added to zero come out of the kernel as
+    the same zero, and SQL wants a null for the first one. Telling them apart
+    needs a count of the values that were really there, which is a second state
+    slot and a second scatter, and is exactly what a mean already pays for its
+    divisor. So a sum that has to answer null costs what a mean costs.
+
+    It is not paid where it cannot buy anything. A column that is not allowed to
+    hold a null has a value in every row it has, so a group that exists held one,
+    and the count would be a number this never reads. A float column is asked
+    about separately because a NaN is not a value here either, so a column of
+    them can be missing without the schema saying it is allowed to be. See #170.
+
+    Args:
+        kind: The reduction.
+        marked: Whether the caller asked for SQL's answer over nothing.
+        source: The type being reduced.
+        nullable: Whether the column being reduced may hold a null.
+
+    Returns:
+        True when a count slot has to be allocated beside the sum.
+    """
+    if kind != AggKind.SUM or not marked:
+        return False
+    return nullable or source.is_float()
+
+
+def _seen_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
+    """Nulls each group's sum where the group held nothing to add.
+
+    Args:
+        sums: One sum per group.
+        counts: One count of the values that were there per group.
+
+    Returns:
+        The same sums, null where the count is zero.
+
+    Raises:
+        If the sums have no physical layout to choose over.
+    """
+    var n = counts.unsafe_ptr[DType.int64]()
+    var held = Array[DType.bool](len(counts))
+    var dst = held.unsafe_mut_ptr()
+    for g in range(len(held)):
+        dst.unsafe_offset(g).unsafe_store(n.unsafe_offset(g).unsafe_load() != 0)
+    return pick_any(held, sums, all_null(sums.type, 1))
+
+
 struct Group(Movable):
     """Groups rows by one or more key columns and reduces each group.
 
@@ -5233,10 +5289,15 @@ struct Group(Movable):
 
     var _at: List[Int]
     """Per aggregate, the slot it starts at. A state slot when it folds and a
-    held slot when it does not. A mean folds and owns two state slots."""
+    held slot when it does not. A mean folds and owns two state slots, and so
+    does a sum that has to answer null over a group that held nothing."""
 
     var _holds: List[Bool]
     """Per aggregate, whether `_at` points into `held` rather than `state`."""
+
+    var _counted: List[Bool]
+    """Per aggregate, whether a count of the values that were there sits in the
+    slot after it. True only for a sum that `_sum_counts` said needs one."""
 
     var held: List[ChunkedArray]
     """Per held slot, every chunk of the column that slot reduces."""
@@ -5297,6 +5358,7 @@ struct Group(Movable):
         self._as_float = List[Bool]()
         self._at = List[Int]()
         self._holds = List[Bool]()
+        self._counted = List[Bool]()
         self.held = List[ChunkedArray]()
         self._kept = List[Int]()
         self._late = List[AggKind]()
@@ -5405,7 +5467,11 @@ struct Group(Movable):
             if not _folds(kind, source):
                 # The values themselves are the state, so the column goes by and
                 # the kernel runs once over each group's share of it at the end.
+                # The kernel's own answer is what a held slot gets, and the
+                # whole frame kernels already give a null where every value in a
+                # group was missing, so nothing here has to be counted.
                 self._holds.append(True)
+                self._counted.append(False)
                 self._at.append(len(self._kept))
                 self._kept.append(at)
                 self._late.append(kind)
@@ -5414,7 +5480,28 @@ struct Group(Movable):
 
             self._holds.append(False)
             self._at.append(len(self._source))
-            if kind == AggKind.MEAN:
+            var counted = _sum_counts(
+                kind,
+                self.aggs[a].empty_is_null,
+                source,
+                self.input[at].nullable,
+            )
+            self._counted.append(counted)
+            if counted:
+                # The same two slots a mean takes, for the same reason and in
+                # the same order: the sum on its own cannot say whether it ever
+                # added anything, and the count beside it can. The sum keeps the
+                # accumulator a sum gets, since this one is the answer and not a
+                # numerator, so nothing about the number it reports moves.
+                self._source.append(at)
+                self._produce.append(AggKind.SUM)
+                self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
+                self._source.append(at)
+                self._produce.append(AggKind.COUNT)
+                self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
+            elif kind == AggKind.MEAN:
                 # A mean is a sum and a count until the last moment. Keeping the
                 # two apart is what lets the merge be an addition, and dividing
                 # earlier would make the running value a mean of means, which is
@@ -5801,6 +5888,18 @@ struct Group(Movable):
                 # The kernel read the same table this node's schema was built
                 # from, so a held answer already carries what was declared.
                 out.append(AnyArray(copy=late[at]))
+            elif self._counted[a]:
+                # A group is here because a row made it, so the count is what
+                # says whether any of those rows held a value. Zero means the
+                # sum added nothing and the zero it is holding is not an answer.
+                out.append(
+                    _labelled(
+                        _seen_of(
+                            self.state[base + at], self.state[base + at + 1]
+                        ),
+                        want,
+                    )
+                )
             elif self.aggs[a].kind == AggKind.MEAN:
                 out.append(
                     _mean_of(self.state[base + at], self.state[base + at + 1])
@@ -5962,10 +6061,15 @@ struct Reduce(Movable):
 
     var _at: List[Int]
     """Per aggregate, the slot it starts at. A state slot when it folds and a
-    held slot when it does not. A mean folds and owns two state slots."""
+    held slot when it does not. A mean folds and owns two state slots, and so
+    does a sum that has to answer null over a column that held nothing."""
 
     var _holds: List[Bool]
     """Per aggregate, whether `_at` points into `held` rather than `state`."""
+
+    var _counted: List[Bool]
+    """Per aggregate, whether a count of the values that were there sits in the
+    slot after it. True only for a sum that `_sum_counts` said needs one."""
 
     var held: List[ChunkedArray]
     """Per held slot, every chunk of the column that slot reduces."""
@@ -6003,6 +6107,7 @@ struct Reduce(Movable):
         self._as_float = List[Bool]()
         self._at = List[Int]()
         self._holds = List[Bool]()
+        self._counted = List[Bool]()
         self.held = List[ChunkedArray]()
         self._kept = List[Int]()
         self._kept_shift = List[Int]()
@@ -6086,8 +6191,11 @@ struct Reduce(Movable):
 
             if not _folds(kind, source):
                 # The values themselves are the state, so the column goes by
-                # and the kernel runs once over all of it at the end.
+                # and the kernel runs once over all of it at the end. The whole
+                # column kernels already answer null where every value was
+                # missing, so nothing here has to be counted.
                 self._holds.append(True)
+                self._counted.append(False)
                 self._at.append(len(self._kept))
                 self._kept.append(at)
                 self._kept_shift.append(shift)
@@ -6097,7 +6205,33 @@ struct Reduce(Movable):
 
             self._holds.append(False)
             self._at.append(len(self._source))
-            if kind == AggKind.MEAN:
+            # An operation folded in is taken as nullable rather than looked up,
+            # because the column it produces is not in the schema and a division
+            # can answer null over an operand that could not.
+            var nullable = self.input[at].nullable
+            if self.aggs[a].op:
+                nullable = True
+            var counted = _sum_counts(
+                kind, self.aggs[a].empty_is_null, source, nullable
+            )
+            self._counted.append(counted)
+            if counted:
+                # The same two slots a mean takes, for the same reason and in
+                # the same order: the sum on its own cannot say whether it ever
+                # added anything, and the count beside it can. The sum keeps the
+                # accumulator a sum gets, since this one is the answer and not a
+                # numerator, so nothing about the number it reports moves.
+                self._source.append(at)
+                self._shift.append(shift)
+                self._produce.append(AggKind.SUM)
+                self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
+                self._source.append(at)
+                self._shift.append(shift)
+                self._produce.append(AggKind.COUNT)
+                self._merge.append(AggKind.SUM)
+                self._as_float.append(False)
+            elif kind == AggKind.MEAN:
                 # Split into a sum and a count for the reason `Group.start`
                 # gives, and the sum takes float64 for the reason it gives too.
                 self._source.append(at)
@@ -6325,6 +6459,17 @@ struct Reduce(Movable):
                     reduce_any(
                         ChunkedArray(copy=self.held[at]).combine(),
                         self._late[at],
+                    )
+                )
+            elif self._counted[a]:
+                # Rows arrived and the count says whether any of them held a
+                # value. Zero means the sum added nothing, which is the null
+                # the marked branch at the top of this loop answers when no row
+                # arrived at all, reached from the other side.
+                out.append(
+                    _labelled(
+                        _seen_of(self.state[at], self.state[at + 1]),
+                        self.output[a].dtype,
                     )
                 )
             elif self.aggs[a].kind == AggKind.MEAN:

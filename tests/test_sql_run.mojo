@@ -704,13 +704,11 @@ def test_a_filter_rides_on_a_distinct_count_and_on_an_extreme() raises:
     same(read_back(out, "m"), [15], "the largest of the dearer rows")
 
 
-def test_a_filter_that_keeps_no_row_answers_zero_and_duckdb_says_null() raises:
-    # Registered divergence, and it is #836 rather than anything about the
-    # filter. A filter does not take rows away, it turns the ones it does not
-    # want into nulls, so the group is a group that saw rows and found every
-    # value in it null, and this engine's sum answers zero for that. Written
-    # with a `WHERE` instead the same query is null already, which is the test
-    # above this file's sum over no rows at all.
+def test_a_filter_that_keeps_no_row_answers_null() raises:
+    # A filter does not take rows away, it turns the ones it does not want into
+    # nulls, so this is a fold that saw rows and found every value in it null
+    # rather than a fold over no rows at all. Those were two answers until
+    # #836 and they are one now.
     same(
         gapped(
             run(
@@ -719,8 +717,8 @@ def test_a_filter_that_keeps_no_row_answers_zero_and_duckdb_says_null() raises:
             ),
             "s",
         ),
-        [0],
-        "zero here and null in DuckDB",
+        [-1],
+        "s",
     )
 
 
@@ -4134,6 +4132,74 @@ def test_a_sum_over_an_empty_group_does_not_arise() raises:
         session(),
     )
     assert_equal(len(got), 0)
+
+
+def test_a_sum_over_nothing_but_nulls_is_a_null_as_well() raises:
+    # The other half of the same disagreement, and the half that is not free.
+    # Rows arrived and every value in them was missing, so the sum added
+    # nothing and the zero it is holding is not an answer. What tells that
+    # apart from values that really summed to zero is a count of what was
+    # added, which is a second state slot beside the sum. Issue #836.
+    same(
+        gapped(
+            run(
+                "SELECT sum(mark) AS total FROM gappy WHERE mark IS NULL",
+                session(),
+            ),
+            "total",
+        ),
+        [-1],
+        "total",
+    )
+
+
+def test_a_count_over_nothing_but_nulls_is_still_a_zero() raises:
+    # A count is the fold the two front ends agree about, so it is a zero
+    # beside the null above rather than a null of its own.
+    same(
+        answer(
+            "SELECT count(mark) AS seen FROM gappy WHERE mark IS NULL", "seen"
+        ),
+        [0],
+        "seen",
+    )
+
+
+def test_a_group_of_nothing_but_nulls_sums_to_null_and_the_rest_do_not() raises:
+    # Two groups, one of which holds nothing but nulls. That group is there
+    # because rows made it, and what the sum has to say about it is nothing,
+    # while the group beside it is the number it always was.
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT mark IS NULL AS gap, sum(mark) AS total FROM gappy"
+                    " GROUP BY gap ORDER BY gap"
+                ),
+                session(),
+            ),
+            "total",
+        ),
+        [18, -1],
+        "total",
+    )
+
+
+def test_a_sum_of_an_expression_over_nothing_but_nulls_is_null() raises:
+    # The count has to be a count of what the sum read rather than of the
+    # column it came from, since a fold can carry an operation and reduce what
+    # that produces. Doubling a null is a null, so there is still nothing here.
+    same(
+        gapped(
+            run(
+                "SELECT sum(mark * 2) AS total FROM gappy WHERE mark IS NULL",
+                session(),
+            ),
+            "total",
+        ),
+        [-1],
+        "total",
+    )
 
 
 def test_a_subquery_over_no_rows_keeps_no_rows() raises:
