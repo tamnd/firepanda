@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a cache of the sets of positions the regular expression machine holds
+
+The machine holds every position a pattern could be in at once and walks the whole set for every character it reads, and it works that set out again at every position of every row. A column of a million rows over a program of forty instructions asks the same question about the same set an enormous number of times, so there is now a cache that answers it once. A state is one of those sets, a transition is a state and one character giving the next state, and both are built the first time they are reached rather than up front, which is the only way to have them at all for a pattern with more states than anyone would want to enumerate.
+
+The alphabet added last release is what makes a row of transitions small enough to hold. It is one number per class of characters the program cannot tell apart rather than one per code point, so a state for `abc` is four numbers wide rather than a million, and finding which one a character is in is an array index for ASCII and the same kind of search the range tables already use above it.
+
+The cache stops at two hundred and fifty six states and says so. A caller that gets that answer runs the machine for that row and gets the same answer more slowly, which is the whole of the fall back and is why this can never be the only engine. Two shapes of pattern are refused before any row is read rather than part way through one. A program compiled without an alphabet is refused because there is nothing to lay the transitions out on, and a program holding a word boundary, a multiline `^` or `$`, or Python's `$` that also matches in front of a newline ending the row is refused because all of those read the character on the other side of a position and a state here knows only whether it is at the start of the row or the end of it. RE2 answers those by folding the neighbouring character into the state, which is a real design and a larger one than this.
+
+The end of the row is a flag on a state rather than a column in the table. Each state is built twice, once asking what it reaches with the end of the row asserted and once without, and the first answer is kept as a bool. That is a second walk per state, which happens once per state ever rather than once per row.
+
+Over two hundred thousand URLs read three times, with the decode taken off both sides, the cache is worth about eleven times the run on an anchored pattern of the shape ClickBench q28 uses and about twenty two times on an unanchored one whose first character set stops nothing. On a pattern that matches most rows it is a bit over twice, and on one that matches none it is about one and a half, since the character set added in 0.8.11 already steps over most of those rows. The machine and the cache now share one definition of what an instruction accepts, because two functions that looked alike would be two engines answering two different patterns the first time one of them was edited.
+
+Nothing calls it yet. The scan that runs it for `contains`, `count`, `match` and `fullmatch` with the machine kept underneath is the next piece, and issue #863 has the order the rest go in.
+
 ### Added: a compiled pattern can say which characters it cannot tell apart
 
 The alphabet a regular expression runs over is a million code points and a machine that remembers what it did needs a table as wide as the alphabet, so something has to make the alphabet small first. A class is a set of characters one program answers identically about: `abc` has four of them, the `a`, the `b`, the `c` and everything else, wherever in the code points that everything else happens to be. `compile_program` works them out when it is asked to and writes them on the program, as one entry per ASCII character and a searched table for the rest, which is the shape a column of text wants.
