@@ -126,7 +126,6 @@ from .unsupported import (
     ESCAPE_STRING,
     FIELD_ACCESS,
     GROUPING,
-    INTERVAL,
     IN_BARE_VALUE,
     IS_UNKNOWN,
     JOIN_FORM,
@@ -143,7 +142,6 @@ from .unsupported import (
     POSTFIX_OPERATOR,
     QUANTIFIED_VALUE,
     QUOTED_NAME,
-    ROW_VALUE,
     SELECT_CLAUSE,
     SELECT_SAMPLE,
     SPECIAL_CALL,
@@ -238,6 +236,15 @@ comptime _POSITION: UInt8 = 78
 
 comptime _TYPE_LITERAL: UInt8 = 79
 """`TypeLiteral`, the `DATE '2020-01-01'` spelling, which is a cast."""
+
+comptime _INTERVAL: UInt8 = 80
+"""`IntervalLiteral`, a duration written as an amount and a unit."""
+
+comptime _ROW: UInt8 = 81
+"""`ParenthesisExpression` and `RowExpression`, a value with parts in it."""
+
+comptime _NAMED_ARGUMENT: UInt8 = 82
+"""`NamedFunctionArgument`, an argument a call passes by name."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -557,6 +564,24 @@ struct Transform(Movable):
     be a hundred lines saying the same thing a hundred times.
     """
 
+    var slice_minus: UInt16
+    """The rule index of `EndSliceMinus`, the one slice bound with no value.
+
+    The grammar takes `x[1:-]` and DuckDB's own parser does not, so there is
+    nothing on the other side to agree with and the rule is worth naming here
+    rather than working out from the text of a bound that holds one byte.
+    """
+
+    var units: Dict[UInt16, StaticString]
+    """The one spelling of the interval unit a rule names, by rule index.
+
+    Twenty entries rather than a table as long as the grammar, because twenty
+    rules out of 1,187 name a unit and a map that holds only those is shorter
+    to read than an array that is nothing but zeroes. The rule is what says
+    `DAY` and `DAYS` are one unit, since the grammar gives the two spellings one
+    name, and it is what makes `YEAR TO MONTH` one unit rather than three words.
+    """
+
     var expression_rule: Int
     """The index of `Expression`, so a caller can parse one directly."""
 
@@ -579,6 +604,8 @@ struct Transform(Movable):
         """
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
         self.refusals = List[UInt16](length=len(grammar.names), fill=0)
+        self.slice_minus = 0
+        self.units = Dict[UInt16, StaticString]()
         self.expression_rule = -1
         self.statement_rule = -1
         self.parens_rule = -1
@@ -695,6 +722,60 @@ struct Transform(Movable):
         self._set(names, "ExtractExpression", _EXTRACT)
         self._set(names, "TrimExpression", _TRIM)
         self._set(names, "PositionExpression", _POSITION)
+        self.slice_minus = UInt16(self._index(names, "EndSliceMinus"))
+
+        self._set(names, "IntervalLiteral", _INTERVAL)
+
+        # The interval units, as a rule name and the one spelling of what it
+        # means, in pairs. The grammar gives `DAY` and `DAYS` a single rule, so
+        # the rule is what says the two are one unit and this is what says
+        # which of them comes back out. The seven compound units are here for
+        # the same reason: `YEAR TO MONTH` is one unit, and reading it off the
+        # rule is shorter than putting three tokens back together.
+        var units: List[StaticString] = [
+            "YearKeyword",
+            "YEAR",
+            "MonthKeyword",
+            "MONTH",
+            "DayKeyword",
+            "DAY",
+            "HourKeyword",
+            "HOUR",
+            "MinuteKeyword",
+            "MINUTE",
+            "SecondKeyword",
+            "SECOND",
+            "MillisecondKeyword",
+            "MILLISECOND",
+            "MicrosecondKeyword",
+            "MICROSECOND",
+            "WeekKeyword",
+            "WEEK",
+            "QuarterKeyword",
+            "QUARTER",
+            "DecadeKeyword",
+            "DECADE",
+            "CenturyKeyword",
+            "CENTURY",
+            "MillenniumKeyword",
+            "MILLENNIUM",
+            "YearToMonth",
+            "YEAR TO MONTH",
+            "DayToHour",
+            "DAY TO HOUR",
+            "DayToMinute",
+            "DAY TO MINUTE",
+            "DayToSecond",
+            "DAY TO SECOND",
+            "HourToMinute",
+            "HOUR TO MINUTE",
+            "HourToSecond",
+            "HOUR TO SECOND",
+            "MinuteToSecond",
+            "MINUTE TO SECOND",
+        ]
+        for at in range(0, len(units), 2):
+            self._unit(names, units[at], units[at + 1])
         self._set(names, "StringLiteral", _STRING)
         self._set(names, "NumberLiteral", _NUMBER)
         self._set(names, "NullLiteral", _NULL)
@@ -839,15 +920,17 @@ struct Transform(Movable):
         self._set(names, "CTEDMLBody", _DESCEND)
         self._set(names, "Parens_Statement", _DESCEND)
 
+        # Forms that read and print here and are turned down further on, where
+        # the stage that has something to say about them is.
+        self._set(names, "ParenthesisExpression", _ROW)
+        self._set(names, "RowExpression", _ROW)
+        self._set(names, "NamedFunctionArgument", _NAMED_ARGUMENT)
+
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "ParenthesisExpression", ROW_VALUE)
-        self._refuse(names, "RowExpression", ROW_VALUE)
-        self._refuse(names, "IntervalLiteral", INTERVAL)
         self._refuse(names, "LambdaExpression", LAMBDA)
         self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
-        self._refuse(names, "NamedFunctionArgument", NAMED_ARGUMENT)
         self._refuse(names, "ColumnsExpression", COLUMNS)
         self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "GroupingExpression", GROUPING)
@@ -1452,6 +1535,23 @@ struct Transform(Movable):
         Raises:
             Error: If there is no such rule.
         """
+        self.actions[self._index(names, name)] = action
+
+    def _index(
+        self, names: Dict[String, Int], name: StaticString
+    ) raises -> Int:
+        """The rule index one name has, or a raise saying it has none.
+
+        Args:
+            names: Every rule name and its index.
+            name: The rule name, spelled the way the grammar spells it.
+
+        Returns:
+            The rule index.
+
+        Raises:
+            Error: If there is no such rule.
+        """
         var index = names.get(String(name), -1)
         if index < 0:
             raise Error(
@@ -1465,7 +1565,25 @@ struct Transform(Movable):
                     ),
                 )
             )
-        self.actions[index] = action
+        return index
+
+    def _unit(
+        mut self,
+        names: Dict[String, Int],
+        name: StaticString,
+        unit: StaticString,
+    ) raises:
+        """Says which interval unit a rule names.
+
+        Args:
+            names: Every rule name and its index.
+            name: The rule name, spelled the way the grammar spells it.
+            unit: The one spelling it comes back out as.
+
+        Raises:
+            Error: If there is no such rule.
+        """
+        self.units[UInt16(self._index(names, name))] = unit
 
     def _refuse(
         mut self, names: Dict[String, Int], name: StaticString, feature: UInt16
@@ -1687,6 +1805,15 @@ struct Transform(Movable):
 
         if action == _TRIM:
             return self._trim(tree, sql, node, ast, work, at)
+
+        if action == _ROW:
+            return self._row(tree, sql, node, ast, work)
+
+        if action == _NAMED_ARGUMENT:
+            return self._named_argument(tree, sql, node, ast, work)
+
+        if action == _INTERVAL:
+            return self._interval(tree, sql, node, ast, work, at)
 
         if action == _POSITION:
             # `POSITION Parens(PositionArguments)`, and the arguments rule holds
@@ -2458,10 +2585,105 @@ struct Transform(Movable):
                 continue
 
             if lead == _LEFT_BRACKET:
-                raise _unsupported(tree, sql, what, SUBSCRIPT)
+                built = self._subscript(tree, sql, what, built, ast, work)
+                continue
 
             raise _unsupported(tree, sql, what, POSTFIX_OPERATOR)
         return built
+
+    def _subscript(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        operand: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `x[1]` or `x[1:2]`.
+
+        The grammar is `'[' SliceBound ']'`, and `SliceBound` is three optional
+        parts: an expression, a colon with an expression after it, and a second
+        colon with an expression after it. They are told apart here the way the
+        grammar tells them apart, by the order they come in and by whether one
+        starts with a colon, so `x[1]` and `x[1:]` differ by a part that holds
+        nothing but its colon.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SliceExpression` node.
+            operand: The expression being indexed.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the bounds.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a bound is a shape with no value in it.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var parts = tree.children(self._only(tree, node))
+
+        var start = NO_NODE
+        var next = 0
+        if len(parts) > 0 and _first_byte(tree, sql, parts[0]) != _COLON:
+            start = parts[0]
+            next = 1
+
+        var sliced = next < len(parts)
+        var end = NO_NODE
+        if sliced:
+            end = self._slice_value(tree, sql, parts[next])
+            next += 1
+
+        var step = NO_NODE
+        if next < len(parts):
+            step = self._slice_value(tree, sql, parts[next])
+
+        var wanted: List[UInt32] = [start, end, step]
+        work.warm(wanted)
+        return ast.subscript(
+            operand,
+            NO_NODE if start == NO_NODE else work.value(start),
+            NO_NODE if end == NO_NODE else work.value(end),
+            NO_NODE if step == NO_NODE else work.value(step),
+            sliced,
+            at,
+        )
+
+    def _slice_value(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """The expression a colon bound holds, or nothing for a bare colon.
+
+        The two bounds are not shaped alike. The end holds an `EndSliceValue`
+        and the step holds the expression itself, so this steps over the rules
+        that carry no value of their own until it reaches one that does.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `EndSliceBound` or `StepSliceBound` node.
+
+        Returns:
+            The expression node, or the null node for a colon with nothing
+            after it.
+
+        Raises:
+            Error: If the bound is the one spelling DuckDB does not take.
+        """
+        var kids = tree.children(node)
+        if len(kids) == 0:
+            return NO_NODE
+
+        var value = kids[0]
+        while self._action(tree, value) == _CONSUMED:
+            if tree.nodes[Int(value)].rule == self.slice_minus:
+                raise _unsupported(tree, sql, node, SUBSCRIPT)
+            value = self._only(tree, value)
+        return value
 
     def _function(
         self,
@@ -2797,6 +3019,109 @@ struct Transform(Movable):
         arguments.append(ast.literal(LITERAL_STRING, field.lower(), at))
         arguments.append(column)
         return ast.call("date_part", arguments, 0, at)
+
+    def _interval(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        at: UInt32,
+    ) raises -> UInt32:
+        """Builds a duration, `INTERVAL '1' DAY` and the spellings around it.
+
+        The grammar is `'INTERVAL' IntervalParameter Interval?`, so there is an
+        amount and there may be a unit. The amount is a string, a number or a
+        parenthesized expression, and `_amount_of` finds the node that builds
+        the value for all three. The parentheses are not kept, because the rule
+        that holds them is a pass through and the printer decides them again
+        from what the amount turned out to be.
+
+        The unit is left out when the query wrote it inside the string, as
+        `INTERVAL '1 day'` does. Nothing here looks in the string, since the
+        text is the value and reading a duration out of it is the work a
+        duration type does.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `IntervalLiteral` node.
+            ast: Where to put the nodes.
+            work: The walk, for the value of the amount.
+            at: The token it starts at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the amount is missing, or the unit names nothing.
+        """
+        var kids = tree.children(node)
+        if len(kids) == 0:
+            raise _malformed(tree, sql, node, "an INTERVAL with no amount")
+
+        var amount = work.value(self._amount_of(tree, kids[0]))
+        var unit = String()
+        if len(kids) > 1:
+            unit = self._unit_of(tree, sql, kids[1])
+        return ast.interval(amount, unit, at)
+
+    def _amount_of(self, tree: Parse, node: UInt32) raises -> UInt32:
+        """The node an interval's amount builds its value from.
+
+        `IntervalParameter` holds a string, a number or a parenthesized
+        expression. The last two build the value themselves, and the string
+        sits one rule further down, under `IntervalStringParameter`, which is a
+        name the grammar gives a string in this one place and nothing more.
+        Stepping over the rules the walk has no value for reaches the right
+        node in all three cases without naming any of them here.
+
+        Args:
+            tree: The parse.
+            node: The `IntervalParameter` node.
+
+        Returns:
+            The node whose value is the amount.
+
+        Raises:
+            Error: If nothing under it builds a value.
+        """
+        var found = self._only(tree, node)
+        while self._action(tree, found) == _CONSUMED:
+            found = self._only(tree, found)
+        return found
+
+    def _unit_of(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> String:
+        """The one spelling of the unit an `Interval` node names.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `Interval` node.
+
+        Returns:
+            The unit, upper case, with a space between the two halves of a
+            compound one.
+
+        Raises:
+            Error: If the rule under it is not one that names a unit.
+        """
+        var inner = self._only(tree, node)
+        var named = self.units.get(tree.nodes[Int(inner)].rule)
+        if named:
+            return String(named.value())
+
+        # `IntervalToInterval` is a rule over the seven compound units and
+        # nothing else, so one step further down reaches the one that was
+        # written.
+        var deeper = self._only(tree, inner)
+        var compound = self.units.get(tree.nodes[Int(deeper)].rule)
+        if compound:
+            return String(compound.value())
+        raise _malformed(tree, sql, node, "an INTERVAL unit with no name")
 
     def _trim(
         self,
@@ -3186,6 +3511,84 @@ struct Transform(Movable):
         for item in items:
             elements.append(work.value(item))
         return ast.list_of(elements, tree.nodes[Int(node)].token_start)
+
+    def _row(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `(a, b)` or `ROW(a, b)`.
+
+        The two rules are shaped alike, since `ROW` adds a word in front of the
+        same parenthesized list, so the word is what tells them apart and the
+        parts are read the same way for both. A single expression in
+        parentheses is a different rule and never reaches here.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ParenthesisExpression` or `RowExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the parts.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a part has no case.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var written = _first_byte(tree, sql, node) != _LEFT_PAREN
+        var items = self._items(tree, self._only(tree, node))
+        work.warm(items)
+        var elements = List[UInt32]()
+        for item in items:
+            elements.append(work.value(item))
+        return ast.row(elements, written, at)
+
+    def _named_argument(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `a := 1`, one argument of a call passed by name.
+
+        `NamedParameter <- TypeFuncName Type? NamedParameterAssignment
+        Expression`, so a fourth child is a type written on the name. DuckDB's
+        own parser turns that down, so nothing in the corpus has one, and the
+        refusal stays here for the shape the published grammar allows and the
+        thing that reads the grammar does not.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `NamedFunctionArgument` node.
+            ast: Where to put the nodes.
+            work: The walk, for the value.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a type is written on the name, or the value has no case.
+        """
+        var inside = self._only(tree, node)
+        var kids = tree.children(inside)
+        if len(kids) != 3:
+            raise _unsupported(tree, sql, node, NAMED_ARGUMENT)
+        var value = work.value(kids[2])
+        return ast.named_argument(
+            self._plain(tree, sql, kids[0]),
+            value,
+            _first_byte(tree, sql, kids[1]) != _COLON,
+            tree.nodes[Int(node)].token_start,
+        )
 
     def _struct(
         self,

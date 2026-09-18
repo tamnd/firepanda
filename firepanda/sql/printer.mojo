@@ -43,13 +43,17 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
+    EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
+    EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
+    EXPR_SUBSCRIPT,
     EXPR_UNARY,
     EXPR_WINDOW,
     BOUND_CURRENT_ROW,
@@ -360,6 +364,55 @@ def _names(
     return out^
 
 
+def _parameter_name(name: StringSlice, grammar: Grammar) -> String:
+    """Quotes the name in `a := 1`, a position with a keyword mask of its own.
+
+    `TypeFuncName <- UnreservedKeyword / TypeFuncKeyword / Identifier`, which
+    is the classes a called name takes less the column name one, so `header`
+    stands bare and `coalesce` does not even though a column may be called
+    either. It is the only position in the language with that mask, which is
+    why it is spelled here rather than as a third flag on `needs_quoting`.
+
+    Args:
+        name: The name, as the AST holds it.
+        grammar: A loaded grammar, for the keyword table.
+
+    Returns:
+        The name, bare or in double quotes.
+    """
+    var classes = grammar.keyword_class(name)
+    var allowed = KEYWORD_UNRESERVED | KEYWORD_FUNC_NAME | KEYWORD_TYPE_NAME
+    if needs_quoting(name, grammar, calling=True) or (
+        classes != 0 and classes & allowed == 0
+    ):
+        return _wrapped(name, DOUBLE_QUOTE)
+    return String(name)
+
+
+def _interval_amount_is_bare(ast: Ast, amount: UInt32) -> Bool:
+    """Whether an interval's amount can be written without parentheses.
+
+    `INTERVAL '1' DAY` and `INTERVAL 5 DAY` are the two forms the grammar takes
+    without them, and every other amount is a parenthesized expression. A
+    string or a number that arrived inside parentheses loses them here, which
+    is a shorter way of writing the same interval and is stable, since printing
+    the shorter form again gives the shorter form.
+
+    Args:
+        ast: The AST.
+        amount: The amount expression.
+
+    Returns:
+        True when it is a string or a number literal.
+    """
+    if amount == NO_NODE or Int(amount) >= len(ast.exprs):
+        return False
+    ref item = ast.exprs[Int(amount)]
+    if item.kind != EXPR_LITERAL:
+        return False
+    return item.b == LITERAL_STRING or item.b == LITERAL_NUMBER
+
+
 @fieldwise_init
 struct _Step(ImplicitlyCopyable, Movable):
     """A node, and which part of it is being written.
@@ -667,6 +720,105 @@ def _write_step(
         out += " COLLATE "
         out += quote_name(ast.text(item.payload), grammar)
         out += ")"
+        return
+
+    if kind == EXPR_INTERVAL:
+        # The amount keeps the parentheses the query needed, because the
+        # grammar takes a string, a number or a parenthesized expression there
+        # and nothing else, so `INTERVAL (a + 1) DAY` without them is not a
+        # query any more. A string or a number goes bare, which is what almost
+        # every interval in the world is written as.
+        var bare = _interval_amount_is_bare(ast, item.a)
+        if phase == 0:
+            out += "INTERVAL "
+            if not bare:
+                out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if not bare:
+            out += ")"
+        var unit = ast.text(item.payload)
+        if unit.byte_length() > 0:
+            out += " "
+            out += unit
+        return
+
+    if kind == EXPR_NAMED_ARGUMENT:
+        # Every keyword goes back in quotes here, not only the ones a column
+        # position would quote. `TypeFuncName` is the rule the name stands in
+        # and it takes fewer keyword classes than a column name does, so
+        # `f(coalesce := 1)` is a syntax error and `f("coalesce" := 1)` is not.
+        # DuckDB writes the quotes here too, even around a word its own parser
+        # would have taken bare.
+        if phase == 0:
+            out += _parameter_name(ast.text(item.payload), grammar)
+            out += " => " if item.b == 1 else " := "
+            stack.append(_Step(item.a, 0))
+            return
+        return
+
+    if kind == EXPR_ROW:
+        # A row of one written without the word is `(a,)`, and the comma is the
+        # whole of what makes it a row rather than an expression in
+        # parentheses, so it goes back in. DuckDB's own parser turns that
+        # spelling down, so nothing in the corpus takes this path, but a
+        # printer that dropped the comma would not read back as what it was.
+        var count = ast.length(item.children)
+        if phase == 0:
+            out += "ROW(" if item.payload == 1 else "("
+            if count == 0:
+                out += ")"
+                return
+            stack.append(_Step(node, 1))
+            stack.append(_Step(ast.at(item.children, 0), 0))
+            return
+        if phase < count:
+            out += ", "
+            stack.append(_Step(node, UInt32(phase + 1)))
+            stack.append(_Step(ast.at(item.children, phase), 0))
+            return
+        if count == 1 and item.payload != 1:
+            out += ","
+        out += ")"
+        return
+
+    if kind == EXPR_SUBSCRIPT:
+        # No parentheses of its own, because everything that binds looser than
+        # a subscript already prints inside its own pair, so `(a + b)[1]` comes
+        # back the way it was written and `a[1]` does not grow a pair it never
+        # had.
+        if ast.length(item.children) != 3:
+            raise Error("a subscript without exactly three bounds on it")
+        var start = ast.at(item.children, 0)
+        var end = ast.at(item.children, 1)
+        var step = ast.at(item.children, 2)
+        if phase == 0:
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += "["
+            if start != NO_NODE:
+                stack.append(_Step(node, 2))
+                stack.append(_Step(start, 0))
+                return
+            phase = 2
+        if phase == 2:
+            if item.payload == 1:
+                out += ":"
+            if end != NO_NODE:
+                stack.append(_Step(node, 3))
+                stack.append(_Step(end, 0))
+                return
+            phase = 3
+        if phase == 3:
+            if step != NO_NODE:
+                out += ":"
+                stack.append(_Step(node, 4))
+                stack.append(_Step(step, 0))
+                return
+        out += "]"
         return
 
     if kind == EXPR_PARAMETER:

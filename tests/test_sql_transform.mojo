@@ -375,6 +375,60 @@ def test_collate_keeps_a_name_and_not_a_column() raises:
     assert_equal(_printed("a COLLATE nocase", g, rules), "(a COLLATE nocase)")
 
 
+def test_an_interval_keeps_its_amount_and_its_unit() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL '1' DAY", g, rules), "INTERVAL '1' DAY")
+    assert_equal(_printed("INTERVAL 5 MONTH", g, rules), "INTERVAL 5 MONTH")
+
+
+def test_a_plural_unit_and_a_singular_one_are_the_same_unit() raises:
+    # The grammar gives the two spellings one rule, and the unit comes off the
+    # rule and not off the text, so there is no table of plurals anywhere.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL 5 MONTHS", g, rules), "INTERVAL 5 MONTH")
+    assert_equal(
+        _printed("INTERVAL '2' CENTURIES", g, rules), "INTERVAL '2' CENTURY"
+    )
+    assert_equal(_printed("INTERVAL 1 days", g, rules), "INTERVAL 1 DAY")
+
+
+def test_a_compound_unit_stays_one_unit() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("INTERVAL '1' YEAR TO MONTH", g, rules),
+        "INTERVAL '1' YEAR TO MONTH",
+    )
+    assert_equal(
+        _printed("INTERVAL '1' HOUR TO SECOND", g, rules),
+        "INTERVAL '1' HOUR TO SECOND",
+    )
+
+
+def test_an_interval_with_the_unit_inside_the_string_keeps_the_string() raises:
+    # Nothing here reads the string, because the text is the value and taking a
+    # duration out of it is the work a duration type does.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL '1 day'", g, rules), "INTERVAL '1 day'")
+    assert_equal(_printed("INTERVAL '1'", g, rules), "INTERVAL '1'")
+
+
+def test_an_amount_that_is_not_a_literal_keeps_its_parentheses() raises:
+    # The grammar takes a string, a number or a parenthesized expression there
+    # and nothing else, so an amount that is neither of the first two has to
+    # keep them or it stops being a query. A string or a number inside them
+    # loses them, which is the shorter way of writing the same interval.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL (x) DAY", g, rules), "INTERVAL (x) DAY")
+    assert_equal(
+        _printed("INTERVAL ('7') WEEKS", g, rules), "INTERVAL '7' WEEK"
+    )
+
+
 def test_a_list_constructor_and_the_array_spelling_agree() raises:
     var g = Grammar()
     var rules = Transform(g)
@@ -466,6 +520,11 @@ def test_every_shape_here_round_trips() raises:
         "a SIMILAR TO 'x'",
         "a ILIKE 'x'",
         "$1 + $two",
+        "d + INTERVAL 3 MONTH",
+        "a[1] + b[2:3]",
+        "(a, b) = ROW(1, 2)",
+        "INTERVAL (a + 1) DAY",
+        "f(1, b := 2, c => 3)",
     ]
     for sample in cases:
         _ = _round_trips(sample, g, rules)
@@ -588,20 +647,87 @@ def test_an_escaped_string_refuses_rather_than_decoding_half_of_it() raises:
         _ = _printed("E'a\\nb'", g, rules)
 
 
-def test_a_subscript_refuses() raises:
+def test_a_subscript_and_the_slices_around_it() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a slice or a subscript"):
-        _ = _printed("a[1]", g, rules)
+    assert_equal(_printed("a[1]", g, rules), "a[1]")
+    assert_equal(_printed("a[1:2]", g, rules), "a[1:2]")
+    assert_equal(_printed("a[1:4:2]", g, rules), "a[1:4:2]")
+
+
+def test_a_slice_that_left_a_bound_out_leaves_it_out_again() raises:
+    # `a[1]` and `a[1:]` both have a start and neither has an end, so the colon
+    # is the only thing that tells them apart and the node carries a flag for
+    # it. Printing one as the other would be a different query.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a[:2]", g, rules), "a[:2]")
+    assert_equal(_printed("a[1:]", g, rules), "a[1:]")
+    assert_equal(_printed("a[:]", g, rules), "a[:]")
+
+
+def test_a_subscript_takes_what_is_in_front_of_it_and_not_more() raises:
+    # A subscript binds tighter than any operator, and every operand that binds
+    # looser already prints inside its own parentheses, so nothing here has to
+    # add a pair to keep the shape.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a[1][2]", g, rules), "a[1][2]")
+    assert_equal(_printed("(a + b)[1]", g, rules), "(a + b)[1]")
+    assert_equal(_printed("f(x)[1]", g, rules), "f(x)[1]")
+    assert_equal(_printed("[1, 2, 3][2]", g, rules), "[1, 2, 3][2]")
+
+
+def test_an_argument_passed_by_name_keeps_the_name_and_the_value() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(a := 1)", g, rules), "f(a := 1)")
+    assert_equal(_printed("f(1, b := 2)", g, rules), "f(1, b := 2)")
+
+
+def test_the_two_spellings_of_the_assignment_are_both_written_back() raises:
+    # DuckDB prints `:=` for both and firepanda prints what was written. The
+    # two mean the same thing, so a query that wrote `=>` gets it back rather
+    # than being told it should have written the other one.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(a => 1)", g, rules), "f(a => 1)")
+    assert_equal(_printed("f(a := 1)", g, rules), "f(a := 1)")
+
+
+def test_a_parameter_name_is_quoted_by_the_rule_of_its_own_position() raises:
+    # `TypeFuncName` takes an unreserved keyword and a type or function name
+    # keyword bare, and a column name keyword not at all, so `header` comes
+    # back as it was written and `coalesce` comes back in quotes. Printing
+    # `coalesce` bare here gives text that does not parse.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("read_csv('x', header := TRUE)", g, rules),
+        "read_csv('x', header := TRUE)",
+    )
+    assert_equal(_printed("f(left := 1)", g, rules), "f(left := 1)")
+    assert_equal(_printed("f(coalesce := 1)", g, rules), 'f("coalesce" := 1)')
+
+
+def test_a_name_passed_by_name_is_folded_like_any_other_name() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(Header := 1)", g, rules), "f(header := 1)")
+    assert_equal(_printed('f("Header" := 1)', g, rules), 'f("Header" := 1)')
 
 
 def test_a_refusal_says_where_it_was() raises:
+    # A lambda is the example because it is the refusal least likely to stop
+    # being one. Firepanda has no value that is a function, so there is nowhere
+    # for this to go even once everything around it reads.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="LINE 1: INTERVAL 1 DAY"):
-        _ = _printed("INTERVAL 1 DAY", g, rules)
+    var sql = "list_apply(l, lambda x: x + 1)"
+    with assert_raises(contains="LINE 1: list_apply(l, lambda x: x + 1)"):
+        _ = _printed(sql, g, rules)
     with assert_raises(contains="issues/"):
-        _ = _printed("INTERVAL 1 DAY", g, rules)
+        _ = _printed(sql, g, rules)
 
 
 def test_a_long_chain_of_tails_is_built_once() raises:

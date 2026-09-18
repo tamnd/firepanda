@@ -58,6 +58,7 @@ accident is not available.
 """
 
 from std.collections.span import Span
+from std.sys.info import simd_width_of
 
 from firepanda.kernel.regex.tokens import (
     AT_BEGINNING,
@@ -534,40 +535,73 @@ def decode_into(bytes: Span[UInt8, _], mut out: List[UInt32]):
     row is the unit here, a column has millions of them, and a list per row is
     a malloc per row for a few dozen bytes of text.
 
+    A row has at most as many characters as it has bytes, so the list is grown
+    to the length of the row once and the characters are written into it rather
+    than appended one at a time, and it is cut back to what was written at the
+    end. What that takes out is the capacity check and the length increment per
+    character, which on a row of plain text is most of what the loop below was
+    doing.
+
+    The block that reads ahead is the other half. Text that is all ASCII is a
+    character per byte with nothing to decode, so a block of bytes with no top
+    bit set in any of them is widened and stored in one go. Anything else drops
+    into the loop under it for one character and the block is tried again from
+    there, so a row with an accented letter in the middle of it still reads the
+    rest of the row a block at a time. tamnd/firepanda#889 has what the pass
+    costs on a column of URLs, which is where this was measured.
+
     Args:
         bytes: The text. Borrowed for the length of the call and not stored.
         out: Where to put the code points. Emptied first.
     """
-    out.clear()
+    comptime width = simd_width_of[DType.uint8]()
+    var count = len(bytes)
+    out.resize(count, 0)
+    if count == 0:
+        return
+    var src = bytes.unsafe_ptr()
+    var dst = out.unsafe_ptr()
     var i = 0
-    while i < len(bytes):
-        var lead = UInt32(Int(bytes[i]))
+    var at = 0
+    while i < count:
+        while i + width <= count:
+            var block = src.unsafe_offset(i).unsafe_load[width=width]()
+            if block.reduce_or() >= 0x80:
+                break
+            dst.unsafe_offset(at).unsafe_store(block.cast[DType.uint32]())
+            i += width
+            at += width
+        if i >= count:
+            break
+        var lead = UInt32(Int(src.unsafe_offset(i).unsafe_load()))
         if lead < 0x80:
-            out.append(lead)
+            dst.unsafe_offset(at).unsafe_store(lead)
             i += 1
-        elif lead >= 0xF0 and i + 3 < len(bytes):
-            out.append(
+        elif lead >= 0xF0 and i + 3 < count:
+            dst.unsafe_offset(at).unsafe_store(
                 ((lead & 0x07) << 18)
                 | ((UInt32(Int(bytes[i + 1])) & 0x3F) << 12)
                 | ((UInt32(Int(bytes[i + 2])) & 0x3F) << 6)
                 | (UInt32(Int(bytes[i + 3])) & 0x3F)
             )
             i += 4
-        elif lead >= 0xE0 and i + 2 < len(bytes):
-            out.append(
+        elif lead >= 0xE0 and i + 2 < count:
+            dst.unsafe_offset(at).unsafe_store(
                 ((lead & 0x0F) << 12)
                 | ((UInt32(Int(bytes[i + 1])) & 0x3F) << 6)
                 | (UInt32(Int(bytes[i + 2])) & 0x3F)
             )
             i += 3
-        elif lead >= 0xC0 and i + 1 < len(bytes):
-            out.append(
+        elif lead >= 0xC0 and i + 1 < count:
+            dst.unsafe_offset(at).unsafe_store(
                 ((lead & 0x1F) << 6) | (UInt32(Int(bytes[i + 1])) & 0x3F)
             )
             i += 2
         else:
-            out.append(lead)
+            dst.unsafe_offset(at).unsafe_store(lead)
             i += 1
+        at += 1
+    out.resize(at, 0)
 
 
 def _is_digit(point: UInt32) -> Bool:

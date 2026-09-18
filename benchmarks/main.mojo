@@ -191,6 +191,12 @@ from firepanda.kernel.chars import (
     text_character_length,
     text_is_ascii,
 )
+from firepanda.kernel.regex.backtrack import Bounded, searched
+from firepanda.kernel.regex.column import text_replace_regex
+from firepanda.kernel.regex.method import METHOD_REPLACE, program_for
+from firepanda.kernel.regex.parse import decode_into
+from firepanda.kernel.regex.pike import Machine, fill_byte_offsets
+from firepanda.kernel.regex.replace import parse_rewrite, replaced
 from firepanda.kernel.url import text_hostname
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -3828,6 +3834,181 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/character_length", "rows", rows, character_length)
+
+
+def _referer_column(count: Int) raises -> StringArray:
+    """Builds a column of URLs for the regular expression benchmarks.
+
+    The shapes are the ones ClickBench's `Referer` column holds, which is the
+    column q28 runs a pattern over: a scheme, sometimes a `www.`, a host and a
+    path, at about fifty bytes a row. One row in seven carries a Cyrillic path,
+    which is close to the share of that column that is not ASCII and is the only
+    reason the offset table below has anything to do.
+
+    Args:
+        count: How many rows.
+
+    Returns:
+        The column.
+
+    Raises:
+        If the builder raises.
+    """
+    var shapes = List[String]()
+    shapes.append(String("http://example.com/one/two/three?q=1&sort=price"))
+    shapes.append(String("http://www.another-site.ru/path/to/a/page/here/12"))
+    shapes.append(String("https://shop.example.org/catalog/item/12345/detail"))
+    shapes.append(String("news.site.com/story/about/something/or/other/here"))
+    shapes.append(String("http://a.b/c"))
+    var wide = String("http://www.example.ru/поиск/страница/1?q=товар")
+
+    var builder = StringBuilder(capacity=count)
+    for i in range(count):
+        if i % 7 == 3:
+            builder.append(wide.as_bytes())
+        else:
+            builder.append(shapes[i % len(shapes)].as_bytes())
+    return builder^.finish()
+
+
+def bench_regex(mut harness: Harness) raises:
+    """Times the replacing kernel and the passes it makes around the engine.
+
+    Every row here runs q28's pattern over the same column of URLs, and each one
+    contains the row above it, so the table is read by subtracting. `decode` is
+    the pass that turns a row of bytes into code points, `offsets` is that pass
+    and the table that turns a character position back into a byte, `search` is
+    both of those and one run of the engine per row, and `replace_serial` is all
+    of that and the copy that writes the answer out. The pattern is anchored and
+    the limit is one, so one run of the engine really is the whole scan and the
+    subtraction is honest.
+
+    What the table said when it was written is that the engine is about nine
+    tenths of the serial row and the three passes together are the rest, which
+    is the measurement tamnd/firepanda#889 asked for and is not what the issue
+    guessed. The decode is the largest of the three and is the one that was made
+    cheaper. The other two were left alone with a reason rather than a hope.
+
+    `search_machine` is the same row with the backtracker taken out, so the pair
+    says what tamnd/firepanda#863 bought and keeps saying it. It is the one row
+    here that is expected to be slower than the row above it.
+
+    `replace_column` is the kernel as a caller reaches it. The row count here is
+    below one morsel, so what it adds to `replace_serial` is the kernel's own
+    work rather than the morsel split: a view written per row, a payload per
+    morsel and the pass at the end that puts the payloads end to end. That is
+    the fourth cost around the engine and it belongs in the table beside the
+    three passes. What the split is worth is a question for a column of
+    millions, which is `tamnd/firepanda-bench` and not a pull request.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    # A sixteenth of the usual row count. A row costs a scan rather than a
+    # compare, so a million of them would be most of the suite's runtime.
+    var rows = harness.options.rows // 16
+    if rows < 1:
+        rows = 1
+
+    var urls = _referer_column(rows)
+    var pattern = String("^https?://(?:www\\.)?([^/]+)/.*$")
+    var program = program_for(METHOD_REPLACE, pattern)
+    if not program.ok:
+        raise Error(String("the pattern did not compile: ", program.problem))
+    var rewrite = parse_rewrite(String("\\1"), program.groups)
+    if not rewrite.ok:
+        raise Error(String("the replacement was refused: ", rewrite.problem))
+
+    def decode() raises {imm urls, imm rows}:
+        var points = List[UInt32]()
+        var total = 0
+        for i in range(rows):
+            decode_into(urls.unsafe_bytes(i), points)
+            total += len(points)
+        keep(total)
+
+    harness.record("regex/decode", "rows", rows, decode)
+
+    def offsets() raises {imm urls, imm rows}:
+        var points = List[UInt32]()
+        var table = List[Int]()
+        var total = 0
+        for i in range(rows):
+            var bytes = urls.unsafe_bytes(i)
+            decode_into(bytes, points)
+            fill_byte_offsets(bytes, Span(points), table)
+            total += len(table)
+        keep(total)
+
+    harness.record("regex/offsets", "rows", rows, offsets)
+
+    def search() raises {imm urls, imm rows, imm program}:
+        var machine = Machine(program)
+        var bounded = Bounded(program)
+        var points = List[UInt32]()
+        var table = List[Int]()
+        var found = List[Int32]()
+        var total = 0
+        for i in range(rows):
+            var bytes = urls.unsafe_bytes(i)
+            decode_into(bytes, points)
+            fill_byte_offsets(bytes, Span(points), table)
+            total += searched(program, Span(points), 0, machine, bounded, found)
+        keep(total)
+
+    harness.record("regex/search", "rows", rows, search)
+
+    def search_machine() raises {imm urls, imm rows, imm program}:
+        var machine = Machine(program)
+        var points = List[UInt32]()
+        var table = List[Int]()
+        var found = List[Int32]()
+        var total = 0
+        for i in range(rows):
+            var bytes = urls.unsafe_bytes(i)
+            decode_into(bytes, points)
+            fill_byte_offsets(bytes, Span(points), table)
+            total += machine.search(program, Span(points), 0, found)
+        keep(total)
+
+    harness.record("regex/search_machine", "rows", rows, search_machine)
+
+    def replace_serial() raises {imm urls, imm rows, imm program, imm rewrite}:
+        var machine = Machine(program)
+        var bounded = Bounded(program)
+        var points = List[UInt32]()
+        var table = List[Int]()
+        var found = List[Int32]()
+        var out = List[UInt8]()
+        var total = 0
+        for i in range(rows):
+            var bytes = urls.unsafe_bytes(i)
+            decode_into(bytes, points)
+            replaced(
+                program,
+                rewrite,
+                bytes,
+                Span(points),
+                machine,
+                bounded,
+                table,
+                found,
+                out,
+                1,
+            )
+            total += len(out)
+        keep(total)
+
+    harness.record("regex/replace_serial", "rows", rows, replace_serial)
+
+    def replace_column() raises {imm urls, imm program, imm rewrite}:
+        var out = text_replace_regex(urls, program, rewrite, 1)
+        keep(len(out))
+
+    harness.record("regex/replace_column", "rows", rows, replace_column)
 
 
 def bench_dispatch(mut harness: Harness) raises:
@@ -7636,6 +7817,7 @@ def main() raises:
     bench_csv(harness)
     bench_strings(harness)
     bench_text(harness)
+    bench_regex(harness)
     bench_temporal(harness)
     bench_dispatch(harness)
     bench_arrow(harness)

@@ -1178,6 +1178,45 @@ def test_a_decimal_expression_of_literals_alone_is_refused() raises:
         _ = _plan("SELECT 1.1 + 2.2 AS a")
 
 
+def test_a_row_value_is_refused_here_and_not_in_the_transformer() raises:
+    # A row is a value with fields in it and a firepanda column holds one
+    # scalar, so this is where the query is told, in both spellings.
+    with assert_raises(contains="a row value"):
+        _ = _plan("SELECT (a, b) FROM t")
+    with assert_raises(contains="a row value"):
+        _ = _plan("SELECT ROW(a, b) FROM t")
+
+
+def test_an_argument_by_name_is_refused_here_not_in_the_transformer() raises:
+    # Whether a name is a parameter of the function being called is a question
+    # about the function, and the transformer has no catalog to ask. The call
+    # is one firepanda has a kernel for, so the refusal is about the name and
+    # not about the function not being there.
+    with assert_raises(contains="an argument passed by name"):
+        _ = _plan("SELECT upper(a := 'x') FROM t")
+
+
+def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
+    # Which of the three families a subscript belongs to, a list, an array or a
+    # string, depends on what the operand holds, so this is the first stage
+    # with anything to say about it and it says the refusal instead.
+    with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[1] FROM t")
+    with assert_raises(contains="rather than with brackets"):
+        _ = _plan("SELECT g[1:2] FROM t")
+
+
+def test_an_interval_is_refused_here_and_not_in_the_transformer() raises:
+    # The transformer builds a duration and the printer writes it back, so the
+    # round trip over DuckDB's corpus agrees on every interval in it. The type
+    # is what is missing, not the syntax, and this is the stage that would have
+    # to name one.
+    with assert_raises(contains="an INTERVAL literal"):
+        _ = _plan("SELECT INTERVAL '1' DAY AS d")
+    with assert_raises(contains="no column type for one yet"):
+        _ = _plan("SELECT a FROM t WHERE f > INTERVAL 3 MONTH")
+
+
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")

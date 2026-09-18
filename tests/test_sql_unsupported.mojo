@@ -184,7 +184,7 @@ def test_the_transformer_refuses_in_the_table_shape() raises:
     var g = Grammar()
     var rules = Transform(g)
     var ast = Ast()
-    var sql = "SELECT a[1] FROM t"
+    var sql = "SELECT list_apply(l, lambda x: x + 1) FROM t"
     var text = String()
     try:
         _ = rules.parse_statement(sql, g, ast)
@@ -194,7 +194,7 @@ def test_the_transformer_refuses_in_the_table_shape() raises:
         text.startswith("Not Implemented Error: firepanda does not support"),
         text,
     )
-    assert_true("LINE 1: SELECT a[1] FROM t" in text, text)
+    assert_true("LINE 1: " + sql in text, text)
     assert_true("^" in text, text)
     assert_true("issues/" in text, text)
 

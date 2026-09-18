@@ -238,6 +238,66 @@ is a statement index and everything that walks a binary node reads both sides
 out of the expression arena.
 """
 
+comptime EXPR_INTERVAL: UInt8 = 21
+"""`INTERVAL '1' DAY`, and the spellings around it.
+
+`a` is the expression the amount is written as, which is a string in
+`INTERVAL '1 day'`, a number in `INTERVAL 5 DAY` and anything at all in
+`INTERVAL (x) DAY`. `payload` is the interned unit, folded to one spelling and
+upper case, so `DAYS` and `DAY` are one thing here and `YEAR TO MONTH` is the
+whole of what was written. It is empty for `INTERVAL '1 day'`, where the unit
+is inside the string and this stage does not read strings.
+
+The amount is an expression and not a number because the grammar lets it be
+one, and a unit is text and not a tag because the printer is what needs it and
+nothing here converts anything. What the three fields mean together is a
+duration, and firepanda has no column type for a duration, so this gets as far
+as the printer and no further.
+"""
+
+comptime EXPR_SUBSCRIPT: UInt8 = 22
+"""`x[1]` and `x[1:2]`, an element of something or a run of them.
+
+`a` is the operand. `children` is a run of exactly three, the start, the end
+and the step, and a bound the query left out is 0, so `x[:2]` has no start and
+`x[1:]` has no end. `payload` is 1 when a colon was written and 0 when it was
+not, which is the whole of what tells `x[1]` from `x[1:]`, since both have a
+start and neither has an end.
+
+Three bounds and a flag rather than two kinds, because the grammar makes one
+rule of them and DuckDB reads `x[a]` and `x[a:b]` as two calls of one family.
+Which family depends on what the operand turns out to hold, a list, an array or
+a string, and that is a question for a stage that knows types. This gets as far
+as the printer.
+"""
+
+comptime EXPR_ROW: UInt8 = 23
+"""`(a, b)` and `ROW(a, b)`, several expressions written as one value.
+
+`children` is a run of elements, which may be empty, and `payload` is 1 when
+`ROW` was written and 0 when the parentheses stood on their own. The two
+spellings mean the same thing and are kept apart so that the printer writes
+back what the query wrote.
+
+A row is a value with fields in it and a firepanda column holds one scalar, so
+this gets as far as the printer and no further. It is not the struct
+constructor under another name: a struct names its fields and a row does not,
+and naming them here would be inventing text the query did not write.
+"""
+
+comptime EXPR_NAMED_ARGUMENT: UInt8 = 24
+"""`a := 1`, an argument a call passes by name rather than by position.
+
+`a` is the value, `payload` is the interned name and `b` is 1 when `=>` was
+written and 0 when `:=` was. The two spellings mean the same thing and are kept
+apart so that the printer writes back what the query wrote.
+
+This is an expression because the argument list holds expressions, and it is
+the one kind that is only ever an argument. Nothing else may hold one, and the
+binder is where that is said, since a name with no call around it has nobody to
+give the name to.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1271,6 +1331,98 @@ struct Ast(Movable):
             )
         )
 
+    def subscript(
+        mut self,
+        operand: UInt32,
+        start: UInt32,
+        end: UInt32,
+        step: UInt32,
+        sliced: Bool,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `x[1]` or `x[1:2]`.
+
+        Args:
+            operand: What is being indexed.
+            start: The first bound, or 0 for a slice that left it out.
+            end: The second bound, or 0.
+            step: The third bound, or 0.
+            sliced: Whether a colon was written, which is what tells `x[1]`
+                from `x[1:]`.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var bounds = List[UInt32]()
+        bounds.append(start)
+        bounds.append(end)
+        bounds.append(step)
+        var run = self.run(bounds)
+        return self.add(
+            Expr(
+                kind=EXPR_SUBSCRIPT,
+                token=token,
+                a=operand,
+                children=run,
+                payload=UInt32(1) if sliced else UInt32(0),
+            )
+        )
+
+    def row(
+        mut self,
+        elements: List[UInt32],
+        written: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `(a, b)` or `ROW(a, b)`.
+
+        Args:
+            elements: The parts, in order, which may be none at all.
+            written: Whether the query wrote the word `ROW`.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var run = self.run(elements)
+        return self.add(
+            Expr(
+                kind=EXPR_ROW,
+                token=token,
+                children=run,
+                payload=UInt32(1) if written else UInt32(0),
+            )
+        )
+
+    def named_argument(
+        mut self,
+        name: StringSlice,
+        value: UInt32,
+        arrow: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `a := 1`, one argument of a call passed by name.
+
+        Args:
+            name: The parameter name, folded as the tokenizer folded it.
+            value: The expression being passed.
+            arrow: Whether the query wrote `=>` rather than `:=`.
+            token: The token the name is at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_NAMED_ARGUMENT,
+                token=token,
+                a=value,
+                b=UInt32(1) if arrow else UInt32(0),
+                payload=self.intern(name),
+            )
+        )
+
     def in_list(
         mut self,
         operand: UInt32,
@@ -1367,6 +1519,25 @@ struct Ast(Movable):
         var text = self.intern(collation)
         return self.add(
             Expr(kind=EXPR_COLLATE, token=token, a=operand, payload=text)
+        )
+
+    def interval(
+        mut self, amount: UInt32, unit: StringSlice = "", token: UInt32 = 0
+    ) -> UInt32:
+        """Builds `INTERVAL '1' DAY`.
+
+        Args:
+            amount: How much, as the expression it was written as.
+            unit: The unit in one spelling and upper case, empty when the
+                query wrote the unit inside the amount.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var text = self.intern(unit)
+        return self.add(
+            Expr(kind=EXPR_INTERVAL, token=token, a=amount, payload=text)
         )
 
     def parameter(

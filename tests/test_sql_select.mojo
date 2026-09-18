@@ -227,11 +227,19 @@ def test_a_grouping_set_of_several_columns_is_not_an_expression() raises:
     assert_equal(ast.length(first.children), 2)
 
 
-def test_a_row_is_still_refused_where_it_is_really_a_row() raises:
+def test_a_row_and_a_grouping_tuple_are_told_apart_by_where_they_are() raises:
+    # The two are spelled the same way and mean different things. The row used
+    # to refuse here, which is what kept them apart, and now both build, so
+    # each one has to come back where it was written and not as the other.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="does not support"):
-        _ = _printed("SELECT (a, b) FROM t", g, rules)
+    assert_equal(
+        _printed("SELECT (a, b) FROM t", g, rules), "SELECT (a, b) FROM t"
+    )
+    assert_equal(
+        _printed("SELECT a FROM t GROUP BY GROUPING SETS ((a, b))", g, rules),
+        "SELECT a FROM t GROUP BY GROUPING SETS ((a, b))",
+    )
 
 
 def test_order_by_keeps_its_direction_and_its_null_placement() raises:
@@ -705,18 +713,10 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     # to print one.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a row value"):
-        _ = _printed("SELECT (1, 2)", g, rules)
-    with assert_raises(contains="a row value"):
-        _ = _printed("SELECT ROW(1, 2)", g, rules)
-    with assert_raises(contains="an INTERVAL literal"):
-        _ = _printed("SELECT INTERVAL '1 day'", g, rules)
     with assert_raises(contains="a lambda"):
         _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
         _ = _printed("SELECT [x FOR x IN l]", g, rules)
-    with assert_raises(contains="an argument passed by name"):
-        _ = _printed("SELECT f(a := 1)", g, rules)
     with assert_raises(contains="COLUMNS"):
         _ = _printed("SELECT COLUMNS('a')", g, rules)
     with assert_raises(contains="a MAP literal"):
@@ -764,6 +764,66 @@ def test_the_keyword_calls_that_no_longer_refuse() raises:
     )
 
 
+def test_an_interval_reaches_the_printer_and_is_refused_further_on() raises:
+    # It was in the list above until the transformer learned to build one. The
+    # type is what is missing rather than the syntax, so the statement prints
+    # and the refusal waits for the stage that would have to name a type.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT INTERVAL '1 day' FROM t", g, rules),
+        "SELECT INTERVAL '1 day' FROM t",
+    )
+    assert_equal(
+        _printed("SELECT a + INTERVAL 3 MONTHS FROM t", g, rules),
+        "SELECT (a + INTERVAL 3 MONTH) FROM t",
+    )
+
+
+def test_a_row_value_reaches_the_printer_in_both_spellings() raises:
+    # `(a, b)` and `ROW(a, b)` are one thing written two ways, and the word is
+    # kept so that what comes back is what was written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT (a, b) FROM t", g, rules), "SELECT (a, b) FROM t"
+    )
+    assert_equal(
+        _printed("SELECT ROW(a, b) FROM t", g, rules),
+        "SELECT ROW(a, b) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT ROW() FROM t", g, rules), "SELECT ROW() FROM t"
+    )
+
+
+def test_an_argument_passed_by_name_reaches_the_printer() raises:
+    # The same rule serves a call in a select list and a table function in a
+    # `FROM`, so both paths are checked here. The second is the one the corpus
+    # is full of, since `read_csv` takes most of its settings by name.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT f(a := 1) FROM t", g, rules),
+        "SELECT f(a := 1) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT * FROM read_csv('x.csv', header := TRUE)", g, rules),
+        "SELECT * FROM read_csv('x.csv', header := TRUE)",
+    )
+
+
+def test_a_subscript_reaches_the_printer_too() raises:
+    # Same as the interval above it. The syntax is read and the stage that
+    # would have to know what the operand holds is the one that refuses.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a[1:2] FROM t", g, rules),
+        "SELECT a[1:2] FROM t",
+    )
+
+
 def test_a_typed_literal_is_the_cast_it_means() raises:
     # `DATE '2020-01-01'` is a type name in front of a string, and the type is
     # what decides how the string is read, which is the whole of what a cast
@@ -806,9 +866,9 @@ def test_a_query_that_is_not_a_select_refuses_by_name() raises:
 
 
 def test_a_parenthesised_expression_is_still_just_the_expression() raises:
-    # `ParenthesisExpression` is the rule that refuses a row value, and it is
-    # also the rule around `(1 + 2)`. The one that is a plain expression has to
-    # keep working.
+    # `ParenthesisExpression` is the rule that builds a row value, and a single
+    # expression in parentheses is a different rule that has to keep going
+    # through untouched.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(

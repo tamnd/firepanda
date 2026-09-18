@@ -40,6 +40,8 @@ injection, so the path is quoted the way SQL quotes a string and the caller neve
 writes SQL unless it wants to.
 """
 
+from firepanda.array.chunked import ChunkedArray
+from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import (
@@ -71,6 +73,38 @@ comptime CONNECTION = 1
 
 comptime RESULT_WORDS = 6
 """How many words a `duckdb_result` is. See `DuckResult`."""
+
+comptime COLLECT_GROUP_ROWS = 1 << 19
+"""Rows of Arrow chunks to hold before assembling them and letting them go.
+
+A read used to fetch every chunk out of DuckDB, describe all of them as Arrow,
+and only then copy the lot into a frame, because `assemble` sizes the sink it
+allocates from every batch it is handed and so cannot begin until it has them
+all. The Arrow copy of the whole answer and the frame it turns into were
+therefore both resident, and the peak was the sum of the two.
+
+Assembling a group at a time and dropping that group's Arrow arrays before
+fetching the next holds one group instead of all of them. Measured on a 13900K
+reading sf1 lineitem, six million rows and sixteen columns, the read peaks at
+3498 MB with no grouping, 2896 MB at two million rows a group, 2625 MB at half
+a million, and 2556 MB at a hundred and twenty eight thousand.
+
+Half a million is where it sits because the bottom of that ladder is not free.
+The read itself is 1040 to 1090 ms at half a million against 1140 to 1440 with
+no grouping, since a group that fits in cache is assembled out of cache, and it
+goes back up to 1220 ms at a hundred and twenty eight thousand where the fixed
+cost of an assemble is being paid forty six times. What is left under the curve
+at that end is not the Arrow copy any more, it is DuckDB's own materialised
+result, which is about 1400 MB here and is not ours to release a piece at a
+time.
+
+The frame still comes back in one chunk, which `_combined` does afterwards and
+which costs about 410 MB of peak, so the whole change is 3498 MB to 3037 MB
+end to end with the read a little faster than it was. Dropping the stacking
+step would be worth the other 410 MB and is not done here, because
+`DataFrame.__getitem__` raises on a column with more than one chunk and the
+whole library is downstream of that.
+"""
 
 
 def quote(text: StringSlice) -> String:
@@ -183,6 +217,80 @@ def _columns_of(array: ArrowArray) raises -> List[ArrowArray]:
     return out^
 
 
+def _stitch(
+    mut schema: Schema, mut built: List[ChunkedArray], var group: DataFrame
+) raises:
+    """Adds one group's frame onto the end of the frame being read.
+
+    The first group is the answer so far and every later one hands over its
+    chunks, which is a pointer each rather than a copy, so a read of ten groups
+    costs the same bytes as a read of one and differs only in how many chunks a
+    column ends up holding.
+
+    Args:
+        schema: The names and types, taken from the first group and checked
+            against the rest.
+        built: The columns so far, one entry a column, extended in place.
+        group: The frame the assembler just built, consumed here.
+
+    Raises:
+        Error: If a later group has a different width from the first, which
+            would mean DuckDB changed the shape of a result mid stream.
+    """
+    if len(built) == 0:
+        schema = group.schema.copy()
+        built = group^.into_columns()
+        return
+
+    var columns = group^.into_columns()
+    if len(columns) != len(built):
+        raise Error(
+            String(
+                "parquet: a result began with ",
+                len(built),
+                " columns and went on with ",
+                len(columns),
+            )
+        )
+    for c in range(len(built)):
+        var chunks = columns.pop(0).into_chunks()
+        while len(chunks) != 0:
+            built[c].append(chunks.pop(0))
+
+
+def _combined(var frame: DataFrame) raises -> DataFrame:
+    """Stacks each column's groups back into the one chunk callers expect.
+
+    A column at a time rather than all of them at once, so that what is held
+    twice is the column being stacked and not the frame. A read of one group,
+    which is every read small enough not to care, moves its chunk and copies
+    nothing.
+
+    This is where the grouped read gives some of its saving back. It is a
+    hundred milliseconds on sf1 lineitem, against the two hundred and fifty the
+    grouping took off the read itself, and 410 MB of peak, against the 870 the
+    grouping took off that. What it buys is that nothing downstream has to know
+    the read happened in pieces: `DataFrame.__getitem__` borrows a column only
+    when it has exactly one chunk and raises otherwise, so a frame in groups is
+    not a frame most of this library can use.
+
+    Args:
+        frame: The frame the collector built, consumed here.
+
+    Returns:
+        The same rows, one chunk a column.
+
+    Raises:
+        Error: If the chunks of a column cannot be stacked.
+    """
+    var schema = frame.schema.copy()
+    var pieces = frame^.into_columns()
+    var out = List[ChunkedArray](capacity=len(pieces))
+    while len(pieces) != 0:
+        out.append(ChunkedArray(pieces.pop(0).combine()))
+    return DataFrame(schema^, out^)
+
+
 struct Session(Movable):
     """An in memory DuckDB, open for as long as one read takes.
 
@@ -242,20 +350,26 @@ struct Session(Movable):
         _ = cells^
 
     def run(
-        mut self, sql: StringSlice, morsel_rows: Int = 0
+        mut self,
+        sql: StringSlice,
+        morsel_rows: Int = 0,
+        group_rows: Int = COLLECT_GROUP_ROWS,
     ) raises -> DataFrame:
         """Runs one query and returns the whole answer as a frame.
 
-        Every chunk is converted to Arrow and kept, and none of them is copied
-        into the frame until all of them have arrived, because the assembler
-        wants to know the row count before it allocates. That is a copy of the
-        answer held twice for the length of the read, which is the same trade
-        every eager reader makes and is what an eager frame is.
+        The assembler wants to know the row count before it allocates, so a
+        group of chunks is converted to Arrow and kept until the group is full
+        and then copied into the frame in one go. Those Arrow arrays are let go
+        of before the next group is fetched, so what is held twice is a group
+        and not the answer.
 
         Args:
             sql: The query.
             morsel_rows: The chunk height to come back in, or zero for a frame in
                 one chunk, which is what every eager caller wants.
+            group_rows: How many rows to hold before assembling them. See
+                `COLLECT_GROUP_ROWS`, which is the default and is the only value
+                anything but a test passes.
 
         Returns:
             The result.
@@ -265,10 +379,14 @@ struct Session(Movable):
                 cannot read.
         """
         var result = Cells(RESULT_WORDS)
-        return self._execute(sql, result, morsel_rows)
+        return self._execute(sql, result, morsel_rows, group_rows)
 
     def _execute(
-        mut self, sql: StringSlice, mut result: Cells, morsel_rows: Int = 0
+        mut self,
+        sql: StringSlice,
+        mut result: Cells,
+        morsel_rows: Int = 0,
+        group_rows: Int = COLLECT_GROUP_ROWS,
     ) raises -> DataFrame:
         """Runs one query into a result the caller owns.
 
@@ -294,6 +412,8 @@ struct Session(Movable):
             sql: The query.
             result: Six words for DuckDB's `duckdb_result`.
             morsel_rows: The chunk height, passed through to the assembler.
+            group_rows: How many rows to hold before assembling them, passed
+                through to the collector.
 
         Returns:
             The answer.
@@ -320,22 +440,35 @@ struct Session(Movable):
             self.lib.destroy_result(slot)
             raise Error(message)
 
+        var frame: DataFrame
         try:
-            var frame = self._collect(slot, morsel_rows)
-            self.lib.destroy_result(slot)
-            return frame^
+            frame = self._collect(slot, morsel_rows, group_rows)
         except error:
             self.lib.destroy_result(slot)
             raise error
+        self.lib.destroy_result(slot)
+
+        # After the result is destroyed rather than before, so that DuckDB's
+        # copy of the answer is gone by the time a second copy of a column
+        # exists. A caller that asked for morsels asked for chunks and keeps
+        # them.
+        if morsel_rows == 0:
+            return _combined(frame^)
+        return frame^
 
     def _collect(
-        self, slot: ResultPtr, morsel_rows: Int = 0
+        self,
+        slot: ResultPtr,
+        morsel_rows: Int = 0,
+        group_rows: Int = COLLECT_GROUP_ROWS,
     ) raises -> DataFrame:
         """Drains a result and turns it into a frame.
 
         Args:
             slot: The result, which the caller destroys either way.
             morsel_rows: The chunk height, passed through to the assembler.
+            group_rows: How many rows of Arrow chunks to hold before assembling
+                them and letting them go. See `COLLECT_GROUP_ROWS`.
 
         Returns:
             The frame.
@@ -356,8 +489,21 @@ struct Session(Movable):
             self._drop_options(settings)
             raise error
 
+        # A group boundary is a chunk boundary, so a caller that asked for
+        # morsels has to get groups that are a whole number of them or the
+        # frame comes back in morsels with a short one every group. Rounding up
+        # rather than down, because a morsel taller than the group is a
+        # perfectly reasonable thing to ask for and the answer to it is one
+        # morsel a group.
+        var wanted = group_rows
+        if morsel_rows > 0 and wanted > 0:
+            wanted = ((wanted + morsel_rows - 1) // morsel_rows) * morsel_rows
+
         var arrays = List[ArrowArray]()
         var batches = List[List[ArrowArray]]()
+        var schema = Schema(List[Field]())
+        var built = List[ChunkedArray]()
+        var held_rows = 0
         try:
             while True:
                 var chunk = self.lib.fetch_chunk(slot[])
@@ -374,16 +520,29 @@ struct Session(Movable):
                 self.lib.destroy_chunk(held.at(0))
                 _ = held^
                 self.lib.check(failure^)
+                held_rows += Int(box[0].length)
                 batches.append(_columns_of(box[0]))
                 arrays.append(box.pop())
-        except error:
-            self._drop(arrays^)
-            self._drop_options(settings)
-            raise error
+                if width != 0 and wanted > 0 and held_rows >= wanted:
+                    _stitch(
+                        schema,
+                        built,
+                        assemble(layout, batches, morsel_rows=morsel_rows),
+                    )
+                    batches.clear()
+                    self._drop(arrays^)
+                    arrays = List[ArrowArray]()
+                    held_rows = 0
 
-        var frame: DataFrame
-        try:
-            frame = assemble(layout, batches, morsel_rows=morsel_rows)
+            # The last group, and also the whole of a result that never reached
+            # the line. An empty result goes through here as well, so that a
+            # query matching no rows still comes back with its columns.
+            if len(batches) != 0 or len(built) == 0:
+                _stitch(
+                    schema,
+                    built,
+                    assemble(layout, batches, morsel_rows=morsel_rows),
+                )
         except error:
             self._drop(arrays^)
             self._drop_options(settings)
@@ -391,7 +550,7 @@ struct Session(Movable):
 
         self._drop(arrays^)
         self._drop_options(settings)
-        return frame^
+        return DataFrame(schema^, built^)
 
     def _layout(
         self, slot: ResultPtr, settings: Handle, width: Int

@@ -53,15 +53,20 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
+    EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
+    EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
+    EXPR_SUBSCRIPT,
     EXPR_UNARY,
     EXPR_WINDOW,
+    NO_NODE,
 )
 from .catalog import fold
 
@@ -172,8 +177,25 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         return out^
     if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS:
         return out^
-    if kind == EXPR_UNARY or kind == EXPR_CAST or kind == EXPR_COLLATE:
+    if (
+        kind == EXPR_UNARY
+        or kind == EXPR_CAST
+        or kind == EXPR_COLLATE
+        or kind == EXPR_INTERVAL
+        or kind == EXPR_NAMED_ARGUMENT
+    ):
         out.append(item.a)
+        return out^
+    if kind == EXPR_ROW:
+        for i in range(ast.length(item.children)):
+            out.append(ast.at(item.children, i))
+        return out^
+    if kind == EXPR_SUBSCRIPT:
+        out.append(item.a)
+        for i in range(ast.length(item.children)):
+            var bound = ast.at(item.children, i)
+            if bound != NO_NODE:
+                out.append(bound)
         return out^
     if kind == EXPR_BINARY or kind == EXPR_FRAME:
         out.append(item.a)
@@ -677,7 +699,12 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(_folded_names(ast, item.payload), "/", item.a)
     if kind == EXPR_LITERAL:
         return String(item.b, "/", ast.text(item.payload))
-    if kind == EXPR_UNARY or kind == EXPR_BINARY or kind == EXPR_COLLATE:
+    if (
+        kind == EXPR_UNARY
+        or kind == EXPR_BINARY
+        or kind == EXPR_COLLATE
+        or kind == EXPR_INTERVAL
+    ):
         return String(ast.text(item.payload))
     if kind == EXPR_CAST:
         return String(item.b, "/", ast.text(item.payload))
@@ -685,6 +712,10 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(ast.text(item.b), "/", ast.text(item.payload))
     if kind == EXPR_BETWEEN or kind == EXPR_IN or kind == EXPR_IN_SUBQUERY:
         return String(item.payload)
+    if kind == EXPR_SUBSCRIPT or kind == EXPR_ROW:
+        return String(item.payload)
+    if kind == EXPR_NAMED_ARGUMENT:
+        return String(item.b, "/", ast.text(item.payload))
     if kind == EXPR_STRUCT:
         var out = String()
         for at in range(0, ast.length(item.children), 2):

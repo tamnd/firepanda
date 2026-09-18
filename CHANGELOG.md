@@ -8,6 +8,54 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads an argument passed by name
+
+`f(a := 1)` and `f(a => 1)` used to be refused by the transformer. 346 statements in DuckDB's corpus stopped there, and 332 of them now round trip, the other 14 having a lambda or a `COLUMNS` in them as well. The three that account for most of them are `struct_pack`, `union_value` and `unnest`, which take the name as part of what they build rather than as a setting, and the rest are spread over table functions such as `read_csv` and over macros somebody defined in the test itself. They now build a node with the name and the value under it, print back in the spelling that was written, and are refused in lowering, where the catalog that could say whether the function has a parameter by that name lives.
+
+The name is quoted by a rule of its own, because the position it stands in takes a different set of keywords than any other. `TypeFuncName` is an unreserved keyword, a type or function name keyword, or an identifier, so `read_csv('x', header := TRUE)` keeps its bare `header` and `f(coalesce := 1)` comes back as `f("coalesce" := 1)`. Printing that one bare gives text that is a syntax error, which is the kind of mistake the corpus round trip is there to find.
+
+The published grammar allows a type on the name, as in `f(a INTEGER := 1)`, and DuckDB's own parser turns that down. That shape keeps the refusal.
+
+### Added: SQL reads a row value in both of its spellings
+
+`(a, b)` and `ROW(a, b)` used to be refused by the transformer, and 430 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval and the subscript are out of it. They build a node and print back in the spelling they were written in, since the two mean the same thing and there is no reason for the printer to pick one.
+
+The refusal moved to lowering, for the third time this week and for the same reason each time. A row is a value with fields in it and a firepanda column holds one scalar, so lowering is the stage with something to say and it says the entry that was already in the table.
+
+It is not the struct constructor under another name. A struct names its fields and a row does not, and giving the parts names here would be inventing text the query never wrote, which the printer would then hand back as though the user had asked for it.
+
+`(a,)` is a row of one and comes back with its comma, because the comma is the whole of what separates it from an expression in parentheses. DuckDB's parser turns that spelling down, so nothing in the corpus reaches it, but a printer that dropped the comma would be printing something that does not read back as what it was.
+
+### Added: SQL reads a subscript and the slices around it
+
+`a[1]`, `a[1:2]`, `a[:2]`, `a[1:]` and `a[1:4:2]` used to be refused by the transformer, and 660 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval is out of it. They parse, transform and print, and every one of those spellings comes back the way it was written.
+
+The refusal moved to lowering, the same way the interval literal's did. Which of the three families a subscript belongs to, a list, an array or a string, depends on what the operand turns out to hold, so the first stage with anything to say about it is the one that knows types, and what it says is the refusal that was already in the table.
+
+`a[1]` and `a[1:]` are the pair that makes this more than a pass through. Both have a start, neither has an end, and the colon is the whole of what separates them, so the node carries a flag for whether one was written rather than working it out from which bounds are there. `a[::2]` is not in, because it is not in DuckDB either: the tokenizer reads the two colons as a cast operator and both parsers say so.
+
+## [0.8.14] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with two threads in it, one that finishes the lookaround and one that finishes the question 0.8.13 left open.
+
+The engine that copies Python reads a lookahead and a lookbehind now, both forms of each, which are the first two constructs RE2 has not got and the last two the held out corpus of 30052 patterns was turning down. A pattern with one in it used to raise from `contains`, `count`, `replace`, `match`, `fullmatch` and `extract` and now answers, with the one refusal Python itself makes, which is a lookbehind whose body does not always read the same number of characters. The lookahead is what surfaced a wrong answer sitting underneath both of them: a pattern that prefers to match nothing where it could have matched something was losing the character after the empty match, so `count("a*?")` on `abc` said four where CPython says five. Both engines learned the rule upstream has used since 3.7.
+
+Issue #889 asked what the decode, the byte offset table and the copy cost inside the replacing kernel, on ClickBench q28's column, and guessed the three of them were about half the work. They are about a tenth and the engine is the rest. The decode got about three times cheaper anyway, by widening a block of ASCII in one go rather than a character at a time, and every copy in the replacing scan is a run copy now, which is worth about a third on a row shape where the copy is most of the work. q28 does not move. What the issue leaves behind is six rows of the benchmark suite that split the kernel into its passes and run on every pull request, and a next question, which is the engine's step count.
+
+Beside those, three things. SQL reads an `INTERVAL` literal rather than stopping at one, which was the largest single reason anything in DuckDB's corpus stopped at all, and the refusal moves to lowering where it belongs. SQL `first` and `last` report the row at the edge rather than the first value that is not null, which is what DuckDB does and what separates them from `any_value`. And a Parquet read assembles half a million rows at a time rather than the whole answer at once, which takes about 460 MB off the peak of a six million row read and makes it slightly faster.
+
+### Added: SQL reads an INTERVAL literal instead of stopping at one
+
+`INTERVAL '1' DAY` and the spellings around it used to be refused by the transformer, and 697 statements in DuckDB's corpus stopped there, which was the largest single reason anything in it stopped at all. They parse, transform and print now, and a duration arrives at the printer with its amount and its unit intact.
+
+The refusal moved rather than went away. Nothing here has a column type for a duration yet, so lowering is the stage that says so, and it says it with the entry it always used, which keeps `sql_support()` and the README's table honest. What changed is when a query hears about it: one that only has to be read gets read, and one that has to run is refused in the same words.
+
+The unit comes off the grammar rule and not off the text, so `DAYS` and `DAY` are one unit without a table of plurals anywhere, and `YEAR TO MONTH` is one unit rather than three words. The amount is whatever the query wrote, which is a string in `INTERVAL '1 day'`, a number in `INTERVAL 5 DAY`, and any expression at all in `INTERVAL (x) DAY`. The string is not read, because the text is the value and taking a duration out of it is work the type does.
+
+The parentheses around the amount are the printer's decision rather than something the arena keeps. A string or a number goes bare, which is how nearly every interval anybody writes is written, and anything else keeps them, because the grammar takes only those three things in that position and `INTERVAL x DAY` without them is not a query.
+
 ### Fixed: SQL `first` and `last` report the row and not the first value there is
 
 `first(x)` and `last(x)` inside a `GROUP BY` skipped over a null looking for something to report, so a group whose first row was missing answered the row after it. DuckDB answers null there, because those two name a row and read whatever is in it. Issue #888.
@@ -69,6 +117,32 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+
+### Changed: the passes a regular expression kernel makes around the engine are measured, and the decode reads a block at a time
+
+Issue #889 asked what the decode, the byte offset table and the copy cost inside the replacing kernel, on the column ClickBench q28 runs over, before changing any of them. That measurement is now six rows of `benchmarks/main.mojo` under `regex/`, over a column of URLs with q28's pattern, and each row contains the one above it so a pass comes out by subtracting.
+
+What it says is that the engine is about nine tenths of the serial row and the three passes together are the rest. The issue guessed half and half from arithmetic stitched out of two different runs, and the guess was wrong. What is left on q28 is the engine.
+
+The decode is the largest of the three and is the one that got cheaper. A row has at most as many characters as it has bytes, so the list is grown once and written into rather than appended to a character at a time, and a block of bytes with no top bit set in any of them is widened into place in one go. Text with a multi byte character in it drops into the old loop for that character and the block is tried again from there, so a row that is mostly ASCII still reads mostly in blocks. On the benchmark's URL column the pass goes from about 56 ns a row to about 23, and on the real Referer column of the suite's 1M ClickBench file from about 137 ms to about 48 ms over the 921225 rows q28 keeps, which is about 149 ns a row down to about 52.
+
+The copy is the second. Every piece of a row the scan writes out is copied as a run now rather than a byte at a time, which is what it always was: both ends of a piece are known before any of it is written. On q28's column that is one host name a row and it is hard to see, so it was measured on a row shape where the copy is most of the work, a 350 byte row with eight short matches in it. Over 100000 of those, the two changes together take the scan from about 866 ms to about 562 ms.
+
+The offset table is the third and it stays as it was, with a measurement rather than an argument. Growing it to its size first costs a fill of whatever the last row did not use, the row that empties it is the ASCII row, and most rows are ASCII, so the fill lands on every row that needs a table at all. On the same column that came out slower than the appends it would have replaced. The table is under ten nanoseconds a row where the engine is over a thousand, which is the other half of why it stays.
+
+q28 itself does not move, and that is the honest reading rather than a disappointment. The kernel the query calls goes from about 773 ms to about 800 ms over the real column, which is the same number twice on a shared machine, and the suite is worse than that: q28 at 1M in memory mode landed anywhere between 0.57 s and 2.34 s across four paired runs the same afternoon, on both sides of the change and in both orders, tracking the load average and nothing else. A tenth of a tenth does not show up in a suite. The passes are now measured where a pull request can see them, which is the point.
+
+`regex/search_machine` is in the same section and is the only row there expected to be slower than the row above it. It runs the same scan with the backtracker taken out, so the pair keeps saying what 0.8.13 bought, which on this column is about two and a half times.
+
+### Changed: a Parquet read assembles a group of chunks at a time
+
+A read fetched every chunk out of DuckDB, described all of them as Arrow, and only then copied the lot into a frame, because the assembler sizes the buffer it allocates from every batch it is handed and cannot begin until it has them all. So the Arrow copy of the whole answer and the frame it turns into were both resident, and the peak of a read was the sum of the two.
+
+It now assembles half a million rows at a time and lets that group's Arrow arrays go before fetching the next, then stacks the groups into one chunk a column after DuckDB's own result has been destroyed. Nothing downstream can tell: the frame comes back in one chunk the way it always did, which matters because a column with more than one chunk cannot be borrowed and most of this library borrows.
+
+Measured on a 13900K reading sf1 lineitem, six million rows and sixteen columns, with the two builds run alternately four times each, the peak resident set goes from 3498 MB to 3037 MB and the read from 1083 to 1189 ms down to 1011 to 1129. The read gets faster rather than slower because a group that fits in cache is assembled out of cache, and that pays for the stacking step at the end.
+
+The group size is half a million rows because the ladder flattens there. The read peaks at 2896 MB at two million rows a group, 2625 MB at half a million and 2556 MB at a hundred and twenty eight thousand, and at the last of those the read has gone back up to 1220 ms because the fixed cost of an assemble is being paid forty six times. What is left is mostly DuckDB's materialised result, about 1400 MB of it, which is not ours to release a piece at a time. Issue #427.
 
 ## [0.8.13] - 2026-09-18
 
@@ -8228,7 +8302,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.13...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.14...HEAD
+[0.8.14]: https://github.com/tamnd/firepanda/releases/tag/v0.8.14
 [0.8.13]: https://github.com/tamnd/firepanda/releases/tag/v0.8.13
 [0.8.12]: https://github.com/tamnd/firepanda/releases/tag/v0.8.12
 [0.8.11]: https://github.com/tamnd/firepanda/releases/tag/v0.8.11
