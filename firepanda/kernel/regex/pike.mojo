@@ -52,6 +52,16 @@ Arrow's rather than either engine's: three rules about where to look next after
 a match, none of which is what a reader would guess, all of which were measured
 out of pandas rather than read anywhere. They are written out on `counts` and
 document 79 has where each of them came from.
+
+Four things here have no underscore in front of them and are read by the other
+two engines rather than by this one. `accepts` says whether an instruction takes
+a character and the state cache asks it once per class. `holds` says whether a
+position is the kind an assertion wants, `point_at` reads the character at a
+position counting the unreadable bytes in front of it, and `first_stop` steps
+over the positions no match can begin at, and the backtracker asks all three.
+Every one of them is a question about what the pattern means rather than about
+how this machine is written, so a copy next door would be a second answer to the
+same question and the two would part company the first time one was edited.
 """
 
 from std.collections.span import Span
@@ -116,7 +126,7 @@ position rather than the text at it.
 """
 
 
-def _point(points: Span[UInt32, _], lead: Int, at: Int) -> UInt32:
+def point_at(points: Span[UInt32, _], lead: Int, at: Int) -> UInt32:
     """The character at a position, counting the unreadable bytes in front.
 
     Args:
@@ -132,7 +142,7 @@ def _point(points: Span[UInt32, _], lead: Int, at: Int) -> UInt32:
     return points[at - lead]
 
 
-def _holds(
+def holds(
     which: Int32,
     points: Span[UInt32, _],
     lead: Int,
@@ -185,19 +195,19 @@ def _holds(
     if which == Int32(Int(AT_BEGINNING_LINE)):
         if at == 0:
             return True
-        return _point(points, lead, at - 1) == NEWLINE
+        return point_at(points, lead, at - 1) == NEWLINE
     if which == Int32(Int(AT_END)) or which == Int32(Int(AT_END_STRING)):
         return at == length
     if which == Int32(Int(AT_END_LINE)):
         if at == length:
             return True
-        return _point(points, lead, at) == NEWLINE
+        return point_at(points, lead, at) == NEWLINE
     if which == Int32(Int(AT_END_TEXT)):
         if at == length:
             return True
         if at != length - 1:
             return False
-        return _point(points, lead, at) == NEWLINE
+        return point_at(points, lead, at) == NEWLINE
     if which == Int32(Int(AT_TEXT_NOT_EMPTY)):
         # Nobody writes this and the compiler puts it in front of a `\\B` when
         # the interpreter beside it is one of the ones that fails a `\\B` on an
@@ -208,16 +218,16 @@ def _holds(
         Int(AT_NON_BOUNDARY_UNICODE)
     ):
         var was = at > 0 and is_word_point_unicode(
-            _point(points, lead, at - 1), word
+            point_at(points, lead, at - 1), word
         )
         var next = at < length and is_word_point_unicode(
-            _point(points, lead, at), word
+            point_at(points, lead, at), word
         )
         if which == Int32(Int(AT_BOUNDARY_UNICODE)):
             return was != next
         return was == next
-    var before = at > 0 and is_word_point(_point(points, lead, at - 1))
-    var after = at < length and is_word_point(_point(points, lead, at))
+    var before = at > 0 and is_word_point(point_at(points, lead, at - 1))
+    var after = at < length and is_word_point(point_at(points, lead, at))
     if which == Int32(Int(AT_BOUNDARY)):
         return before != after
     if which == Int32(Int(AT_NON_BOUNDARY)):
@@ -233,8 +243,9 @@ def accepts(
     The cache next door asks the same question of the same instructions, once
     per class of the alphabet rather than once per character, and the two have
     to agree about every character or the cache answers a different pattern from
-    the machine it is standing in front of. So it is one function with two
-    callers rather than two functions that look alike.
+    the machine it is standing in front of. The backtracker asks it too, one
+    instruction at a time. So it is one function with three callers rather than
+    three functions that look alike.
 
     Args:
         instruction: The instruction.
@@ -341,7 +352,7 @@ def byte_of(offsets: List[Int], at: Int) -> Int:
     return offsets[at]
 
 
-def _first_stop(
+def first_stop(
     program: Program,
     points: Span[UInt32, _],
     lead: Int,
@@ -368,7 +379,7 @@ def _first_stop(
     """
     var at = from_at
     while at < length:
-        var point = _point(points, lead, at)
+        var point = point_at(points, lead, at)
         if point != UNREADABLE and in_set(
             program.ranges, program.first_at, program.first_count, point
         ):
@@ -483,7 +494,7 @@ def _queue(
             word,
         )
     elif instruction.op == IN_AT:
-        if _holds(instruction.a, points, lead, position, word):
+        if holds(instruction.a, points, lead, position, word):
             _queue(
                 code,
                 list,
@@ -641,7 +652,7 @@ struct Machine(Movable):
                     # can begin one. The same rule the other scan gives a
                     # paragraph to, asked once above because the answer does not
                     # change while the row is being read.
-                    position = _first_stop(program, points, 0, position, length)
+                    position = first_stop(program, points, 0, position, length)
                     if position >= length:
                         break
                 _queue(
@@ -771,7 +782,7 @@ struct Machine(Movable):
                 # read something. An anchored program never has a set, so its
                 # scan is the scan it was before this was written.
                 if skipping and len(self.here) == 0:
-                    position = _first_stop(
+                    position = first_stop(
                         program, points, lead, position, length
                     )
                     if position >= length:
@@ -807,7 +818,7 @@ struct Machine(Movable):
                 if position < length and accepts(
                     instruction,
                     program.ranges,
-                    _point(points, lead, position),
+                    point_at(points, lead, position),
                 ):
                     for k in range(self.nslots):
                         self.carry[k] = self.slots_here[i * self.nslots + k]

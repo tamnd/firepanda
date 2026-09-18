@@ -21,6 +21,17 @@ Nothing pandas-facing pays it. The count is allocated only for a fold the plan m
 One registered divergence closes with it. A `FILTER` does not take rows away, it turns the ones it does not want into nulls, so `sum(qty) FILTER (WHERE price > 500)` over rows where the predicate never holds was a fold that saw rows and found nothing in them. It answered zero and it answers null.
 
 A window aggregate still answers zero. `sum(x) OVER ()` over a partition of nothing but nulls is the same disagreement in the one operator this does not reach, because a window carries no mark to read, and that is issue #877.
+### Added: a backtracker with a bitmap, for the scans that have to say where every group matched
+
+The state cache answers whether a row matched and cannot say where, so the three scans that read the groups out of a match, which are `replace`, `extract` and the counting loop, are all still on the machine. This is the engine for those. It follows one path through the program at a time the way an ordinary backtracking engine does, and it writes down every pair of an instruction and a position it has already been to. Arriving at a pair it has already been to means the rest of that path has already been tried and has already failed, because whether a match can be found from an instruction and a position does not depend on how the search got there. So the pair is dropped, and the work is held to one visit per instruction per position, which is the same bound the machine has. It is RE2's BitState and the name is the bitmap.
+
+What that buys is the constants rather than the bound. There are no thread lists, no stamp array to refill per row, and no copy of the slots per thread: one set of slots is written as the path goes forward and put back as it comes out. Over two hundred thousand URLs, a search with the groups of the ClickBench q28 pattern goes from about 1.47 s on the machine to about 0.33 s, and a shorter pattern with two groups in it from about 0.46 s to about 0.12 s. A pattern that matches nothing is about the same on both, since the character set added in 0.8.11 is what answers those and it answers them for either engine.
+
+What it costs is the bitmap, which is one bit per instruction per position and so grows with the row. A row needing more than a quarter of a million bits is handed back, and the caller runs the machine on it. That is the same arrangement the state cache has: an accelerator with an engine underneath rather than a second engine a caller has to choose between. There is no pattern shape it refuses, which is the difference from the cache, since it answers the assertions and the captures exactly as the machine does.
+
+The order is the correctness argument. A split pushes its second arm and then its first, so the first arm comes off the stack first and the path the pattern prefers is the path that is followed. Attempts start at one position after another from the cursor, and the first position that matches wins. Those two together are leftmost first, which is what the machine does and what both RE2 and Python do. The bitmap is deliberately not cleared between attempts at different positions, which is what keeps the whole scan linear and is sound for the same reason the memo is: nothing in the program reads where the attempt began.
+
+Nothing calls it yet. Wiring it under the replacing scan is the next piece and is where the ClickBench q28 number is, and issue #863 has the order the rest go in.
 
 ## [0.8.12] - 2026-09-18
 
