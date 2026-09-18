@@ -146,6 +146,28 @@ def test_a_match_can_start_at_the_last_position() raises:
     assert_true(hits("^$", ""))
 
 
+def test_an_anchored_pattern_answers_what_it_did_before_the_shortcut() raises:
+    """The scan starts no attempt above position zero for a pattern that opens
+    with `^` or `\\A`, and stops reading the row once the attempt at zero has
+    died. Everything here is a case where that could be got wrong: a match that
+    is not at the start, a match that ends at the last position, a row long
+    enough that the walk goes on well past the anchor, and the empty row."""
+    assert_true(hits("^abc", "abcdef"))
+    assert_false(hits("^abc", "xabcdef"))
+    assert_true(hits("\\Aabc", "abc"))
+    assert_false(hits("\\Aabc", " abc"))
+    assert_true(hits("^a.*z", "abcdefghijklmnopqrstuvwxyz"))
+    assert_false(hits("^b.*z", "abcdefghijklmnopqrstuvwxyz"))
+    assert_true(hits("^a*$", "aaaaaaaa"))
+    assert_false(hits("^a*$", "aaaaaaab"))
+    assert_true(hits("^", ""))
+    assert_false(hits("^a", ""))
+    assert_true(hits("^https?://([^/]+)/", "http://example.com/page"))
+    assert_false(hits("^https?://([^/]+)/", "ftp://example.com/page"))
+    assert_true(hits("(?m)^b", "a\nb"))
+    assert_true(hits("(?m)^b$", "a\nb\nc"))
+
+
 def test_a_repeat_whose_body_can_match_nothing_terminates() raises:
     """The whole reason an instruction is added to a list at most once per
     position. Without that, this is an infinite loop rather than a slow one, and
