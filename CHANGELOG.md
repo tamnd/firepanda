@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a sum over values that are every one null answers null
+
+`SELECT sum(x) FROM t` where every `x` is null answered zero, and so did a group inside a `GROUP BY` whose values were all null. DuckDB answers null to both, because a total of nothing is not a total, and so does firepanda now. Issue #836.
+
+The neighbouring case, a fold over no rows at all, was fixed in 0.8.7 and cost nothing, because the operator already knew that no chunk with rows in it had ever arrived. This one is not free. A group is a group because a row made it, so a group whose values were all missing and a group whose values added to zero leave the kernel as the same zero. A grouped sum reads no validity at all: a null holds a zero and a NaN is made to hold one, so both spellings of missing add nothing and neither has to be looked up, which is the invariant that makes the sum as fast as it is. Telling the two groups apart means counting what was really added.
+
+So a sum that has to answer null now carries a count beside it, which is the second state slot and the second scatter a mean has always carried for its divisor. The sum keeps the accumulator a sum gets, since this one is the answer and not a numerator, so the number it reports does not move. `group/pipeline_stream_marked` is a new benchmark row that says what the pair costs, against `group/pipeline_stream` beside it, which is the same query without the mark: sixteen million rows in a thousand groups through the streaming operator, 1.009 nanoseconds a row unmarked and 1.745 marked.
+
+Nothing pandas-facing pays it. The count is allocated only for a fold the plan marked and the mark is the one the SQL front end sets, so `DataFrame.group_by` sums the way it always did and `firepanda/frame/groupby.mojo` still describes what it does. It is not allocated where it cannot buy anything either. A column the schema says cannot hold a null has a value in every row it has, so a group that exists held one, and a float column is asked about on its own because a NaN is not a value here and a column of them holds nothing even where the schema allows no null.
+
+One registered divergence closes with it. A `FILTER` does not take rows away, it turns the ones it does not want into nulls, so `sum(qty) FILTER (WHERE price > 500)` over rows where the predicate never holds was a fold that saw rows and found nothing in them. It answered zero and it answers null.
+
+A window aggregate still answers zero. `sum(x) OVER ()` over a partition of nothing but nulls is the same disagreement in the one operator this does not reach, because a window carries no mark to read, and that is issue #877.
+
 ## [0.8.12] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).

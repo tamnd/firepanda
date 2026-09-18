@@ -4838,6 +4838,25 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/pipeline_stream", "rows", rows, pipeline_stream)
 
+    def pipeline_stream_marked() raises {imm streamed}:
+        keep(streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total", empty_is_null=True))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Group([0], aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    # The same query the SQL front end asks for, which is the row above with
+    # the mark on it. A marked sum has to answer null over a group whose values
+    # were all missing, and the only thing that knows whether that happened is
+    # a count of what was added, so this pays a second state slot and a second
+    # scatter that the row above does not. The pair is the price of #836 and
+    # the reason it is measured rather than assumed.
+    harness.record(
+        "group/pipeline_stream_marked", "rows", rows, pipeline_stream_marked
+    )
+
     def pipeline_materialize() raises {imm streamed}:
         keep(streamed.rows)
         var fields = List[Field]()

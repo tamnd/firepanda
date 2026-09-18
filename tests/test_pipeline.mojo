@@ -13,7 +13,7 @@ easy case and it hides every off by one in the prefix sums, in the reverse pop
 order the scan uses, and in the way a breaker hands its result back.
 """
 
-from std.math import isnan
+from std.math import isnan, nan
 from std.testing import TestSuite, assert_equal, assert_false, assert_raises
 from std.testing import assert_true
 
@@ -2096,6 +2096,153 @@ def test_a_marked_reduction_over_rows_is_the_ordinary_sum() raises:
     var out = pipeline^.run()
     assert_equal(len(out), 1, "one row")
     assert_equal(one_int(out, "total"), 21, "1 through 6")
+
+
+def nans(count: Int) raises -> AnyArray:
+    """Builds a float64 array of NaNs, every one of them marked present."""
+    var col = Array[DType.float64](count)
+    for i in range(count):
+        col.set_valid(i, nan[DType.float64]())
+    return AnyArray(col^)
+
+
+def hollow_frame() raises -> DataFrame:
+    """Four rows in two chunks, one group of which holds no value at all.
+
+    Group 1 holds a five and group 2 holds three nulls, so a sum over group 2 is
+    a sum that saw rows and found nothing in them. That is the case the two
+    front ends disagree about and it is not the case a filter that keeps no rows
+    makes, because this group is there. `bare` is the same thing without a key,
+    and `drift` is it spelled with NaN on a column the schema says cannot hold a
+    null, which is the other way a value can fail to be there. See #170.
+
+    The nulls are split across the two chunks on purpose. Each chunk is folded
+    on its own and the partials are merged, so a group that held a value in one
+    chunk and nothing in another has to come out the same as one that held it
+    all at once.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    var first = Array[DType.int64](2)
+    first.set_valid(0, Int64(5))
+    first.set_null(1)
+    n.append(AnyArray(first^))
+    var second = Array[DType.int64](2)
+    second.set_null(0)
+    second.set_null(1)
+    n.append(AnyArray(second^))
+
+    var g = ChunkedArray(LogicalType.INT64)
+    g.append(numbers([1, 2]))
+    g.append(numbers([2, 2]))
+
+    var bare = ChunkedArray(LogicalType.INT64)
+    var here = Array[DType.int64](2)
+    here.set_null(0)
+    here.set_null(1)
+    bare.append(AnyArray(here^))
+    var there = Array[DType.int64](2)
+    there.set_null(0)
+    there.set_null(1)
+    bare.append(AnyArray(there^))
+
+    var drift = ChunkedArray(LogicalType.FLOAT64)
+    drift.append(nans(2))
+    drift.append(nans(2))
+
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(g^)
+    columns.append(bare^)
+    columns.append(drift^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64, True))
+    fields.append(Field("g", LogicalType.INT64, False))
+    fields.append(Field("bare", LogicalType.INT64, True))
+    fields.append(Field("drift", LogicalType.FLOAT64, False))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_reduction_over_nothing_but_nulls_answers_zero() raises:
+    """pandas' answer. Rows arrived and none of them held a value, and adding no
+    numbers gives zero, which is what the accessor on a frame promises and what
+    `firepanda/frame/groupby.mojo` writes down."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(2, AggKind.COUNT, "seen"))
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(one_int(out, "total"), 0, "pandas adds nothing to zero")
+    assert_equal(one_int(out, "seen"), 0, "and there was nothing to add")
+
+
+def test_a_marked_reduction_over_nothing_but_nulls_answers_null() raises:
+    """SQL's answer for the same four rows, which is #836. The mark is the only
+    difference between this and the test above it, and the count is not marked
+    on either side because a count of nothing is zero in both front ends."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "total", empty_is_null=True))
+    aggs.append(GroupAgg(2, AggKind.COUNT, "seen"))
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(present(out, "total"), [False], "SQL adds nothing to null")
+    assert_equal(one_int(out, "seen"), 0, "a count is zero on both sides")
+
+
+def test_a_marked_reduction_over_a_column_of_nans_answers_null_too() raises:
+    """A NaN is not a value here either, so a column of them is a column that
+    holds nothing even though the schema says it cannot hold a null. That is
+    why `_sum_counts` asks about a float column separately. See #170."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(3, AggKind.SUM, "total", empty_is_null=True))
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    var total = out.column("total").as_typed[DType.float64]()
+    assert_true(not total.is_valid(0), "nothing was added")
+
+
+def test_a_marked_reduction_that_added_something_is_the_ordinary_sum() raises:
+    """The one value in the frame is still the answer, so the mark costs a
+    count and changes nothing about the number it is beside."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total", empty_is_null=True))
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(one_int(out, "total"), 5, "the five that was there")
+
+
+def test_a_group_of_nothing_but_nulls_sums_to_zero() raises:
+    """pandas' answer again, one group at a time."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    assert_equal(
+        read_back(out, "g"), [1, 2], "the two groups, first seen first"
+    )
+    assert_equal(read_back(out, "total"), [5, 0], "the five and a zero")
+
+
+def test_a_marked_group_of_nothing_but_nulls_sums_to_null() raises:
+    """SQL's answer, and the half of #836 a group by owns. The group is there,
+    because a row made it, and what it holds is three nulls, so the sum has
+    nothing to report rather than a zero to report."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total", empty_is_null=True))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "g"), [1, 2], "the two groups")
+    assert_equal(present(out, "total"), [True, False], "the five and a null")
+    assert_equal(read_back(out, "total")[0], 5, "the five is still a five")
 
 
 def test_a_held_column_survives_the_parallel_route() raises:
