@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release that is mostly one thread: the regular expression engine learning to remember what it did, which is the third of the three costs in issue #830 and the largest single change to the engine since it was written.
+
+It arrives in three pieces. A compiled program can now say which characters it cannot tell apart, which turns an alphabet of a million code points into a handful of classes and is what makes a table of transitions small enough to keep. On top of that there is a cache of the sets of positions the machine holds, built as they are reached and bounded at two hundred and fifty six of them, which answers in one step what the machine answers by walking every instruction it is holding. And the matching kernel now runs that cache for `contains`, `match` and `fullmatch` over a column tall enough to pay for building it, with the machine kept underneath for every pattern the cache refuses and every row it gives up on.
+
+On a million URLs that is about seven times the run on an anchored pattern of the shape ClickBench q28 uses and about fifteen on an unanchored one the first character set cannot help with. It does not move q28 itself, which replaces rather than matches and waits on the piece that finds where each match ended. `count`, `replace` and `extract` are all still the machine for the same reason.
+
+Beside it, one wrong answer is gone. `\z` is RE2's spelling for the end of the string and Python read it as a bad escape until 3.14, so a flagged call carrying one was answered here and raised upstream on every interpreter but the newest. The compiler refuses it below 3.14 now, reading the same version number as the new rule that fails the build when the interpreter is newer than the versions those rules were measured against.
+
+The other thread is a route that was taken back out. The streaming join's byte key packing was wired into whole frame joins behind a threshold, and the measurement said the concatenating route it was meant to replace is faster on every shape that was tried, because its copy is parallel and the packing route's is not. The threshold is gone and the measurement is written into the file in its place, so the next person to have the idea reads the numbers before writing the code.
+
 ### Changed: the join's two compound key packings now have the measurement that says which one a whole frame join uses
 
 The streaming join packs a key tuple into one byte string per row, because it holds the build side whole and the probe side a chunk at a time and cannot make a plan that both sides agree on. A whole frame join has both sides, so it uses `_pair_plan` to pack the tuple into a single integer, and when that declines it concatenates every key column with its opposite number and factorizes the lot. The obvious follow-up to the streaming work was to give the whole frame join the byte packing as well, for the tuples the integer packing declines. That is the thing this entry is about not doing.
@@ -8047,7 +8061,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.11...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.12...HEAD
+[0.8.12]: https://github.com/tamnd/firepanda/releases/tag/v0.8.12
 [0.8.11]: https://github.com/tamnd/firepanda/releases/tag/v0.8.11
 [0.8.10]: https://github.com/tamnd/firepanda/releases/tag/v0.8.10
 [0.8.9]: https://github.com/tamnd/firepanda/releases/tag/v0.8.9
