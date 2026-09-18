@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `replace` and `extract` run the backtracker
+
+The backtracker in the entry below is wired under the two kernels that read the groups out of a match. Every search goes through one function that asks it first and asks the machine for the rows it hands back, so a caller never learns which of the two answered and there is one place in the library where that is decided.
+
+On a million URLs with four threads, `replace` with the ClickBench q28 pattern goes from about 2.11 s to about 0.75 s, a two group pattern that matches nothing in most rows from about 6.40 s to about 3.14 s, and a short two group pattern from about 0.85 s to about 0.45 s. Those are smaller multiples than the engine on its own gets, which is the honest shape of it: the kernel also decodes the row, builds a byte offset table for it and copies the pieces out, and none of that got faster.
+
+The replace differential now runs the pattern corpus through both engines, since it calls the same kernel function the column does. `extract` is the same change in one line, and the counting scan is still the machine because its loop cuts the row down after every match and hands the engine a different text rather than a cursor.
+
 ### Fixed: a sum over values that are every one null answers null
 
 `SELECT sum(x) FROM t` where every `x` is null answered zero, and so did a group inside a `GROUP BY` whose values were all null. DuckDB answers null to both, because a total of nothing is not a total, and so does firepanda now. Issue #836.
@@ -21,6 +29,7 @@ Nothing pandas-facing pays it. The count is allocated only for a fold the plan m
 One registered divergence closes with it. A `FILTER` does not take rows away, it turns the ones it does not want into nulls, so `sum(qty) FILTER (WHERE price > 500)` over rows where the predicate never holds was a fold that saw rows and found nothing in them. It answered zero and it answers null.
 
 A window aggregate still answers zero. `sum(x) OVER ()` over a partition of nothing but nulls is the same disagreement in the one operator this does not reach, because a window carries no mark to read, and that is issue #877.
+
 ### Added: a backtracker with a bitmap, for the scans that have to say where every group matched
 
 The state cache answers whether a row matched and cannot say where, so the three scans that read the groups out of a match, which are `replace`, `extract` and the counting loop, are all still on the machine. This is the engine for those. It follows one path through the program at a time the way an ordinary backtracking engine does, and it writes down every pair of an instruction and a position it has already been to. Arriving at a pair it has already been to means the rest of that path has already been tried and has already failed, because whether a match can be found from an instruction and a position does not depend on how the search got there. So the pair is dropped, and the work is held to one visit per instruction per position, which is the same bound the machine has. It is RE2's BitState and the name is the bitmap.
@@ -31,7 +40,7 @@ What it costs is the bitmap, which is one bit per instruction per position and s
 
 The order is the correctness argument. A split pushes its second arm and then its first, so the first arm comes off the stack first and the path the pattern prefers is the path that is followed. Attempts start at one position after another from the cursor, and the first position that matches wins. Those two together are leftmost first, which is what the machine does and what both RE2 and Python do. The bitmap is deliberately not cleared between attempts at different positions, which is what keeps the whole scan linear and is sound for the same reason the memo is: nothing in the program reads where the attempt began.
 
-Nothing calls it yet. Wiring it under the replacing scan is the next piece and is where the ClickBench q28 number is, and issue #863 has the order the rest go in.
+The scans that call it are the entry above, and issue #863 has the order the rest go in.
 
 ## [0.8.12] - 2026-09-18
 

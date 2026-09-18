@@ -62,6 +62,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.mask import repair_range
+from firepanda.kernel.regex.backtrack import Bounded, searched
 from firepanda.kernel.regex.dfa import Cache, SCAN_GAVE_UP, SCAN_YES
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
@@ -259,9 +260,11 @@ def text_extract_regex(
         heads.append(first)
         for g in range(1, groups):
             heads.append(views[g].unsafe_mut_ptr().unsafe_bitcast[StringView]())
-        # One machine and one of each buffer for the whole morsel rather than
-        # one of each per row, which is what the serial version did per column.
+        # One of each engine and one of each buffer for the whole morsel
+        # rather than one of each per row, which is what the serial version did
+        # per column.
         var machine = Machine(program)
+        var bounded = Bounded(program)
         var points = List[UInt32]()
         var offsets = List[Int]()
         var found = List[Int32]()
@@ -278,7 +281,9 @@ def text_extract_regex(
             # The whole row is searched from its first position, which is the
             # one place this differs from the replacing scan: that one walks a
             # cursor and this one asks once and stops.
-            var end = machine.search(program, Span(points), 0, found)
+            var end = searched(
+                program, Span(points), 0, machine, bounded, found
+            )
             if end < 0:
                 for g in range(groups):
                     heads[g].unsafe_offset(i)[] = StringView()
@@ -389,9 +394,11 @@ def text_replace_regex(
     def compute(start: Int, stop: Int) {mut parts, mut views, imm}:
         ref payload = parts[start // MORSEL_ROWS]
         var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
-        # One machine and one of each buffer for the whole morsel rather than
-        # one of each per row, which is what the serial version did per column.
+        # One of each engine and one of each buffer for the whole morsel
+        # rather than one of each per row, which is what the serial version did
+        # per column.
         var machine = Machine(program)
+        var bounded = Bounded(program)
         var points = List[UInt32]()
         var offsets = List[Int]()
         var found = List[Int32]()
@@ -412,6 +419,7 @@ def text_replace_regex(
                     bytes,
                     Span(points),
                     machine,
+                    bounded,
                     offsets,
                     found,
                     out,
@@ -424,6 +432,7 @@ def text_replace_regex(
                     bytes,
                     Span(points),
                     machine,
+                    bounded,
                     offsets,
                     found,
                     out,

@@ -54,6 +54,7 @@ at the moment a match is reached and nowhere else, which is all anybody needs.
 from std.collections.span import Span
 
 from firepanda.kernel.regex.pike import (
+    Machine,
     accepts,
     first_stop,
     holds,
@@ -319,3 +320,38 @@ struct Bounded(Movable):
                 return end
             position += 1
         return NO_MATCH
+
+
+def searched(
+    program: Program,
+    points: Span[UInt32, _],
+    first: Int,
+    mut machine: Machine,
+    mut bounded: Bounded,
+    mut found: List[Int32],
+) -> Int:
+    """The leftmost first match at or after a cursor, from whichever engine can
+    answer.
+
+    The backtracker first, because it is the faster of the two on every row it
+    will take, and the machine for the rows it hands back. The two answer the
+    same question and a caller that read which of them answered would be reading
+    something that is none of its business, so this is the only place either of
+    them is chosen and every scan that wants a match with its groups in it comes
+    through here.
+
+    Args:
+        program: The compiled pattern.
+        points: The whole row, as code points.
+        first: The cursor, which is the first position an attempt may start at.
+        machine: The machine's buffers, which the caller keeps across rows.
+        bounded: The backtracker's, the same way.
+        found: Filled with the two ends of the whole match and of every group.
+
+    Returns:
+        Where the match ends, or -1 when there is none at or after the cursor.
+    """
+    var end = bounded.search(program, points, 0, first, found)
+    if end != GAVE_UP:
+        return end
+    return machine.search(program, points, first, found)
