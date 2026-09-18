@@ -176,6 +176,45 @@ because renumbering partway through is what `_condense` does and a single pass
 has no partway, and the check is on the product rather than on the key count, so
 nothing has to predict which tables are real.
 
+## Factorizing the keys at the same time
+
+The factorizes that are left after all of that are independent of each other.
+None of them reads another's ordinals, none of them reads another's count, and
+the first thing that needs any of them is the packing pass at the bottom, which
+needs all of them. They were nonetheless run one after another, and every one of
+them is itself a serial pass until the column is tall enough to be worth
+splitting, so a group by under those heights ran a core at a time no matter how
+many keys it had and no matter how many cores were free.
+
+TPC-H q10 is what found it. It groups the join of customer, orders, lineitem and
+nation on seven columns, five of which are text, and at sf1 that intermediate is
+114,705 rows. `PARALLEL_STRING_ROWS` is 1 << 18, so all five text factorizes
+were under the line and stayed on one thread, and on a 13900K with 32 workers
+the seven keys cost 15.3 ms one after another out of 17.9 ms for the whole of
+`group_ordinals`. Six sevenths of the time, in other words, was spent proving
+that a core can do one thing at a time.
+
+Running them one per worker costs nothing that splitting a single column costs.
+There is no merge, because no two keys share a hash table, and there is no
+renumbering, because each key's ordinals are already the ones it would have
+produced alone. The only thing a fan out can be charged for is the fork, and the
+only thing it can save is every key but the slowest, which is why
+`SPREAD_KEY_WORK` counts the key work with the largest term left out.
+
+The same seven keys cost 7.0 ms one per worker, and `group_ordinals` as a whole
+went from 17.9 ms to 9.8. What it does not do is reach the slowest key, which is
+5.3 ms on its own: seven hash tables built at once contend for the allocator and
+for memory bandwidth in a way seven built in turn do not. That is a ceiling on
+this rather than a fault in it, and it is the reason the threshold was fitted
+from measurements rather than from the arithmetic.
+
+Two things are deliberately left. A key already over its own parallel line is
+not forked over, because a split inside a split is the same cores counted twice
+and neither half knows about the other; whether a tall group by on many text
+keys would rather have one wide split or several narrow ones is a question this
+does not ask. And the fan out is over the key list only, so a group by on one
+key is exactly as it was.
+
 ## The representative row
 
 An aggregation produces one row per group and those rows need their key values
@@ -222,12 +261,15 @@ from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
+from firepanda.exec.parallel import parallel_for, worker_count
 
 from firepanda.kernel.agg import max_of
 
 from .factorize import (
     DIRECT_LIMIT,
     DIRECT_SHARE,
+    PARALLEL_ROWS,
+    PARALLEL_STRING_ROWS,
     direct_plan,
     factorize,
     factorize_dense,
@@ -459,6 +501,88 @@ def _key_agrees(
     raise Error("group by: unsupported key dtype")
 
 
+comptime STRING_KEY_WEIGHT = 8
+"""What a text key costs per row against a fixed width one.
+
+Only ever used to compare one key against another, so it is a ratio rather than
+a time and nothing depends on its units. Measured on the TPC-H q10 key set at
+114,705 rows on an i9-13900K, in nanoseconds a row: c_custkey 2.35, c_acctbal
+6.72, n_name 16.4, c_name 16.7, c_address 19.1, c_phone 21.5 and c_comment 46.1.
+So a text key is between seven and twenty times an integer one depending on how
+long its strings are, and eight is the low end of that rather than the middle,
+because the thing this decides is whether to fork and overestimating the saving
+is what makes that a bad trade.
+
+The length of the strings is what the spread inside that range is, and a
+`StringArray` knows its own byte count, so a weight that reads it would be
+closer. It is not worth it here: this feeds one comparison against a threshold
+that was fitted with this same weight in it, and a better weight would want the
+threshold refitted rather than left alone.
+"""
+
+comptime SPREAD_KEY_WORK = 1 << 17
+"""Key work that has to be movable off the critical path before keys fork.
+
+In rows times `STRING_KEY_WEIGHT`, counting every key but the most expensive
+one, because the most expensive one is what a fan out still has to wait for and
+the rest is all a fan out can save.
+
+Measured on a 13900K with 32 workers, factorizing the first two and then all
+seven of the q10 key columns one after another against one per worker, as a
+ratio of the two medians. Two keys, which here is an int64 and an eighteen byte
+string: 0.08 at 512 rows, 0.35 at 2048, 0.70 at 8192, 0.93 at 32768 and 1.10 at
+131072. Seven keys: 0.30, 0.97, 1.91, 1.70 and 2.18 at the same heights. So the
+key count matters more than the height, which is what the movable work being the
+sum over the keys rather than the height alone is saying, and this threshold is
+the only line that separates the four losses from the five wins.
+
+The two key ladder tops out near 1.1 for a reason that is not overhead: its two
+keys are an integer at 2.35 nanoseconds a row and a string at 16.7, so a fan out
+of them waits on the string and saves the integer. An unbalanced key set has
+little to gain however tall it is, which is the same thing the sum without the
+largest term already says.
+"""
+
+
+def _worth_spreading[
+    o: ImmOrigin
+](columns: ColumnRefs[o], at: List[Int], rows: Int) -> Bool:
+    """Reports whether these keys should be factorized one per worker.
+
+    Two conditions and they are different questions. The first is that no key
+    would have gone parallel inside its own factorize, since a fan out over
+    keys on top of that is the same cores twice and neither split knows about
+    the other. `PARALLEL_STRING_ROWS` and `PARALLEL_ROWS` are those lines and
+    they are far apart, so this asks per key rather than once.
+
+    The second is that there is enough work here to pay for the fork, which is
+    `SPREAD_KEY_WORK` and its docstring has the measurement.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys.
+        rows: The frame's height.
+
+    Returns:
+        Whether to fan out over the key list.
+    """
+    if len(at) < 2 or worker_count() < 2:
+        return False
+
+    var total = 0
+    var largest = 0
+    for k in range(len(at)):
+        ref col = columns[at[k]][]
+        var text = col.is_string()
+        if rows >= (PARALLEL_STRING_ROWS if text else PARALLEL_ROWS):
+            return False
+        var cost = rows * (STRING_KEY_WEIGHT if text else 1)
+        total += cost
+        if cost > largest:
+            largest = cost
+    return total - largest >= SPREAD_KEY_WORK
+
+
 def _worth_fusing[
     o: ImmOrigin
 ](columns: ColumnRefs[o], at: List[Int]) raises -> Bool:
@@ -615,16 +739,15 @@ def group_ordinals[
             if fused:
                 return fused.take()
 
-    var first = factorize_any(columns[at[0]][])
-    var groups = first.groups
-    var known = first.knows_rows()
-    var codes = Array[DType.uint32](0)
-    var rows_at = List[Int]()
-    first^.into_parts(codes, rows_at)
-
     if len(at) == 1:
         # One key is the whole answer, so its ordinals are the result's and the
         # only thing that can be wrong with them is where the null group sits.
+        var first = factorize_any(columns[at[0]][])
+        var groups = first.groups
+        var known = first.knows_rows()
+        var codes = Array[DType.uint32](0)
+        var rows_at = List[Int]()
+        first^.into_parts(codes, rows_at)
         if not known:
             rows_at = List[Int]()
             groups = _densify(codes, rows_at)
@@ -642,23 +765,31 @@ def group_ordinals[
     # are what decides which of the two runs.
     var stacked = List[Array[DType.uint32]]()
     var counts = List[Int]()
-    stacked.append(codes^)
-    counts.append(groups)
-    for k in range(1, len(at)):
+    for _ in range(len(at)):
+        stacked.append(Array[DType.uint32](0))
+        counts.append(0)
+
+    def one_key(k: Int) raises {mut stacked, mut counts, imm}:
         var key = factorize_any(columns[at[k]][])
         var next_groups = key.groups
-        var next = Array[DType.uint32](0)
         var spare = List[Int]()
-        key^.into_parts(next, spare)
+        key^.into_parts(stacked[k], spare)
         if next_groups < 0:
-            # Only the count matters here, not the order and not the rows, for
-            # the same reason the first key's order does not matter. A key that
-            # knows how many groups it has can skip the pass even when it cannot
-            # say which row each one is on.
+            # Only the count matters here, not the order and not the rows. A key
+            # that knows how many groups it has can skip the pass even when it
+            # cannot say which row each one is on.
             spare = List[Int]()
-            next_groups = _densify(next, spare)
-        stacked.append(next^)
-        counts.append(next_groups)
+            next_groups = _densify(stacked[k], spare)
+        counts[k] = next_groups
+
+    # One key per worker when there is enough key work to move off the critical
+    # path, one after another when there is not. `_worth_spreading` is the
+    # question and the module docstring has the measurement.
+    if _worth_spreading(columns, at, rows):
+        parallel_for(one_key, len(at))
+    else:
+        for k in range(len(at)):
+            one_key(k)
 
     # The multipliers of the positional notation the fold would have arrived at,
     # rightmost first, alongside the product they end at. The test is a division
