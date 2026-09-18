@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with three threads in it: the end of the flags work on the string accessor, one more TPC-H query, and the regular expression machine doing less work per row.
+
+Verbose mode and the ascii flag are the last two of the seven flag letters, so every letter `re` names that means anything on a pattern made of text is read now. Verbose mode turned out to be a rule about where whitespace is skipped rather than about which characters are skipped, and the ascii flag needed a third alphabet rather than a narrowing of the two that were there, since Python's ASCII `\s` holds a vertical tab and RE2's never did.
+
+TPC-H q13 answers, which takes `pixi run tpch` to twenty of twenty two. An outer join with a condition about its right side used to be refused because a residual above the join would test the padding on a left row that matched nothing. A part of the condition that reads only the right side goes under the right input instead, before the pairing is built, and the left rows are padded or dropped exactly as they were.
+
+ClickBench q28 at 1M is 1.26 s where the 0.8.9 notes had it at 1.95 s, on 3.39 cores where it was on 3.41, machine idle for both and q27 run beside it as the control. DuckDB 1.5.5 answered the same query in 0.154 s in the same minute, so this library is about eight times slower on it rather than about twelve. Almost all of that is the anchored pattern change below; the byte table beside it is about four percent. Issue #830 stays open on the third of its three costs, which is a lazy DFA and is milestone sized.
+
 ### Added: verbose mode and the ascii flag, which are the last two of the seven letters
 
 `Series.str.contains("a # comment\nb", flags=re.VERBOSE)` and `Series.str.contains(r"\w", flags=re.ASCII)` used to be refused, and with them every call on the accessor carrying either letter or a written `(?x)` or `(?a)`. All of them are answered now, out of Python's engine, which is where upstream sends a call carrying any flag. Six of the seven letters are read and the seventh is one Python will not take on a pattern made of text either. Issue #8 M6.
@@ -33,6 +45,7 @@ What that missed is that some residuals do not have to go above the join at all.
 A part that reads the left side, or both sides, is still refused, and with the sentence it came back with before. There is nowhere for those to go: a left row that fails one has to come out padded rather than dropped, and neither above the join nor under one of its inputs is a place that can say so.
 
 `pixi run tpch` is twenty of twenty two. The two left stop in two different places, q20 on a left join with two key pairs and q21 on a correlated `EXISTS` that matches through an inequality as well as an equality.
+
 ### Changed: the table that turns a character position into a byte position is only built when it is needed
 
 A row of one byte characters has the same number for both, so the table is left empty for one and `byte_of` reads an empty table as saying the two agree. `text_extract_regex` also builds it after the search rather than before, since a row that matched nothing has no piece to hand back and the table is only ever read to cut one out.
@@ -7874,7 +7887,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/tamnd/firepanda/releases/tag/v0.8.10
 [0.8.9]: https://github.com/tamnd/firepanda/releases/tag/v0.8.9
 [0.8.8]: https://github.com/tamnd/firepanda/releases/tag/v0.8.8
 [0.8.7]: https://github.com/tamnd/firepanda/releases/tag/v0.8.7
