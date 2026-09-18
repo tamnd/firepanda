@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads an INTERVAL literal instead of stopping at one
+
+`INTERVAL '1' DAY` and the spellings around it used to be refused by the transformer, and 697 statements in DuckDB's corpus stopped there, which was the largest single reason anything in it stopped at all. They parse, transform and print now, and a duration arrives at the printer with its amount and its unit intact.
+
+The refusal moved rather than went away. Nothing here has a column type for a duration yet, so lowering is the stage that says so, and it says it with the entry it always used, which keeps `sql_support()` and the README's table honest. What changed is when a query hears about it: one that only has to be read gets read, and one that has to run is refused in the same words.
+
+The unit comes off the grammar rule and not off the text, so `DAYS` and `DAY` are one unit without a table of plurals anywhere, and `YEAR TO MONTH` is one unit rather than three words. The amount is whatever the query wrote, which is a string in `INTERVAL '1 day'`, a number in `INTERVAL 5 DAY`, and any expression at all in `INTERVAL (x) DAY`. The string is not read, because the text is the value and taking a duration out of it is work the type does.
+
+The parentheses around the amount are the printer's decision rather than something the arena keeps. A string or a number goes bare, which is how nearly every interval anybody writes is written, and anything else keeps them, because the grammar takes only those three things in that position and `INTERVAL x DAY` without them is not a query.
+
 ### Fixed: SQL `first` and `last` report the row and not the first value there is
 
 `first(x)` and `last(x)` inside a `GROUP BY` skipped over a null looking for something to report, so a group whose first row was missing answered the row after it. DuckDB answers null there, because those two name a row and read whatever is in it. Issue #888.

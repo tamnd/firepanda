@@ -238,6 +238,23 @@ is a statement index and everything that walks a binary node reads both sides
 out of the expression arena.
 """
 
+comptime EXPR_INTERVAL: UInt8 = 21
+"""`INTERVAL '1' DAY`, and the spellings around it.
+
+`a` is the expression the amount is written as, which is a string in
+`INTERVAL '1 day'`, a number in `INTERVAL 5 DAY` and anything at all in
+`INTERVAL (x) DAY`. `payload` is the interned unit, folded to one spelling and
+upper case, so `DAYS` and `DAY` are one thing here and `YEAR TO MONTH` is the
+whole of what was written. It is empty for `INTERVAL '1 day'`, where the unit
+is inside the string and this stage does not read strings.
+
+The amount is an expression and not a number because the grammar lets it be
+one, and a unit is text and not a tag because the printer is what needs it and
+nothing here converts anything. What the three fields mean together is a
+duration, and firepanda has no column type for a duration, so this gets as far
+as the printer and no further.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1367,6 +1384,25 @@ struct Ast(Movable):
         var text = self.intern(collation)
         return self.add(
             Expr(kind=EXPR_COLLATE, token=token, a=operand, payload=text)
+        )
+
+    def interval(
+        mut self, amount: UInt32, unit: StringSlice = "", token: UInt32 = 0
+    ) -> UInt32:
+        """Builds `INTERVAL '1' DAY`.
+
+        Args:
+            amount: How much, as the expression it was written as.
+            unit: The unit in one spelling and upper case, empty when the
+                query wrote the unit inside the amount.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var text = self.intern(unit)
+        return self.add(
+            Expr(kind=EXPR_INTERVAL, token=token, a=amount, payload=text)
         )
 
     def parameter(

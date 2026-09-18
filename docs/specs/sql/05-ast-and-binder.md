@@ -24,7 +24,7 @@ struct Expr:
 
 Fixed size nodes in a `List`, variadic children in a side list of index runs. The alternative, a variant with an inline `List` per node, allocates per node and fights ownership for no benefit.
 
-`ExprKind` covers literal, column reference, star with `EXCLUDE`, `REPLACE` and `RENAME` payloads, function call with `DISTINCT`, `ORDER BY`, `FILTER` and window spec, operator, cast, case, subquery, exists, in, between, collate, lambda, list, struct and map constructors, slice, extract, and parameter.
+`ExprKind` covers literal, column reference, star with `EXCLUDE`, `REPLACE` and `RENAME` payloads, function call with `DISTINCT`, `ORDER BY`, `FILTER` and window spec, operator, cast, case, subquery, exists, in, between, collate, lambda, list, struct and map constructors, slice, extract, interval, and parameter.
 
 Statement kinds at 1.0 are `SELECT`, `CREATE TABLE AS`, `CREATE VIEW`, `INSERT`, `EXPLAIN`, `DESCRIBE`, `SUMMARIZE`, `PRAGMA` and `SET`, `COPY`, and `PREPARE` and `EXECUTE`. Everything else in the grammar parses into an `Unsupported` node carrying the rule name and the token span, which is the mechanism in section 4.
 
