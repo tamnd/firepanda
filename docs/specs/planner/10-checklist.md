@@ -20,11 +20,11 @@ M3 keeps the lazy user surface, `LazyFrame`, `scan_parquet`, `collect`, `explain
 
 ### Stage zero, no plan required
 
-- [ ] Join build side chosen by size rather than by parameter name, with the output pair order flipped to compensate
+- [ ] Join build side chosen by size rather than by parameter name, with the output pair order flipped to compensate. Done for an inner join, which is the one kind that can swap without tracking the exchange to the output; still owed to left, semi, anti and outer
 - [ ] A sortedness flag on a column, set by sort and by readers that know, cleared by everything that reorders
 - [ ] A cached distinct count on a column, written by `factorize` which already computes it
 - [ ] A cached minimum and maximum, and an all valid flag, written by the kernels that already know
-- [ ] A join on more than one key column building a dictionary on the smaller side and probing the larger, rather than concatenating both sides and factorizing the tuple. Done for the streaming operator, which packs the tuple into bytes and then takes the text key route, and still owed to `align_keys` for the whole frame join
+- [x] A join on more than one key column building a dictionary on the smaller side and probing the larger, rather than concatenating both sides and factorizing the tuple. Done for the streaming operator, which packs the tuple into bytes and then takes the text key route. Measured for `align_keys` and not taken there: the concatenating route wins by five to eight times on every shape where the two sides differ in height, because its copy is a parallel memcpy and `group_ordinals` fuses the tuple into one parallel hash pass, and the byte packing writes its byte strings serially. Document 07 has the reasoning and `firepanda/join/keys.mojo` has the table
 - [ ] A join on one text key taking the dictionary route when the two sides are close in height, rather than only when they differ by a factor of eight
 - [ ] Sorted group by, chosen when the key carries the sortedness flag
 

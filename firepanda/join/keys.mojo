@@ -86,6 +86,50 @@ work, this route does it on one thread and the route it replaced does it on ever
 core, so it loses and is not taken. Fixing that means a build that spreads rather
 than a better line to draw.
 
+## The tuple this route does not take, and why it stays that way
+
+A streaming join cannot use `_pair_plan`, because a plan wants both sides and a
+streaming join has one of them. `packed.mojo` is what it uses instead: each key
+writes its own bytes into one byte string per row, with enough in the buffer to
+say where each key ends, and the tuple becomes a text key. That asks nothing of
+the dtypes and nothing of the ranges, so it takes every tuple, and the obvious
+thought is that a whole frame join should take it too for the tuples
+`_pair_plan` declines.
+
+It should not. Measured on an i9-13900K at ten million probe rows, three sessions
+a side in ABBA order, with the byte packing wired into this route and the choice
+forced either way, medians:
+
+| row | build rows | concatenating | byte string a row | ratio |
+| --- | --- | --- | --- | --- |
+| `join/two_keys_far_apart` | eight thousand | 63.7 ms | 322.7 ms | 0.20 |
+| `join/two_keys_far_apart_100k` | a hundred thousand | 77.1 ms | 335.6 ms | 0.23 |
+| `join/two_keys_far_apart_equal_sides` | one per probe row | 951.4 ms | 960.2 ms | 0.99 |
+| `join/two_keys_text` | eight thousand | 55.6 ms | 482.2 ms | 0.12 |
+| `join/two_keys_text_100k` | a hundred thousand | 65.1 ms | 507.3 ms | 0.13 |
+| `join/two_keys_text_equal_sides` | one per probe row | 1.430 s | 1.342 s | 1.07 |
+
+Five to eight times slower on every lopsided shape, on the integer pair and on
+the pair with a string in it alike, and every run of one side outside the range
+of the other. The two equal sides rows are the only ones that are close and their
+runs interleave, so there is nothing there either.
+
+The reason is that the concatenating route is not the naive thing its name
+suggests. The copy it makes is a parallel memcpy and costs almost nothing, and
+what it hands the copy to is `group_ordinals`, which has its own tuple handling:
+an integer pair it cannot lay a table over still gets one fused hash of the whole
+tuple in a single parallel pass, and a tuple with a string in it gets a factorize
+a key and a fold, both parallel. Against that, packing to bytes writes a byte
+string a row on each side in a serial pass and then hashes and compares those
+strings, which is more bytes touched and less of it spread.
+
+So this stays as it is: `_pair_plan` or the concatenating route, and the byte
+packing stays where it is the only thing available. The two ladders above are in
+the benchmark set so that the next person to have the same idea can see the
+answer without building it, and if the serial pack ever spreads across cores the
+question is worth reopening on the equal sides rows, which are the only ones it
+was ever close on.
+
 ## Which side is built
 
 The smaller one, counted in rows. Not the right one, which is what the argument
