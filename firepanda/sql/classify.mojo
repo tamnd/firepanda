@@ -48,6 +48,7 @@ from .ast import (
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
+    EXPR_COMPREHENSION,
     EXPR_EXISTS,
     EXPR_FRAME,
     EXPR_FUNCTION,
@@ -190,6 +191,12 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         out.append(item.a)
         return out^
     if kind == EXPR_ROW:
+        for i in range(ast.length(item.children)):
+            out.append(ast.at(item.children, i))
+        return out^
+    if kind == EXPR_COMPREHENSION:
+        out.append(item.a)
+        out.append(item.b)
         for i in range(ast.length(item.children)):
             out.append(ast.at(item.children, i))
         return out^
@@ -727,7 +734,7 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(item.payload)
     if kind == EXPR_NAMED_ARGUMENT:
         return String(item.b, "/", ast.text(item.payload))
-    if kind == EXPR_LAMBDA:
+    if kind == EXPR_LAMBDA or kind == EXPR_COMPREHENSION:
         var out = String()
         for at in range(ast.length(item.payload)):
             out += ast.text(ast.at(item.payload, at))

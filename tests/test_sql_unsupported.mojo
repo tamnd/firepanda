@@ -184,7 +184,7 @@ def test_the_transformer_refuses_in_the_table_shape() raises:
     var g = Grammar()
     var rules = Transform(g)
     var ast = Ast()
-    var sql = "SELECT [x + 1 FOR x IN l] FROM t"
+    var sql = "SELECT MAP {'a': 1} FROM t"
     var text = String()
     try:
         _ = rules.parse_statement(sql, g, ast)

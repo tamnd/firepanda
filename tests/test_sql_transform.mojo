@@ -527,6 +527,9 @@ def test_every_shape_here_round_trips() raises:
         "f(1, b := 2, c => 3)",
         "list_apply(l, lambda x: x + 1)",
         "list_reduce(l, lambda acc, e: acc + e)",
+        "[x + 1 FOR x IN l]",
+        "[x FOR x IN l IF x > 2]",
+        "[x + y FOR x, y IN l]",
         "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
         "mode() WITHIN GROUP (ORDER BY a)",
         "lag(a IGNORE NULLS) OVER ()",
@@ -831,14 +834,52 @@ def test_the_arrow_spelling_is_an_operator_and_not_a_lambda() raises:
     assert_equal(_printed("x -> x + 1", g, rules), "(x -> (x + 1))")
 
 
+def test_a_comprehension_keeps_its_three_parts() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("[x + 1 FOR x IN l]", g, rules), "[(x + 1) FOR x IN l]"
+    )
+    assert_equal(_printed("[x FOR x, y IN l]", g, rules), "[x FOR x, y IN l]")
+
+
+def test_a_comprehension_keeps_the_condition_on_the_end() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("[x FOR x IN l IF x > 2]", g, rules),
+        "[x FOR x IN l IF (x > 2)]",
+    )
+
+
+def test_a_comprehension_name_is_quoted_like_a_lambda_parameter() raises:
+    # The same `ColIdOrString` rule stands in both places, so a keyword comes
+    # back in quotes and a string literal comes back as the name it stood for.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed('[1 FOR "select" IN l]', g, rules), '[1 FOR "select" IN l]'
+    )
+    assert_equal(_printed("[1 FOR 'q' IN l]", g, rules), "[1 FOR q IN l]")
+
+
+def test_a_comprehension_is_not_a_list_of_one() raises:
+    # `[x]` and `[x FOR x IN l]` open the same way and the grammar tries the
+    # comprehension first, so the two have to come back as what they were.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("[x]", g, rules), "[x]")
+    assert_equal(_printed("[x FOR x IN [l]]", g, rules), "[x FOR x IN [l]]")
+
+
 def test_a_refusal_says_where_it_was() raises:
     # The example is whichever refusal the transformer still makes. What is
     # under test is the shape of the message and not the feature, so any of
     # them would do and this one changes as the list gets shorter.
     var g = Grammar()
     var rules = Transform(g)
-    var sql = "[x + 1 FOR x IN l]"
-    with assert_raises(contains="LINE 1: [x + 1 FOR x IN l]"):
+    var sql = "MAP {'a': 1}"
+    with assert_raises(contains="LINE 1: MAP {'a': 1}"):
         _ = _printed(sql, g, rules)
     with assert_raises(contains="issues/"):
         _ = _printed(sql, g, rules)

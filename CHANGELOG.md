@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads a list comprehension
+
+`[x + 1 FOR x IN l]` used to be refused by the transformer, and 68 statements in DuckDB's corpus stopped there. 67 of them round trip now and the other one holds something else the transformer still turns down. The refusal moved to lowering and kept the sentence it already had.
+
+The node holds four things: the element written before `FOR`, a run of interned names, the source written after `IN`, and the condition an `IF` put on the end when one was written. The names are read as text the way a lambda's parameters are and for the same reason, which is that a name in that position is being bound rather than looked up, and the element and the condition both refer to it the way they refer to a column.
+
+DuckDB reads this as calls. `[x + 1 FOR x IN l]` is `list_apply(l, lambda x: x + 1)` in its own parse tree, and the form with a condition grows a `list_filter` and a pair of `struct_pack` calls under that. That is what a comprehension means rather than what it says, and this keeps what it says, so the printer hands back the brackets the query wrote instead of a nest of calls a reader would have to turn back into brackets.
+
 ### Added: a backreference under the ignore case flag, which is a second case table
 
 `str.contains(r"(\w)\1", case=False)` used to raise and now answers, which is one of the two things the backreference entry in 0.8.15 left refused.
@@ -17,6 +25,7 @@ It wanted a table because `(?i)` means two different things and upstream impleme
 So there are two case tables now. `folddata.mojo` is the orbits and `lowerdata.mojo` is the simple lowercase, written by `tools/gen_regexlower.py` beside the fold generator and against the same interpreter, CPython 3.13.12 with Unicode 15.1.0. 1433 code points move, in 214 runs, which takes a marker of its own: the fold table's says a run alternates up and down because folding is a cycle, and this one says the even code point steps up and the odd one stays, because lowering is not. Without it the same table is 668 runs. The generator walks its own runs over every code point in Unicode and checks each against `_sre.unicode_tolower`, so a release that moves an answer fails there rather than drifting.
 
 The table is read by one function and held on the engine rather than copied per row, and only a program that actually holds a reference under the wide flag asks for it at all. `(?ai)` is a third rule rather than the wide one narrowed: it is the twenty six ASCII letters and nothing else, so the Kelvin sign is not a `k` there. The Python differential moves from 28729 patterns compared to 28739, which is the ten that were held out for this, and stays at zero disagreements. Document 97.
+
 ### Added: SQL reads a lambda
 
 `lambda x: x + 1` used to be refused by the transformer, and 349 statements in DuckDB's corpus stopped there, which was the largest entry left in the refusal histogram. 333 of them round trip now and the other 16 hold something else the transformer still turns down. The refusal moved to lowering and kept its sentence, because the sentence was already the right one: firepanda runs the functions it already has, and a function written inside a query would have to be compiled along with it.

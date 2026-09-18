@@ -38,13 +38,14 @@ from .ast import (
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
+    EXPR_COMPREHENSION,
     EXPR_EXISTS,
     EXPR_FRAME,
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
-    EXPR_LAMBDA,
     EXPR_INTERVAL,
+    EXPR_LAMBDA,
     EXPR_LIST,
     EXPR_LITERAL,
     EXPR_NAMED_ARGUMENT,
@@ -779,6 +780,34 @@ def _write_step(
             out += ": "
             stack.append(_Step(item.a, 0))
             return
+        return
+
+    if kind == EXPR_COMPREHENSION:
+        # The names go back the way a lambda's parameters do, since they are
+        # the same rule and are bound the same way, and the condition only
+        # prints when one was written, because `IF` with nothing after it is
+        # not a thing the grammar reads.
+        if phase == 0:
+            out += "["
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += " FOR "
+            for i in range(ast.length(item.payload)):
+                if i > 0:
+                    out += ", "
+                out += quote_name(ast.text(ast.at(item.payload, i)), grammar)
+            out += " IN "
+            stack.append(_Step(node, 2))
+            stack.append(_Step(item.b, 0))
+            return
+        if phase == 2 and ast.length(item.children) != 0:
+            out += " IF "
+            stack.append(_Step(node, 3))
+            stack.append(_Step(ast.at(item.children, 0), 0))
+            return
+        out += "]"
         return
 
     if kind == EXPR_ROW:
