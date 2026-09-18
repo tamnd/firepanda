@@ -4403,6 +4403,69 @@ def test_a_window_partitions_on_a_column_of_the_chunk() raises:
     assert_equal(counts[1], 2, "and two on this one")
 
 
+def test_a_window_over_a_partition_of_nothing_but_nulls_sums_to_zero() raises:
+    # The pandas answer, which is what an unmarked window asks for. The first
+    # partition holds a five and the second holds three nulls, and a sum that
+    # added nothing is holding the zero it started at.
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Window([1], [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "total"), [5, 0, 0, 0], "one per row")
+
+
+def test_a_marked_window_over_a_partition_of_nothing_but_nulls_is_null() raises:
+    # The same windows with the mark the SQL front end sets. A partition is
+    # never empty, so the only thing the mark can decide here is whether the
+    # rows it did hold had anything in them, and these three did not. See #877.
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Window([1], [0], [AggKind.SUM], ["total"], [True])))
+    var out = pipeline^.run()
+    assert_equal(
+        present(out, "total"), [True, False, False, False], "one per row"
+    )
+    assert_equal(read_back(out, "total")[0], 5, "the partition that had one")
+
+
+def test_a_marked_window_over_a_partition_of_nans_is_null_too() raises:
+    # The column the schema says holds no null, holding four NaNs. A NaN is not
+    # a value to a count either, so the sum has nothing and answers null.
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(
+        Node(Window(List[Int](), [3], [AggKind.SUM], ["total"], [True]))
+    )
+    var out = pipeline^.run()
+    var total = out.column("total").as_typed[DType.float64]()
+    for i in range(4):
+        assert_true(not total.is_valid(i), "row " + String(i))
+
+
+def test_a_marked_window_that_added_something_is_the_ordinary_sum() raises:
+    # The mark costs a count and changes nothing where a value turned up, which
+    # is the case that has to keep working.
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(
+        Node(Window(List[Int](), [0], [AggKind.SUM], ["total"], [True]))
+    )
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "total"), [5, 5, 5, 5], "the one value there")
+
+
+def test_a_marked_count_window_still_answers_zero() raises:
+    # A count answers a number over nothing on both sides, so the SQL front end
+    # leaves it unmarked and the mark would not reach it anyway.
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Window([1], [0], [AggKind.COUNT], ["how_many"], [True])))
+    var out = pipeline^.run()
+    assert_equal(read_back(out, "how_many"), [1, 0, 0, 0], "one per row")
+
+
+def test_a_window_told_the_wrong_number_of_marks_is_refused() raises:
+    with assert_raises(contains="said whether folding nothing answers null"):
+        _ = Window(
+            List[Int](), [0, 0], [AggKind.SUM, AggKind.SUM], ["a", "b"], [True]
+        )
+
+
 def test_a_window_leaves_the_rows_where_they_were() raises:
     var pipeline = Pipeline(cut_frame())
     pipeline.add(Node(Window([1], [0], [AggKind.SUM], ["total"])))

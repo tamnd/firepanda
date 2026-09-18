@@ -761,6 +761,57 @@ def test_a_fold_that_is_not_marked_writes_nothing_about_it() raises:
     )
 
 
+def test_a_window_that_is_null_over_nothing_says_so_and_still_is() raises:
+    # A partition is never empty, so on a window the flag says a partition of
+    # nothing but nulls answers null. It is written and read the same way as on
+    # a fold, and the fold's own name still has to survive beside it.
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var total = plan.exprs.window(
+        AggKind.SUM,
+        plan.exprs.column("a"),
+        List[Int](),
+        List[Int](),
+        empty_is_null=True,
+    )
+    var at = plan.window(t, [total], ["x"])
+    assert_true(
+        to_json(plan, at).find('"empty_is_null": true') != -1,
+        "the flag is in the JSON",
+    )
+    assert_true(
+        to_json(plan, at).find('"op": "sum"') != -1,
+        "and the fold is still written by its own name",
+    )
+    var back = _trip(plan, at)
+    assert_true(
+        folds_empty_to_null(
+            back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].op
+        ),
+        "and it is still on the node that came back",
+    )
+
+
+def test_an_unmarked_window_writes_nothing_about_it() raises:
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var total = plan.exprs.window(
+        AggKind.SUM, plan.exprs.column("a"), List[Int](), List[Int]()
+    )
+    var at = plan.window(t, [total], ["x"])
+    assert_true(
+        to_json(plan, at).find('"empty_is_null"') == -1,
+        "nothing is written for the pandas window",
+    )
+    var back = _trip(plan, at)
+    assert_true(
+        not folds_empty_to_null(
+            back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].op
+        ),
+        "and it comes back unmarked",
+    )
+
+
 def test_every_binary_operator_is_written_and_reads_back() raises:
     for code in range(Int(BinaryOp.GE.code) + 1):
         var plan = Plan()

@@ -76,7 +76,7 @@ from firepanda.exec import Cast, Compute, Connective, Filter, Group, GroupAgg
 from firepanda.exec import Join
 from firepanda.exec import Case, Cut, Length, Locate, Member, Trim
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
-from firepanda.exec import Sort
+from firepanda.exec import Sort, Window
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
@@ -4855,6 +4855,38 @@ def bench_group(mut harness: Harness) raises:
     # the reason it is measured rather than assumed.
     harness.record(
         "group/pipeline_stream_marked", "rows", rows, pipeline_stream_marked
+    )
+
+    def pipeline_window() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Window([0], [1], [AggKind.SUM], ["total"])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    # The window operator asking the same question of the same rows, which is a
+    # grouping pass and then a gather that writes each partition's answer onto
+    # every row of it. Read against `group/pipeline_stream`, which stops after
+    # the grouping, the difference is the gather.
+    harness.record("group/pipeline_window", "rows", rows, pipeline_window)
+
+    def pipeline_window_marked() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(
+            DataFrame(copy=streamed),
+        )
+        pipeline.add(Node(Window([0], [1], [AggKind.SUM], ["total"], [True])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    # The mark a window costs more than the mark a group by costs, and this pair
+    # is where that shows. A group carries the count as a second state slot and
+    # fills it in the pass it was already making, while a window has no running
+    # state to add a slot to, so the count is a second reduction over the whole
+    # flattened column. The grouping itself is still done once. That is the
+    # price of #877 and the reason it is measured rather than assumed.
+    harness.record(
+        "group/pipeline_window_marked", "rows", rows, pipeline_window_marked
     )
 
     def pipeline_materialize() raises {imm streamed}:

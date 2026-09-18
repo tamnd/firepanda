@@ -4202,6 +4202,61 @@ def test_a_sum_of_an_expression_over_nothing_but_nulls_is_null() raises:
     )
 
 
+def test_a_window_over_a_partition_of_nothing_but_nulls_is_null() raises:
+    # The same question asked of the operator that writes one value on every
+    # row. A partition is never empty, since it is a partition because a row is
+    # in it, so this is the only thing the mark decides on a window. The rows
+    # where the mark is null read a partition that held nothing. Issue #877.
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT sum(mark) OVER (PARTITION BY mark IS NULL) AS total"
+                    " FROM gappy ORDER BY mark IS NULL"
+                ),
+                session(),
+            ),
+            "total",
+        ),
+        [18, 18, 18, 18, -1, -1],
+        "total",
+    )
+
+
+def test_a_window_over_a_whole_frame_of_nothing_but_nulls_is_null() raises:
+    # No partition keys is one partition, and every row of it is missing.
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT sum(mark) OVER () AS whole FROM gappy WHERE mark IS"
+                    " NULL"
+                ),
+                session(),
+            ),
+            "whole",
+        ),
+        [-1, -1],
+        "whole",
+    )
+
+
+def test_a_count_window_over_nothing_but_nulls_is_still_a_zero() raises:
+    # The fold both front ends agree about, so the mark is never set on it and
+    # a partition of nothing but nulls counts zero rather than answering null.
+    same(
+        answer(
+            (
+                "SELECT count(mark) OVER (PARTITION BY mark IS NULL) AS c FROM"
+                " gappy ORDER BY mark IS NULL"
+            ),
+            "c",
+        ),
+        [4, 4, 4, 4, 0, 0],
+        "c",
+    )
+
+
 def test_a_subquery_over_no_rows_keeps_no_rows() raises:
     # The fold above is one null row, the cross join puts that null on every
     # row, and a comparison against a null keeps nothing.

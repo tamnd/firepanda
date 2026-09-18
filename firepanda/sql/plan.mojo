@@ -3231,8 +3231,13 @@ def _lower_over(
         partition.append(_lower_operand(ast, entry, plan, walk, scope, grouped))
         key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
 
+    var kind = _agg_kind(name, distinct)
     var built = plan.exprs.window(
-        _agg_kind(name, distinct), over, partition^, List[Int]()
+        kind,
+        over,
+        partition^,
+        List[Int](),
+        empty_is_null=not _counts_rows(kind),
     )
     var place = walk._record_window(
         built, String("__win_", len(walk.windows)), key^

@@ -2707,6 +2707,7 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var keys = List[Int]()
     var sources = List[Int](capacity=len(held))
     var kinds = List[AggKind](capacity=len(held))
+    var marked = List[Bool](capacity=len(held))
     for i in range(len(held)):
         ref node = plan.exprs.nodes[held[i]]
         if node.kind != ExprKind.WINDOW:
@@ -2795,9 +2796,10 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
             )
         )
         kinds.append(agg_kind(node.op))
+        marked.append(folds_empty_to_null(node.op))
 
     var made = len(pipe.schema) - base
-    pipe.add(Node(Window(keys^, sources^, kinds^, names^)))
+    pipe.add(Node(Window(keys^, sources^, kinds^, names^, marked^)))
     if made == 0:
         return
     var keep = List[Int](capacity=base + len(held))

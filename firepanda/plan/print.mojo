@@ -248,7 +248,7 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
 
     if node.kind == ExprKind.WINDOW:
         var written = String(
-            AggKind(UInt8(node.op)),
+            agg_kind(node.op),
             "(",
             render_expr(tree, node.children[0]),
             ") over (",
