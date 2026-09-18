@@ -46,6 +46,22 @@ Measured on a 13900K, TPC-H sf1 in memory, three rounds in ABBA order with seven
 
 The answer does not change and the two routes are still checked against each other. What the scan will not do is remember what it found, because a group by borrows the frame and has nowhere to write it, so a frame grouped twice on the same key is scanned twice. `DataFrame.sortedness` is still the way to pay for the scan once and keep the answer. Issue #79.
 
+### Changed: a semi join on two sorted keys walks them instead of building a table
+
+A semi join asks of each left row whether the right side holds its key anywhere. The way to answer that without knowing anything about the two columns is to factorize both, build a hash table over the right one and probe it with the left, and that is what every join here did. When both key columns are sorted there is a shorter answer: one cursor into each, and because the left keys never fall the right cursor never goes backwards, so the whole join is one pass over each column with nothing built in between.
+
+Asking whether the keys are sorted is two scans that stop at the first pair out of order, which on a column in no order is a handful of rows. Below sixty five thousand probe rows the question is not asked at all, for the same reason the group by does not ask below the same number: the table being skipped is already under a millisecond there, so neither route is worth choosing between and the scan would be the only thing either one added.
+
+The walk splits across workers the same way the probe does, a count pass and then an emit, because the output height is not known until the walk has run and a morsel can only write where the morsels before it stopped. Each morsel places its own first left key in the right column with a binary search rather than inheriting a cursor, which is what makes the pass splittable at all.
+
+Only a semi join takes this route. It is the one kind whose output is a subset of the left rows in left row order, which is exactly what walking the two columns produces, so there is nothing to sort afterwards and nothing to gather from the right. An inner join on sorted keys is the same walk with the emit fanning out over a run of equal right keys, and it is a separate change. A null key is declined rather than handled: it matches nothing in a semi join, but it also has no place in an ordering, so a column holding one goes down the ordinary route.
+
+Measured on a 13900K, TPC-H sf1 in memory, three rounds in ABBA order with nine runs a round. q21 goes from 0.076, 0.082, 0.080, 0.077, 0.081 and 0.081 seconds to 0.082, 0.060, 0.062, 0.061, 0.060 and 0.062, which is 1.31 times on the medians. The one branch reading of 0.082 came with an interquartile range of 0.013 seconds where every other reading is at 0.002, and the base run taken next to it reads 0.082 with 0.014, so that pair is a load blip which caught one run of each side rather than anything either route did. q3 is the control, since it joins four tables and none of the joins is a semi join, and it reads 0.022 to 0.023 seconds before and 0.023 to 0.025 after.
+
+q21 has three semi joins in it and all three take the walk. A stage probe over three replays reads the pair on `l_orderkey` at 20.4, 20.2 and 21.6 milliseconds and then at 9.8, 9.6 and 9.6, and the one against `orders` at 8.2, 7.7 and 8.0 and then at 3.3, 3.4 and 3.5, which is 15.5 milliseconds across the three. That probe was taken before the sorted key group by landed, when the whole query still read 127 milliseconds rather than 80, and it was not run again, so the 19 milliseconds the query moves above is the measured figure and the 15.5 is where the bulk of it comes from.
+
+The answer does not change either way, and the two routes are checked against each other on a fixture that spans both. Issue #79.
+
 ## [0.8.15] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).
