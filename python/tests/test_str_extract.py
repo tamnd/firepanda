@@ -26,11 +26,19 @@ There is one disagreement and it is the label one `partition` already carries. p
 unnamed group with its own position as an integer and a firepanda frame holds text column labels, so
 a group that would be `1` upstream is `"1"` here. A named group is labelled with its name on both
 sides, which is why the tests compare the labels through `str` rather than directly.
+
+`flags` is the fifth thing worth knowing and it is the one argument on this accessor that carries no
+route with it. Everywhere else a flags argument says both what the letters mean and that the call
+has left Arrow, and the second of those is what costs a word at the door the call crosses by. This
+name is on Python's engine whatever anybody passes, so the letters cross on their own. It is also
+the one pattern method with no `case` argument, so it is the one where the two spellings of a fold
+cannot disagree with each other.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import re
 from types import ModuleType
 from typing import Any
 
@@ -290,10 +298,115 @@ def test_expand_is_checked_before_the_pattern_is(firepanda: ModuleType) -> None:
         theirs().str.extract(r"[a-z]", expand=None)
 
 
-def test_flags_are_refused(firepanda: ModuleType) -> None:
-    """The same refusal the four names above this one make, for the same reason."""
-    with pytest.raises(firepanda.errors.UnsupportedError, match="flags"):
-        made(firepanda).str.extract(r"([a-z])", flags=2)
+FLAGGED_ROWS = ["1\nab", "ab", "1", None, "a\nb1", "\u212a1", "F8", ""]
+"""Eight rows chosen by running both libraries over candidates rather than from memory.
+
+Each of the first three flags has a row here that answers one way without it and another way with
+it, and those rows were found by sweeping rather than picked because they sound discriminating. The
+first is the multiline row, where the front of the text is a digit and the front of the second line
+is a letter. The fifth is the dot row, where the only thing between an `a` and a `b` is a newline.
+The sixth and seventh are the fold rows, a Kelvin sign and a capital F.
+"""
+
+FLAGS = (0, re.IGNORECASE, re.MULTILINE, re.DOTALL, re.UNICODE, re.IGNORECASE | re.DOTALL)
+"""The four letters that go through, alone and in one pair, with no flags at the front of the list
+so that every sweep below also runs the unflagged call it is being compared against."""
+
+
+def flagged(firepanda: ModuleType, pattern: str, flags: int = 0) -> list[list[Any]]:
+    """One flagged extract, read out of a firepanda frame row by row."""
+    return mine_rows(made(firepanda, FLAGGED_ROWS).str.extract(pattern, flags=flags))
+
+
+def their_flagged(pattern: str, flags: int = 0) -> list[list[Any]]:
+    """The same call on the same rows in pandas."""
+    return their_rows(theirs(FLAGGED_ROWS).str.extract(pattern, flags=flags))
+
+
+@needs_pandas
+def test_every_pattern_under_every_flag_matches_pandas(firepanda: ModuleType) -> None:
+    """Seven patterns under six flag settings over eight rows, which is 336 cells.
+
+    The sweep is the assertion that matters here. Each test below it names one flag and one row
+    where that flag changes the answer, and those are worth reading, but they are three cells out
+    of the same 336 and every one of them would pass against an implementation that read the flags
+    for some patterns and dropped them for the rest.
+    """
+    for pattern in PATTERNS:
+        for flags in FLAGS:
+            assert flagged(firepanda, pattern, flags) == their_flagged(pattern, flags), (
+                pattern,
+                flags,
+            )
+
+
+@needs_pandas
+def test_multiline_moves_the_front_of_the_row_to_the_front_of_a_line(
+    firepanda: ModuleType,
+) -> None:
+    """`extract` runs `search` rather than `match`, so an anchor is the only way a flag about
+    anchors can show at all. A row whose first line is a digit answers nothing for `^([a-z])` and
+    answers the second line's first letter once the flag is beside it."""
+    assert flagged(firepanda, r"^([a-z])")[0] == [None]
+    assert flagged(firepanda, r"^([a-z])", re.MULTILINE)[0] == ["a"]
+    assert their_flagged(r"^([a-z])")[0] == [None]
+    assert their_flagged(r"^([a-z])", re.MULTILINE)[0] == ["a"]
+
+
+@needs_pandas
+def test_dotall_lets_the_dot_cover_the_newline(firepanda: ModuleType) -> None:
+    """The one flag of the four whose effect is on a single character rather than on an anchor or
+    on a table. `a.b` finds nothing in a row where the only thing between the two letters is a
+    newline, and finds the whole of it with the flag."""
+    assert flagged(firepanda, r"(a.b)")[4] == [None]
+    assert flagged(firepanda, r"(a.b)", re.DOTALL)[4] == ["a\nb"]
+    assert their_flagged(r"(a.b)")[4] == [None]
+    assert their_flagged(r"(a.b)", re.DOTALL)[4] == ["a\nb"]
+
+
+@needs_pandas
+def test_ignorecase_folds_the_engines_way_and_there_is_no_other_way_here(
+    firepanda: ModuleType,
+) -> None:
+    """A Kelvin sign is a `k` to this fold and a capital F is an `f`, and both of those are the
+    engine's fold rather than the one to one one RE2 uses. That distinction decides nothing on this
+    name, because there is no `case` argument here to reach the other fold by, which is what makes
+    this the one pattern method where the two spellings cannot disagree."""
+    assert flagged(firepanda, r"(k)")[5] == [None]
+    assert flagged(firepanda, r"(k)", re.IGNORECASE)[5] == ["\u212a"]
+    assert flagged(firepanda, r"([a-z])(\d)", re.IGNORECASE)[6] == ["F", "8"]
+    assert their_flagged(r"(k)")[5] == [None]
+    assert their_flagged(r"(k)", re.IGNORECASE)[5] == ["\u212a"]
+    assert their_flagged(r"([a-z])(\d)", re.IGNORECASE)[6] == ["F", "8"]
+
+
+@needs_pandas
+def test_the_locale_flag_is_a_value_error_on_both_sides(firepanda: ModuleType) -> None:
+    """Python turns `re.LOCALE` down on text and pandas hands text to `re`, so this is upstream's
+    refusal rather than one of ours, and it is a `ValueError` here because it is one there."""
+    with pytest.raises(ValueError):
+        flagged(firepanda, r"([a-z])", re.LOCALE)
+    with pytest.raises(ValueError):
+        their_flagged(r"([a-z])", re.LOCALE)
+
+
+def test_the_two_letters_this_library_cannot_read_say_so(firepanda: ModuleType) -> None:
+    """Verbose mode is not read by the parser and the ascii flag is not carried, and both of those
+    are gaps in this library rather than anything upstream does, so they answer there and refuse
+    here. A bit belonging to none of the seven letters is refused as well rather than dropped."""
+    for flags in (re.VERBOSE, re.ASCII):
+        with pytest.raises(NotImplementedError):
+            flagged(firepanda, r"([a-z])", flags)
+    with pytest.raises(firepanda.errors.UnsupportedError, match="flag value"):
+        flagged(firepanda, r"([a-z])", 1024)
+
+
+def test_a_pattern_that_is_not_text_is_refused_beside_a_flag_too(firepanda: ModuleType) -> None:
+    """The check that used to live on the path a pattern took rather than at the entrance, which is
+    correct only while there is one path. This name takes a second one now."""
+    for flags in (0, re.IGNORECASE):
+        with pytest.raises(TypeError):
+            made(firepanda, FLAGGED_ROWS).str.extract(1, flags=flags)
 
 
 @needs_pandas

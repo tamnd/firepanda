@@ -122,7 +122,7 @@ Both come off the L2 ceiling document 84 named. The board's cases for the `flags
 
 ## 12. What is not here yet
 
-`extract` still refuses a flag. It is on Python's engine already and the reason is now a different one: it hands back a frame of groups rather than a column, so it crosses by a door that takes no flags, and the flags would have to travel beside the group count. That is wiring rather than a scan.
+`extract` still refuses a flag. It is on Python's engine already and the reason is now a different one: it hands back a frame of groups rather than a column, so it crosses by a door that takes no flags, and the flags would have to travel beside the group count. That is wiring rather than a scan. Document 87 is that wiring, and it corrects the reason given here: the door takes no flags because `extract` has no second engine for a flag to move it to, so the argument means only what the letters mean and there is nothing for the door to say.
 
 Verbose mode in the parser and the ascii flag are unchanged from document 85 section 12 and are the only two of the seven letters still refused for a reason inside this library.
 

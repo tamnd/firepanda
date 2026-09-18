@@ -275,13 +275,19 @@ def test_the_other_three_take_the_flag_to_the_other_engine(
 
 
 @needs_pandas
-def test_extract_still_refuses_a_flag(firepanda: ModuleType) -> None:
-    """The one name left. `replace` is served out of the same engine now and is
-    measured in `test_str_count_replace_python_engine.py`. `extract` is on that
-    engine upstream whatever is passed, and a flag there is still refused, since
-    it hands back a frame of groups rather than a column and the door it crosses
-    by carries no flags."""
+def test_extract_takes_a_flag_without_taking_a_route_with_it(
+    firepanda: ModuleType,
+) -> None:
+    """The last of the six, and the only one where the flag moves nothing.
+
+    Every other name on this accessor reads a flags argument as two facts, what
+    the letters mean and that the call has left Arrow. `extract` is one of the
+    three pandas never sends to Arrow, so the second fact has nowhere to go and
+    the letters cross on their own. It is also the one pattern method with no
+    `case` argument, so it is the one where the two spellings of a fold cannot
+    disagree.
+    """
     mine = made(firepanda)
     assert mine.str.replace("a", "-", flags=re.IGNORECASE, regex=True).tolist()[0] is not None
-    with pytest.raises(NotImplementedError):
-        mine.str.extract("(a)", flags=re.IGNORECASE)
+    assert mine.str.extract("(A)", flags=re.IGNORECASE)["0"].tolist()[0] == "a"
+    assert theirs().str.extract("(A)", flags=re.IGNORECASE)[0].tolist()[0] == "a"
