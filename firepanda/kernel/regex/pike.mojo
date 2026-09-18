@@ -105,7 +105,7 @@ of a character and the text it then searches begins with a byte that is not a
 character at all. RE2 reads such a byte as nothing: no class matches it, the
 full stop does not match it, and it is not a word character, so the only thing
 that can happen at that position is a match of no width. This value is that
-byte, and it behaves that way here because `_accepts` refuses it outright and
+byte, and it behaves that way here because `accepts` refuses it outright and
 `is_word_point` says no to anything above the last code point.
 
 It is a position rather than a character, which is the point of having it. A
@@ -225,10 +225,16 @@ def _holds(
     return False
 
 
-def _accepts(
+def accepts(
     instruction: Instruction, ranges: Span[Int32, _], point: UInt32
 ) -> Bool:
     """Whether an instruction that reads a character accepts this one.
+
+    The cache next door asks the same question of the same instructions, once
+    per class of the alphabet rather than once per character, and the two have
+    to agree about every character or the cache answers a different pattern from
+    the machine it is standing in front of. So it is one function with two
+    callers rather than two functions that look alike.
 
     Args:
         instruction: The instruction.
@@ -664,7 +670,7 @@ struct Machine(Movable):
                 var instruction = program.code[Int(pc)]
                 if instruction.op == IN_MATCH:
                     return True
-                if position < length and _accepts(
+                if position < length and accepts(
                     instruction, program.ranges, points[position]
                 ):
                     _queue(
@@ -798,7 +804,7 @@ struct Machine(Movable):
                     for k in range(self.nslots):
                         found.append(self.slots_here[i * self.nslots + k])
                     break
-                if position < length and _accepts(
+                if position < length and accepts(
                     instruction,
                     program.ranges,
                     _point(points, lead, position),
