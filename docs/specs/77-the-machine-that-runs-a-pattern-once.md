@@ -93,3 +93,51 @@ Nothing is wired to the accessor. `contains`, `match`, `fullmatch`, `count` and 
 RE2's `\B` is byte based, so pandas gives different answers for the same data on its two string backends, and the difference is invisible until the column holds a character outside ASCII. This one is worth filing because it is not a documented divergence between the backends and it is not the kind a caller would think to check.
 
 The rest of the list is in document 76 section 12 and is unchanged by this slice.
+
+## 10. What a character costs, and what a lazy DFA would buy
+
+This section was written after issue #830 was closed and before any of issue #863 was written, because #863's first question is whether the machine should move to bytes and the honest answer to that turned out to be a measurement rather than an argument.
+
+Everything here is one column of 200000 synthetic URLs written the way ClickBench q28's referers are, which is 7.52 million characters of ASCII, run with q28's own pattern `^https?://(?:www\.)?([^/]+)/.*$` compiled to 25 instructions. Each line is one thread doing one thing, and the figure is the user CPU of the process over three passes of the column rather than the wall clock, because the machine this was taken on carries other work and wall clock there says more about the neighbours than about the program.
+
+| what runs | CPU over 22.56 million characters | per character |
+| --- | --- | --- |
+| building the column and nothing else | 0.01 s | |
+| reading the bytes as code points | 0.05 s | about 2 ns |
+| the same answer written by hand over the bytes | 0.02 s | about 1 ns |
+| `matches`, which is the yes or no | 1.10 s | about 48 ns |
+| `search` with captures, which is what a replace runs | 1.75 s | about 77 ns |
+
+The last two lines have the decode inside them, because a scan has to read the bytes as code points before it can run, and the hand written line does not because it works in bytes and never needs one.
+
+A sample of the yes or no scan puts 69 percent of it in `_queue`, 19 percent in the loop in `matches` that calls it, 5 percent in the decode and 3 percent in `_accepts` and the range search underneath it. The number of threads the machine holds was counted rather than guessed at: 25.68 million thread steps over 22.56 million characters, which is 1.14 threads per character.
+
+Those two together say something that was not obvious before it was measured. The machine is not slow here because it is holding many possibilities at once, since it is holding barely more than one. It is slow because each character costs a walk of the program through a recursive function with a stamp array, a list append and a dozen arguments, and that walk is most of the run whatever the pattern is doing.
+
+### The alphabet is not where the time is
+
+Reading a character and asking whether an instruction accepts it is 3 percent, and turning the row's bytes into code points is 5 percent. So moving the machine to UTF-8 bytes, which is what RE2 does, would be a large change to the compiler in exchange for a few percent of the scan.
+
+It is still worth having a cheaper alphabet, because a DFA has to key a transition on the input and a million entries per state is not a table. The decision is to keep code points and to give the compiled program a class table instead: one number per distinct set of characters the program can tell apart, computed once when the pattern is compiled, with ASCII indexed directly and anything above it found by the same kind of binary search the ranges already use. A pattern's class count is small, since it is bounded by the number of distinct sets in the program plus one for everything else, so a state is a row of a few entries rather than of a million.
+
+What that decision gives up is `\B`, which section 6 above has as a gap because RE2 asks the word boundary question between bytes and this machine has no byte positions to ask it at. Moving to bytes would close it. It stays open, and it stays open knowing what it would have cost to close: a UTF-8 range compiler in front of every class, the fold tables reworked to match, and the three differentials rerun against a compiler that now writes several instructions where it used to write one. That is a milestone of its own to close one line in one report.
+
+If the DFA ever does want bytes, the class table is the piece that changes and the cache above it is not, because the cache is keyed on a class number and does not know where the number came from.
+
+### The DFA reaches the yes or no scans and not the capturing ones
+
+A DFA replaces the 69 percent. One lookup per character in a table of states, filled when a state is first reached, instead of a walk of the program per character. The floor underneath that is the hand written line in the table, which is about 1 ns per character, and the yes or no scan today is about 48.
+
+So `contains`, `count`, `match` and `fullmatch` are what a DFA is for, and the gain there should be most of the difference between 48 ns and something near the hand written kernel.
+
+`replace` and `extract` are not. A DFA says whether and where a match ended and cannot say where each group started, so the shape everyone uses is to find the span with the DFA and then run the machine over the span to fill the groups in. On q28 that shape saves nothing at all, because q28's pattern ends in `.*$` and so the span is the whole row every time it matches. The scan would find the span quickly and then pay the same 77 ns per character it pays now.
+
+That is the thing this measurement changed. The issue that asks for a DFA is motivated by q28, and a DFA on its own does not answer q28.
+
+### What answers the capturing scans is a bounded backtracker
+
+The reason the capturing scan costs 77 ns rather than 48 is that every thread carries a slot vector and the fresh attempt at each position copies one. The reason it cannot simply backtrack instead is the whole of section 2: a backtracking engine on `(a+)+b` does not finish.
+
+There is a third engine that is neither of those, and RE2 carries it for exactly this case. It backtracks, and it keeps a bitmap of the instruction and position pairs it has already tried, so a pair is never tried twice and the work is bounded by the size of the program times the length of the span. That makes it safe on `(a+)+b` for the same reason this machine is safe, and it makes a match with one capture over a forty character row a couple of passes over the row with one instruction per step rather than a thread list per character. It is only affordable when the span is short enough for the bitmap, which is why it is a third engine rather than a replacement, and the span is exactly what the DFA hands it.
+
+So the order of the work is the class table first, since both of the other two want it; then the DFA, which answers the four scans that ask yes or no; then the bounded backtracker, which is what q28 has been waiting for. Issue #863 carries all three and the measurements above are why it is in that order.
