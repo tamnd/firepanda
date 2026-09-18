@@ -29,6 +29,13 @@ rewrite, and the corpus produces all three in quantity. The rewrite also moves
 patterns across the line between answered and refused in both directions, so the
 two refusal comparisons are worth as much here as the match comparison is.
 
+There are two engines under the three methods now, the machine and the state
+cache, and both are asked every text. A pattern the cache refuses and a row it
+gave up on are not disagreements, they are the kernel falling back the way it
+does over a column. A row where both answered and the answers differ is reported
+on its own line, because pandas has no view on which of the two is wrong and the
+report should not pretend it does.
+
 The ceiling is zero. A wrong answer here is not a refusal a caller can see, it
 is a column of booleans that looks exactly like a right one.
 
@@ -62,6 +69,7 @@ from std.collections.span import Span
 from std.python import Python, PythonObject
 from std.sys import argv
 
+from firepanda.kernel.regex.dfa import Cache, SCAN_GAVE_UP, SCAN_YES
 from firepanda.kernel.regex.method import (
     METHOD_CONTAINS,
     METHOD_FULLMATCH,
@@ -178,7 +186,8 @@ def sweep(
     accessor makes, so what is compared is the rewrite and the routing order as
     well as the engine. Reaching past it and compiling the pattern here would
     leave the rewrite untested, and the rewrite is the only thing that differs
-    between the three sweeps.
+    between the three sweeps. It is asked for the alphabet, which is what the
+    accessor does over a tall column and is what the state cache needs.
 
     Args:
         method: Which of the three, as the code the rewrite takes.
@@ -198,6 +207,7 @@ def sweep(
     var we_refuse = List[String]()
     var they_refuse = List[String]()
     var differ = List[String]()
+    var engines = List[String]()
     var reasons = List[String]()
     var counts = List[Int]()
     var held = 0
@@ -207,7 +217,7 @@ def sweep(
         ref pattern = patterns[at]
         ref answer = answers[at]
 
-        var program = program_for(method, pattern)
+        var program = program_for(method, pattern, alphabet=True)
         if not program.ok and program.gap:
             held += 1
             tally(reasons, counts, program.problem)
@@ -224,14 +234,24 @@ def sweep(
             continue
 
         var machine = Machine(program)
+        var cache = Cache(program)
         for which in range(len(points)):
             var ours = machine.matches(program, Span(points[which]))
+            # The state cache is asked the same question as the machine, and a
+            # pattern it refuses or a row it gave up on is not a disagreement,
+            # it is the kernel falling back the way it does in the column.
+            var said = cache.scan(program, Span(points[which]))
+            if said != SCAN_GAVE_UP and (said == SCAN_YES) != ours:
+                engines.append(pattern)
+                break
             var theirs = answer[byte=which] == "y"
             if ours != theirs:
                 differ.append(pattern)
                 break
 
-    var disagreements = len(we_refuse) + len(they_refuse) + len(differ)
+    var disagreements = (
+        len(we_refuse) + len(they_refuse) + len(differ) + len(engines)
+    )
     print()
     print("str.", name, sep="")
     print("compared", compared, "patterns")
@@ -242,6 +262,7 @@ def sweep(
     report("firepanda answers and pandas raises:", we_refuse, compared)
     report("pandas answers and firepanda refuses:", they_refuse, compared)
     report("both answer and the answers differ:", differ, compared)
+    report("the machine and the state cache differ:", engines, compared)
 
     print(
         "agreement",

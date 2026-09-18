@@ -29,12 +29,17 @@ next one is.
 ### What the twin checks, and what checks the engine
 
 `text_matches_regex_scalar` and `text_count_regex_scalar` are the slow twins,
-and they are honest about being a narrower check than the usual one. They run
-the same engine, so they cannot catch the engine being wrong. What they check is
-everything around the engine: the morsel split, the null repair, the reused
-buffers. Those are the parts of this file that are not the engine, and reusing a
-stamp array across rows is exactly the kind of change that works on one row and
-fails on the second.
+and they are honest about being a narrower check than the usual one. What they
+check is everything around the engine: the morsel split, the null repair, the
+reused buffers. Those are the parts of this file that are not the engine, and
+reusing a stamp array across rows is exactly the kind of change that works on
+one row and fails on the second.
+
+The matching twin has since become a wider check than that without being
+rewritten. It runs the machine, and the kernel beside it now runs the state
+cache for any pattern the cache will take, so for those patterns the two sides
+of the comparison are two engines rather than one. The counting twin is still
+the narrow check it always was, since nothing counts with the cache yet.
 
 What checks the engine is `tests/differential/regex_match.mojo`, which asks
 pandas about thirty thousand generated patterns. A twin that was a second engine
@@ -57,6 +62,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
 from firepanda.kernel.mask import repair_range
+from firepanda.kernel.regex.dfa import Cache, SCAN_GAVE_UP, SCAN_YES
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
 from firepanda.kernel.regex.program import Program
@@ -67,6 +73,14 @@ def text_matches_regex(
     a: StringArray, program: Program
 ) raises -> Array[DType.bool]:
     """Whether each element matches a compiled pattern somewhere in it.
+
+    Two engines answer this, and which one answers a row is not a property of
+    the row. The state cache answers it when the program was compiled with an
+    alphabet and holds nothing the cache refuses, and the machine answers it
+    otherwise and answers the rows the cache ran out of room on. The two are
+    kept side by side for the whole morsel rather than chosen once, because the
+    cache can give up part way down a column and the row it gave up on still
+    has to be answered.
 
     Args:
         a: The column.
@@ -87,13 +101,21 @@ def text_matches_regex(
 
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
-        # One machine and one decode buffer for the whole morsel rather than one
-        # of each per row.
+        # One machine, one cache and one decode buffer for the whole morsel
+        # rather than one of each per row. The cache is per morsel rather than
+        # per column because it is written to as it answers, and the first rows
+        # of a morsel are what pay for the states the rest of them read.
         var machine = Machine(program)
+        var cache = Cache(program)
         var points = List[UInt32]()
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
-            var found = machine.matches(program, Span(points))
+            var said = cache.scan(program, Span(points))
+            var found: Bool
+            if said == SCAN_GAVE_UP:
+                found = machine.matches(program, Span(points))
+            else:
+                found = said == SCAN_YES
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
         repair_range(out, validity, start, stop)
 
