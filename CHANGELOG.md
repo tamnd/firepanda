@@ -98,6 +98,20 @@ The rule was written down as a step one character on after a match of no width a
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
 
+### Changed: a text column compared against a short constant is settled a block of rows at a time
+
+A filter like `l_returnflag = 'R'` reads a column of sixteen byte views and compares each one against the constant's view, which is four register compares and a branch per row. The comparison itself is the cheap part and the loop around it was most of the cost.
+
+A view is two 64-bit words, so eight of them is one load and one exclusive or against a register holding eight copies of the constant. Deinterleaving the result splits every view's two halves apart again, and a view matched when both of its halves came out zero. The tail, which is shorter than a block, still goes one row at a time.
+
+A long element answers false out of the same instruction rather than needing a branch of its own. Its length field is above twelve and a short constant's is at or below it, so the low word can never agree, and the payload address in its top two words is never read.
+
+On a 13900K at six million rows, four builds a side run in turn, `text/equal_constant_short` reads 351, 314, 326 and 311 microseconds before and 188, 199, 193 and 190 after. That is between 4.27 and 4.82 billion rows a second before and between 7.55 and 7.97 after. The long constant row, which is the same code on both sides, reads 1.113, 1.077, 1.078 and 1.075 milliseconds before against 1.084, 1.092, 1.082 and 1.180 after, which is the control.
+
+Eight views a block rather than four because four measured slower and less evenly, 197, 195, 227 and 271 microseconds over the same four rounds. Sixteen is a shade faster again, 187 to 193, and is not worth a two hundred and fifty six byte load. The two cases also get a loop each rather than one loop asking on every row which of them it is on, because the long case read six per cent slower with the block compare sitting above it in the same body.
+
+Nothing above the kernel changes. Issue #79.
+
 ### Changed: the passes a regular expression kernel makes around the engine are measured, and the decode reads a block at a time
 
 Issue #889 asked what the decode, the byte offset table and the copy cost inside the replacing kernel, on the column ClickBench q28 runs over, before changing any of them. That measurement is now six rows of `benchmarks/main.mojo` under `regex/`, over a column of URLs with q28's pattern, and each row contains the one above it so a pass comes out by subtracting.

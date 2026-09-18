@@ -18,10 +18,12 @@ packed into words in an order that makes equality one compare and makes ordering
 wrong, so it goes to the byte loop.
 
 The constant form hoists what it can out of the loop. A short constant is turned
-into a view once, before any row is read, and then each row of a column of short
-strings costs four register compares and no memory traffic at all beyond the
-views. That is the shape a filter on a status column or a country code has, and
-it is the case worth being fast.
+into a view once, before any row is read, and then the rows are taken a block at
+a time: a view is two 64-bit words, and one exclusive or against a register
+holding a copy of the constant per row settles the whole block with nothing
+loaded but the views themselves. That is the shape a filter on a status column
+or a country code has, and it is the case worth being fast. The tail, which is
+shorter than a block, goes one row at a time.
 
 Comparison against a null is null, exactly as it is for numbers, and it is
 handled the same way: the loop writes whatever falls out and the repair at the
@@ -40,9 +42,11 @@ from std.collections.span import Span
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.array.strview import (
+    EQUAL_BLOCK,
     INLINE_CAPACITY,
     StringView,
     make_inline,
+    short_pattern,
     views_equal_short,
 )
 from firepanda.bitmap.bitmap import Bitmap
@@ -159,18 +163,34 @@ def compare_text_const[
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         comptime if op == CMP_EQ or op == CMP_NE:
-            for i in range(start, stop):
-                var same: Bool
-                if short:
-                    same = views_equal_short(a.view(i), probe)
-                else:
-                    same = a.equals(i, b)
-                comptime if op == CMP_EQ:
+            # The two cases get a loop each rather than one loop asking which
+            # it is on every row. They were one loop with a branch in it, and
+            # a 13900K read the long case six percent slower that way once the
+            # block compare was sitting above it, on code the block compare
+            # does not otherwise touch.
+            if short:
+                var pattern = short_pattern(probe)
+                var i = start
+                while i + EQUAL_BLOCK <= stop:
+                    var block = a.equal_short_block(i, pattern)
+                    comptime if op == CMP_NE:
+                        block = ~block
+                    dst.unsafe_offset(i).unsafe_store(block)
+                    i += EQUAL_BLOCK
+
+                # Fewer rows than a block, so at most `EQUAL_BLOCK - 1`.
+                while i < stop:
+                    var same = views_equal_short(a.view(i), probe)
+                    comptime if op == CMP_NE:
+                        same = not same
                     dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
-                else:
-                    dst.unsafe_offset(i).unsafe_write(
-                        Scalar[DType.bool](not same)
-                    )
+                    i += 1
+            else:
+                for i in range(start, stop):
+                    var same = a.equals(i, b)
+                    comptime if op == CMP_NE:
+                        same = not same
+                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
         else:
             for i in range(start, stop):
                 var order = a.compare(i, b)
