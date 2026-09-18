@@ -3442,6 +3442,55 @@ def test_a_subquery_in_a_select_list_runs() raises:
     )
 
 
+def test_a_subquery_in_a_having_runs() raises:
+    # Half of everything sold is 79.5, shop one sold 75 and shop two sold 84.
+    # The subquery is one value for the whole query, and the only thing that
+    # makes it different from one written in a WHERE is that the clause reading
+    # it is above the aggregate and the column has to be joined on up there.
+    same(
+        answer(
+            (
+                "SELECT shop FROM sales GROUP BY shop HAVING sum(qty) >"
+                " (SELECT sum(qty) / 2 FROM sales)"
+            ),
+            "shop",
+        ),
+        [2],
+        "shop",
+    )
+
+
+def test_a_subquery_in_the_select_list_of_a_fold_runs() raises:
+    # The same join in the same place, read by the projection rather than by
+    # the HAVING. The smallest quantity is one, so each shop's total loses one.
+    var got = run(
+        (
+            "SELECT shop, sum(qty) - (SELECT min(qty) FROM sales) AS total FROM"
+            " sales GROUP BY shop ORDER BY shop"
+        ),
+        session(),
+    )
+    same(read_back(got, "shop"), [1, 2], "shop")
+    same(read_back(got, "total"), [74, 83], "total")
+
+
+def test_a_subquery_in_a_having_that_reads_the_group_is_refused() raises:
+    # Correlated rather than not, and the correlation is what there is no
+    # answer for here: the fold under the FROM answers one value per outer row
+    # and the outer rows this one would need are the rows the aggregate folded
+    # away.
+    with assert_raises(
+        contains="written above the aggregate, where the columns it correlates"
+    ):
+        _ = run(
+            (
+                "SELECT shop FROM sales GROUP BY shop HAVING sum(qty) >"
+                " (SELECT sum(rate) FROM tiers WHERE band = shop)"
+            ),
+            session(),
+        )
+
+
 def test_a_correlated_subquery_folds_per_outer_row() raises:
     # Shop one sold 75 and shop two sold 84, so both floors are under their
     # own shop's total. Shop three sold nothing, its total is a null, and a

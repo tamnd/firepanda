@@ -115,6 +115,22 @@ because a query cannot write one, and they are visible in `EXPLAIN`, which is
 the right trade: a reader who sees `__having_0` learns something true about how
 the query runs.
 
+### A subquery that answers one value is a cross join, above one node or another
+
+`(SELECT max(x) FROM t)` written as a value is one row holding one value, the
+same value for every row of the query around it, so it comes out as a cross join
+onto that row and the expression that held it reads the column back by a
+generated name. Where the join goes is decided by which clause wrote it. One in
+a `WHERE` goes above the `FROM`, under the filter that reads it. One in a
+`HAVING`, or in the select list of a query that folds, goes above the aggregate
+instead, because an aggregate hands up its keys and its folds and a column
+joined on underneath it is not either of those. TPC-H q11 is the second shape.
+
+Both are built at the same point, before the select list and the `HAVING` are
+lowered, because building one is what settles the name those clauses read it
+back by. What differs is only which node the join is put over, and the one that
+waits is put over the aggregate once the aggregate exists.
+
 ### A function may be written where a table goes
 
 `FROM range(5)` is a source that reads no file and names no table, so nothing
@@ -2748,11 +2764,11 @@ def _lower_expr(
             )
         raise Error(
             "firepanda lowers an uncorrelated subquery that answers one value"
-            " where it is written in a WHERE, or in the select list of a query"
-            " that does not aggregate, and this one is written somewhere else."
-            " The answer is a column cross joined on above the FROM, which is"
-            " under the aggregate, and an aggregate hands up its keys and its"
-            " folds rather than everything it read"
+            " where it is written in a WHERE, in a select list or in a HAVING,"
+            " and this one is written somewhere else. The answer is a column"
+            " cross joined on, above the FROM for the first and above the"
+            " aggregate for the other two, and an ORDER BY or a QUALIFY is"
+            " read after both of those have been built"
         )
     if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_QUANTIFIED:
         var shape = _in_shape(ast, at)
@@ -5525,7 +5541,7 @@ def _counting(exprs: Expressions, at: Int) -> Bool:
     return _counts_rows(agg_kind(exprs.nodes[at].op))
 
 
-def _scalar_join(
+def _scalar_row(
     ast: Ast,
     at: UInt32,
     catalog: Catalog,
@@ -5534,15 +5550,22 @@ def _scalar_join(
     mut sources: List[Schema],
     ctes: _Bindings,
     mut walk: _Walk,
-    left: Int,
 ) raises -> Int:
-    """Puts an uncorrelated subquery that answers one value under the query.
+    """The one row an uncorrelated subquery that answers one value is.
 
     The subquery is a plan of its own and its answer is one value, the same
     value for every row of the query around it, so it is a cross join onto one
     row. That is a column added to each row and nothing moved, and the lowering
     turns it into a constant per right column, so the cost is the subquery run
     once rather than once per row.
+
+    The row is built here and joined on by the caller, because where the join
+    goes is not the same place every time. One written in a `WHERE` is joined
+    on above the `FROM`, where the filter reads it. One written in a `HAVING`
+    or in the select list of a query that folds is joined on above the
+    aggregate, because an aggregate hands up its keys and its folds and a
+    column joined on underneath it is not one of those. Either way it is the
+    same one row and the same one value.
 
     Only a subquery that is one row by construction is taken, which means one
     that aggregates with no `GROUP BY`, or one with no `FROM` at all. Both of
@@ -5568,11 +5591,10 @@ def _scalar_join(
         ctes: The CTE names in reach.
         walk: Told what the answer's column is called, so that the expression
             around it can read it back.
-        left: What the cross join is put over.
 
     Returns:
-        The cross join, which produces what the left side produced and the one
-        column the subquery answered.
+        A node of one row and one column, which is the subquery's answer under
+        a name the query around it cannot have written.
 
     Raises:
         If the subquery is a shape whose row count is not one by construction,
@@ -5644,7 +5666,50 @@ def _scalar_join(
     # A cross join onto one row pads nothing, so a null here is the subquery's
     # own answer and is read as one.
     walk.scalar_zeroes.append(False)
-    return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
+    return one_row
+
+
+def _scalar_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    left: Int,
+) raises -> Int:
+    """Puts an uncorrelated subquery that answers one value under the query.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        left: What the cross join is put over.
+
+    Returns:
+        The cross join, which produces what the left side produced and the one
+        column the subquery answered.
+
+    Raises:
+        If the subquery is a shape whose row count is not one by construction,
+        or if it hands out more than one column.
+    """
+    return plan.join(
+        left,
+        _scalar_row(ast, at, catalog, grammar, plan, sources, ctes, walk),
+        List[Int](),
+        List[Int](),
+        JoinKind.CROSS,
+    )
 
 
 def _folded_join(
@@ -6752,6 +6817,38 @@ def _block(
             ast, found[i], catalog, grammar, plan, sources, ctes, walk, at
         )
 
+    # A `HAVING` is read above the aggregate and so is the select list of a
+    # query that folds, and a column cross joined on under the FROM does not
+    # reach either of them, because an aggregate hands up its keys and its folds
+    # and nothing else. The answer is the same cross join put above the
+    # aggregate instead, which is the same one row holding the same one value.
+    #
+    # The row is built here, with the select list and the `HAVING` still
+    # unlowered, because building it is what tells `walk` the column's name and
+    # the name is what those two read the answer back by. The join itself waits
+    # until the aggregate exists, which is a long way down.
+    var above = List[Int]()
+    if grouped:
+        var later = List[UInt32]()
+        _scalars(ast, having, later)
+        for one in items:
+            _scalars(ast, ast.stmts[Int(one)].a, later)
+        for i in range(len(later)):
+            if _reaches_out(
+                ast, ast.exprs[Int(later[i])].a, catalog, ctes, scope
+            ):
+                raise Error(
+                    "firepanda lowers a correlated subquery that answers one"
+                    " value into a fold and a left join under the FROM, and"
+                    " this one is written above the aggregate, where the"
+                    " columns it correlates through have been folded away"
+                )
+            above.append(
+                _scalar_row(
+                    ast, later[i], catalog, grammar, plan, sources, ctes, walk
+                )
+            )
+
     # An `IN` over a subquery goes the same way, as a mark join rather than a
     # cross join. The ones the `WHERE` is the `AND` of are left alone, because
     # each of those is a semi join below and a semi join is the cheaper answer
@@ -7173,6 +7270,13 @@ def _block(
         for i in range(len(agg_names)):
             both.append(String(agg_names[i]))
         at = plan.aggregate(at, keys^, aggs^, both^)
+
+    # The subqueries the `HAVING` and the select list read, joined on now that
+    # there is an aggregate to put them over. Above rather than below for the
+    # reason written where they were built, and below the filter because the
+    # filter is what reads them.
+    for i in range(len(above)):
+        at = plan.join(at, above[i], List[Int](), List[Int](), JoinKind.CROSS)
 
     if predicate >= 0:
         at = plan.filter(at, predicate)
