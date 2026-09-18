@@ -154,6 +154,19 @@ jobs:
       - name: mojo format
         if: needs.guard.outputs.has_mojo == 'true'
         run: pixi run format-check
+
+      # The regular expression compiler holds version numbers for the rules
+      # CPython's `re` has changed inside the range of interpreters this project
+      # supports, and a constant like that fails quietly: when a new release
+      # moves a rule, nothing raises, the library keeps answering with the rules
+      # it was last told about. So the next release has to be a red light on
+      # purpose. This step is it, and it lives in this job rather than in the
+      # spec one because the question is about the interpreter a run is standing
+      # in rather than about a file. Documents 90 and 91 both end by naming it.
+      - name: Version rules match the interpreter
+        if: needs.guard.outputs.has_mojo == 'true'
+        run: pixi run python-version
+
       - uses: astral-sh/setup-uv@v7
         if: needs.guard.outputs.has_python == 'true'
       - name: ruff

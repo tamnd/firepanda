@@ -198,7 +198,7 @@ comptime PYTHON_NEWEST: Int = 14
 
 What this library copies on one of its two engines is the `re` module, and `re`
 is not the same module in every version of Python this project supports.
-`pixi.toml` says 3.12 and up, and one rule this file writes down changed inside
+`pixi.toml` says 3.12 and up, and two rules this file writes down changed inside
 that range, so a program is compiled for a version of Python rather than for
 Python.
 
@@ -207,6 +207,14 @@ test and every differential that is not already standing inside one. The Python
 door reads the real number off `sys.version_info` and passes it, because the
 answer that matters there is the answer pandas would have given in the process
 the call arrived in.
+
+A number like this one fails quietly. When a release moves a rule, nothing
+raises: the library keeps answering with the rules it was last told about, and
+the wrong answers are ordinary looking columns. So `tools/python_version.py`
+compares this against the interpreter it is standing in and fails when it is
+behind, which is what turns the next release into a red light on purpose rather
+than into one by luck. It runs in CI and again in the accessor suite, because
+those two stand in different interpreters. Document 92.
 """
 
 

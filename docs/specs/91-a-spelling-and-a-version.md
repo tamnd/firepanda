@@ -82,7 +82,7 @@ The parser gained `zed` on `Parsed` and on its cursor and sets it in the escape 
 
 ## 10. What is not done
 
-The job that fails when the interpreter running the build is newer than `PYTHON_NEWEST` still does not exist. Document 90 deferred it on the grounds that a mechanism for keeping a list of one rule honest is a mechanism nobody maintains. The list is two now, which is the condition that document set, so it is the next thing rather than a someday thing, and it is not in this slice because it is a change to the build rather than to the engine and those are two reviews.
+The job that fails when the interpreter running the build is newer than `PYTHON_NEWEST` is not in this slice, because it is a change to the build rather than to the engine and those are two reviews. It is the slice immediately after this one and it is document 92. Document 90 had deferred it on the grounds that a mechanism for keeping a list of one rule honest is a mechanism nobody maintains, and the list is two now, which is the condition that document set.
 
 Nothing here asks 3.15. The two rules found were found by measuring three versions that exist, and the corpus sweep that found them is a thing somebody has to run again rather than a thing that runs itself.
 
