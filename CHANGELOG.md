@@ -20,6 +20,16 @@ Nothing moved for RE2, which has no version of Python and no `\B` either, since 
 
 280 of the 30052 held-out corpus patterns answer differently on 3.13 and on 3.14, and 130 of them are this one. The other 150 are `\z`, which became a legal escape in the same release and is a slice of its own. Document 90.
 
+### Changed: a pattern says which characters a match can begin with, and the scans step over the rest
+
+The anchored shortcut in 0.8.10 knew that every position but zero was hopeless for a pattern opening with `^`. This is the general form of it: the compiler walks the program from its first instruction through the splits, the jumps, the saves and the assertions, collects every character a first step could read, and writes that set on the end of the range table the program already carries. A scan with nothing running is about to start a fresh attempt, and an attempt that begins by reading a character no first step accepts dies on its first step, so the scan steps over that position rather than walking the program at it.
+
+It is worth about twice the run on an unanchored pattern. A `str.contains` scan over two hundred thousand rows of URLs, three passes, one thread, measured as user CPU because the machine it was measured on carries other work: a pattern that matches nothing in any row went from 0.29 s to 0.12 s, and one that matches in most of them from 0.27 s to 0.14 s. The second is the smaller win for the obvious reason, that a row which matches has to be walked from wherever the match begins.
+
+Four kinds of pattern are left without a set. One that can match nothing begins a match at every position, so there is nothing to step over. One opening with `(?s).` accepts every character. One whose set holds more than three quarters of ASCII is left out on purpose, because the test costs a search per position and only pays where it rejects. And an anchored pattern is left out because 0.8.10's rule already ends its row, which keeps ClickBench q28 the scan it was rather than the scan that asks a question per row and never uses the answer.
+
+The set is what the first step could read and not what a match must begin with, which are different for a pattern whose first step is an assertion. `\bfoo` is walked through the boundary to the `f`, so the set is one letter and the assertion still decides. An alternation contributes both arms, a star contributes the letter it repeats and the letter after it, and anything the walk does not recognise ends it with no set at all. Issue #863.
+
 ### Added: scoped flag groups, which are a letter with a reach
 
 `Series.str.contains("(?i:a)bc")` used to be refused with `a scoped flag group is not carried yet`, and with it every pattern writing a flag letter inside a bracket rather than in front of the whole pattern. All of them are answered now, on either engine, and the regex differential compares 434 more corpus patterns than it did, 8205 of 30052. Every one of the seven letters is read in both forms now but for locale, which Python will not take on a pattern made of text in either form. Issue #8 M6.

@@ -18,6 +18,7 @@ caller above can tell a pattern it will never answer from a pattern it cannot
 answer yet.
 """
 
+from std.collections.span import Span
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.parse import parse_pattern
@@ -33,6 +34,7 @@ from firepanda.kernel.regex.program import (
     IN_SPLIT,
     Program,
     compile_program,
+    in_set,
 )
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
 
@@ -274,6 +276,81 @@ def test_a_pattern_that_can_match_further_along_says_nothing() raises:
     assert_false(anchored("^a|^b"))
     assert_false(anchored("a^b"))
     assert_false(anchored("a*^b"))
+
+
+def begins(pattern: StringSlice, point: Int, captures: Bool = False) -> Bool:
+    """Whether a character is one the pattern says a match can begin with.
+
+    Args:
+        pattern: The pattern.
+        point: The character.
+        captures: Whether to compile with the save instructions, which is the
+            case the walk has to step over.
+
+    Returns:
+        What the set on the program says, which is False when there is no set.
+    """
+    var program = compile_program(parse_pattern(pattern), ENGINE_RE2, captures)
+    return in_set(
+        Span(program.ranges),
+        program.first_at,
+        program.first_count,
+        UInt32(point),
+    )
+
+
+def firsts(pattern: StringSlice) -> Int:
+    """How many ranges the set of first characters has.
+
+    Args:
+        pattern: The pattern.
+
+    Returns:
+        The count, which is zero when the compiler decided against a set.
+    """
+    return Int(compile_program(parse_pattern(pattern), ENGINE_RE2).first_count)
+
+
+def test_a_pattern_says_which_characters_can_begin_a_match() raises:
+    """The set the scans read to step over a position without walking the
+    program at it. An alternation contributes both arms, a star contributes the
+    letter it repeats and the one after it, and an assertion is walked through
+    rather than reasoned about."""
+    assert_true(begins("abc", ord("a")))
+    assert_false(begins("abc", ord("b")))
+    assert_true(begins("a|b", ord("a")))
+    assert_true(begins("a|b", ord("b")))
+    assert_false(begins("a|b", ord("c")))
+    assert_true(begins("a*b", ord("a")))
+    assert_true(begins("a*b", ord("b")))
+    assert_true(begins("[0-9]x", ord("5")))
+    assert_false(begins("[0-9]x", ord("x")))
+    assert_true(begins("\\bfoo", ord("f")))
+    assert_false(begins("\\bfoo", ord("o")))
+    assert_true(begins("(abc)", ord("a"), captures=True))
+    assert_false(begins("(abc)", ord("b"), captures=True))
+    assert_equal(firsts("abc"), 1)
+    # Two letters next to each other come out as one range, because the set is
+    # sorted and merged the way every other set in the table is.
+    assert_equal(firsts("a|b"), 1)
+    assert_equal(firsts("a|c"), 2)
+
+
+def test_a_pattern_that_could_begin_anywhere_is_left_without_a_set() raises:
+    """Four reasons not to have one. A pattern that can match nothing begins a
+    match at every position, so there is nothing to step over. A pattern opening
+    with `(?s).` accepts every character. A set holding nearly all of ASCII
+    would cost a search at every position and reject almost none of them, which
+    is the full stop and the negated class of one character. And an anchored
+    pattern starts no attempt above position zero, so it has no position to step
+    over and is left out to keep its scan the one it was."""
+    assert_equal(firsts("a*"), 0)
+    assert_equal(firsts(""), 0)
+    assert_equal(firsts("^https?://"), 0)
+    assert_equal(firsts("(?s).x"), 0)
+    assert_equal(firsts(".x"), 0)
+    assert_equal(firsts("[^/]x"), 0)
+    assert_equal(firsts("\\b"), 0)
 
 
 def test_what_re2_refuses_is_not_counted_as_a_gap() raises:

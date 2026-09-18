@@ -334,6 +334,32 @@ struct Program(Movable):
     URLs read by an anchored pattern, so document 80 has the number.
     """
 
+    var first_at: Int32
+    """Where in `ranges` the characters a match can begin with are, and zero
+    when there is no such set worth having."""
+
+    var first_count: Int32
+    """How many ranges that set has, and zero when there is not one.
+
+    A scan that has nothing running and has not matched yet is about to start a
+    fresh attempt, and an attempt that begins by reading a character the program
+    cannot begin with dies on its first step. So a position holding such a
+    character can be stepped over without the walk, which is the same trade the
+    `anchored` flag above makes and is the general form of it: that one knows
+    every position but zero is hopeless, this one knows which characters are.
+
+    Empty for four kinds of program, each for its own reason. A pattern that
+    can match nothing has every position begin a match, so there is nothing to
+    skip. A pattern that can begin with anything, which is a leading `(?s).`,
+    has the same problem. A pattern whose set holds most of ASCII is left out on
+    purpose, because the test costs a binary search per position and only pays
+    where it rejects, so a set that accepts nearly everything would be paid for
+    and never used. The line is drawn at three quarters of ASCII, which is a
+    reading of that trade rather than a measured crossing point. And an anchored
+    pattern is left out because it has no position to step over, which keeps its
+    scan the scan it was before any of this was written.
+    """
+
     var labels: List[String]
     """What each group is called, one entry per group and empty for an unnamed
     one.
@@ -357,6 +383,8 @@ struct Program(Movable):
         self.groups = 0
         self.python = False
         self.anchored = False
+        self.first_at = 0
+        self.first_count = 0
         self.labels = []
 
     def sized(self) -> Int:
@@ -1468,6 +1496,102 @@ def _anchored(code: Span[Instruction, _]) -> Bool:
     )
 
 
+def _first_ranges(
+    code: Span[Instruction, _], ranges: Span[Int32, _]
+) -> List[Int32]:
+    """The characters a match can begin with, or nothing when anything can.
+
+    The walk starts at instruction zero and goes wherever the program can go
+    without reading a character, collecting what each character reading
+    instruction it arrives at would accept. A position holding a character
+    outside the union of those cannot begin a match, because whichever way the
+    first step went it would have to read one of them.
+
+    An assertion is walked through as though it held, which makes the set larger
+    than it has to be and never smaller. `\\bfoo` collects `f` rather than
+    working out where a word boundary could be, and that is the right way round:
+    a set that is too large skips fewer positions and still skips only positions
+    that cannot match.
+
+    Two shapes answer with nothing at all. A program that can reach its match
+    instruction without reading a character can match nothing, and then every
+    position begins a match and there is nothing to skip. A program that can
+    begin with `(?s).` accepts every character, so the set would be everything.
+
+    Args:
+        code: The instructions, which start at zero.
+        ranges: The program's range table.
+
+    Returns:
+        The set as sorted disjoint low and high pairs, empty when there is no
+        set worth having.
+    """
+    var seen = List[Bool](length=len(code), fill=False)
+    var stack = List[Int32]()
+    stack.append(0)
+    var out = List[Int32]()
+    while len(stack) > 0:
+        var pc = Int(stack.pop())
+        if seen[pc]:
+            continue
+        seen[pc] = True
+        var instruction = code[pc]
+        if instruction.op == IN_JUMP:
+            stack.append(instruction.a)
+        elif instruction.op == IN_SPLIT:
+            stack.append(instruction.a)
+            stack.append(instruction.b)
+        elif instruction.op == IN_AT or instruction.op == IN_SAVE:
+            stack.append(Int32(pc + 1))
+        elif instruction.op == IN_CHAR:
+            out.append(instruction.a)
+            out.append(instruction.a)
+        elif instruction.op == IN_SET:
+            for i in range(Int(instruction.b)):
+                out.append(ranges[Int(instruction.a) + i * 2])
+                out.append(ranges[Int(instruction.a) + i * 2 + 1])
+        elif instruction.op == IN_NOT_SET:
+            var held = List[Int32]()
+            for i in range(Int(instruction.b)):
+                held.append(ranges[Int(instruction.a) + i * 2])
+                held.append(ranges[Int(instruction.a) + i * 2 + 1])
+            var rest = _complemented(held)
+            for i in range(len(rest)):
+                out.append(rest[i])
+        elif instruction.op == IN_ANY:
+            out.append(0)
+            out.append(0x09)
+            out.append(0x0B)
+            out.append(UNICODE_LAST)
+        else:
+            return List[Int32]()
+    return _sorted_merged(out^)
+
+
+def _first_worth_having(ranges: List[Int32]) -> Bool:
+    """Whether a set of first characters would pay for the test it costs.
+
+    Args:
+        ranges: The set, sorted and disjoint.
+
+    Returns:
+        True when it holds three quarters of ASCII or less.
+    """
+    if len(ranges) == 0:
+        return False
+    var held = 0
+    for i in range(len(ranges) // 2):
+        var low = ranges[i * 2]
+        var high = ranges[i * 2 + 1]
+        if low < 0:
+            low = 0
+        if high > 127:
+            high = 127
+        if high >= low:
+            held += Int(high - low) + 1
+    return held <= 96
+
+
 def compile_program(
     tree: Parsed,
     engine: UInt8,
@@ -1599,6 +1723,22 @@ def compile_program(
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
     out.anchored = _anchored(Span(out.code))
+    # After the range table has been copied, because the set is written onto the
+    # end of it rather than into a second table. Nothing already in there moves,
+    # so the offsets the instructions hold are the offsets they had.
+    #
+    # An anchored program is left without one. It starts no attempt above
+    # position zero, so there is no position for the set to step over, and a
+    # scan that has to ask whether it has one runs slower than a scan that
+    # reads a count it knows will be zero.
+    var first = List[Int32]()
+    if not out.anchored:
+        first = _first_ranges(Span(out.code), Span(out.ranges))
+    if _first_worth_having(first):
+        out.first_at = Int32(len(out.ranges))
+        out.first_count = Int32(len(first) // 2)
+        for i in range(len(first)):
+            out.ranges.append(first[i])
     out.groups = Int(tree.groups)
     out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
     # The parser keeps the names and the numbers as two lists the length of
