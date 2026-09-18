@@ -3167,6 +3167,229 @@ def _pairwise_distinct[
     return distinct
 
 
+def _codes_are_runs(codes: Array[DType.uint32]) -> Bool:
+    """Reports whether the ordinals never fall from one row to the next.
+
+    That is the whole of what the run route needs. Ordinals that never fall put
+    every group's rows in one stretch of the column, so a group's values can be
+    read where they already are instead of being copied into a slab first.
+
+    A group by that walked a sorted key produces exactly this, and so does a
+    hash group by over a key that happened to arrive in order, which is why this
+    is asked of the ordinals rather than carried down from whoever made them.
+
+    The check is a compare of the column against itself shifted by one, and it
+    returns at the first pair out of order, so ordinals in no order cost a
+    vector and ordinals in runs cost one read of four bytes a row. That read is
+    a fraction of the three passes it stands to save.
+
+    Args:
+        codes: One group ordinal per row.
+
+    Returns:
+        Whether each group's rows are one contiguous stretch.
+    """
+    var n = len(codes)
+    if n < 2:
+        return True
+    var at = codes.unsafe_ptr()
+    comptime W = simd_width_of[DType.uint32]()
+
+    var i = 0
+    while i + W + 1 <= n:
+        var here = at.unsafe_offset(i).unsafe_load[width=W]()
+        var next = at.unsafe_offset(i + 1).unsafe_load[width=W]()
+        if here.gt(next).reduce_or():
+            return False
+        i += W
+    for j in range(i, n - 1):
+        if (
+            at.unsafe_offset(j).unsafe_load()
+            > at.unsafe_offset(j + 1).unsafe_load()
+        ):
+            return False
+    return True
+
+
+def _first_row_of[
+    origin: ImmOrigin
+](codes: Pointer[Scalar[DType.uint32], origin], rows: Int, group: Int) -> Int:
+    """Finds where a group's stretch begins, in ordinals that never fall.
+
+    A worker is given a range of groups and has to turn it into a range of rows.
+    The ordinals are in order, so that is a binary search rather than a scan,
+    which is what keeps the split from costing a pass of its own.
+
+    Args:
+        codes: The ordinals.
+        rows: How many there are.
+        group: The group to find.
+
+    Returns:
+        The first row whose ordinal is `group` or more, which is `rows` when
+        there is none.
+    """
+    var lo = 0
+    var hi = rows
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if Int(codes.unsafe_offset(mid).unsafe_load()) < group:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _distinct_in_run[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    start: Int,
+    stop: Int,
+    mut scratch: Array[dt],
+) -> Int:
+    """Counts the distinct values of one group, reading them where they are.
+
+    The two shapes are the same two the slab route has, and the line between
+    them is the same one. A short group is counted by asking of each value
+    whether an earlier one in the group already held it. A long one is copied
+    into the worker's scratch and sorted, because a copy of one group's rows is
+    sequential either way and a sort of them beats the compares past
+    `NUNIQUE_PAIRWISE`.
+
+    The scratch grows and is never given back, so a worker that meets one long
+    group early allocates once and reuses it for every group after. A group that
+    is all nulls counts zero, which is what a group of no rows counts.
+
+    Args:
+        source: The column.
+        validity: Its validity bits.
+        has_null: Whether it has any nulls at all.
+        start: The group's first row.
+        stop: One past its last.
+        scratch: The worker's buffer, grown here when a group needs more.
+
+    Returns:
+        How many distinct present values the group holds.
+    """
+    var count = stop - start
+    if count <= 0:
+        return 0
+
+    if count <= NUNIQUE_PAIRWISE:
+        var distinct = 0
+        for i in range(start, stop):
+            if not _there(source, validity, has_null, i):
+                continue
+            var value = source.unsafe_offset(i).unsafe_load()
+            var seen = False
+            for j in range(start, i):
+                if not _there(source, validity, has_null, j):
+                    continue
+                if source.unsafe_offset(j).unsafe_load() == value:
+                    seen = True
+                    break
+            if not seen:
+                distinct += 1
+        return distinct
+
+    if len(scratch) < count:
+        var want = 2 * len(scratch)
+        scratch = Array[dt](overwritten=count if count > want else want)
+    var into = scratch.unsafe_mut_ptr()
+    var kept = 0
+    for i in range(start, stop):
+        if not _there(source, validity, has_null, i):
+            continue
+        into.unsafe_offset(kept).unsafe_store(
+            source.unsafe_offset(i).unsafe_load()
+        )
+        kept += 1
+    if kept == 0:
+        return 0
+
+    sort(Span[Scalar[dt], origin_of(scratch)](unsafe_ptr=into, length=kept))
+    var distinct = 1
+    for i in range(1, kept):
+        if (
+            into.unsafe_offset(i).unsafe_load()
+            != into.unsafe_offset(i - 1).unsafe_load()
+        ):
+            distinct += 1
+    return distinct
+
+
+def _nunique_runs[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[DType.int64]:
+    """Counts each group's distinct values without building a slab first.
+
+    The slab route exists to put a group's values next to each other. When the
+    ordinals never fall they already are, so the count, the prefix sum and the
+    scatter that fills the slab are three passes over the column that produce a
+    copy of the column in the order it was already in.
+
+    What is left is the loop over the groups, which reads the column in place.
+    Each worker turns its range of groups into a range of rows with two binary
+    searches and then walks forward, closing a group each time the ordinal
+    changes. A group with no rows keeps the zero the output was allocated with.
+
+    Args:
+        source: The column being counted.
+        validity: Its validity bits.
+        has_null: Whether it has any nulls at all.
+        codes: One group ordinal per row, never falling.
+        groups: The number of distinct ordinals.
+
+    Returns:
+        A column of `groups` counts, every one of them present.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run.
+    """
+    var rows = len(codes)
+    var out = Array[DType.int64](groups)
+    var blocks = _group_blocks(rows, groups)
+    var cuts = _group_bounds(groups, blocks)
+    var at = codes.unsafe_ptr()
+
+    def one(b: Int) raises {mut out, imm}:
+        var target = out.unsafe_mut_ptr()
+        var lo = cuts[b]
+        var hi = cuts[b + 1]
+        if lo >= hi:
+            return
+        var row = _first_row_of(at, rows, lo)
+        var stop = _first_row_of(at, rows, hi)
+        var scratch = Array[dt](overwritten=0)
+        while row < stop:
+            var here = Int(at.unsafe_offset(row).unsafe_load())
+            var end = row + 1
+            while (
+                end < stop and Int(at.unsafe_offset(end).unsafe_load()) == here
+            ):
+                end += 1
+            target.unsafe_offset(here).unsafe_store(
+                Int64(
+                    _distinct_in_run(
+                        source, validity, has_null, row, end, scratch
+                    )
+                )
+            )
+            row = end
+
+    parallel_for(one, blocks)
+    return out^
+
+
 def _nunique_core[
     dt: DType, //, origin: ImmOrigin
 ](
@@ -3206,7 +3429,16 @@ def _nunique_core[
     its own stretch of the slab, so the sorting gets cheaper as the groups get
     more numerous, which is what makes a high group count the easy case here
     rather than the hard one.
+
+    All of that is the route for ordinals that arrive in no particular order. A
+    group by that walked a sorted key hands down ordinals that never fall, and
+    then the slab is a copy of the column into the order it was already in, so
+    `_codes_are_runs` is asked first and `_nunique_runs` reads the column in
+    place when the answer is yes.
     """
+    if _codes_are_runs(codes):
+        return _nunique_runs(source, validity, has_null, codes, groups)
+
     var counts = _count_core(source, validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
     # Every element of the slab is a present row and the fill writes all of them,
