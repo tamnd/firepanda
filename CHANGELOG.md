@@ -19,6 +19,7 @@ So there are two new reductions rather than a flag on the old ones, `FIRST_ROW` 
 They do not fold a chunk at a time, which is the one design decision here worth writing down. A partial answer from one chunk is a value that may itself be null, and a running slot holding a null cannot say whether it is a group whose first row was missing or a group no chunk has reached yet. That is the trap a sum fell into in the entry below, where a zero meant both nothing added and a total of zero. The way out there was a second state slot; here it is cheaper to hold the column and reduce once at the end, which is the route a median already takes, because these two copy one element per group rather than accumulating anything.
 
 `FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
+
 ### Added: a lookbehind, which is the other half of the construct below
 
 `str.contains("(?<=a)b")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both forms are in, the positive one and the negative one, and a lookbehind may hold another or hold a lookahead. With this the whole of the lookaround is read on the engine that copies Python, and no pattern in the held out corpus is turned down for one.
@@ -48,6 +49,7 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+
 ### Changed: a Parquet read assembles a group of chunks at a time
 
 A read fetched every chunk out of DuckDB, described all of them as Arrow, and only then copied the lot into a frame, because the assembler sizes the buffer it allocates from every batch it is handed and cannot begin until it has them all. So the Arrow copy of the whole answer and the frame it turns into were both resident, and the peak of a read was the sum of the two.
