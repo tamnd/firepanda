@@ -205,6 +205,51 @@ def test_a_short_constant_compares_against_every_row() raises:
     assert_true(got[2], "third")
 
 
+def test_a_short_constant_is_compared_a_block_at_a_time() raises:
+    """Four rows at once and then a tail of at most three, one at a time.
+    A column whose height is not a multiple of four is what says whether the
+    two halves of that loop agree, so this one is twenty three rows: five
+    blocks and a tail of three, with a match in the first block, a match in the
+    tail, a long element, and a null."""
+    var values = List[String]()
+    var present = List[Bool]()
+    for i in range(23):
+        if i % 5 == 2:
+            values.append(String("ab"))
+            present.append(True)
+        elif i % 7 == 5:
+            # Longer than a view, so its last two words are a payload address
+            # rather than data. A block compare that read the whole view
+            # without minding the length field would be comparing that address
+            # against the constant's zero padding.
+            values.append(String("abcdefghijklmnop"))
+            present.append(True)
+        elif i % 11 == 4:
+            values.append(String("ab"))
+            present.append(False)
+        else:
+            values.append(String("x", i))
+            present.append(True)
+    var a = with_nulls(values, present)
+    var word = String("ab")
+    var got = compare_text_const[CMP_EQ](a, word.as_bytes())
+    var flipped = compare_text_const[CMP_NE](a, word.as_bytes())
+
+    assert_equal(len(got), 23, "height")
+    assert_equal(got.null_count(), 2, "the nulls the fixture asked for")
+    var hits = 0
+    for i in range(23):
+        assert_equal(got.is_valid(i), present[i], "validity at " + String(i))
+        if not present[i]:
+            continue
+        var want = values[i] == word
+        assert_equal(Bool(got[i]), want, "eq at " + String(i))
+        assert_equal(Bool(flipped[i]), not want, "ne at " + String(i))
+        if want:
+            hits += 1
+    assert_equal(hits, 5, "the matches the fixture asked for")
+
+
 def test_a_long_constant_compares_against_every_row() raises:
     """A constant of more than twelve bytes cannot be turned into a view, so this
     takes the other branch of the constant kernel."""
@@ -340,6 +385,11 @@ def test_the_kernels_agree_with_their_twins_on_random_data() raises:
         compare_text_const[CMP_LT](a, short.as_bytes()),
         compare_text_const_scalar[CMP_LT](a, short),
         "const lt short",
+    )
+    same_answer(
+        compare_text_const[CMP_NE](a, short.as_bytes()),
+        compare_text_const_scalar[CMP_NE](a, short),
+        "const ne short",
     )
     var long = String("abababababababab")
     same_answer(

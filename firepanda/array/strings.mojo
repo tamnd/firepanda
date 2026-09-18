@@ -51,6 +51,7 @@ register that is wider than the field is a tail loop wearing a costume.
 
 
 from .strview import (
+    EQUAL_BLOCK,
     INLINE_CAPACITY,
     PREFIX_LENGTH,
     StringView,
@@ -167,6 +168,40 @@ struct StringArray(Copyable, Movable, Sized):
             .unsafe_bitcast[StringView]()
             .unsafe_offset(i)[]
         )
+
+    def equal_short_block(
+        self, at: Int, pattern: SIMD[DType.uint64, 2 * EQUAL_BLOCK]
+    ) -> SIMD[DType.bool, EQUAL_BLOCK]:
+        """Compares `EQUAL_BLOCK` views against one short constant at once.
+
+        A view is sixteen bytes and a short string is all sixteen of them, zero
+        padded, so equality is those bytes being equal and nothing has to be
+        read out of the payload. Four views is a cache line, and the exclusive
+        or below turns the whole line into one register that is zero in the
+        lanes that matched.
+
+        The deinterleave is what turns eight lanes of sixteen rows' halves back
+        into four answers: a view's two words sit next to each other, so the
+        even lanes are every view's first word and the odd lanes are every
+        view's second, and a view matched when both of its lanes are zero.
+
+        Args:
+            at: The first element of the block. There must be `EQUAL_BLOCK`
+                elements at or after it.
+            pattern: The constant, from `short_pattern`.
+
+        Returns:
+            One bool per element of the block, set where the element is exactly
+            the constant. A long element answers false, because its last two
+            words are a payload address rather than data and cannot be equal to
+            a short constant's zero padding.
+        """
+        var words = self.views.unsafe_ptr().unsafe_bitcast[UInt64]()
+        var block = words.unsafe_offset(at * 2).unsafe_load[
+            width=2 * EQUAL_BLOCK
+        ]()
+        var apart = (block ^ pattern).deinterleave()
+        return (apart[0] | apart[1]).eq(0)
 
     def byte_length(self, i: Int) -> Int:
         """Returns the length of one element in bytes.

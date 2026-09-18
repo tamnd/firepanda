@@ -18,10 +18,12 @@ packed into words in an order that makes equality one compare and makes ordering
 wrong, so it goes to the byte loop.
 
 The constant form hoists what it can out of the loop. A short constant is turned
-into a view once, before any row is read, and then each row of a column of short
-strings costs four register compares and no memory traffic at all beyond the
-views. That is the shape a filter on a status column or a country code has, and
-it is the case worth being fast.
+into a view once, before any row is read, and then the rows are taken four at a
+time: four views is a cache line, a view is two 64-bit words, and one exclusive
+or against a register holding four copies of the constant settles the whole line
+with nothing loaded but the views themselves. That is the shape a filter on a
+status column or a country code has, and it is the case worth being fast. The
+tail, which is at most three rows, goes one at a time.
 
 Comparison against a null is null, exactly as it is for numbers, and it is
 handled the same way: the loop writes whatever falls out and the repair at the
@@ -40,9 +42,11 @@ from std.collections.span import Span
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.array.strview import (
+    EQUAL_BLOCK,
     INLINE_CAPACITY,
     StringView,
     make_inline,
+    short_pattern,
     views_equal_short,
 )
 from firepanda.bitmap.bitmap import Bitmap
@@ -159,16 +163,27 @@ def compare_text_const[
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         comptime if op == CMP_EQ or op == CMP_NE:
-            for i in range(start, stop):
+            var i = start
+            if short:
+                # A cache line of views at a time. The scalar loop below
+                # finishes whatever is left, which is at most three rows.
+                var pattern = short_pattern(probe)
+                while i + EQUAL_BLOCK <= stop:
+                    var same = a.equal_short_block(i, pattern)
+                    comptime if op == CMP_NE:
+                        same = ~same
+                    dst.unsafe_offset(i).unsafe_store(same)
+                    i += EQUAL_BLOCK
+            for j in range(i, stop):
                 var same: Bool
                 if short:
-                    same = views_equal_short(a.view(i), probe)
+                    same = views_equal_short(a.view(j), probe)
                 else:
-                    same = a.equals(i, b)
+                    same = a.equals(j, b)
                 comptime if op == CMP_EQ:
-                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+                    dst.unsafe_offset(j).unsafe_write(Scalar[DType.bool](same))
                 else:
-                    dst.unsafe_offset(i).unsafe_write(
+                    dst.unsafe_offset(j).unsafe_write(
                         Scalar[DType.bool](not same)
                     )
         else:

@@ -233,3 +233,36 @@ def views_equal_short(a: StringView, b: StringView) -> Bool:
         and a._w2 == b._w2
         and a._w3 == b._w3
     )
+
+
+comptime EQUAL_BLOCK = 4
+"""Short views one SIMD pass of `StringArray.equal_short_block` settles.
+
+Four views is sixty four bytes, which is a cache line on every machine this
+runs on and is eight lanes of the widest register there is reason to ask for.
+"""
+
+
+def short_pattern(v: StringView) -> SIMD[DType.uint64, 2 * EQUAL_BLOCK]:
+    """Lays a short view out as the two words a block compare is made of.
+
+    A view is four little-endian uint32 with nothing between them, so it is
+    also two little-endian uint64, and comparing sixteen bytes is comparing
+    those two. The pair is repeated once per view in a block so that one
+    register holds the constant a whole cache line of rows is measured against.
+
+    Args:
+        v: The view. Must be short, since a long view's last two words are a
+            block and an offset in a payload the other side does not share.
+
+    Returns:
+        The constant, ready to be exclusive ored against a block of views.
+    """
+    var low = UInt64(v._length) | (UInt64(v._w1) << 32)
+    var high = UInt64(v._w2) | (UInt64(v._w3) << 32)
+    var out = SIMD[DType.uint64, 2 * EQUAL_BLOCK]()
+
+    comptime for k in range(EQUAL_BLOCK):
+        out[2 * k] = low
+        out[2 * k + 1] = high
+    return out
