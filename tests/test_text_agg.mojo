@@ -1,10 +1,12 @@
 """Tests for aggregating a text column rather than grouping by one.
 
-Six of the thirteen reductions mean something over bytes. Two of them, `SIZE`
-and `COUNT`, never look at a value and are the same loops the number path runs.
-Four report a value the column held, and those are where the tests are, because
-that is where the kernel has decisions to make: which row to keep while scanning,
-and what to produce for a group whose every row is null.
+Eight of the reductions mean something over bytes. Two of them, `SIZE` and
+`COUNT`, never look at a value and are the same loops the number path runs. Six
+report a value the column held, and those are where the tests are, because that
+is where the kernel has decisions to make: which row to keep while scanning, and
+what to produce for a group whose every row is null. Two of those six name their
+row by where it sits rather than by what it holds, so for them the second
+question has a different answer and #888 is why.
 
 `MIN` and `MAX` are the two worth being careful about. They order bytes, so the
 keys here are built to disagree only late: "am" against "amsterdam", where one is
@@ -124,6 +126,37 @@ def test_first_and_last_skip_the_nulls() raises:
     var last = reduce(col^, AggKind.LAST, [0, 0, 0, 0], 1)
     assert_equal(value_of(first, 0), "oslo")
     assert_equal(value_of(last, 0), "lima")
+
+
+def test_the_row_kinds_do_not_skip_the_nulls() raises:
+    # The same four rows the pair above reads. These two name a row and report
+    # whatever is in it, so the group whose first and last rows are both null
+    # answers null twice where the pair above found the two values in the
+    # middle. This is what DuckDB's `first` and `last` do. See #888.
+    var col = with_nulls(["x", "oslo", "lima", "y"], [False, True, True, False])
+    var first = reduce(
+        StringArray(copy=col), AggKind.FIRST_ROW, [0, 0, 0, 0], 1
+    )
+    var last = reduce(col^, AggKind.LAST_ROW, [0, 0, 0, 0], 1)
+    assert_true(not first.is_valid(0), "the group's first row holds nothing")
+    assert_true(not last.is_valid(0), "and neither does its last")
+
+
+def test_the_row_kinds_take_each_group_s_own_edges() raises:
+    # Two groups interleaved, so a kind that took the column's first row rather
+    # than the group's would answer the same thing for both of them. Group one
+    # is rows 0 and 2 and group two is rows 1 and 3.
+    var col = with_nulls(
+        ["oslo", "lima", "cairo", "quito"], [True, False, True, True]
+    )
+    var first = reduce(
+        StringArray(copy=col), AggKind.FIRST_ROW, [0, 1, 0, 1], 2
+    )
+    var last = reduce(col^, AggKind.LAST_ROW, [0, 1, 0, 1], 2)
+    assert_equal(value_of(first, 0), "oslo")
+    assert_true(not first.is_valid(1), "group two starts on a null row")
+    assert_equal(value_of(last, 0), "cairo")
+    assert_equal(value_of(last, 1), "quito")
 
 
 def test_min_and_max_order_bytes() raises:
@@ -276,6 +309,8 @@ def test_the_kernel_agrees_with_the_twin() raises:
     kinds.append(AggKind.LAST)
     kinds.append(AggKind.MIN)
     kinds.append(AggKind.MAX)
+    kinds.append(AggKind.FIRST_ROW)
+    kinds.append(AggKind.LAST_ROW)
     for k in range(len(kinds)):
         var want = group_text_scalar(
             StringArray(copy=col), kinds[k], group_codes(codes), 10
@@ -594,6 +629,16 @@ def test_the_edges_of_a_whole_column_skip_the_nulls() raises:
     var col = with_nulls(["a", "b", "c", "d"], [False, True, True, False])
     assert_equal(value_of(whole(StringArray(copy=col), AggKind.FIRST), 0), "b")
     assert_equal(value_of(whole(col^, AggKind.LAST), 0), "c")
+
+
+def test_the_row_kinds_of_a_whole_column_do_not_skip_them() raises:
+    # The same column and the two kinds that name a row instead of looking for
+    # a value. Both ends of it are missing, so both answers are. See #888.
+    var col = with_nulls(["a", "b", "c", "d"], [False, True, True, False])
+    var first = whole(StringArray(copy=col), AggKind.FIRST_ROW)
+    var last = whole(col^, AggKind.LAST_ROW)
+    assert_true(not first.is_valid(0), "the first row holds nothing")
+    assert_true(not last.is_valid(0), "and neither does the last")
 
 
 def test_nulls_and_an_empty_string_order_the_way_both_rivals_say() raises:

@@ -1457,10 +1457,18 @@ def _agg_kind(name: String, distinct: Bool = False) raises -> AggKind:
         return AggKind.MAX
     if name == "count":
         return AggKind.COUNT
-    if name == "first" or name == "any_value":
-        return AggKind.FIRST
+    if name == "first":
+        # Not `FIRST`, which is the kind that skips over a null looking for
+        # something to report. DuckDB's `first` reports the first row whatever
+        # is in it, so a group whose first row is missing answers null, and the
+        # row kinds are what say that. See #888.
+        return AggKind.FIRST_ROW
     if name == "last":
-        return AggKind.LAST
+        return AggKind.LAST_ROW
+    if name == "any_value":
+        # This one does skip, which is what separated the two and is why there
+        # are now four kinds where there were two.
+        return AggKind.FIRST
     if name == "stddev" or name == "stddev_samp":
         return AggKind.STD
     if name == "var_samp" or name == "variance":

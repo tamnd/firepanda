@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: SQL `first` and `last` report the row and not the first value there is
+
+`first(x)` and `last(x)` inside a `GROUP BY` skipped over a null looking for something to report, so a group whose first row was missing answered the row after it. DuckDB answers null there, because those two name a row and read whatever is in it. Issue #888.
+
+`any_value` is the one that skips, and it was the one already right. That is what separated the three: they had been one fold under three names, and the case that tells them apart is a group whose first row holds nothing and whose second row holds a five. DuckDB says null for `first` and five for `any_value`, and firepanda said five for both.
+
+So there are two new reductions rather than a flag on the old ones, `FIRST_ROW` and `LAST_ROW`, and both rules are kept because both are wanted. pandas `groupby.first` skips and keeps the fold it had, `any_value` keeps it too, and SQL's `first` and `last` are the new pair. The numeric kernel, the text kernel and the slow reference twin all grew the pair, and the plan JSON reads and writes their names.
+
+They do not fold a chunk at a time, which is the one design decision here worth writing down. A partial answer from one chunk is a value that may itself be null, and a running slot holding a null cannot say whether it is a group whose first row was missing or a group no chunk has reached yet. That is the trap a sum fell into in the entry below, where a zero meant both nothing added and a total of zero. The way out there was a second state slot; here it is cheaper to hold the column and reduce once at the end, which is the route a median already takes, because these two copy one element per group rather than accumulating anything.
+
+`FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
+
 ### Added: a lookahead, which is the first construct RE2 has not got
 
 `str.contains("a(?=b)")` used to raise and now answers, and so do `count`, `replace`, `match`, `fullmatch` and `extract`. Both forms are in, the positive one and the negative one, and a lookahead may hold another. This is the first piece of syntax to land that only one of the two engines reads. Everything before it on this engine was a flag, and a flag modifies syntax both engines already have.

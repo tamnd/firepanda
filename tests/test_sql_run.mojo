@@ -723,10 +723,11 @@ def test_a_filter_that_keeps_no_row_answers_null() raises:
 
 
 def test_a_filter_on_a_fold_that_reads_a_null_as_a_value_is_refused() raises:
-    # These three take the first or the last value rather than folding over the
-    # values, and a null is one of the values to them. A row the filter turned
-    # into a null is not a row it took away as far as they are concerned, so
-    # the rewrite would answer a different question and there is no other one.
+    # These two take the value in the first or the last row rather than folding
+    # over the values, and a null is one of the values to them. A row the filter
+    # turned into a null is not a row it took away as far as they are concerned,
+    # so the rewrite would answer a different question and there is no other
+    # one. See #888.
     with assert_raises(contains="FILTER on first"):
         _ = run(
             "SELECT first(qty) FILTER (WHERE price > 5) AS f FROM sales",
@@ -737,11 +738,28 @@ def test_a_filter_on_a_fold_that_reads_a_null_as_a_value_is_refused() raises:
             "SELECT last(qty) FILTER (WHERE price > 5) AS f FROM sales",
             session(),
         )
-    with assert_raises(contains="FILTER on any_value"):
-        _ = run(
-            "SELECT any_value(qty) FILTER (WHERE price > 5) AS f FROM sales",
-            session(),
-        )
+
+
+def test_a_filter_on_any_value_is_the_case_rewritten() raises:
+    # `any_value` was refused beside the two above until the three stopped
+    # being one thing. It passes over a null, so a row turned into a null and a
+    # row taken away are the same row to it, and the `CASE` the rewrite writes
+    # says what the filter said. The five rows priced over five carry 5, 3, 8, 1
+    # and 15, and the first of them is the answer DuckDB gives too.
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT any_value(qty) FILTER (WHERE price > 5) AS f"
+                    " FROM sales"
+                ),
+                session(),
+            ),
+            "f",
+        ),
+        [5],
+        "f",
+    )
 
 
 def test_a_filter_on_something_that_is_not_a_fold_is_refused() raises:
@@ -4254,6 +4272,128 @@ def test_a_count_window_over_nothing_but_nulls_is_still_a_zero() raises:
         ),
         [4, 4, 4, 4, 0, 0],
         "c",
+    )
+
+
+def test_first_and_last_report_the_row_and_not_the_value() raises:
+    # `gappy` is 4, 4, null, 9, null, 1 in that order, and the group is the
+    # three rows in the middle of it: a null, a nine and a null. DuckDB answers
+    # null for both, because both name a row and read whatever is in it, and
+    # this is the case that separated them from `any_value`. See #888.
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT first(mark) AS f FROM gappy"
+                    " GROUP BY mark IS NULL OR mark = 9"
+                    " ORDER BY mark IS NULL OR mark = 9"
+                ),
+                session(),
+            ),
+            "f",
+        ),
+        [4, -1],
+        "f",
+    )
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT last(mark) AS l FROM gappy"
+                    " GROUP BY mark IS NULL OR mark = 9"
+                    " ORDER BY mark IS NULL OR mark = 9"
+                ),
+                session(),
+            ),
+            "l",
+        ),
+        [1, -1],
+        "l",
+    )
+
+
+def test_any_value_is_the_one_that_passes_over_a_null() raises:
+    # The same two groups and the same three rows in the second of them, where
+    # the nine is the only value there is. DuckDB answers nine here, which is
+    # why `any_value` kept the fold `first` used to share with it.
+    same(
+        answer(
+            (
+                "SELECT any_value(mark) AS a FROM gappy"
+                " GROUP BY mark IS NULL OR mark = 9"
+                " ORDER BY mark IS NULL OR mark = 9"
+            ),
+            "a",
+        ),
+        [4, 9],
+        "a",
+    )
+
+
+def test_first_over_a_whole_column_of_nothing_but_nulls_is_null() raises:
+    # No group by, so the rows are the whole of one fold, and the two rows that
+    # reach it are both null. DuckDB answers null for all three here, since even
+    # the one that passes over a null has nothing left to report.
+    same(
+        gapped(
+            run(
+                "SELECT first(mark) AS f FROM gappy WHERE mark IS NULL",
+                session(),
+            ),
+            "f",
+        ),
+        [-1],
+        "f",
+    )
+    same(
+        gapped(
+            run(
+                "SELECT last(mark) AS l FROM gappy WHERE mark IS NULL",
+                session(),
+            ),
+            "l",
+        ),
+        [-1],
+        "l",
+    )
+    same(
+        gapped(
+            run(
+                "SELECT any_value(mark) AS a FROM gappy WHERE mark IS NULL",
+                session(),
+            ),
+            "a",
+        ),
+        [-1],
+        "a",
+    )
+
+
+def test_first_over_no_rows_at_all_is_null() raises:
+    # A fold over nothing, which is the other half of `EMPTY_IS_NULL` and is
+    # not what #888 changed. Kept beside the three above because a row kind
+    # that answered its slot's zero here would look like a first row holding
+    # one.
+    same(
+        gapped(
+            run(
+                "SELECT first(mark) AS f FROM gappy WHERE mark > 1000",
+                session(),
+            ),
+            "f",
+        ),
+        [-1],
+        "f",
+    )
+    same(
+        gapped(
+            run(
+                "SELECT last(mark) AS l FROM gappy WHERE mark > 1000", session()
+            ),
+            "l",
+        ),
+        [-1],
+        "l",
     )
 
 

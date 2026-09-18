@@ -417,7 +417,7 @@ def _agg_text(op: Int) raises -> String:
     Raises:
         Error: If the code is not one of the folds.
     """
-    if op < 0 or op > Int(AggKind.SKEW.code):
+    if op < 0 or op > Int(AggKind.LAST_ROW.code):
         raise Error(String("aggregate ", op, " is not one anybody can fold"))
     return String(AggKind(UInt8(op)))
 
@@ -439,7 +439,7 @@ def _agg_of(word: String) raises -> AggKind:
     Raises:
         Error: If nothing is called that.
     """
-    for code in range(Int(AggKind.SKEW.code) + 1):
+    for code in range(Int(AggKind.LAST_ROW.code) + 1):
         var kind = AggKind(UInt8(code))
         if String(kind) == word:
             return kind

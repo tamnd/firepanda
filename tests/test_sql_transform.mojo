@@ -545,8 +545,19 @@ def test_a_filter_on_something_it_cannot_be_rewritten_into_refuses() raises:
         _ = _printed("first(a) FILTER (WHERE b > 1)", g, rules)
     with assert_raises(contains="FILTER on last"):
         _ = _printed("last(a) FILTER (WHERE b > 1)", g, rules)
-    with assert_raises(contains="FILTER on any_value"):
-        _ = _printed("any_value(a) FILTER (WHERE b > 1)", g, rules)
+
+
+def test_a_filter_on_any_value_is_rewritten_like_the_rest() raises:
+    # It used to be refused beside `first` and `last` and it is not, because it
+    # passes over a null, so a row the predicate turned into a null and a row it
+    # took away are the same row to it. The other two read the null as a value
+    # and cannot say that. See #888.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("any_value(a) FILTER (WHERE b > 1)", g, rules),
+        "any_value(CASE WHEN (b > 1) THEN a END)",
+    )
 
 
 def test_the_two_call_modifiers_left_still_refuse() raises:

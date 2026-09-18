@@ -93,7 +93,7 @@ def _reports_a_row(kind: AggKind) -> Bool:
         kind: Which reduction.
 
     Returns:
-        True for the four that pick a row rather than computing something out of
+        True for the six that pick a row rather than computing something out of
         several of them.
     """
     return (
@@ -101,16 +101,21 @@ def _reports_a_row(kind: AggKind) -> Bool:
         or kind == AggKind.MAX
         or kind == AggKind.FIRST
         or kind == AggKind.LAST
+        or kind == AggKind.FIRST_ROW
+        or kind == AggKind.LAST_ROW
     )
 
 
 def _reduce_text(col: StringArray, kind: AggKind) raises -> AnyArray:
     """Reduces a text column to the one element the reduction names.
 
-    All four of these answer with a row of the column, so all four are the same
+    All six of these answer with a row of the column, so all six are the same
     two steps: find the row, then copy that one element out. The finding is in
     `agg.mojo` beside the numeric extremes, because it is the numeric extreme
-    with a row number where the accumulator used to be.
+    with a row number where the accumulator used to be. The two row kinds are
+    the exception that needs no finding at all: the row is the first or the last
+    one, and whether it holds anything is the answer rather than a reason to
+    keep looking. See #888.
 
     What this replaces is a trip through `aggregate_group_any` with a code per
     row that is always zero. On the hits table that is four hundred megabytes of
@@ -119,10 +124,11 @@ def _reduce_text(col: StringArray, kind: AggKind) raises -> AnyArray:
 
     Args:
         col: The column.
-        kind: One of MIN, MAX, FIRST or LAST.
+        kind: One of MIN, MAX, FIRST, LAST, FIRST_ROW or LAST_ROW.
 
     Returns:
-        A text column of exactly one row, null if every input row was null.
+        A text column of exactly one row, null if the row it reports is null or
+        if there was no row to report.
 
     Raises:
         Error: Only what the morsel runtime raises.
@@ -132,11 +138,16 @@ def _reduce_text(col: StringArray, kind: AggKind) raises -> AnyArray:
         row = text_extreme_row[want_min=True](col)
     elif kind == AggKind.MAX:
         row = text_extreme_row[want_min=False](col)
+    elif kind == AggKind.FIRST_ROW or kind == AggKind.LAST_ROW:
+        if len(col) == 0:
+            row = -1
+        else:
+            row = 0 if kind == AggKind.FIRST_ROW else len(col) - 1
     else:
         row = text_edge_row(col, kind == AggKind.FIRST)
 
     var builder = StringBuilder(capacity=1)
-    if row < 0:
+    if row < 0 or not col.is_valid(row):
         builder.append_null()
     else:
         builder.append(col.unsafe_bytes(row))
