@@ -793,6 +793,105 @@ def test_a_percent_takes_nothing_as_readily_as_something() raises:
     matched(col, "_%", [1, 1, 1, 1, 0, 1, 1, 1])
 
 
+def escaped(
+    col: StringArray, pattern: String, escape: Int, want: List[Int]
+) raises:
+    """Asserts an escaped pattern answers the way DuckDB did, row by row.
+
+    The twin runs on the same call, the same as `matched` above, so the escape
+    is held to two readings rather than one. The two walk the pattern by
+    different rules, and an escape is a rule about where a step starts, which is
+    exactly the kind of thing one of them could get right and the other wrong.
+
+    Args:
+        col: The column.
+        pattern: The pattern, escapes and wildcards and all.
+        escape: The byte the escape names.
+        want: One per row, one for a match and nought for none.
+
+    Raises:
+        AssertionError: On the first row that differs.
+    """
+    var got = text_like(col, pattern.as_bytes(), escape)
+    agrees(got, text_like_scalar(col, pattern, escape), "like " + pattern)
+    assert_equal(len(got), len(want), "like " + pattern + ": lengths differ")
+    for i in range(len(got)):
+        assert_equal(
+            got[i],
+            want[i] == 1,
+            "like " + pattern + " row " + String(i),
+        )
+
+
+def marks() raises -> StringArray:
+    """Eight rows written around the two wildcards and a would be escape.
+
+    Nothing in `probe` holds a `%` or a `_`, which is the whole subject here, so
+    this is the column an escape is asked about. Every answer against it below
+    is DuckDB 1.5.1's.
+    """
+    return strings_from_list(
+        [
+            "a%b",
+            "axb",
+            "a_b",
+            "a!b",
+            "acb",
+            "ab%",
+            "a%%b",
+            "%",
+        ]
+    )
+
+
+def test_an_escape_makes_the_next_byte_a_literal_one() raises:
+    var col = marks()
+    # Each of the three things an escape can be put in front of. The third is
+    # the escape itself, which is the only way a pattern says it wants the
+    # escape character as a byte.
+    escaped(col, "a!%b", ord("!"), [1, 0, 0, 0, 0, 0, 0, 0])
+    escaped(col, "a!_b", ord("!"), [0, 0, 1, 0, 0, 0, 0, 0])
+    escaped(col, "a!!b", ord("!"), [0, 0, 0, 1, 0, 0, 0, 0])
+    # And in front of a byte that was never a wildcard, where DuckDB drops the
+    # escape rather than refusing the pattern.
+    escaped(col, "a!cb", ord("!"), [0, 0, 0, 0, 1, 0, 0, 0])
+
+
+def test_an_escaped_pattern_still_has_its_other_wildcards() raises:
+    var col = marks()
+    escaped(col, "%!%%", ord("!"), [1, 0, 0, 0, 0, 1, 1, 1])
+    escaped(col, "a!%!%b", ord("!"), [0, 0, 0, 0, 0, 0, 1, 0])
+    escaped(col, "_!%_", ord("!"), [1, 0, 0, 0, 0, 0, 0, 0])
+
+
+def test_the_escape_is_read_before_the_wildcards_are() raises:
+    # Which is what lets the escape be a wildcard. Under `ESCAPE '%'` there is
+    # no `%` wildcard left at all, every one of them being an escape, so `a%%b`
+    # is the three bytes `a%b` and matches only the row that holds them.
+    var col = marks()
+    escaped(col, "a%%b", ord("%"), [1, 0, 0, 0, 0, 0, 0, 0])
+    escaped(col, "a__b", ord("_"), [0, 0, 1, 0, 0, 0, 0, 0])
+
+
+def test_no_escape_is_the_reading_there_was_before() raises:
+    # Minus one is not a byte, so a pattern read with it is read the way every
+    # pattern above this was, escape character and all.
+    var col = marks()
+    escaped(col, "a!%b", -1, [0, 0, 0, 1, 0, 0, 0, 0])
+    escaped(col, "a%b", -1, [1, 1, 1, 1, 1, 0, 1, 0])
+
+
+def test_an_escaped_pattern_goes_to_the_general_search() raises:
+    # `abc%` is a prefix and reads as one, the escape not appearing in it. Put
+    # the escape in and it has to be the general search instead, because the
+    # four that read runs find them by splitting on `%` and would split on the
+    # escaped one.
+    assert_true(read_pattern("abc%", ord("!")).kind == MatchKind.STARTS_WITH)
+    assert_true(read_pattern("ab!%c", ord("!")).kind == MatchKind.GENERAL)
+    assert_equal(read_pattern("ab!%c", ord("!")).escape, ord("!"))
+    assert_equal(read_pattern("abc%", ord("!")).escape, -1)
+
+
 def test_the_matcher_keeps_a_missing_row_missing() raises:
     var col = sample()
     var got = text_like(col, "%g_een%".as_bytes())

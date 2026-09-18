@@ -251,8 +251,20 @@ struct Pattern(ImplicitlyCopyable, Movable):
     var second: String
     """The run that has to follow the first one, and empty otherwise."""
 
+    var escape: Int
+    """The byte an `ESCAPE` named, or minus one where the query named none.
+
+    Only the general search ever carries one. A pattern with an escape in it is
+    sent there by `read_pattern` whatever shape it looks like, because the four
+    that read runs find them by splitting on `%` and would split on an escaped
+    one too."""
+
     def __init__(
-        out self, kind: MatchKind, var first: String, var second: String
+        out self,
+        kind: MatchKind,
+        var first: String,
+        var second: String,
+        escape: Int = -1,
     ):
         """Constructs a read pattern.
 
@@ -260,13 +272,15 @@ struct Pattern(ImplicitlyCopyable, Movable):
             kind: Which search answers it.
             first: The first run. Consumed.
             second: The second run, empty unless the search reads two. Consumed.
+            escape: The escape byte, or minus one where there is none.
         """
         self.kind = kind
         self.first = first^
         self.second = second^
+        self.escape = escape
 
 
-def read_pattern(pattern: StringSlice) raises -> Pattern:
+def read_pattern(pattern: StringSlice, escape: Int = -1) raises -> Pattern:
     """Reads a `LIKE` pattern into the search that answers it.
 
     The five shapes above `GENERAL` are the ones with a kernel of their own, and
@@ -282,26 +296,35 @@ def read_pattern(pattern: StringSlice) raises -> Pattern:
     compared as an ordinary byte. `a_c` would read as an equality and `%a_b%` as
     a substring, and both would quietly answer the wrong rows.
 
-    There is no escape character. DuckDB has none by default either, so a
-    backslash in a pattern is an ordinary byte to both, and `ESCAPE` is refused
-    by the SQL front end before anything gets here.
+    There is no escape character unless the query named one, which DuckDB is the
+    same about: a backslash in a pattern written without `ESCAPE` is an ordinary
+    byte to both. A pattern that does carry one and uses it goes to the general
+    search whatever shape it looks like, for the same reason an underscore does.
+    The four that read runs find them by splitting on `%`, and a split does not
+    know that the `%` in `a!%b` is a byte the pattern is looking for rather than
+    a wildcard, so `a!%b` would read as a starts with against `a!` and answer
+    the wrong rows.
 
     Args:
         pattern: The pattern as the query wrote it, wildcards and all.
+        escape: The byte an `ESCAPE` named, or minus one for none. A pattern
+            that has none of it in it is read as though there were none.
 
     Returns:
         The search and the runs of bytes it reads.
 
     Raises:
         Error: Nothing here raises. The signature keeps it because every caller
-            is already in a context that can, and because reading a pattern is
-            where an escape character would be refused if one is ever added.
+            is already in a context that can.
     """
     var text = String(pattern)
     var bytes = text.as_bytes()
     var general = False
     for i in range(len(bytes)):
         if bytes[i] == UInt8(ord("_")):
+            general = True
+            break
+        if escape >= 0 and bytes[i] == UInt8(escape):
             general = True
             break
 
@@ -333,7 +356,7 @@ def read_pattern(pattern: StringSlice) raises -> Pattern:
                     MatchKind.IN_ORDER, runs[1].copy(), runs[2].copy()
                 )
 
-    return Pattern(MatchKind.GENERAL, String(pattern), String(""))
+    return Pattern(MatchKind.GENERAL, String(pattern), String(""), escape)
 
 
 def _match_at(
@@ -945,12 +968,23 @@ def _character_width(bytes: Span[UInt8, _], at: Int) -> Int:
     return end - at
 
 
-def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
+def matches_pattern(
+    bytes: Span[UInt8, _], pattern: Span[UInt8, _], escape: Int = -1
+) -> Bool:
     """Whether a run of bytes matches a `LIKE` pattern, wildcards and all.
 
     The pattern language is two wildcards and everything else. `%` stands for
     any run of characters including none, `_` stands for exactly one character,
     and every other byte stands for itself.
+
+    An `ESCAPE` adds a third thing. The byte it names stands for nothing itself
+    and makes the byte after it stand for itself, whatever that byte is, which
+    is how a pattern says it is looking for a literal `%` or `_`. The escape is
+    tested before the two wildcards are, and that order is the whole of why
+    `ESCAPE '%'` works: there every `%` is an escape and `%%` is a literal one,
+    so the pattern has no wildcard left in it at all. An escape at the very end
+    of a pattern has no byte to make literal and is refused while the plan is
+    built, so there is always one here to read.
 
     Characters and not bytes, which is the one thing about `_` that is easy to
     get wrong and that DuckDB is clear about: `'héllo' LIKE 'h_llo'` is true
@@ -977,6 +1011,7 @@ def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
     Args:
         bytes: The element being matched.
         pattern: The pattern as the query wrote it.
+        escape: The byte an `ESCAPE` named, or minus one for none.
 
     Returns:
         True if the whole element matches the whole pattern.
@@ -985,6 +1020,8 @@ def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
     var m = len(pattern)
     comptime PERCENT = UInt8(ord("%"))
     comptime UNDERSCORE = UInt8(ord("_"))
+    var marker = UInt8(escape) if escape >= 0 else UInt8(0)
+    var escaped = escape >= 0
 
     var s = 0
     var p = 0
@@ -995,6 +1032,17 @@ def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
     var star_s = 0
 
     while s < n:
+        if escaped and p + 1 < m and pattern[p] == marker:
+            if pattern[p + 1] == bytes[s]:
+                p += 2
+                s += 1
+                continue
+            if star_p >= 0:
+                star_s += _character_width(bytes, star_s)
+                s = star_s
+                p = star_p + 1
+                continue
+            return False
         if p < m and pattern[p] == UNDERSCORE:
             s += _character_width(bytes, s)
             p += 1
@@ -1017,14 +1065,20 @@ def matches_pattern(bytes: Span[UInt8, _], pattern: Span[UInt8, _]) -> Bool:
             return False
 
     # The row is used up. What is left of the pattern can only match nothing,
-    # which `%` does and neither `_` nor a literal byte does.
-    while p < m and pattern[p] == PERCENT:
+    # which `%` does and neither `_` nor a literal byte does. An escaped `%` is
+    # a literal byte and stops the walk here, which the escape test does by
+    # sitting first.
+    while p < m:
+        if escaped and pattern[p] == marker:
+            break
+        if pattern[p] != PERCENT:
+            break
         p += 1
     return p == m
 
 
 def text_like(
-    a: StringArray, pattern: Span[UInt8, _]
+    a: StringArray, pattern: Span[UInt8, _], escape: Int = -1
 ) raises -> Array[DType.bool]:
     """Whether each element matches a `LIKE` pattern with wildcards in it.
 
@@ -1036,6 +1090,7 @@ def text_like(
         a: The column.
         pattern: The pattern as the query wrote it, wildcards and all. Borrowed
             for the length of the call and not stored.
+        escape: The byte an `ESCAPE` named, or minus one for none.
 
     Returns:
         A bool column, null wherever the input is null.
@@ -1050,7 +1105,7 @@ def text_like(
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
-            var hit = matches_pattern(a.unsafe_bytes(i), pattern)
+            var hit = matches_pattern(a.unsafe_bytes(i), pattern, escape)
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](hit))
         repair_range(out, validity, start, stop)
 

@@ -633,19 +633,31 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 )
             )
         return LogicalType.BOOL
-    if name == "like":
+    if name == "like" or name == "like_escape":
         # The pattern is a constant and lowering refuses it as anything else,
         # but that is lowering's rule rather than a typing one, so what is
-        # checked here is only that both sides are text.
-        if len(args) != 2:
+        # checked here is only that every side is text. `like_escape` is the
+        # same call with the escape character as a third one, which is how
+        # DuckDB writes `x LIKE p ESCAPE e` and is text like the other two.
+        var takes = 3 if name == "like_escape" else 2
+        if len(args) != takes:
             raise Error(
-                String("'like' takes 2 arguments and was given ", len(args))
+                String(
+                    "'",
+                    name,
+                    "' takes ",
+                    takes,
+                    " arguments and was given ",
+                    len(args),
+                )
             )
-        for i in range(2):
+        for i in range(takes):
             if args[i] != LogicalType.STRING and args[i] != LogicalType.NULL:
                 raise Error(
                     String(
-                        "'like' reads text and argument ",
+                        "'",
+                        name,
+                        "' reads text and argument ",
                         i,
                         " is ",
                         args[i],
