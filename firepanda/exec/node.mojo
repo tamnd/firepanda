@@ -4995,6 +4995,19 @@ def _folds(kind: AggKind, source: LogicalType) -> Bool:
     the key columns held alongside. What this answers is which of the two a
     reduction gets, not whether it runs.
 
+    `FIRST_ROW` and `LAST_ROW` are left out on purpose, and it is not for want
+    of an obvious merge. Their partial answer is a value that may itself be
+    null, and a running state has nowhere to write the difference between a
+    group whose first row was missing and a group no chunk has reached yet.
+    Both read as a null sitting in the slot, the merge takes the second one as
+    the answer, and the first row's nullness is lost. That is the same trap a
+    marked sum fell into in #836, where zero meant both nothing added and a
+    total of zero, and the way out there was an extra state column. Holding the
+    values costs less than a third state column for a kind that copies one
+    element per group, so these two hold. `FIRST` and `LAST` above are free of
+    it because they skip nulls, so their partial is null only when the chunk had
+    nothing to report, which is exactly what an unfilled slot means. See #888.
+
     A mean over a column of times is the one place the column's type decides it
     rather than the reduction. Splitting that mean would put a sum of instants
     in the running state, which is a value the library refuses to produce by

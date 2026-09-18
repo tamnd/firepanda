@@ -2654,11 +2654,15 @@ struct Transform(Movable):
             # the name may be a macro the catalog defines, and whether that is
             # a fold is not something this pass can know.
             raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
-        if name == "first" or name == "last" or name == "any_value":
-            # These three read a null as a value rather than passing over it, so
+        if name == "first" or name == "last":
+            # These two read a null as a value rather than passing over it, so
             # a row the predicate drops and a row it turns into a null are not
             # the same row to them, and the rewrite would answer a different
-            # question. There is nothing else to rewrite it into.
+            # question. There is nothing else to rewrite it into. `any_value`
+            # used to be refused here alongside them and is not, because it
+            # skips nulls, so a row turned into a null and a row taken away are
+            # the same row to it and the `CASE` says what the filter said. See
+            # #888, which is where the three stopped being one thing.
             raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
         if flags & CALL_STAR != 0:
             var arms = List[UInt32]()

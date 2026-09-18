@@ -576,6 +576,41 @@ def test_first_and_last_skip_nulls_across_a_chunk_boundary() raises:
             )
 
 
+def test_the_row_kinds_report_the_edge_row_whatever_it_holds() raises:
+    """Key 9's two rows are both null, so the two row kinds answer null there.
+
+    `FIRST` above passes over a null looking for something to report and these
+    do not, which is the whole difference and is what #888 was. Key 1 is the
+    control: its rows carry 5 and then 4 with nothing missing between them, so
+    both kinds answer the same thing there that the skipping pair does.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.FIRST_ROW, "opening"))
+    aggs.append(GroupAgg(1, AggKind.LAST_ROW, "closing"))
+    var out = run_group(holey_frame(), [0], aggs^)
+    var keys = read_ints(out, "k")
+    var opening = read_ints(out, "opening")
+    var closing = read_ints(out, "closing")
+    var reached = False
+    for g in range(len(out)):
+        if not out.column("k").is_valid(g):
+            continue
+        if keys[g] == 1:
+            assert_equal(opening[g], Int64(5), "the value in key 1's first row")
+            assert_equal(closing[g], Int64(4), "and in its last")
+        if keys[g] == 9:
+            reached = True
+            assert_true(
+                not out.column("opening").is_valid(g),
+                "key 9's first row holds nothing and that is the answer",
+            )
+            assert_true(
+                not out.column("closing").is_valid(g),
+                "and so does its last",
+            )
+    assert_true(reached, "key 9 is a group")
+
+
 def test_two_key_columns_group_on_the_tuple() raises:
     var aggs = List[GroupAgg]()
     aggs.append(GroupAgg(2, AggKind.SUM, "total"))

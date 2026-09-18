@@ -1379,11 +1379,19 @@ def group_scalar[
         # be, because the alternative is a bucketing pass and a bucketing pass is
         # the thing being checked.
         var present = List[Float64]()
+        var edge = -1
         var rows = 0
         for i in range(len(codes)):
             if Int(codes[i]) != g:
                 continue
             rows += 1
+            # The row the two row kinds report, kept as a row number and not as
+            # a value, because what is in it is not what chooses it.
+            if kind == AggKind.FIRST_ROW:
+                if edge < 0:
+                    edge = i
+            elif kind == AggKind.LAST_ROW:
+                edge = i
             if kind.counts_rows():
                 continue
             # `_is_there` and not `is_valid`, so a NaN is left out of the group
@@ -1456,6 +1464,22 @@ def group_scalar[
             else:
                 var at = 0 if kind == AggKind.FIRST else len(present) - 1
                 values.append(present[at])
+                valid.append(True)
+        elif kind == AggKind.FIRST_ROW or kind == AggKind.LAST_ROW:
+            # The row was chosen above by where it sits, so this reads it
+            # whatever is in it and a group whose chosen row is missing answers
+            # missing. That is the whole difference from the pair above, and a
+            # group with no rows at all lands in the same branch because there
+            # is no row to read. See #888.
+            if edge < 0 or not _is_there(col, edge):
+                comptime if dt.is_floating_point():
+                    values.append(nan[DType.float64]())
+                    valid.append(True)
+                else:
+                    values.append(Float64(0))
+                    valid.append(False)
+            else:
+                values.append(Float64(col[edge]))
                 valid.append(True)
         elif kind == AggKind.VAR or kind == AggKind.STD or kind == AggKind.SEM:
             var divisor = len(present) - Int(kind.param)
@@ -1768,7 +1792,7 @@ def group_text_scalar(
 ) raises -> Tuple[List[String], List[Bool]]:
     """Aggregates a text column by collecting each group's values and reducing.
 
-    The twin for the four reductions that report a value the column held. The
+    The twin for the six reductions that report a value the column held. The
     three that count are not here, because a count over text is the same loop as
     a count over numbers and `group_scalar` already covers it, and a twin that
     exists only to be a second copy of another twin is a second place to be
@@ -1790,13 +1814,15 @@ def group_text_scalar(
         One value per group and one validity flag per group.
 
     Raises:
-        If the reduction is not one of the four.
+        If the reduction is not one of the six.
     """
     if not (
         kind == AggKind.FIRST
         or kind == AggKind.LAST
         or kind == AggKind.MIN
         or kind == AggKind.MAX
+        or kind == AggKind.FIRST_ROW
+        or kind == AggKind.LAST_ROW
     ):
         raise Error(
             "group by twin: " + String(kind) + " does not report a text value"
@@ -1809,6 +1835,25 @@ def group_text_scalar(
         # Every row, for every group, the same as the number twin. It is O(groups
         # times rows) on purpose: the bucketing pass is the thing being checked,
         # so the twin cannot use one.
+        if kind == AggKind.FIRST_ROW or kind == AggKind.LAST_ROW:
+            # A row chosen by where it sits and then read whatever is in it,
+            # which is the rule the number twin follows too. The loop below
+            # cannot do it because it passes over an invalid row on the way in,
+            # and passing over one is the thing these two do not do. See #888.
+            var edge = -1
+            for i in range(len(codes)):
+                if Int(codes[i]) != g:
+                    continue
+                if kind == AggKind.LAST_ROW or edge < 0:
+                    edge = i
+            if edge < 0 or not col.is_valid(edge):
+                values.append(String(""))
+                valid.append(False)
+            else:
+                values.append(col[edge])
+                valid.append(True)
+            continue
+
         var held = String("")
         var seen = False
         for i in range(len(codes)):

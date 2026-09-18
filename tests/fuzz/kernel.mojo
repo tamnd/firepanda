@@ -1222,6 +1222,8 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         AggKind.NUNIQUE,
         AggKind.SEM,
         AggKind.SKEW,
+        AggKind.FIRST_ROW,
+        AggKind.LAST_ROW,
     ]
     var kind = single[(step // 4) % len(single)]
     if kind == AggKind.QUANTILE:

@@ -802,6 +802,18 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     which is the identity of the operator rather than a claim about the
     group."""
 
+    comptime FIRST_ROW = Self(20)
+    """The value in the group's first row, null or not.
+
+    `FIRST` above skips a null looking for something to report and this does
+    not, so a group whose first row is missing answers null here and answers
+    the row after it there. Both are wanted: pandas `groupby.first` skips, and
+    so does DuckDB's `any_value`, while DuckDB's `first` does not. Issue #888
+    has the case that separated them."""
+
+    comptime LAST_ROW = Self(21)
+    """The value in the group's last row, null or not. `FIRST_ROW` reversed."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds, by reduction and not by parameter.
 
@@ -852,7 +864,7 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             The dtype the reduction produces, which is int64 for the two
             counts, float64 for a mean, bool for the two truth values, the
             accumulator dtype for a sum and a product, and `dt` itself for the
-            four that report a value the column held.
+            six that report a value the column held.
         """
         if self == Self.COUNT or self == Self.SIZE or self == Self.NUNIQUE:
             return DType.int64
@@ -920,6 +932,10 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("all")
         elif self == Self.NUNIQUE:
             writer.write("nunique")
+        elif self == Self.FIRST_ROW:
+            writer.write("first_row")
+        elif self == Self.LAST_ROW:
+            writer.write("last_row")
         else:
             writer.write("an unknown reduction")
 
@@ -2195,6 +2211,83 @@ def _edge_core[
                 if not out.data.validity.get(g):
                     target.unsafe_offset(g).unsafe_store(nan[dt]())
                     out.data.validity.set(g, True)
+    return out^
+
+
+def _edge_row_core[
+    dt: DType, //, origin: ImmOrigin, want_first: Bool
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) -> Array[dt]:
+    """Takes what each group's first or last row holds, null or not.
+
+    The same walk `_edge_core` makes, with one thing changed: a row that holds
+    no value settles its group instead of being stepped over. So the loop cannot
+    ask the output's validity whether a group is done, the way the other one
+    does, because the answer it writes is allowed to be missing. It carries a
+    second mark for that, which is a byte a group and not a byte a row, and the
+    early exit still fires as soon as every group has been reached.
+
+    A float column spells missing as a NaN and stays valid, the rule the rest of
+    this file follows, so a null row on a float column writes a NaN rather than
+    clearing a bit. That also means a row really holding a NaN and a row holding
+    nothing answer the same on a float column, which is the same trade #170
+    describes everywhere else here. See #888.
+    """
+    var out = Array[dt](groups)
+    var target = out.unsafe_mut_ptr()
+    out.data.validity.clear_all()
+
+    # Which row each group settled on, or -1 for a group no row reached. The
+    # output's own validity is the mark `_edge_core` uses and it cannot be the
+    # one here, because the value written is allowed to be missing, so a group
+    # that settled on a null row and a group nothing has reached yet would read
+    # the same. This is the same row number table the text path keeps, for the
+    # same reason.
+    var settled = Array[DType.int64](overwritten=groups)
+    var mark = settled.unsafe_mut_ptr()
+    _fill_rows(mark, groups)
+
+    var at = codes.unsafe_ptr()
+    var rows = len(codes)
+    var filled = 0
+    for step in range(rows):
+        var i = step if want_first else rows - 1 - step
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        if mark.unsafe_offset(g).unsafe_load() >= 0:
+            continue
+        mark.unsafe_offset(g).unsafe_store(Int64(i))
+        filled += 1
+        if filled == groups:
+            break
+
+    # The gather. A group the walk never reached has no rows in it, which the
+    # same branch covers, since there is no row to read there either. It cannot
+    # happen when the codes came from a grouping pass, because a group is there
+    # on account of a row making it.
+    for g in range(groups):
+        var row = Int(mark.unsafe_offset(g).unsafe_load())
+        var there = row >= 0 and (not has_null or validity.get(row))
+        comptime if dt.is_floating_point():
+            # Missing is a NaN in a slot that stays valid, the rule the rest of
+            # this file follows. See #170.
+            if there:
+                target.unsafe_offset(g).unsafe_store(
+                    source.unsafe_offset(row).unsafe_load()
+                )
+            else:
+                target.unsafe_offset(g).unsafe_store(nan[dt]())
+            out.data.validity.set(g, True)
+        else:
+            if there:
+                target.unsafe_offset(g).unsafe_store(
+                    source.unsafe_offset(row).unsafe_load()
+                )
+                out.data.validity.set(g, True)
     return out^
 
 
@@ -3635,6 +3728,18 @@ def _dispatch_core[
                 source, validity, has_null, codes, groups
             )
         )
+    if kind == AggKind.FIRST_ROW:
+        return AnyArray(
+            _edge_row_core[want_first=True](
+                source, validity, has_null, codes, groups
+            )
+        )
+    if kind == AggKind.LAST_ROW:
+        return AnyArray(
+            _edge_row_core[want_first=False](
+                source, validity, has_null, codes, groups
+            )
+        )
     if kind == AggKind.VAR:
         return AnyArray(
             _var_core[want_std=False](
@@ -4247,9 +4352,12 @@ def agg_type(
     to hand the input type straight back for the reductions that report a value
     the column held.
 
-    Those reductions are four, and the rule is that they are the only ones. A
-    minimum, a maximum, a first and a last answer an element that was in the
-    column, so they answer the column's type. Everything else answers a number
+    Those reductions are six, and the rule is that they are the only ones. A
+    minimum, a maximum, a first, a last and the two row kinds answer an element
+    that was in the column, so they answer the column's type. The row kinds
+    answer it even when the element is missing, because the row is chosen by
+    where it sits and not by what it holds, and a null timestamp is still a
+    timestamp. Everything else answers a number
     about the column: a count, a size and a distinct count are int64 whatever
     they counted, a sum is its accumulator, and the nine that measure a spread
     or an order statistic are float64 whatever they measured. Handing the input
@@ -4675,6 +4783,23 @@ def aggregate_group_strings(
             _text_truth_per_group(col, kind == AggKind.ALL, codes, groups)
         )
 
+    if kind == AggKind.FIRST_ROW or kind == AggKind.LAST_ROW:
+        # The same gather, over a row chosen without asking what it holds. A
+        # group whose chosen row is null appends a null, which is the answer
+        # rather than the absence of one. See #888.
+        var edge = _text_edge_rows_per_group(
+            col, kind == AggKind.FIRST_ROW, codes, groups
+        )
+        var edge_at = edge.unsafe_ptr()
+        var rows = StringBuilder(capacity=groups)
+        for g in range(groups):
+            var row = Int(edge_at.unsafe_offset(g).unsafe_load())
+            if row < 0 or not col.is_valid(row):
+                rows.append_null()
+            else:
+                rows.append(col.unsafe_bytes(row))
+        return AnyArray(rows^.finish())
+
     var wants_edge = kind == AggKind.FIRST or kind == AggKind.LAST
     var wants_extreme = kind == AggKind.MIN or kind == AggKind.MAX
     if not (wants_edge or wants_extreme):
@@ -4744,6 +4869,58 @@ def _text_truth_per_group(
                 flags.unsafe_offset(g).unsafe_store(False)
         elif here:
             flags.unsafe_offset(g).unsafe_store(True)
+    return out^
+
+
+def _text_edge_rows_per_group(
+    col: StringArray,
+    want_first: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[DType.int64]:
+    """Finds each group's first or last row, whatever that row holds.
+
+    `_text_rows_per_group` below is the same idea for the four reductions that
+    look for a value, and the difference is the one #888 turns on: this settles
+    a group on the row it reaches rather than on the first row with something in
+    it, so a group whose first row is null answers null. That makes the loop
+    simpler than the one below, because there is no comparison and no merge to
+    get right: the answer is decided by the first row of the group the walk
+    meets, and a walk in row order meets them in the order that decides it.
+
+    Serial, for the reason `_text_rows_per_group` gives for its own ceiling,
+    and with the same early exit `_edge_row_core` has: once every group has been
+    reached there is nothing left for the rest of the column to say.
+
+    Args:
+        col: The text column.
+        want_first: True for each group's earliest row, False for its latest.
+        codes: One group ordinal per row.
+        groups: How many ordinals there are.
+
+    Returns:
+        A row number per group, or -1 for a group the walk never reached.
+
+    Raises:
+        If the answer column cannot be allocated.
+    """
+    var out = Array[DType.int64](overwritten=groups)
+    var target = out.unsafe_mut_ptr()
+    for g in range(groups):
+        target.unsafe_offset(g).unsafe_store(Int64(-1))
+
+    var at = codes.unsafe_ptr()
+    var rows = len(codes)
+    var filled = 0
+    for step in range(rows):
+        var i = step if want_first else rows - 1 - step
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        if target.unsafe_offset(g).unsafe_load() >= 0:
+            continue
+        target.unsafe_offset(g).unsafe_store(Int64(i))
+        filled += 1
+        if filled == groups:
+            break
     return out^
 
 

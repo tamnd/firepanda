@@ -389,6 +389,68 @@ def test_first_and_last_of_an_all_null_group_are_null() raises:
     assert_false(high.is_valid(1))
 
 
+def edge_rows() raises -> Array[DType.int64]:
+    """Five rows in two groups, each group missing one end and not the other.
+
+    Group 0 is rows 0, 1 and 2, and its first row is null. Group 1 is rows 3 and
+    4, and its last row is null. So a kind that reports the row answers null
+    once at each end, and a kind that looks for a value answers 5 and 3, and no
+    single row shape could tell the two apart at both ends.
+    """
+    var col = ints([0, 5, 7, 3, 0])
+    col.set_null(0)
+    col.set_null(4)
+    return col^
+
+
+def test_the_row_kinds_report_a_null_edge_row_rather_than_skipping_it() raises:
+    # This is #888. DuckDB's `first` and `last` answer the value in the row and
+    # not the first value there is, so the group whose first row is missing
+    # answers missing. `FIRST` and `LAST` below are the other rule, which is
+    # what pandas does and what DuckDB's `any_value` does.
+    var codes = codes_of([0, 0, 0, 1, 1])
+    var early = aggregate_group_any(
+        AnyArray(edge_rows()), AggKind.FIRST_ROW, codes, 2
+    ).as_typed[DType.int64]()
+    var late = aggregate_group_any(
+        AnyArray(edge_rows()), AggKind.LAST_ROW, codes, 2
+    ).as_typed[DType.int64]()
+    assert_false(early.is_valid(0), "group 0 starts on a null row")
+    assert_equal(early[1], 3, "group 1 starts on a row holding 3")
+    assert_equal(late[0], 7, "group 0 ends on a row holding 7")
+    assert_false(late.is_valid(1), "group 1 ends on a null row")
+
+
+def test_the_skipping_kinds_still_skip_the_same_edges() raises:
+    # The control for the test above, over the same five rows. Nothing here
+    # changed and the test is what says so.
+    var codes = codes_of([0, 0, 0, 1, 1])
+    var early = group_first(edge_rows(), codes, 2)
+    var late = group_last(edge_rows(), codes, 2)
+    assert_equal(early[0], 5, "the first value group 0 holds")
+    assert_equal(late[1], 3, "the last value group 1 holds")
+
+
+def test_a_null_edge_row_on_a_float_column_is_a_nan() raises:
+    # The column decides how missing is spelled, the same as it does for the
+    # four kinds above it, so a float answers with a NaN in a row that stays
+    # valid. See #170.
+    var col = floats([0.0, 5.0, 7.0, 3.0, 0.0])
+    col.set_null(0)
+    col.set_null(4)
+    var codes = codes_of([0, 0, 0, 1, 1])
+    var early = aggregate_group_any(
+        AnyArray(col.copy()), AggKind.FIRST_ROW, codes, 2
+    ).as_typed[DType.float64]()
+    var late = aggregate_group_any(
+        AnyArray(col^), AggKind.LAST_ROW, codes, 2
+    ).as_typed[DType.float64]()
+    assert_missing(early, 0, "group 0 starts on a row holding nothing")
+    assert_almost_equal(early[1], 3.0, atol=1e-9)
+    assert_almost_equal(late[0], 7.0, atol=1e-9)
+    assert_missing(late, 1, "group 1 ends on a row holding nothing")
+
+
 def test_an_empty_column_gives_no_groups() raises:
     var out = group_sum(ints([]), codes_of([]), 0)
     assert_equal(len(out), 0)

@@ -702,7 +702,7 @@ def test_a_weak_constant_is_still_weak_when_it_comes_back() raises:
 def test_every_aggregate_is_named_and_reads_back() raises:
     # The reader's table and `AggKind.write_to` are two lists that have to
     # agree, so the test walks every code rather than a sample of them.
-    for code in range(Int(AggKind.SKEW.code) + 1):
+    for code in range(Int(AggKind.LAST_ROW.code) + 1):
         var plan = Plan()
         var t = plan.scan("t", List[String](), 0)
         var fold = plan.exprs.aggregate(
