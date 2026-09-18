@@ -28,8 +28,10 @@ what makes the test worth running rather than what makes it circular.
 
 There is no test here for a file of several row groups, because DuckDB hands
 back chunks of two thousand rows and a fixture that large cannot be checked in
-as hex. The glob test covers the same code path from the other side: two files
-read as one frame is two batches through the same assembler.
+as hex. Two other tests cover that code path from the other side. The glob test
+reads two files as one frame, which is two batches through the same assembler,
+and the group test runs a query over `range` so that the reader's group loop
+goes round ten times, which no fixture here is large enough to make it do.
 
 These tests need libduckdb, which pixi.toml puts in the development environment.
 Without it every one of them fails at the first call with a message saying so,
@@ -292,6 +294,76 @@ def test_a_glob_of_two_files_reads_as_one_frame() raises:
     assert_equal(frame[3].null_count(), 2)
     assert_equal(frame[3].strings()[0], "a")
     assert_equal(frame[3].strings()[6], "a")
+
+
+def test_a_result_read_in_groups_holds_what_one_group_holds() raises:
+    # The reader assembles a group of chunks at a time rather than the whole
+    # result, so a read of any size worth the trouble goes round that loop more
+    # than once, and the file fixtures here are all one chunk and never do. The
+    # rows come from `range` rather than from a file because what is under test
+    # is the loop and not the decoder, and twenty thousand rows of it is ten
+    # chunks of DuckDB's two thousand.
+    #
+    # The comparison is against the same query read in one group rather than
+    # against a rule, so a group that wrote its rows at the wrong offset or lost
+    # a null on a boundary fails it row for row. The nulls are every fifth row
+    # and the chunk is two thousand, so a boundary lands on a null and on a
+    # valid row over the ten groups.
+    var session = Session()
+    var sql = String(
+        "SELECT i::BIGINT AS n,",
+        " ('value-' || (i % 97)::VARCHAR) AS s,",
+        " CASE WHEN i % 5 = 0 THEN NULL ELSE i::DOUBLE * 1.5 END AS d",
+        " FROM range(20000) t(i)",
+    )
+    var whole = session.run(sql, group_rows=1 << 30)
+    var split = session.run(sql, group_rows=2048)
+
+    # Both come back in one chunk. That is the point of the stacking step and
+    # it is why this test can compare them with the ordinary accessors at all.
+    assert_equal(len(whole.columns[0].chunks), 1)
+    assert_equal(len(split.columns[0].chunks), 1)
+    assert_equal(len(split), len(whole))
+    assert_equal(split.width(), whole.width())
+
+    # Every column is taken out of its frame once. A multi chunk column is
+    # copied by `__getitem__` rather than borrowed, so asking for one inside the
+    # loop below would copy twenty thousand rows twenty thousand times.
+    var ours = split[0].as_typed[DType.int64]().copy()
+    var theirs = whole[0].as_typed[DType.int64]().copy()
+    var texts = split[1].strings().copy()
+    var others = whole[1].strings().copy()
+    var mine = split[2].copy()
+    var yours = whole[2].copy()
+    var wrong = -1
+    for i in range(len(whole)):
+        if ours[i] != theirs[i] or texts[i] != others[i]:
+            wrong = i
+            break
+        if mine.is_valid(i) != yours.is_valid(i):
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("the two reads differ at row ", wrong))
+    assert_equal(mine.null_count(), yours.null_count())
+    assert_equal(mine.null_count(), 4000)
+
+
+def test_a_group_asked_for_in_morsels_is_a_whole_number_of_them() raises:
+    # A group boundary is a chunk boundary, so a group that is not a whole
+    # number of morsels would put a short chunk at the end of every group and
+    # the caller asked for morsels. The group here is smaller than the morsel,
+    # which is the awkward direction, and the answer to it is one morsel a
+    # group rather than a morsel cut into pieces.
+    var session = Session()
+    var sql = String(
+        "SELECT i::BIGINT AS n FROM range(20000) t(i)",
+    )
+    var frame = session.run(sql, morsel_rows=4096, group_rows=2048)
+    assert_equal(len(frame), 20000)
+    assert_equal(len(frame.columns[0].chunks), 5)
+    for i in range(4):
+        assert_equal(len(frame.columns[0].chunks[i]), 4096)
+    assert_equal(len(frame.columns[0].chunks[4]), 3616)
 
 
 comptime MONEY = "/tmp/firepanda_parquet_money.parquet"
