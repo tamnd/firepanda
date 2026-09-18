@@ -18,12 +18,12 @@ packed into words in an order that makes equality one compare and makes ordering
 wrong, so it goes to the byte loop.
 
 The constant form hoists what it can out of the loop. A short constant is turned
-into a view once, before any row is read, and then the rows are taken four at a
-time: four views is a cache line, a view is two 64-bit words, and one exclusive
-or against a register holding four copies of the constant settles the whole line
-with nothing loaded but the views themselves. That is the shape a filter on a
-status column or a country code has, and it is the case worth being fast. The
-tail, which is at most three rows, goes one at a time.
+into a view once, before any row is read, and then the rows are taken a block at
+a time: a view is two 64-bit words, and one exclusive or against a register
+holding a copy of the constant per row settles the whole block with nothing
+loaded but the views themselves. That is the shape a filter on a status column
+or a country code has, and it is the case worth being fast. The tail, which is
+shorter than a block, goes one row at a time.
 
 Comparison against a null is null, exactly as it is for numbers, and it is
 handled the same way: the loop writes whatever falls out and the repair at the
@@ -178,7 +178,7 @@ def compare_text_const[
                     dst.unsafe_offset(i).unsafe_store(block)
                     i += EQUAL_BLOCK
 
-                # At most three rows, since the block is four.
+                # Fewer rows than a block, so at most `EQUAL_BLOCK - 1`.
                 while i < stop:
                     var same = views_equal_short(a.view(i), probe)
                     comptime if op == CMP_NE:

@@ -235,11 +235,20 @@ def views_equal_short(a: StringView, b: StringView) -> Bool:
     )
 
 
-comptime EQUAL_BLOCK = 4
+comptime EQUAL_BLOCK = 8
 """Short views one SIMD pass of `StringArray.equal_short_block` settles.
 
-Four views is sixty four bytes, which is a cache line on every machine this
-runs on and is eight lanes of the widest register there is reason to ask for.
+Eight views is a hundred and twenty eight bytes, which is two cache lines on
+every machine this runs on, and sixteen lanes of uint64, which is more lanes
+than any register here holds. The compiler splits it, and splitting it is the
+point: the halves have nothing to say to each other, so the second one issues
+while the first is still in flight.
+
+Measured on a 13900K at six million rows with four builds a side run in turn,
+`text/equal_constant_short` reads 196.6, 195.3, 227.1 and 270.8 microseconds
+at four views a block and 188.2, 198.6, 192.8 and 190.3 at eight. Sixteen was
+tried as well and reads a little under eight, 187 to 193 over four rounds,
+which is not enough to be worth a two hundred and fifty six byte load.
 """
 
 

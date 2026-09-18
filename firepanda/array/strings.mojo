@@ -176,12 +176,11 @@ struct StringArray(Copyable, Movable, Sized):
 
         A view is sixteen bytes and a short string is all sixteen of them, zero
         padded, so equality is those bytes being equal and nothing has to be
-        read out of the payload. Four views is a cache line, and the exclusive
-        or below turns the whole line into one register that is zero in the
-        lanes that matched.
+        read out of the payload. The exclusive or below turns a whole block of
+        them into lanes that are zero where the element matched.
 
-        The deinterleave is what turns eight lanes of sixteen rows' halves back
-        into four answers: a view's two words sit next to each other, so the
+        The deinterleave is what turns two lanes an element back into one
+        answer an element: a view's two words sit next to each other, so the
         even lanes are every view's first word and the odd lanes are every
         view's second, and a view matched when both of its lanes are zero.
 

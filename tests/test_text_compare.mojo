@@ -35,6 +35,7 @@ from firepanda.array.strings import (
     StringBuilder,
     strings_from_list,
 )
+from firepanda.array.strview import EQUAL_BLOCK
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
@@ -206,14 +207,16 @@ def test_a_short_constant_compares_against_every_row() raises:
 
 
 def test_a_short_constant_is_compared_a_block_at_a_time() raises:
-    """Four rows at once and then a tail of at most three, one at a time.
-    A column whose height is not a multiple of four is what says whether the
-    two halves of that loop agree, so this one is twenty three rows: five
-    blocks and a tail of three, with a match in the first block, a match in the
-    tail, a long element, and a null."""
+    """A block of rows at once and then a tail shorter than a block, one at a
+    time. A column whose height is not a whole number of blocks is what says
+    whether the two halves of that loop agree, so this one is two blocks and a
+    tail one row short of a third, and the checks below insist the fixture puts
+    a match in the first block, a match in the tail, a long element and a null
+    somewhere in it whatever the block width is."""
+    var rows = 3 * EQUAL_BLOCK - 1
     var values = List[String]()
     var present = List[Bool]()
-    for i in range(23):
+    for i in range(rows):
         if i % 5 == 2:
             values.append(String("ab"))
             present.append(True)
@@ -235,19 +238,33 @@ def test_a_short_constant_is_compared_a_block_at_a_time() raises:
     var got = compare_text_const[CMP_EQ](a, word.as_bytes())
     var flipped = compare_text_const[CMP_NE](a, word.as_bytes())
 
-    assert_equal(len(got), 23, "height")
-    assert_equal(got.null_count(), 2, "the nulls the fixture asked for")
-    var hits = 0
-    for i in range(23):
+    assert_equal(len(got), rows, "height")
+    var nulls = 0
+    var early = 0
+    var late = 0
+    var longs = 0
+    for i in range(rows):
         assert_equal(got.is_valid(i), present[i], "validity at " + String(i))
         if not present[i]:
+            nulls += 1
             continue
+        if values[i].byte_length() > 12:
+            longs += 1
         var want = values[i] == word
         assert_equal(Bool(got[i]), want, "eq at " + String(i))
         assert_equal(Bool(flipped[i]), not want, "ne at " + String(i))
-        if want:
-            hits += 1
-    assert_equal(hits, 5, "the matches the fixture asked for")
+        if not want:
+            continue
+        if i < EQUAL_BLOCK:
+            early += 1
+        elif i >= 2 * EQUAL_BLOCK:
+            late += 1
+
+    assert_equal(got.null_count(), nulls, "the nulls the fixture put in")
+    assert_true(nulls > 0, "the fixture has a null in it")
+    assert_true(longs > 0, "the fixture has a long element in it")
+    assert_true(early > 0, "the fixture matches inside the first block")
+    assert_true(late > 0, "the fixture matches in the tail")
 
 
 def test_a_long_constant_compares_against_every_row() raises:
