@@ -63,7 +63,13 @@ from .ast import (
     BOUND_UNBOUNDED_FOLLOWING,
     BOUND_UNBOUNDED_PRECEDING,
     CALL_DISTINCT,
+    CALL_EXPORT_STATE,
+    CALL_IGNORE_NULLS,
+    CALL_RESPECT_NULLS,
     CALL_STAR,
+    CALL_WITHIN_GROUP,
+    call_flags,
+    call_sorts,
     CLAUSE_FROM,
     CLAUSE_GROUP,
     CLAUSE_HAVING,
@@ -537,23 +543,23 @@ def _write_step(
         # Phase 0 is the name and the opening parenthesis, and phase 1 onwards
         # walks the argument run, one argument per phase. The same shape does
         # the list, the struct and the two IN forms below.
-        var count = ast.length(item.children)
+        var flags = call_flags(item.a)
+        var count = ast.length(item.children) - call_sorts(item.a)
         if phase == 0:
             if ast.length(item.payload) == 0:
                 raise Error("a function call with no name on it")
             out += _names(ast, item.payload, grammar, calling=True)
             out += "("
-            if item.a & CALL_STAR != 0:
-                out += "*)"
-                _write_over(ast, item.b, grammar, out)
+            if flags & CALL_STAR != 0:
+                out += "*"
+                _write_call_tail(ast, node, grammar, out)
                 return
-            if item.a & CALL_DISTINCT != 0:
+            if flags & CALL_DISTINCT != 0:
                 out += "DISTINCT "
             stack.append(_Step(node, 1))
             return
         if phase == count + 1:
-            out += ")"
-            _write_over(ast, item.b, grammar, out)
+            _write_call_tail(ast, node, grammar, out)
             return
         var argument = phase - 1
         if argument > 0:
@@ -872,6 +878,76 @@ def _write_step(
         return
 
     raise Error(String("the printer has no case for expression kind ", kind))
+
+
+def _write_call_tail(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends everything a call writes after its last argument.
+
+    The order is the grammar's: the call's own `ORDER BY` and its null
+    treatment are inside the parentheses, and `WITHIN GROUP`, `EXPORT_STATE`
+    and `OVER` are after them. The `ORDER BY` entries are the same run either
+    way, so the flag is what says which side of the closing parenthesis they go
+    on.
+
+    Recursive rather than a phase of the caller's stack, for the reason a
+    window is: getting here at all costs a parenthesis in the query text and
+    the matcher caps how many of those there can be.
+
+    Args:
+        ast: The AST.
+        node: The `EXPR_FUNCTION`.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If something under the call could not be printed.
+    """
+    ref item = ast.exprs[Int(node)]
+    var flags = call_flags(item.a)
+    var sorts = call_sorts(item.a)
+    var count = ast.length(item.children) - sorts
+    var written = count != 0 or flags & CALL_STAR != 0
+    if sorts != 0 and flags & CALL_WITHIN_GROUP == 0:
+        out += " ORDER BY " if written else "ORDER BY "
+        _write_call_order(ast, node, grammar, out)
+        written = True
+    if flags & CALL_IGNORE_NULLS != 0:
+        out += " IGNORE NULLS" if written else "IGNORE NULLS"
+    elif flags & CALL_RESPECT_NULLS != 0:
+        out += " RESPECT NULLS" if written else "RESPECT NULLS"
+    out += ")"
+    if sorts != 0 and flags & CALL_WITHIN_GROUP != 0:
+        out += " WITHIN GROUP (ORDER BY "
+        _write_call_order(ast, node, grammar, out)
+        out += ")"
+    if flags & CALL_EXPORT_STATE != 0:
+        out += " EXPORT_STATE"
+    _write_over(ast, item.b, grammar, out)
+
+
+def _write_call_order(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends the entries of a call's own `ORDER BY`, the words already out.
+
+    Args:
+        ast: The AST.
+        node: The `EXPR_FUNCTION`.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If an entry could not be printed.
+    """
+    ref item = ast.exprs[Int(node)]
+    var sorts = call_sorts(item.a)
+    var count = ast.length(item.children) - sorts
+    for i in range(sorts):
+        if i > 0:
+            out += ", "
+        _write_order(ast, ast.at(item.children, count + i), grammar, out)
 
 
 def _write_over(

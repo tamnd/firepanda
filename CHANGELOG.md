@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads the four things a call may carry beside its arguments
+
+`WITHIN GROUP (ORDER BY x)`, an `ORDER BY` written inside the parentheses, `IGNORE NULLS` or `RESPECT NULLS`, and `EXPORT_STATE` used to be refused by the transformer. 620 statements in DuckDB's corpus stopped there, and 604 of them now round trip, the other 16 holding a `COLUMNS`, a field access, an escaped string or a `FILTER` on a name that has no fold. All four read, all four print back where they were written, and all four are refused in lowering, which is the stage that has something to say about them: each one asks the fold itself for something firepanda's folds do not do, an order to see the rows in, a rule for what to do with a null, or the fold's own state instead of its answer.
+
+The two `ORDER BY` spellings share one run of entries. DuckDB turns down a call that writes both, saying "cannot use multiple ORDER BY clauses with WITHIN GROUP", so a flag for which one was written is the whole of what the node needs and the printer puts the entries back on the side of the closing parenthesis they came from. The entries go on the end of the argument run and the count of them goes in the top half of the call's flag field, packed the way a window frame's four tags already were.
+
+That makes the argument run a run with two parts in it, so everything that walks a call's arguments now stops where the sort entries start. Eight of them are in `classify.mojo` and `plan.mojo` and the ninth is the printer arm that writes the call out. A sort entry is a statement node and an argument is an expression node, so a walker that ran off the end would be reading one arena with the other one's indices, which is the kind of mistake that gives a wrong answer rather than an error.
+
+`f(ignore)` is why the four groups inside the parentheses are told apart by grammar rule and not by first word. `IGNORE` and `RESPECT` are words a column may be called, and a reader that looks at the word would take that column for a null treatment and drop it.
+
 ### Added: SQL reads an argument passed by name
 
 `f(a := 1)` and `f(a => 1)` used to be refused by the transformer. 346 statements in DuckDB's corpus stopped there, and 332 of them now round trip, the other 14 having a lambda or a `COLUMNS` in them as well. The three that account for most of them are `struct_pack`, `union_value` and `unnest`, which take the name as part of what they build rather than as a setting, and the rest are spread over table functions such as `read_csv` and over macros somebody defined in the test itself. They now build a node with the name and the value under it, print back in the spelling that was written, and are refused in lowering, where the catalog that could say whether the function has a parameter by that name lives.

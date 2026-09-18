@@ -308,9 +308,10 @@ def sql_support() -> List[Refusal]:
             "call-modifier",
             "{} on a call",
             (
-                "A window specification and an aggregate filter are read now."
-                " WITHIN GROUP and EXPORT_STATE change what a call reads, which"
-                " is the rest of this stage and is not in the AST yet."
+                "Both read and print back where they were written. WITHIN GROUP"
+                " gives the fold an order to see the rows in and EXPORT_STATE"
+                " asks for its state rather than its answer, and firepanda has"
+                " no fold that can be told either."
             ),
             STAGE_ISSUE,
         ),
@@ -318,9 +319,10 @@ def sql_support() -> List[Refusal]:
             "call-argument",
             "{} inside a call",
             (
-                "An ordered aggregate and a null treatment both change what the"
-                " call means, so firepanda refuses them rather than dropping"
-                " them."
+                "Both read and print back where they were written. An ordered"
+                " aggregate gives the fold an order to see the rows in and a"
+                " null treatment gives it a rule for what to do with a null,"
+                " and firepanda has no fold that can be told either."
             ),
             STAGE_ISSUE,
         ),

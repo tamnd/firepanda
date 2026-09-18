@@ -13,7 +13,7 @@ no exclusion and `EXCLUDE NO OTHERS` are the same thing and only the second was
 written down.
 """
 
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+from std.testing import TestSuite, assert_equal, assert_true
 
 from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import (
@@ -326,16 +326,22 @@ def test_an_expression_bound_is_an_expression() raises:
     )
 
 
-def test_the_other_call_modifiers_still_refuse_by_name() raises:
-    # Two of the four are implemented and the other two have to keep saying so
-    # rather than being silently ignored now that the loop over them no longer
-    # stops at the first.
+def test_the_other_call_modifiers_read_beside_the_window() raises:
+    # All six things a call may carry after its name are read in the one loop,
+    # and the loop no longer stops at the first, so this checks that the two
+    # that go outside the parenthesis do not eat each other.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="WITHIN"):
-        _ = _printed(
+    assert_equal(
+        _printed(
             "SELECT quantile(a) WITHIN GROUP (ORDER BY a) FROM t", g, rules
-        )
+        ),
+        "SELECT quantile(a) WITHIN GROUP (ORDER BY a) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT sum(a) EXPORT_STATE OVER () FROM t", g, rules),
+        "SELECT sum(a) EXPORT_STATE OVER () FROM t",
+    )
 
 
 def test_a_filter_next_to_an_over_is_read_beside_it() raises:
