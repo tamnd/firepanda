@@ -77,6 +77,17 @@ What it costs is the bitmap, which is one bit per instruction per position and s
 The order is the correctness argument. A split pushes its second arm and then its first, so the first arm comes off the stack first and the path the pattern prefers is the path that is followed. Attempts start at one position after another from the cursor, and the first position that matches wins. Those two together are leftmost first, which is what the machine does and what both RE2 and Python do. The bitmap is deliberately not cleared between attempts at different positions, which is what keeps the whole scan linear and is sound for the same reason the memo is: nothing in the program reads where the attempt began.
 
 The scans that call it are the entry above, and issue #863 has the order the rest go in.
+### Changed: a parallel text gather cuts its work by the slice rather than by the threshold that started it
+
+`_take_strings` had one constant doing two jobs. `PARALLEL_TAKE_ROWS` is the height at which a gather is worth splitting at all, and the split then cut the work into pieces of that same size, which means the second worker only arrives at twice the threshold and the thirty second only at thirty two times it. A column of 114,705 rows took the parallel route, did a counting pass to work out where each worker's payload goes, and then ran the whole gather on one worker.
+
+That height is not arbitrary. It is what TPC-H q10's joins emit at sf1, and the three of them were 25.6 ms of the query's 53.8. `PARALLEL_MIN_TAKE_SLICE` is now a separate constant at 1 << 15, so the same column gets three workers, and on a 13900K the join against lineitem went from 11.9 ms to 8.8 and the join against nation from 6.9 to 4.1, with the whole query from 55.8 ms to 44.8. The factorize has had this distinction since it was written, in `PARALLEL_MIN_SLICE` against `PARALLEL_ROWS`, and the take used to have it too until the two were merged when the morsel walk landed.
+
+The slice has a floor rather than an edge and the floor is a few workers wide, not all of them. Cutting finer than 1 << 15 gives the work back: on the same two joins the ladder 1 << 16, 1 << 15, 1 << 14, 1 << 13, 1 << 12 reads 11.9, 8.8, 7.1, 8.1, 11.9 against lineitem and 6.9, 4.1, 4.2, 5.1, 6.8 against nation. A string gather's output write is sequential inside a worker and starts at that worker's own base, so the number of places being written at once is the number of workers, and past a handful of them the write combining loses more than the extra hands gain.
+
+The fixed width gather was measured the same way and left alone. Lowering `TAKE_MORSEL_ROWS` to 1 << 15 on its own takes the query from 55.8 ms to 50.9, which looks like something until the string take is fixed as well, and then it is 45.6 against 44.8 with the morsel untouched, which is inside the run to run spread. A fixed width gather writes at a computed offset and does not care how many workers are open. Its docstring had been arguing for eight thousand rows a morsel while the constant said sixty five thousand, left over from the merge, and now says what was measured.
+
+Issue #79.
 
 ### Changed: a group by on several keys factorizes them one per worker
 

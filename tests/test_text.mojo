@@ -34,6 +34,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.select import _take_strings
 
 
 def long_text(seed: String) -> String:
@@ -195,6 +196,49 @@ def test_a_text_take_past_the_split_carries_the_payload_across() raises:
             break
     assert_equal(wrong, -1, String("a gathered value is wrong at row ", wrong))
     assert_equal(taken.null_count(), 1)
+
+
+def test_a_text_take_on_several_workers_gathers_what_one_worker_gathers() raises:
+    # The two tests above are each one worker wide, because the slice was
+    # `PARALLEL_TAKE_ROWS` and they are barely past it. `PARALLEL_MIN_TAKE_SLICE`
+    # is half of it, so this height is four workers and a partial fifth, which is
+    # the first time the prefix sum over the workers' payload totals has more
+    # than one term to add. A worker given the wrong base would write its rows
+    # over another worker's, and both routes below are handed the same indices so
+    # the comparison is row for row rather than against a rule.
+    var builder = StringBuilder(capacity=2048)
+    for i in range(2048):
+        if i % 4 == 0:
+            builder.append(String("a-long-value-number-", i).as_bytes())
+        elif i % 4 == 1:
+            builder.append(String("s", i).as_bytes())
+        else:
+            builder.append_null()
+    var col = builder^.finish()
+
+    var picks = List[Int](capacity=147_457)
+    for i in range(147_457):
+        picks.append((i * 2039) % 2048)
+    picks[32_768] = -1
+    picks[98_304] = -1
+
+    var spread = _take_strings(col, picks, True)
+    var alone = _take_strings(col, picks, False)
+    assert_equal(len(spread), len(picks))
+    assert_equal(len(alone), len(picks))
+
+    var wrong = -1
+    for i in range(len(picks)):
+        if spread.is_valid(i) != alone.is_valid(i):
+            wrong = i
+            break
+        if spread.is_valid(i) and spread.unsafe_bytes(i) != alone.unsafe_bytes(
+            i
+        ):
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("the two routes differ at row ", wrong))
+    assert_equal(spread.null_count(), alone.null_count())
 
 
 def test_take_past_the_end_is_an_error_rather_than_a_null() raises:

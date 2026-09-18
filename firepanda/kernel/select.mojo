@@ -69,6 +69,32 @@ nanoseconds and the split pays off sooner than it does for a loop over
 consecutive memory. Half of `join`'s threshold, and picked the same way.
 """
 
+comptime PARALLEL_MIN_TAKE_SLICE = 1 << 15
+"""Gathered rows a worker gets at least, once the string take is parallel.
+
+A floor on the whole column and a floor on one worker's slice are different
+rules, the way `PARALLEL_MIN_SLICE` and `PARALLEL_ROWS` are different rules in
+the factorize. `PARALLEL_TAKE_ROWS` above says when the split is worth starting
+at all, and this says how finely to cut what it starts on, and using one number
+for both means the first worker only arrives at twice the floor and every core
+only at thirty two times it. TPC-H q10's joins emit 114,705 rows, which is one
+worker under that arithmetic and three under this one.
+
+Measured on a 13900K against q10's three joins at sf1, medians of seven with two
+sessions a setting, the slice moved and nothing else. The join against lineitem
+is 11.9 ms at 1 << 16, 8.8 at 1 << 15, and then back up: 7.1 at 1 << 14, 8.1 at
+1 << 13 and 11.9 at 1 << 12. The join against nation is 6.9, 4.1, 4.2, 5.1 and
+6.8 on the same ladder. The whole query is 55.8 ms, 44.8, 46.8, 46.4 and 51.3.
+
+So it has a floor rather than an edge, and the floor is a few workers wide
+rather than all of them. A string gather's output write is sequential inside a
+worker and starts at that worker's own base, so the cores are writing to as many
+places at once as there are cores, and past a handful of them the write
+combining does worse than the extra hands do better. That is an argument for a
+slice and not for a worker count, since it is the number of open write streams
+that hurts and a taller column wants both more workers and the same slice.
+"""
+
 comptime TAKE_MORSEL_ROWS = 1 << 16
 """Output rows a worker takes at a time once the gather is on every core.
 
@@ -76,11 +102,19 @@ A multiple of sixty four, which is what makes the morsel boundaries land on
 validity word boundaries and is the only coupling between this number and the
 loop below.
 
-Small, because the cost of a gathered row is the cost of the cache miss it takes
-and that is not the same for every row: indices that walk a small region are hot
-and indices that walk the whole column are not, and a join or a sort produces
-both in the same call. Eight thousand rows is around ten microseconds of work,
-which is four orders of magnitude more than the atomic that hands it out.
+Bigger than a fixed width gather's cost per row would suggest, because what a
+morsel buys is not throughput, it is balance: the cost of a gathered row is the
+cost of the cache miss it takes and that is not the same for every row, since
+indices that walk a small region are hot and indices that walk the whole column
+are not, and a join or a sort produces both in the same call.
+
+Lowering it to 1 << 15, the way `PARALLEL_MIN_TAKE_SLICE` lowers the string
+take's slice, was measured on q10's joins and is not worth having. On its own it
+takes the whole query from 55.8 ms to 50.9, which looks like something until the
+string take is fixed as well, and then it is 45.6 against 44.8 with the morsel
+left alone, which is inside the run to run spread. The string take's slice was
+the whole of it, and this is where it is because a fixed width gather writes at
+a computed offset and does not care how many workers are open at once.
 """
 
 comptime PARALLEL_FILTER_ROWS = 1 << 16
@@ -273,6 +307,10 @@ def _take_strings(
     is skipped when the column has no payload at all, which is every column of
     labels and is the case a group by's key gather actually hits.
 
+    How finely to cut is `PARALLEL_MIN_TAKE_SLICE` and not `PARALLEL_TAKE_ROWS`,
+    which is only the question of whether to cut at all. They were one number
+    for a while and its docstring has what that cost.
+
     Args:
         col: The column to gather from.
         indices: The positions to gather. A negative index produces a null, as
@@ -308,7 +346,7 @@ def _take_strings(
                 builder.append(col.unsafe_bytes(at))
         return builder^.finish()
 
-    var most = n // PARALLEL_TAKE_ROWS
+    var most = n // PARALLEL_MIN_TAKE_SLICE
     if workers > most:
         workers = most
     var bounds = _take_bounds(n, workers)
