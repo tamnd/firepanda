@@ -21,6 +21,7 @@ would answer this column correctly for every pattern made of ASCII.
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.exec import MORSEL_ROWS
 from firepanda.kernel.regex.column import text_extract_regex
 from firepanda.kernel.regex.method import METHOD_EXTRACT, program_for
 from firepanda.kernel.regex.program import Program
@@ -90,6 +91,70 @@ def read(a: StringArray, at: Int) -> String:
     if not a.is_valid(at):
         return String("null")
     return String(StringSlice(unsafe_from_utf8=a.unsafe_bytes(at)))
+
+
+def tiled(
+    rows: List[String], nulls: List[Int], times: Int
+) raises -> StringArray:
+    """The same rows over and over, for a column taller than one morsel.
+
+    `column` walks the null positions once per row, which is fine for the eight
+    row columns above and is a second pass over a hundred thousand rows here, so
+    this one takes the pattern of rows and repeats it instead.
+
+    Args:
+        rows: The text of every row of one tile.
+        nulls: Which rows of the tile are missing.
+        times: How many tiles.
+
+    Returns:
+        The column, `times` times as tall as the tile.
+
+    Raises:
+        Error: If the builder cannot allocate.
+    """
+    var built = StringBuilder(capacity=len(rows) * times)
+    for _ in range(times):
+        for i in range(len(rows)):
+            var missing = False
+            for at in nulls:
+                if at == i:
+                    missing = True
+            if missing:
+                built.append_null()
+            else:
+                built.append(rows[i].as_bytes())
+    return built^.finish()
+
+
+def same(a: StringArray, i: Int, b: StringArray, j: Int) -> Bool:
+    """Whether two rows of two columns say the same thing.
+
+    `read` builds a string per call, which is what makes a failure readable and
+    is more than the tall column below wants to pay a hundred thousand times, so
+    the comparison there goes byte by byte instead.
+
+    Args:
+        a: One column.
+        i: The row of it.
+        b: The other column.
+        j: The row of that one.
+
+    Returns:
+        True if both rows are missing, or both hold the same bytes.
+    """
+    if a.is_valid(i) != b.is_valid(j):
+        return False
+    if not a.is_valid(i):
+        return True
+    var x = a.unsafe_bytes(i)
+    var y = b.unsafe_bytes(j)
+    if len(x) != len(y):
+        return False
+    for k in range(len(x)):
+        if x[k] != y[k]:
+            return False
+    return True
 
 
 def test_a_group_comes_back_as_a_column_of_what_it_held() raises:
@@ -242,6 +307,44 @@ def test_syntax_only_re2_refuses_is_compiled_rather_than_refused() raises:
     var a = column(["ab"], [])
     var out = text_extract_regex(a, compiled("(?#note)(a)"))
     assert_equal(read(out[0], 0), "a")
+
+
+def test_extracting_past_one_morsel_says_what_one_morsel_said() raises:
+    """A column that crosses the morsel split answers what the same rows answer
+    inside one morsel. The kernel builds a payload per morsel per group and puts
+    them end to end afterwards, so a row past the split whose group is too long
+    to live inside its view is reading an offset that was moved, and the tile
+    below holds one of those in each of the two groups. The other rows are the
+    three ways a group comes back missing, which is what would go wrong if the
+    validity of one morsel were written over the validity of another."""
+    var rows: List[String] = [
+        "abcdefghijklmnopq1234567890123",
+        "ab2",
+        "cd",
+        "999",
+        "",
+    ]
+    var nulls: List[Int] = [4]
+    var program = compiled("([a-z]+)(\\d+)?")
+    var short = text_extract_regex(tiled(rows, nulls, 1), program)
+    assert_equal(read(short[0], 0), "abcdefghijklmnopq")
+    assert_equal(read(short[1], 0), "1234567890123")
+    assert_equal(read(short[1], 2), "null")
+    assert_equal(read(short[0], 3), "null")
+    assert_equal(read(short[0], 4), "null")
+
+    var times = MORSEL_ROWS // len(rows) + 2
+    var a = tiled(rows, nulls, times)
+    assert_true(len(a) > MORSEL_ROWS)
+    var tall = text_extract_regex(a, program)
+    assert_equal(len(tall), len(short))
+    for g in range(len(tall)):
+        assert_equal(len(tall[g]), len(a))
+        var wrong = 0
+        for i in range(len(tall[g])):
+            if not same(tall[g], i, short[g], i % len(rows)):
+                wrong += 1
+        assert_equal(wrong, 0, String("rows disagreeing in group ", g))
 
 
 def main() raises:
