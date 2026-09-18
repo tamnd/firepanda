@@ -36,6 +36,18 @@ A dotted name in front of parentheses is not this. `main.upper('x')` is a call t
 
 The `method-call` entry has left the refusal table, which is the first time an entry has left it. The constants after it moved down by one. The numbers were always an index into that list and nothing outside the file keeps one, so what a caller matches on is the feature name and that has not changed.
 
+### Changed: a grouped distinct count reads a sorted key's groups where they lie instead of copying them
+
+A grouped distinct count lays every group's values out in a slab so that a group's rows sit next to each other and can be sorted, and building that slab is a count pass, a prefix sum and a scatter. When the group by walked a sorted key, the rows of a group already do sit next to each other, and the slab is a copy of the column into the order it was already in.
+
+The ordinals say so and asking them costs almost nothing. A walk over a sorted key hands down ordinals that never fall from one row to the next, so one SIMD pass comparing each block against itself shifted by a row answers the question, and it stops at the first pair out of order, which on ordinals from a hash table is a handful of rows. When the answer is yes each worker turns its range of groups into a range of rows with two binary searches and counts each group's distinct values where they lie, with the same pairwise count for a short group and the same sort for a long one that the slab route uses.
+
+Measured on a 13900K, TPC-H sf1 in memory, three rounds in ABBA order with nine runs a round, against a main that already has the sorted key group by and the short group distinct count in it. q21 goes from 0.118, 0.060, 0.060, 0.062, 0.061 and 0.060 seconds to 0.039, 0.040, 0.041, 0.041, 0.041 and 0.041, which is 1.48 times on the medians. The 0.118 is the first reading of the run and the whole of that round is slow rather than that one query: q18 reads 0.037 in it against 0.022 everywhere else and q3 reads 0.026 against 0.023, so it is the machine settling and not the branch. The other five base readings sit between 0.060 and 0.062 and do not touch the branch side at all.
+
+q3, q16 and q18 are the controls and all three are flat, at 0.023 against 0.023, 0.018 against 0.018 and 0.023 against 0.022. q16 is the useful one, because it is the other distinct count in the set and it reaches the new question rather than dodging it. It groups on three keys, so there is no walk, so its ordinals are not runs, and it is unmoved, which says the check costs nothing on the case that fails it.
+
+The answer does not change either way and the two routes are checked against each other on a fixture that spans both. Issue #79.
+
 ### Changed: a group short enough counts its distinct values without sorting them
 
 A grouped distinct count lays each group's values out in a slab, sorts each group's stretch of it and counts the runs. Sorting is the right shape for a group that is long enough to pay for one and most groups are not. TPC-H has one to seven lines per order, so the loop was calling a general sort on four elements six million times and reading back a run length of one.
