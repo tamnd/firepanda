@@ -490,10 +490,70 @@ def test_a_subquery_in_an_expression_reaches_the_statement_arena() raises:
 def test_a_call_carries_the_window_that_over_names() raises:
     # The window itself is tested in `test_sql_window.mojo`. This is here for
     # the call side of it, since `OVER` used to be one of the four call
-    # modifiers that refused and the other three still do.
+    # modifiers that refused and two of them still do.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(_printed("sum(a) OVER ()", g, rules), "sum(a) OVER ()")
+
+
+def test_a_filter_becomes_a_case_around_the_argument() raises:
+    # The clause does not survive the transform. A fold that passes over a null
+    # cannot tell a row that was taken away from one handed to it as a null, so
+    # the two spell the same question and only one of them needs a node.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("sum(a) FILTER (WHERE b > 1)", g, rules),
+        "sum(CASE WHEN (b > 1) THEN a END)",
+    )
+    assert_equal(
+        _printed("sum(a) FILTER (b > 1)", g, rules),
+        "sum(CASE WHEN (b > 1) THEN a END)",
+    )
+
+
+def test_a_filter_on_a_star_count_counts_a_one_instead() raises:
+    # There is no argument to put under the `CASE`, and counting a constant on
+    # the rows the predicate keeps is counting those rows.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("count(*) FILTER (WHERE b > 1)", g, rules),
+        "count(CASE WHEN (b > 1) THEN 1 END)",
+    )
+
+
+def test_a_filter_keeps_the_distinct_and_the_window_beside_it() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("count(DISTINCT a) FILTER (WHERE b > 1)", g, rules),
+        "count(DISTINCT CASE WHEN (b > 1) THEN a END)",
+    )
+    assert_equal(
+        _printed("sum(a) FILTER (WHERE b > 1) OVER ()", g, rules),
+        "sum(CASE WHEN (b > 1) THEN a END) OVER ()",
+    )
+
+
+def test_a_filter_on_something_it_cannot_be_rewritten_into_refuses() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="FILTER on upper"):
+        _ = _printed("upper(a) FILTER (WHERE b > 1)", g, rules)
+    with assert_raises(contains="FILTER on first"):
+        _ = _printed("first(a) FILTER (WHERE b > 1)", g, rules)
+    with assert_raises(contains="FILTER on last"):
+        _ = _printed("last(a) FILTER (WHERE b > 1)", g, rules)
+    with assert_raises(contains="FILTER on any_value"):
+        _ = _printed("any_value(a) FILTER (WHERE b > 1)", g, rules)
+
+
+def test_the_two_call_modifiers_left_still_refuse() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="WITHIN on a call"):
+        _ = _printed("quantile(a, 0.5) WITHIN GROUP (ORDER BY a)", g, rules)
 
 
 def test_an_ordered_aggregate_refuses() raises:

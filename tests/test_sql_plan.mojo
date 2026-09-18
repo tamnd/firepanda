@@ -307,6 +307,24 @@ def test_a_group_by_puts_the_keys_and_the_folds_in_one_node() raises:
     )
 
 
+def test_a_filter_on_a_fold_reaches_the_plan_as_a_conditional() raises:
+    # The clause is gone by the time the plan is built, so what `EXPLAIN` prints
+    # is the conditional it became rather than the words that were written.
+    # DuckDB prints the clause instead, which is the one place this diverges,
+    # and the rows are the same either way. The column the answer comes back
+    # under is written by the AST printer and the fold is written by the plan
+    # printer, which is why the same expression is spelled two ways in one
+    # line, and is the naming work PR #807 left behind it.
+    assert_equal(
+        _plan("SELECT g, sum(a) FILTER (WHERE b > 1) FROM t GROUP BY g"),
+        (
+            "PROJECT [g, __agg_0 as sum(CASE WHEN (b > 1) THEN a END)]\n"
+            "  AGGREGATE [g] -> [sum(if b > 1 then a else null)]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
 def test_a_group_by_all_groups_by_the_items_that_do_not_fold() raises:
     # The same plan the query with the key written out gives, because that is
     # what GROUP BY ALL means rather than being a node of its own.

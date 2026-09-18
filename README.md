@@ -143,7 +143,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `field-access` | a field access | A dotted name is a name to firepanda, and telling a struct field from a column needs a binder that knows what the columns are. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `postfix-operator` | a postfix operator | The two firepanda reads after an operand are a cast and a dotted name, and this is neither. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `call-modifier` | {} on a call | A window specification is read now. The aggregate filter and the two that change what a call reads are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `call-modifier` | {} on a call | A window specification and an aggregate filter are read now. WITHIN GROUP and EXPORT_STATE change what a call reads, which is the rest of this stage and is not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `call-argument` | {} inside a call | An ordered aggregate and a null treatment both change what the call means, so firepanda refuses them rather than dropping them. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `array-subquery` | ARRAY over a subquery | It collects a whole column into one list value, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `dotted-name` | a dotted name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
@@ -176,6 +176,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `unpivot-groups` | more than one FOR group on an UNPIVOT | One UNPIVOT node holds one name column and one set of value columns, so a second group has nowhere to go. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `quantified-value` | ANY or ALL over a value | DuckDB unnests the right side when it is a list, so x = ANY ([1, 2]) is a membership test written the long way. Write it as IN, or put a SELECT on the right. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `aggregate-filter` | FILTER on {} | A filter is read as a CASE around the argument, which answers the same number for a fold that passes over a null. first, last and any_value read a null as a value, so it would not, no fold here reads more than one argument, and a name that is not a fold has nothing for the CASE to go inside. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 
 <!-- end sql-support -->
 
