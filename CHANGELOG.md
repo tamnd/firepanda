@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-09-18
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with three threads in it: the last of the flags work on the string accessor, one more TPC-H query, and the wall clock number 0.8.8 said it owed.
+
+`str.count`, `str.replace` and `str.extract` all read a `flags` argument now. That is the last three of the six pattern methods and the end of what the two `case` and `flags` entries in 0.8.7 were waiting for. A count or a replace carrying a flag goes to Python's engine, which counts and replaces by different rules than Arrow does, so `str.count("^")` on a row of three letters is four and the same call under `re.MULTILINE` is one, and both numbers are pandas'. A `case=False` replacement is a compiled pattern and a scan now rather than a byte search, because that is what upstream does with it. And a flag bit `re` never named was being dropped rather than refused on every one of the six, which lasted two releases because the values anybody would write a test with were the ones it already got right.
+
+TPC-H q11 answers and agrees with DuckDB, which takes `pixi run tpch` to nineteen of twenty two. A subquery that answers one value was refused in a `HAVING` and allowed in the `WHERE` of the same query, and what differed was where the cross join carrying it was put rather than anything about the subquery. It goes above the aggregate when the clause that wrote it reads it from up there.
+
+Every text kernel of the builder shape runs on every core now. The literal `text_replace` and the folded one beside it followed the regular expression replace from 0.8.8, and `text_extract_regex` went last with the join run once per capturing group. The number 0.8.8 could not take, because the machine it would have been measured on was carrying a load average above ninety, is in this one: ClickBench q28 at 1M is 1.95 s where it was 5.48 s, on 3.41 cores where it was 1.00, with q27 run alongside as the control and unchanged either way. That leaves this library about twelve times slower than DuckDB on that query rather than about twenty, and issue #830 stays open on the rest of it.
+
 ### Changed: the replace differential compares the sweeps it used to set aside
 
 `tests/differential/regex_replace.mojo` held 186 sweeps out of its comparison because pandas answered them out of an engine this library did not have. It has had one since the counting and replacing scans landed, so those sweeps are compared now and the set aside count for them is gone from the report.
@@ -26,7 +38,6 @@ Three refusals came off that were never about flags. A replacement holding `\g<`
 
 A bad replacement template raises `InvalidArgumentError`, which is a `ValueError`. Upstream raises `re.PatternError`, which is not one, and an unknown group name comes back from `re` as an `IndexError`. That is a divergence rather than a bug and document 86 says why matching it would be worse.
 
-A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width.
 A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width.
 
 ### Added: `str.extract` under a flag, which is the last of the six
@@ -7824,7 +7835,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/tamnd/firepanda/releases/tag/v0.8.9
 [0.8.8]: https://github.com/tamnd/firepanda/releases/tag/v0.8.8
 [0.8.7]: https://github.com/tamnd/firepanda/releases/tag/v0.8.7
 [0.8.6]: https://github.com/tamnd/firepanda/releases/tag/v0.8.6
