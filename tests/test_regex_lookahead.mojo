@@ -6,9 +6,9 @@ and then refused it, which made every one of those patterns a column a caller
 did not get. 700 of the 30052 held out patterns are this construct, which is the
 largest single thing the Python engine was turning down after the flags landed.
 
-The half here is the lookahead. A lookbehind is a different question and stays
-refused, because reading one means knowing the width of the body and refusing a
-body that has not got one, and neither of those exists yet. Document 93.
+The half here is the lookahead. The lookbehind is a different question and has a
+file of its own beside this one, because reading one means knowing the width of
+the body and refusing a body that has not got one. Documents 93 and 94.
 
 The rows below ask the compiler and the machine directly rather than through the
 accessor, for the reason the `\\z` slice found: the accessor cannot reach every
@@ -152,17 +152,16 @@ def test_re2_still_refuses_the_construct_because_upstream_does() raises:
     assert_equal(said("(?<=a)b", ENGINE_RE2), "!RE2 has no lookaround")
 
 
-def test_a_lookbehind_is_the_other_half_and_is_still_refused() raises:
-    """Reading one means knowing the width of the body, which means a width
-    analysis and the refusal Python raises for a body that has not got a fixed
-    one, and neither is here. The message says lookbehind rather than lookaround
-    so that a caller can tell which half arrived."""
-    assert_equal(
-        said("(?<=a)b", ENGINE_PYTHON), "!this engine has no lookbehind yet"
-    )
-    assert_equal(
-        said("(?<!a)b", ENGINE_PYTHON), "!this engine has no lookbehind yet"
-    )
+def test_a_lookbehind_is_the_other_half_and_answers_too() raises:
+    """One row here rather than a file, since the other half has a file of its
+    own next door. What it is doing in this one is saying that landing the
+    second direction did not cost the first: both forms of both directions
+    compile on the engine that copies Python and none of them compile on the
+    other."""
+    assert_equal(said("(?<=a)b", ENGINE_PYTHON), "ok")
+    assert_equal(said("(?<!a)b", ENGINE_PYTHON), "ok")
+    assert_true(hits("(?<=a)b", "ab"))
+    assert_false(hits("(?<=a)b", "cb"))
 
 
 def test_a_group_inside_one_is_refused_only_when_somebody_asked_for_groups() raises:
@@ -240,9 +239,9 @@ def test_the_constructs_that_are_still_refused_are_refused_the_same_way() raises
     var back = program_for(METHOD_MATCH, "(a)\\1", 0, False, 14)
     assert_false(back.ok)
     assert_equal(back.problem, "this engine has no backreference yet")
-    var behind = program_for(METHOD_COUNT, "(?<=a)b", 0, False, 14)
-    assert_false(behind.ok)
-    assert_equal(behind.problem, "this engine has no lookbehind yet")
+    var atomic = program_for(METHOD_COUNT, "(?=a)(?>a)b", 0, False, 14)
+    assert_false(atomic.ok)
+    assert_equal(atomic.problem, "this engine has no atomic group yet")
 
 
 def main() raises:

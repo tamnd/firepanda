@@ -185,6 +185,30 @@ is a column a caller does not get.
 Document 93.
 """
 
+comptime IN_BEHIND: UInt8 = 12
+"""Ask whether another program matches ending exactly here.
+
+The other half of the instruction above and the same shape, with the one thing a
+lookbehind needs that a lookahead does not: how far back to start. `a` is where
+the body starts and `b` carries two numbers, because an instruction has two
+payloads and this needs three. The width is `b >> 1` and the sign is `b & 1`,
+which is 1 for `(?<=...)` and 0 for `(?<!...)`.
+
+The width is the number of characters the body always reads, worked out by the
+compiler, and the refusal for a body that does not always read the same number
+is upstream's as well as this one's. That is what makes the instruction possible
+at all: a position minus a known width is a place to start, and the body run
+from there ends where the thread is standing, so the same second machine answers
+both halves of the construct with the seed being the only difference.
+
+A body that reads nothing is a width of zero and starts where the thread is,
+which is how `(?<=^)` and `(?<=\\b)` come out right rather than being special
+cases. A position with less text behind it than the width is a False without a
+machine being run.
+
+Document 94.
+"""
+
 
 comptime MAX_INSTRUCTIONS: Int = 200000
 """How large a program may get before the compiler gives up.
@@ -1273,7 +1297,7 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         _emit_repeat(b, nodes, node, False)
         return
     if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
-        _emit_lookahead(b, nodes, node, it.op == OP_ASSERT)
+        _emit_lookaround(b, nodes, node, it.op == OP_ASSERT)
         return
     if it.op == OP_FAILURE:
         # A set with no ranges in it, which nothing is a member of. The parser
@@ -1287,15 +1311,15 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     b.give_up(String("unsupported pattern"))
 
 
-def _emit_lookahead(
+def _emit_lookaround(
     mut b: _Builder, nodes: List[Node], node: Int32, positive: Bool
 ):
-    """Writes a lookahead and the body it asks about.
+    """Writes a lookaround and the body it asks about.
 
     The body goes into the same instruction list as everything else, with a jump
     written over it so that the walk that runs the pattern never falls into it
-    from in front. The only way in is the `IN_LOOK`, which does not step there
-    but hands the position to a second machine.
+    from in front. The only way in is the `IN_LOOK` or the `IN_BEHIND`, which
+    does not step there but hands a position to a second machine.
 
     The order is the whole of the trick and it is worth reading once. The look
     instruction is written first so that the thread reaching it is at the right
@@ -1303,13 +1327,27 @@ def _emit_lookahead(
     through to it when the answer agrees, and the body and its match come last
     so that the jump has somewhere to land.
 
+    The two directions differ in one instruction and nothing else. A lookahead
+    hands over the position the thread is standing at, so the instruction
+    carries only the sign. A lookbehind hands over that position less the width
+    of the body, so the instruction carries the width as well, packed above the
+    sign because an instruction has two payloads and this wants three. The width
+    is known to be fixed by now, since the check that walks the tree refuses the
+    bodies that have not got one before anything is written.
+
     Args:
         b: The builder.
         nodes: The arena.
         node: The assertion.
         positive: Whether the body has to match rather than has to not match.
     """
-    var look = b.emit(IN_LOOK, 0, Int32(1) if positive else Int32(0))
+    var sign = Int32(1) if positive else Int32(0)
+    var behind = nodes[Int(node)].a < 0
+    var op = IN_BEHIND if behind else IN_LOOK
+    var carried = sign
+    if behind:
+        carried = Int32(_children_width(nodes, node)) * 2 + sign
+    var look = b.emit(op, 0, carried)
     var over = b.emit(IN_JUMP, 0, 0)
     b.patch_a(look, b.here())
     _emit_children(b, nodes, node)
@@ -1363,6 +1401,130 @@ def _holds_group(nodes: List[Node], node: Int32) -> Bool:
     return False
 
 
+comptime WIDEST_BEHIND: Int = 1 << 30
+"""How far back a lookbehind is allowed to want to look.
+
+There to keep the multiplication below inside the number it is written in rather
+than because anything here would mind the distance. A pattern asking for more
+than this is refused by the repeat budget several steps earlier, since writing
+out a billion copies of anything is the thing that budget exists to stop, so
+nothing reaches this and it is a guard rather than a rule.
+"""
+
+
+def _children_width(nodes: List[Node], node: Int32) -> Int:
+    """How many characters a node's children always read between them.
+
+    The children of a node are a list rather than one thing, the same list
+    `_emit_children` writes out, so the sum belongs here and every caller below
+    that has a body rather than an atom asks this one.
+
+    Args:
+        nodes: The arena.
+        node: The parent.
+
+    Returns:
+        The number of characters, or minus one when it is not always the same
+        number.
+    """
+    var total = 0
+    var child = nodes[Int(node)].first
+    while child >= 0:
+        var one = _fixed_width(nodes, child)
+        if one < 0:
+            return -1
+        total += one
+        if total > WIDEST_BEHIND:
+            return -1
+        child = nodes[Int(child)].next
+    return total
+
+
+def _fixed_width(nodes: List[Node], node: Int32) -> Int:
+    """How many characters one node always reads, or minus one.
+
+    The whole of what makes a lookbehind possible. A lookahead starts its body
+    where the thread is standing, so it needs to know nothing about the body,
+    and a lookbehind has to start the body far enough back that it ends where
+    the thread is standing, which means the body has to read the same number of
+    characters however it matches. Upstream asks the same question and raises
+    when the answer is no, so this is agreement rather than a shortfall.
+
+    An alternation is fixed when every arm is fixed at the same number, which is
+    why `(?<=a|b)` reads and `(?<=a|bc)` does not. A repeat is fixed when its
+    two bounds are the same number, which is why `(?<=a{3})` reads and
+    `(?<=a{2,3})`, `(?<=a?)` and `(?<=a*)` do not. An assertion of any kind
+    reads nothing, which is why a lookahead can sit inside a lookbehind and a
+    `^` can sit at the front of one.
+
+    Args:
+        nodes: The arena.
+        node: One node, and not the list of siblings it may stand in.
+
+    Returns:
+        The number of characters, or minus one when it is not always the same
+        number.
+    """
+    if node < 0:
+        return 0
+    var it = nodes[Int(node)]
+    if (
+        it.op == OP_LITERAL
+        or it.op == OP_NOT_LITERAL
+        or it.op == OP_ANY
+        or it.op == OP_IN
+        or it.op == OP_RANGE
+        or it.op == OP_CATEGORY
+    ):
+        # One character, and the members of a set are not walked into, since a
+        # set reads one character whatever is written inside it.
+        return 1
+    if (
+        it.op == OP_AT
+        or it.op == OP_ASSERT
+        or it.op == OP_ASSERT_NOT
+        or it.op == OP_FAILURE
+    ):
+        # A position test reads nothing, and so does a node that never matches,
+        # which is the collapse the parser writes for an empty negative
+        # lookaround. Upstream agrees about both: `(?<=(?!))` compiles.
+        return 0
+    if (
+        it.op == OP_SEQ
+        or it.op == OP_SUBPATTERN
+        or it.op == OP_SCOPE
+        or it.op == OP_ATOMIC_GROUP
+    ):
+        return _children_width(nodes, node)
+    if it.op == OP_BRANCH:
+        var arms = 0
+        var width = 0
+        var child = it.first
+        while child >= 0:
+            var one = _fixed_width(nodes, child)
+            if one < 0:
+                return -1
+            if arms > 0 and one != width:
+                return -1
+            width = one
+            arms += 1
+            child = nodes[Int(child)].next
+        return width
+    if (
+        it.op == OP_MAX_REPEAT
+        or it.op == OP_MIN_REPEAT
+        or it.op == OP_POSSESSIVE_REPEAT
+    ):
+        if it.a != it.b:
+            return -1
+        var one = _children_width(nodes, node)
+        if one < 0:
+            return -1
+        var total = Int(it.a) * one
+        return -1 if total > WIDEST_BEHIND else total
+    return -1
+
+
 def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
     """Looks over the whole tree for anything that cannot be compiled.
 
@@ -1397,15 +1559,22 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         if not b.python:
             _refuse_construct(b, String("lookaround"))
             return
-        if it.a < 0:
-            # A lookbehind is a different question from a lookahead and not a
-            # harder version of the same one. Python reads one by trying the
-            # body at a position in front of where the machine has got to, which
-            # means the body has to have a width the compiler knows, which means
-            # a width analysis over the tree and the refusal Python raises for a
-            # body that has not got one. None of that is here yet and none of it
-            # is needed for the half that is. Document 93.
-            _refuse_construct(b, String("lookbehind"))
+        var behind = it.a < 0
+        if behind and _children_width(nodes, node) < 0:
+            # The one refusal a lookbehind has that a lookahead has not. The
+            # body is run from a position worked out by subtracting its width
+            # from where the machine has got to, so a body that reads a
+            # different number of characters depending on how it matches has no
+            # position to be run from. Upstream refuses the same patterns with
+            # `look-behind requires fixed-width pattern`, so this is agreement
+            # rather than a shortfall and it is not flagged as a gap.
+            # Document 94.
+            b.give_up(
+                String(
+                    "a lookbehind wants a body that always reads the same"
+                    " number of characters"
+                )
+            )
             return
         if b.captures and _holds_group(nodes, it.first):
             # A group inside a lookahead keeps what it matched upstream, so
@@ -1416,7 +1585,11 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
             # see the difference, which is why the question is asked of the
             # builder rather than of the tree alone.
             b.give_up(
-                String("this engine has no capture inside a lookahead yet"),
+                String(
+                    "this engine has no capture inside a ",
+                    "lookbehind" if behind else "lookahead",
+                    " yet",
+                ),
                 True,
             )
             return

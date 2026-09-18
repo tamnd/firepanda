@@ -65,6 +65,7 @@ from firepanda.kernel.regex.pike import (
 )
 from firepanda.kernel.regex.program import (
     IN_AT,
+    IN_BEHIND,
     IN_JUMP,
     IN_LOOK,
     IN_MATCH,
@@ -161,13 +162,13 @@ struct Bounded(Movable):
         self.word = []
         for i in range(len(program.code)):
             var instruction = program.code[i]
-            if instruction.op == IN_LOOK:
-                # The machine runs a lookahead by starting a second machine on
-                # the text ahead, with buffers of its own, and comes back with
+            if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
+                # The machine runs a lookaround by starting a second machine on
+                # the text around, with buffers of its own, and comes back with
                 # one answer. There is no second stack and no second bitmap
                 # here, and giving this one a nested walk would mean a path
                 # that is two paths, so the whole program goes to the machine.
-                # Document 93.
+                # Documents 93 and 94.
                 self.ok = False
                 return
             if instruction.op != IN_AT or len(self.word) > 0:

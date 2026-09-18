@@ -212,19 +212,20 @@ def test_a_missing_row_stays_missing_and_na_fills_it(firepanda: ModuleType) -> N
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A lookbehind or a backreference goes to Python's `re` upstream, and this
-    engine has not got either of them.
+    """A backreference goes to Python's `re` upstream, and this engine has not
+    got it.
 
     pandas answers these, so the refusal is a gap rather than a difference of
     opinion, and `NotImplementedError` is what a gap is spelled. The message
     says which gap it is and quotes the pattern back.
 
-    The lookahead used to be on this list. Document 93 answered it, and the row
-    that used to be here is now in `test_str_lookahead.py` asking the opposite
+    Both halves of the lookaround used to be on this list. Documents 93 and 94
+    answered them, and the rows that used to be here are now in
+    `test_str_lookahead.py` and `test_str_lookbehind.py` asking the opposite
     question.
     """
     mine = made(firepanda)
-    for pattern in (r"(a)\1", "(?<=a)b", "(?<!a)b"):
+    for pattern in (r"(a)\1", r"(a)(b)\2"):
         for name in ("contains", "match", "fullmatch"):
             with pytest.raises(NotImplementedError) as caught:
                 getattr(mine.str, name)(pattern)

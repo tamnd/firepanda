@@ -646,22 +646,22 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
-    """A lookaround is the whole reason the router exists, and the half of it
-    that is still refused on both sides is the lookbehind, but the flag says
-    something different on each: for RE2 the refusal agrees with upstream and
-    for Python it is a shortfall here.
+    """A backreference is refused on both sides, but the flag says something
+    different on each: for RE2 the refusal agrees with upstream and for Python
+    it is a shortfall here.
 
-    RE2's voice names the construct and not the half, because RE2 has neither
-    and a caller told that RE2 has no lookbehind might reasonably try the other
-    one. Document 93."""
-    var theirs = compile_program(parse_pattern("(?<=a)b"), ENGINE_RE2)
+    A lookaround was this row's pattern until documents 93 and 94 answered both
+    halves of it on Python's engine, which left RE2 the only side refusing it
+    and so left nothing for the row to compare. The construct here is the
+    largest of the ones neither engine has."""
+    var theirs = compile_program(parse_pattern("(a)\\1"), ENGINE_RE2)
     assert_false(theirs.ok)
     assert_false(theirs.gap)
-    assert_equal(theirs.problem, "RE2 has no lookaround")
-    var ours = compile_program(parse_pattern("(?<=a)b"), ENGINE_PYTHON)
+    assert_equal(theirs.problem, "RE2 has no backreference")
+    var ours = compile_program(parse_pattern("(a)\\1"), ENGINE_PYTHON)
     assert_false(ours.ok)
     assert_true(ours.gap)
-    assert_equal(ours.problem, "this engine has no lookbehind yet")
+    assert_equal(ours.problem, "this engine has no backreference yet")
 
 
 def main() raises:

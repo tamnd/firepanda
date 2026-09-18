@@ -8,10 +8,10 @@ perfectly ordinary column. This library routed those patterns the same way and
 then refused them, so a caller writing `(?=...)` got an exception where pandas
 gave a column.
 
-The half that lands here is the lookahead. A lookbehind is still refused, and it
-is a different question rather than a harder version of the same one, since
-reading one means knowing the width of the body and raising for a body that has
-not got a fixed width. Document 93.
+The half that lands here is the lookahead. The lookbehind is a different question
+rather than a harder version of the same one, since reading one means knowing the
+width of the body and raising for a body that has not got a fixed width, and it
+has a file of its own beside this one. Documents 93 and 94.
 
 Nothing here passes a flag. That is the point worth reading: the route is
 decided by what the pattern holds rather than by what was passed beside it, so
@@ -173,22 +173,21 @@ def test_an_empty_negative_lookaround_is_a_pattern_and_not_an_error(
 
 
 @needs_pandas
-def test_a_lookbehind_is_the_half_that_is_still_refused(
+def test_a_lookbehind_is_the_other_half_and_answers_too(
     firepanda: ModuleType,
 ) -> None:
-    """Named as a gap rather than as a refusal, because pandas answers it. The
-    row is here so that the day it lands is a day this file fails."""
+    """This row used to be the one that said the other half was still refused,
+    and it failed on the day the half landed, which is what it was for. What it
+    says now is that the two directions live in one pattern happily, since they
+    are one instruction apart and neither of them knows about the other."""
     mine, them = made(firepanda), theirs()
-    assert without_the_missing(mask_of(them.str.contains("(?<=a)b"))) == [
-        True,
-        False,
-        False,
-        False,
-        True,
-        False,
-    ]
-    with pytest.raises(NotImplementedError):
-        mine.str.contains("(?<=a)b")
+    ours = mine.str.contains("(?<=a)b").tolist()
+    assert without_the_missing(ours) == without_the_missing(mask_of(them.str.contains("(?<=a)b")))
+    assert without_the_missing(ours) == [True, False, False, False, True, False]
+    both = "(?<=a)b(?=a)"
+    assert without_the_missing(mine.str.contains(both).tolist()) == without_the_missing(
+        mask_of(them.str.contains(both))
+    )
 
 
 @needs_pandas

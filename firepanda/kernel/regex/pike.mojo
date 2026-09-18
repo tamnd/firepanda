@@ -72,6 +72,7 @@ from firepanda.kernel.regex.program import (
     IN_ANY,
     IN_ANY_ALL,
     IN_AT,
+    IN_BEHIND,
     IN_CHAR,
     IN_JUMP,
     IN_LOOK,
@@ -535,6 +536,30 @@ def _queue(
                 nslots,
                 word,
             )
+    elif instruction.op == IN_BEHIND:
+        # The width is packed above the sign because an instruction carries two
+        # numbers and this asks for three. A body wider than the text behind the
+        # thread has nowhere to start, which is a False without a machine being
+        # run, and a negative lookbehind is happy with that.
+        var back = position - (Int(instruction.b) >> 1)
+        var found = back >= 0 and _looks(
+            program, instruction.a, points, lead, back, word
+        )
+        if found == ((instruction.b & 1) == 1):
+            _queue(
+                program,
+                list,
+                slots,
+                carry,
+                stamp,
+                at,
+                start + 1,
+                points,
+                lead,
+                position,
+                nslots,
+                word,
+            )
     elif instruction.op == IN_SAVE:
         if nslots == 0:
             # A caller asking a program with saves in it a question that has no
@@ -587,19 +612,26 @@ def _looks(
     position: Int,
     word: Span[Int32, _],
 ) -> Bool:
-    """Whether the body of a lookahead matches starting exactly here.
+    """Whether the body of a lookaround matches starting exactly here.
 
     The same machine as the one outside, with two differences and both of them
     matter.
 
-    It starts one attempt rather than one per position. A lookahead asks whether
-    the body matches at the position the outer pattern has reached, not whether
-    it matches somewhere ahead, so `(?=b)` on `ab` at position zero is False.
+    It starts one attempt rather than one per position. A lookaround asks
+    whether the body matches at one position, not whether it matches somewhere,
+    so `(?=b)` on `ab` at position zero is False.
 
     And it reads the same text the outer run is reading rather than a piece of
-    it cut off at the position, which is what keeps every anchor honest. `(?=a$)`
-    has to know where the row ends and `(?<!x)` would have to know what is
-    behind, so the text is whole and the position is where to begin.
+    it cut off at the position, which is what keeps every anchor honest.
+    `(?=a$)` has to know where the row ends and `(?<=^a)` has to know where it
+    begins, so the text is whole and the position is where to begin.
+
+    Both directions come here and the seed is the whole of the difference. A
+    lookahead begins the body where the thread is standing. A lookbehind begins
+    it that many characters further back, which lands the end of the body on the
+    thread because the compiler has already refused every body whose width is
+    not always the same number. Nothing in here knows which direction it is
+    answering, and there is nothing it would do with knowing.
 
     Nothing is carried back out. A group inside the body would keep what it
     matched upstream and does not here, which is why the compiler refuses that
@@ -607,10 +639,10 @@ def _looks(
 
     The buffers are allocated per call. A machine outside is built once per
     column for the good reason that a row should not pay for one, and the same
-    argument says this should be held too, but a lookahead can hold a lookahead
-    and the nesting is what a held buffer would have to be indexed by. It is
-    measured work rather than guessed work and it is named in document 93 as the
-    thing to do next.
+    argument says this should be held too, but a lookaround can hold a
+    lookaround and the nesting is what a held buffer would have to be indexed
+    by. It is measured work rather than guessed work and it is named in document
+    93 as the thing to do next.
 
     Args:
         program: The compiled pattern, whose instructions hold the body.
@@ -669,7 +701,13 @@ def _looks(
                     word,
                 )
             i += 1
-        if at >= length:
+        if at >= length or len(next) == 0:
+            # The second half of that is worth more than it looks. A lookbehind
+            # asks about a body of a known width and nothing survives past it,
+            # so without this the machine would walk to the end of the row every
+            # time to learn what it already knew a few characters in. A
+            # lookahead wins the same way whenever its body is short, which most
+            # of them are.
             return False
         swap(here, next)
         next.clear()

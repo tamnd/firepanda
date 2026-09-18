@@ -155,38 +155,38 @@ def test_a_pattern_the_engine_can_run_compiles_for_all_three() raises:
 
 
 def test_a_pattern_the_other_engine_would_run_is_a_gap_here() raises:
-    """A lookaround goes to Python's `re` upstream and this library's Python
-    engine has half of one, so the refusal is its own and names the construct
+    """A backreference goes to Python's `re` upstream and this library's Python
+    engine has not got one, so the refusal is its own and names the construct
     rather than naming the engine. It used to say the engine was not written at
     all, which was true until document 81 wrote it and which threw away the one
     thing the caller could act on.
 
-    The lookahead this used to ask about answers now, so the half that is still
-    missing is what it asks about. Document 93."""
-    var program = program_for(METHOD_MATCH, "a(?<=b)")
+    This row used to ask about a lookaround, which both halves of now answer, so
+    it asks about the largest construct that is left. Documents 93 and 94."""
+    var program = program_for(METHOD_MATCH, "(a)\\1")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no lookbehind yet")
+    assert_equal(program.problem, "this engine has no backreference yet")
 
 
 def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
-    """A flag group and a lookaround together, which reads and answers upstream
-    and stops being a pattern at all once it is wrapped. Deciding on the
-    rewrite would send it to an engine that has never heard of a lookaround and
-    report the wrong reason for refusing it.
+    """A flag group and a backreference together, which reads and answers
+    upstream and stops being a pattern at all once it is wrapped. Deciding on
+    the rewrite would send it to an engine that has never heard of a
+    backreference and report the wrong reason for refusing it.
 
     The flag used to be a refusal of its own and used to be the one the
     compiler met first, so this case used to answer with the folding sentence.
     Document 83 spent the flag while the pattern is being compiled, so the
-    lookaround is now the only shortfall left in this pattern and the refusal is
+    construct is now the only shortfall left in this pattern and the refusal is
     the one the caller can act on.
 
-    It says lookbehind rather than lookaround because document 93 landed the
-    other half, and the pattern here is the half that is left."""
-    var program = program_for(METHOD_FULLMATCH, "(?i)(?<=a)")
+    The construct here was a lookaround until documents 93 and 94 answered both
+    halves of it, and a pattern this row wants is one nothing answers."""
+    var program = program_for(METHOD_FULLMATCH, "(?i)(a)\\1")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no lookbehind yet")
+    assert_equal(program.problem, "this engine has no backreference yet")
 
 
 def test_a_pattern_re2_refuses_is_refused_rather_than_held_out() raises:

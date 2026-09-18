@@ -73,6 +73,7 @@ from std.collections.span import Span
 from firepanda.kernel.regex.pike import accepts
 from firepanda.kernel.regex.program import (
     IN_AT,
+    IN_BEHIND,
     IN_JUMP,
     IN_LOOK,
     IN_MATCH,
@@ -294,9 +295,9 @@ struct Cache(Movable):
             return
         for i in range(len(program.code)):
             var instruction = program.code[i]
-            if instruction.op == IN_LOOK:
+            if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
                 self.ok = False
-                self.problem = String("the pattern asks about the text ahead")
+                self.problem = String("the pattern asks about the text around")
                 return
             if instruction.op != IN_AT:
                 continue
