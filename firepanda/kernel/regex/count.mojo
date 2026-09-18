@@ -20,8 +20,11 @@ own. Python never cuts, so the same call is one.
 
 Arrow moves the cursor in bytes. After a match of no width it moves one byte,
 which is a third of the way through a three byte character, so an empty pattern
-against a row with an accented letter in it counts the bytes. Python moves a
-character at a time, so it counts the characters.
+against a row with an accented letter in it counts the bytes. Python does not
+move the cursor after a match of no width at all. It looks again at the same
+position with the end of the pattern refused, and the search moves itself along
+a character at a time when that second look finds nothing, so it counts the
+characters. Document 93 has why that is not the same as stepping.
 
 Arrow moves the cursor to where the match ended unless the match ended where the
 cursor was, which is not the same rule as moving on after a match of no width. A
@@ -121,11 +124,15 @@ def counted_python(
 ) -> Int:
     """How many times a compiled pattern matches in the text, Python's way.
 
-    Three lines, which is the whole of Python's rule: look from the cursor, put
-    the cursor where the match ended, and move it one further when the match had
-    no width. The replacing scan follows the same rule, which is the other half
-    of the difference between the two engines, since Arrow's two scans follow
-    two rules that are not each other.
+    Look from the cursor, count the match, put the cursor where the match ended.
+    The cursor never steps over a character. After a match of no width it stays
+    where it is and the next search is told to refuse the end of the pattern at
+    that one position, so a lower priority arm that reads a character gets its
+    turn at a place an arm that read nothing has already answered, and only when
+    that second look comes back with nothing does the search move along by
+    itself. The replacing scan follows the same rule, which is the other half of
+    the difference between the two engines, since Arrow's two scans follow two
+    rules that are not each other. Document 93 section 10.
 
     Args:
         program: The compiled pattern, which has to have been compiled with
@@ -145,13 +152,15 @@ def counted_python(
     var n = len(points)
     var seen = 0
     var p = 0
+    var advance = False
     while p <= n:
-        var end = searched(program, points, p, machine, bounded, found)
+        var end = searched(program, points, p, machine, bounded, found, advance)
         if end < 0:
             break
         seen += 1
         var start = Int(found[0])
-        p = end + 1 if start == end else end
+        advance = start == end
+        p = end
     return seen
 
 

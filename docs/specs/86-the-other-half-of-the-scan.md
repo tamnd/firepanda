@@ -38,6 +38,8 @@ if start == end:
 
 Look from the cursor into the whole row. Take the end of the match. If the match had no width, step one character further on. The text is never cut, so an anchor is judged against the row rather than against what is left of it, and the cursor is in characters rather than in bytes.
 
+That is what this document said when it was written and the middle of it is wrong. A match of no width does not step the cursor one character on. The cursor stays where it is and the pattern is asked again at that one position with its end refused, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only when that second ask comes back with nothing does the search move along. The two rules give the same answer for every pattern that cannot prefer to match nothing where it could have matched something, which is nearly all of them and is every pattern this document was checked against. Document 93 section 10 has what it takes to tell them apart, why nothing here noticed for two slices, and the measurements. Everything else in this section stands.
+
 The three differences that come out of that are all visible in ordinary answers, and all three were measured rather than reasoned:
 
 `count("^")` on a row of three letters is four without a flag and one with `re.M`. Four, because Arrow makes the rest of the row into a new text after every match and there are four texts including the empty one at the end. One, because Python looks at one row.
@@ -55,6 +57,8 @@ The replacing loop needs a second cursor and it is the only subtle thing in it.
 That is also what makes a count come out right. A scan stopped by its limit writes out the rest of the row from `pos`, so the character it was about to step over is still there. `str.replace("a*", "#", n=2, case=False)` on `abc` is `##bc` upstream, and a loop keeping one cursor would have written `##c`.
 
 A single cursor would have given the same answer on every unlimited scan, which is most of them, so this is the kind of thing that is either measured or wrong.
+
+The correction in section 4 took the second cursor away again. With the step gone there is nothing for `p` to be one character in front of, so the two are the same number at every point in the loop and the code keeps one. The limit still comes out right and it comes out right for the same reason, which is that the rest of the row is written from the end of the last match. What is left of this section is the assertion in `test_a_limit_stops_the_scan_where_the_last_match_ended`, which is worth keeping because a loop that got the step wrong in the other direction would fail it.
 
 ## 6. The replacement has a second grammar
 

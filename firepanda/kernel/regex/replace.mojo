@@ -59,11 +59,15 @@ with the backslash still in front of it. There is no reading of a replacement
 that satisfies both, so `parse_rewrite_python` is a second function and not a
 flag on the first.
 
-The scan is a different loop. Python never cuts the row, moves the cursor in
-characters and keeps a match of no width wherever it finds one, moving on by
-exactly one character afterwards. That is one rule where Arrow has two, which is
-the whole reason `str.replace("a*", "#")` is `#b#c#` upstream today and
-`##b#c#` the moment a flag is added.
+The scan is a different loop. Python never cuts the row and never steps the
+cursor over a character. It keeps a match of no width wherever it finds one, and
+then looks at that same position a second time with the end of the pattern
+refused, so an arm that reads a character gets its turn where an arm that reads
+nothing has already answered, and the search moves itself along only when that
+second look finds nothing. That is one rule where Arrow has two, which is the
+whole reason `str.replace("a*", "#")` is `#b#c#` upstream today and `##b#c#` the
+moment a flag is added. Document 93 section 10 has why the second look is not
+the same thing as a step, and what it costs to write it as one.
 
 ### What is not here
 
@@ -598,17 +602,21 @@ def replaced_python(
     shorter of the two because it has one rule where Arrow has three. Look from
     the cursor. Copy across whatever sits between the end of the last match and
     the start of this one. Write the replacement. Put the cursor where the match
-    ended, and one character further on when the match had no width.
+    ended.
 
-    The two cursors are what makes that work and are the only subtlety in it.
-    `pos` is the end of the last match and is where untouched text resumes, and
-    `p` is where the next attempt may start. They are the same number except
-    after a match of no width, when `p` is one further on, and the character
-    between them is copied across by the next round's copy rather than by a rule
-    of its own. That is also what makes a limit come out right: a scan stopped by
-    its count writes out the rest of the row from `pos`, so the character it was
-    about to step over is still there. `str.replace("a*", "#", n=2, case=False)`
-    on `abc` is `##bc` upstream and that is the line that gets it.
+    The cursor never steps over a character, which is the part of this that is
+    easy to get wrong and was wrong here until document 93. After a match of no
+    width the cursor stays where it is and the next search is told to refuse the
+    end of the pattern at that one position, so the same place is looked at
+    again and a wider match can come out of it. The search moves along by itself
+    when the second look finds nothing there, and the character it walks over is
+    copied across by the next round's copy rather than by a rule of its own.
+
+    That is also what makes a limit come out right. A scan stopped by its count
+    writes out the rest of the row from the cursor, and the cursor is the end of
+    the last match, so nothing has been consumed that was not replaced.
+    `str.replace("a*", "#", n=2, case=False)` on `abc` is `##bc` upstream and
+    that is the line that gets it.
 
     Args:
         program: The pattern, compiled with captures and for Python's engine.
@@ -630,14 +638,14 @@ def replaced_python(
 
     var n = len(points)
     var p = 0
-    var pos = 0
     var done = 0
+    var advance = False
     while p <= n and (limit < 0 or done < limit):
-        var end = searched(program, points, p, machine, bounded, found)
+        var end = searched(program, points, p, machine, bounded, found, advance)
         if end < 0:
             break
         var start = Int(found[0])
-        for k in range(byte_of(offsets, pos), byte_of(offsets, start)):
+        for k in range(byte_of(offsets, p), byte_of(offsets, start)):
             out.append(bytes[k])
         for part in range(len(rewrite.group)):
             for k in range(Int(rewrite.start[part]), Int(rewrite.stop[part])):
@@ -651,10 +659,10 @@ def replaced_python(
                         byte_of(offsets, opened), byte_of(offsets, closed)
                     ):
                         out.append(bytes[k])
-        pos = end
-        p = end + 1 if start == end else end
+        advance = start == end
+        p = end
         done += 1
-    for k in range(byte_of(offsets, pos), len(bytes)):
+    for k in range(byte_of(offsets, p), len(bytes)):
         out.append(bytes[k])
 
 

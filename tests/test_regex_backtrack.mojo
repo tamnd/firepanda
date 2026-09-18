@@ -56,13 +56,21 @@ def grouped(pattern: StringSlice, engine: UInt8 = ENGINE_RE2) raises -> Program:
     return program^
 
 
-def compared(program: Program, text: StringSlice, first: Int = 0) raises:
+def compared(
+    program: Program,
+    text: StringSlice,
+    first: Int = 0,
+    advance: Bool = False,
+) raises:
     """Asks both engines the same question and fails if they differ.
 
     Args:
         program: The compiled pattern.
         text: The row.
         first: The cursor.
+        advance: Whether a match of no width is refused at the cursor, which is
+            what a scan asks for after one and is a question both engines have
+            to answer the same way.
 
     Raises:
         Error: If the two answers differ anywhere, including in one slot.
@@ -72,8 +80,8 @@ def compared(program: Program, text: StringSlice, first: Int = 0) raises:
     var bounded = Bounded(program)
     var theirs = List[Int32]()
     var ours = List[Int32]()
-    var want = machine.search(program, Span(points), first, theirs)
-    var got = bounded.search(program, Span(points), 0, first, ours)
+    var want = machine.search(program, Span(points), first, theirs, advance)
+    var got = bounded.search(program, Span(points), 0, first, ours, advance)
     if got == GAVE_UP:
         return
     assert_equal(
@@ -469,6 +477,48 @@ def test_the_two_engines_agree_on_the_other_interpreter() raises:
         var program = grouped(cases[c], ENGINE_PYTHON)
         for t in range(len(all_texts)):
             compared(program, all_texts[t])
+
+
+def test_they_agree_when_a_match_of_no_width_is_refused() raises:
+    """The other thing a scan asks for, which is the position it has already
+    matched nothing at being asked again with the end of the pattern refused.
+    Both engines have to leave the rest of the search standing when they refuse
+    it, so that the arm the pattern liked less gets its turn, and a difference
+    between them here is a difference in a count or in a replacement rather than
+    in a search anybody calls directly. Document 93 section 10."""
+    var all_texts = texts()
+    var cases = List[String]()
+    cases.append(String("(a*?)"))
+    cases.append(String("(b*)|(a)"))
+    cases.append(String("\\B|(a)"))
+    cases.append(String("(a*)"))
+    cases.append(String("()"))
+    for c in range(len(cases)):
+        var program = grouped(cases[c], ENGINE_PYTHON)
+        for t in range(len(all_texts)):
+            var length = len(decoded(all_texts[t]))
+            for first in range(length + 1):
+                compared(program, all_texts[t], first, advance=True)
+
+
+def test_a_lookahead_is_handed_straight_back() raises:
+    """The one pattern shape this engine refuses. A lookahead is a search inside
+    a search and there is one stack and one bitmap here, so a program holding
+    one says so at the moment it is sized rather than walking off the end of the
+    instruction set and answering something wrong. The machine underneath
+    answers those rows, which is the arrangement the row being too long already
+    has."""
+    var program = grouped("a(?=b)", ENGINE_PYTHON)
+    var bounded = Bounded(program)
+    var found = List[Int32]()
+    assert_equal(
+        bounded.search(program, Span(decoded("ab")), 0, 0, found), GAVE_UP
+    )
+    # And the plain pattern next to it, so that the refusal is read as being
+    # about the lookahead rather than about the engine.
+    var plain = grouped("ab", ENGINE_PYTHON)
+    var other = Bounded(plain)
+    assert_equal(other.search(plain, Span(decoded("ab")), 0, 0, found), 2)
 
 
 def main() raises:

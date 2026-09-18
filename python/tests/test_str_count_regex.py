@@ -213,13 +213,17 @@ def test_a_missing_row_stays_missing(firepanda: ModuleType) -> None:
 def test_a_pattern_the_other_engine_would_run_is_not_implemented(
     firepanda: ModuleType,
 ) -> None:
-    """A lookaround or a backreference goes to Python's `re` upstream.
+    """A lookbehind or a backreference goes to Python's `re` upstream.
 
     Upstream routes `count` by the same rule it routes the other three by, so
-    the same patterns leave Arrow, and there is no such engine here yet.
+    the same patterns leave Arrow, and this engine has not got these two.
+
+    The lookahead used to be on this list and is answered now, which is what
+    document 93 did. The route did not change, only what waits at the end of
+    it.
     """
     mine = made(firepanda)
-    for pattern in ("a(?=b)", "a(?!b)", r"(a)\1", "(?<=a)b"):
+    for pattern in (r"(a)\1", "(?<=a)b", "(?<!a)b"):
         with pytest.raises(NotImplementedError) as caught:
             mine.str.count(pattern)
         assert pattern in str(caught.value), pattern

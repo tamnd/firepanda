@@ -74,6 +74,7 @@ from firepanda.kernel.regex.program import (
     IN_AT,
     IN_CHAR,
     IN_JUMP,
+    IN_LOOK,
     IN_MATCH,
     IN_NOT_SET,
     IN_SAVE,
@@ -390,7 +391,7 @@ def first_stop(
 
 
 def _queue(
-    code: List[Instruction],
+    program: Program,
     mut list: List[Int32],
     mut slots: List[Int32],
     mut carry: List[Int32],
@@ -427,8 +428,15 @@ def _queue(
     without captures has none, `nslots` is zero, nothing is appended beside the
     thread, and the save branch is never reached because no save was emitted.
 
+    The lookahead is the one branch here that is not a step in a walk. It runs a
+    whole second machine over the rest of the text before deciding whether to go
+    on, which is the only place in this file where answering a question about a
+    position costs more than reading a character. Document 93.
+
     Args:
-        code: The program.
+        program: The compiled pattern, which is the instructions and also the
+            ranges, since a lookahead runs a piece of the same program and needs
+            everything a run needs.
         list: The list to add to.
         slots: The slots of the threads in `list`, `nslots` of them per thread,
             laid out end to end rather than as a list of lists so that a thread
@@ -449,10 +457,10 @@ def _queue(
     if stamp[Int(start)] == at:
         return
     stamp[Int(start)] = at
-    var instruction = code[Int(start)]
+    var instruction = program.code[Int(start)]
     if instruction.op == IN_JUMP:
         _queue(
-            code,
+            program,
             list,
             slots,
             carry,
@@ -467,7 +475,7 @@ def _queue(
         )
     elif instruction.op == IN_SPLIT:
         _queue(
-            code,
+            program,
             list,
             slots,
             carry,
@@ -481,7 +489,7 @@ def _queue(
             word,
         )
         _queue(
-            code,
+            program,
             list,
             slots,
             carry,
@@ -497,7 +505,24 @@ def _queue(
     elif instruction.op == IN_AT:
         if holds(instruction.a, points, lead, position, word):
             _queue(
-                code,
+                program,
+                list,
+                slots,
+                carry,
+                stamp,
+                at,
+                start + 1,
+                points,
+                lead,
+                position,
+                nslots,
+                word,
+            )
+    elif instruction.op == IN_LOOK:
+        var found = _looks(program, instruction.a, points, lead, position, word)
+        if found == (instruction.b == 1):
+            _queue(
+                program,
                 list,
                 slots,
                 carry,
@@ -516,7 +541,7 @@ def _queue(
             # use for them, which is `matches` being handed whatever program is
             # to hand. The instruction is then a jump to the next one.
             _queue(
-                code,
+                program,
                 list,
                 slots,
                 carry,
@@ -534,7 +559,7 @@ def _queue(
         var was = carry[slot]
         carry[slot] = Int32(position)
         _queue(
-            code,
+            program,
             list,
             slots,
             carry,
@@ -552,6 +577,103 @@ def _queue(
         list.append(start)
         for i in range(nslots):
             slots.append(carry[i])
+
+
+def _looks(
+    program: Program,
+    entry: Int32,
+    points: Span[UInt32, _],
+    lead: Int,
+    position: Int,
+    word: Span[Int32, _],
+) -> Bool:
+    """Whether the body of a lookahead matches starting exactly here.
+
+    The same machine as the one outside, with two differences and both of them
+    matter.
+
+    It starts one attempt rather than one per position. A lookahead asks whether
+    the body matches at the position the outer pattern has reached, not whether
+    it matches somewhere ahead, so `(?=b)` on `ab` at position zero is False.
+
+    And it reads the same text the outer run is reading rather than a piece of
+    it cut off at the position, which is what keeps every anchor honest. `(?=a$)`
+    has to know where the row ends and `(?<!x)` would have to know what is
+    behind, so the text is whole and the position is where to begin.
+
+    Nothing is carried back out. A group inside the body would keep what it
+    matched upstream and does not here, which is why the compiler refuses that
+    shape when the caller asked for captures rather than answering it wrongly.
+
+    The buffers are allocated per call. A machine outside is built once per
+    column for the good reason that a row should not pay for one, and the same
+    argument says this should be held too, but a lookahead can hold a lookahead
+    and the nesting is what a held buffer would have to be indexed by. It is
+    measured work rather than guessed work and it is named in document 93 as the
+    thing to do next.
+
+    Args:
+        program: The compiled pattern, whose instructions hold the body.
+        entry: Where the body starts.
+        points: The whole text.
+        lead: How many unreadable bytes stand in front of it.
+        position: Where the body has to start matching.
+        word: Python's word characters as ranges.
+
+    Returns:
+        True when the body matches.
+    """
+    var stamp = List[Int32](length=program.sized(), fill=-1)
+    var here = List[Int32]()
+    var next = List[Int32]()
+    var slots = List[Int32]()
+    var carry = List[Int32]()
+    var length = lead + len(points)
+    var at = position
+    _queue(
+        program,
+        here,
+        slots,
+        carry,
+        stamp,
+        Int32(at),
+        entry,
+        points,
+        lead,
+        at,
+        0,
+        word,
+    )
+    while True:
+        var i = 0
+        while i < len(here):
+            var pc = here[i]
+            var instruction = program.code[Int(pc)]
+            if instruction.op == IN_MATCH:
+                return True
+            if at < length and accepts(
+                instruction, program.ranges, point_at(points, lead, at)
+            ):
+                _queue(
+                    program,
+                    next,
+                    slots,
+                    carry,
+                    stamp,
+                    Int32(at + 1),
+                    pc + 1,
+                    points,
+                    lead,
+                    at + 1,
+                    0,
+                    word,
+                )
+            i += 1
+        if at >= length:
+            return False
+        swap(here, next)
+        next.clear()
+        at += 1
 
 
 struct Machine(Movable):
@@ -657,7 +779,7 @@ struct Machine(Movable):
                     if position >= length:
                         break
                 _queue(
-                    program.code,
+                    program,
                     self.here,
                     self.slots_here,
                     self.carry,
@@ -686,7 +808,7 @@ struct Machine(Movable):
                     instruction, program.ranges, points[position]
                 ):
                     _queue(
-                        program.code,
+                        program,
                         self.next,
                         self.slots_next,
                         self.carry,
@@ -712,6 +834,7 @@ struct Machine(Movable):
         lead: Int,
         first: Int,
         mut found: List[Int32],
+        advance: Bool = False,
     ) -> Int:
         """Where the leftmost first match ends, starting attempts at `first`.
 
@@ -741,6 +864,15 @@ struct Machine(Movable):
             first: The first position an attempt may start at.
             found: Filled with the slots of the thread that matched, and left
                 alone when nothing matched or when the program carries none.
+            advance: Whether a match of no width at `first` is allowed. False is
+                the plain search. True is the one a scan asks for when the last
+                match it found had no width, and it is the whole of Python's
+                rule about repeating a match: the same position is searched
+                again and only something wider is taken from it. A thread that
+                reaches the end at `first` has read nothing, since nothing has
+                been read yet at all, so the test is the position and not the
+                slots and a program with no slots in it can be asked as well.
+                Document 93.
 
         Returns:
             How many positions from the start of the text the match ends, or
@@ -791,7 +923,7 @@ struct Machine(Movable):
                 for k in range(self.nslots):
                     self.carry[k] = -1
                 _queue(
-                    program.code,
+                    program,
                     self.here,
                     self.slots_here,
                     self.carry,
@@ -811,6 +943,18 @@ struct Machine(Movable):
                 var pc = self.here[i]
                 var instruction = program.code[Int(pc)]
                 if instruction.op == IN_MATCH:
+                    if advance and position == first:
+                        # Refused rather than taken, and the threads behind it
+                        # left running, which is the part that matters. What
+                        # upstream does here is fail the end of the pattern and
+                        # carry on backtracking, so the alternative the pattern
+                        # liked less gets its turn and can match something
+                        # wider at the same place. Ending the row instead would
+                        # turn `(?!x)|\\s` into a pattern that never reads a
+                        # space, since the arm that reads nothing is the one it
+                        # likes better and would be the only one ever asked.
+                        i += 1
+                        continue
                     end = position
                     found.clear()
                     for k in range(self.nslots):
@@ -824,7 +968,7 @@ struct Machine(Movable):
                     for k in range(self.nslots):
                         self.carry[k] = self.slots_here[i * self.nslots + k]
                     _queue(
-                        program.code,
+                        program,
                         self.next,
                         self.slots_next,
                         self.carry,
@@ -873,6 +1017,7 @@ struct Machine(Movable):
         points: Span[UInt32, _],
         first: Int,
         mut found: List[Int32],
+        advance: Bool = False,
     ) -> Int:
         """Where the leftmost first match at or after a position ends, and what
         each group of it held.
@@ -891,12 +1036,15 @@ struct Machine(Movable):
             found: Filled with the two ends of the whole match and the two ends
                 of every group, as `2k` and `2k + 1` for group `k`, with -1 for
                 a group that did not take part.
+            advance: Whether a match of no width at the cursor is allowed,
+                which is False for the first search of a row and True for the
+                one after a match that had no width.
 
         Returns:
             Where the match ends, or -1 when there is no match at or after the
             cursor.
         """
-        return self._run(program, points, 0, first, found)
+        return self._run(program, points, 0, first, found, advance)
 
 
 def runs(program: Program, points: Span[UInt32, _]) -> Bool:

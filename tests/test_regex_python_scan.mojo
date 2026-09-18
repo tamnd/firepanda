@@ -4,7 +4,7 @@ The engine next door answers whether a pattern matches, and that question has
 one answer whoever asks it. Counting and replacing are not one question. They
 are a loop around the engine, and the loop pandas runs depends on which engine
 the call landed on, because Arrow's two kernels and Python's `re` walk a row by
-different rules. `firepanda/kernel/regex/pike.mojo` has Arrow's counting loop
+different rules. `firepanda/kernel/regex/count.mojo` has Arrow's counting loop
 beside Python's and `firepanda/kernel/regex/replace.mojo` has the other pair.
 
 Every number and every string asserted here was measured against a running
@@ -89,15 +89,38 @@ def subbed(
     return replaced_python_text(program, rewrite, text, limit)
 
 
-def test_the_counting_scan_steps_one_character_past_an_empty_match() raises:
-    """`re.finditer` moves on by one character after a match of no width, which
-    is what makes an empty pattern count the characters of a row and not its
-    bytes. Arrow's loop moves on by one byte and counts a sharp s twice, which
-    is measured next door and is the reason there are two loops rather than a
-    flag."""
+def test_the_counting_scan_moves_on_by_characters_and_not_by_bytes() raises:
+    """Which is what makes an empty pattern count the characters of a row and
+    not its bytes. Arrow's loop moves on by one byte and counts a sharp s twice,
+    which is measured next door and is the reason there are two loops rather
+    than a flag."""
     assert_equal(counted_python_text(built("a*"), "abc"), 4)
     assert_equal(counted_python_text(built(""), "ßx"), 3)
     assert_equal(counted_text(built(""), "ßx"), 4)
+
+
+def test_a_match_of_no_width_is_looked_at_again_before_it_is_left() raises:
+    """The rule that says what happens after a match of no width, which is not
+    a step forward.
+
+    The cursor stays where it is and the pattern is asked again there with its
+    end refused, so an arm of it that reads a character gets a turn at a place
+    where an arm that reads nothing has already answered. Only when that second
+    ask comes back with nothing does the search move along.
+
+    Every one of these prefers to match nothing where it could have matched
+    something, so every one of them is a place where a scan that stepped
+    forward would lose a match upstream finds. The first pair is a lazy star,
+    the second is an alternation whose first arm reads nothing, and the third
+    is the same with the empty arm being an assertion rather than a repeat.
+    Measured against Python 3.13. Document 93.
+    """
+    assert_equal(counted_python_text(built("a*?"), "abc"), 5)
+    assert_equal(subbed("a*?", "abc", "#"), "###b#c#")
+    assert_equal(counted_python_text(built("b*|a"), "abc"), 5)
+    assert_equal(subbed("b*|a", "abc", "#"), "####c#")
+    assert_equal(counted_python_text(built("\\B|a"), "abc"), 3)
+    assert_equal(subbed("\\B|a", "abc", "#"), "##b#c")
 
 
 def test_the_counting_scan_never_cuts_the_row() raises:
@@ -136,10 +159,10 @@ def test_the_replacing_scan_follows_the_same_rule_as_the_counting_one() raises:
 
 
 def test_a_limit_stops_the_scan_where_the_last_match_ended() raises:
-    """The two cursors are what this asserts. A scan stopped by its count writes
-    the rest of the row out from the end of the last match rather than from
-    where it was about to look, so the letter the empty match sat in front of is
-    still there. `##bc` and not `##c`, measured."""
+    """The cursor is what this asserts. A scan stopped by its count writes the
+    rest of the row out from the end of the last match, which is where the
+    cursor is, so the letter the empty match sat in front of is still there.
+    `##bc` and not `##c`, measured."""
     assert_equal(subbed("a*", "abc", "#", limit=2), "##bc")
     assert_equal(subbed("a", "AaA", "#", limit=2, flags=FLAG_IGNORECASE), "##A")
     assert_equal(subbed("a*", "abc", "#", limit=0), "abc")

@@ -3,11 +3,12 @@
 The two mask methods went to that engine first because a mask is the one answer
 both engines already knew how to give. These two need a loop around the engine
 as well, and the loop is where they differ: `re.finditer` never cuts the row
-down, steps one character past a match of no width, and judges an anchor against
-the row rather than against what is left of it. Arrow's two kernels each do
-something else, and they do not agree with each other either. So the same
-`count("^")` is four upstream without a flag and one with `re.M`, and that pair
-is a fact about pandas rather than about this library.
+down, looks at a match of no width a second time before it moves along, and
+judges an anchor against the row rather than against what is left of it.
+Arrow's two kernels each do something else, and they do not agree with each
+other either. So the same `count("^")` is four upstream without a flag and one
+with `re.M`, and that pair is a fact about pandas rather than about this
+library.
 
 Four shapes of call land here and only two of them mention case. A flag and a
 `case=False` are the ordinary two. The other two are `regex=True` with an empty
@@ -67,9 +68,9 @@ ROWS = [
 
 A row of spaces around a letter is where an empty match and a boundary both
 land several times, a row of three letters is where a greedy star and a cut row
-part company, and the empty row is where a scan that steps before it looks runs
-off the end. The rest are the fold and class rows, which matter here for the
-same reason they matter there.
+part company, and the empty row is where a scan that asks about a position it
+has already answered at runs off the end. The rest are the fold and class rows,
+which matter here for the same reason they matter there.
 """
 
 PATTERNS = [
@@ -97,12 +98,21 @@ PATTERNS = [
     "\u00df",
     "a b",
     "[a b]",
+    "a*?",
+    "b*|a",
+    "\\b|a",
 ]
-"""Twenty four patterns, every one of them run with every flag combination.
+"""Twenty seven patterns, every one of them run with every flag combination.
 
-The last two are there for verbose mode, which reads one of them as two
+`a b` and `[a b]` are there for verbose mode, which reads one of them as two
 characters and the other as three because the skip happens outside a class and
 not inside one. Every other letter reads both of them as written.
+
+The last three are there for the rule about looking at a position twice. Each of
+them prefers to match nothing where it could have matched something, a lazy star
+by being lazy and the other two by the order their arms are written in, so each
+of them is a row where a scan that stepped one character on after a match of no
+width would lose the wider match that upstream finds. Document 93.
 """
 
 FLAGS = [
@@ -169,7 +179,7 @@ def test_replace_answers_what_pandas_answers_under_every_flag(
 ) -> None:
     """The same sweep for the replacing loop, with a marker that cannot be
     confused with anything in a row and with a limit on half the runs, since the
-    limit is the one argument the two cursors exist for."""
+    limit is the one argument that can tell where the cursor was left."""
     mine, them = made(firepanda), theirs()
     for pattern in PATTERNS:
         for flags in FLAGS:
@@ -177,6 +187,35 @@ def test_replace_answers_what_pandas_answers_under_every_flag(
                 got = mine.str.replace(pattern, "#", n=n, flags=flags, regex=True)
                 want = them.str.replace(pattern, "#", n=n, flags=flags, regex=True)
                 assert got.tolist() == texts_of(want), (pattern, flags, n)
+
+
+@needs_pandas
+def test_a_match_of_no_width_gets_a_second_look_rather_than_a_step(
+    firepanda: ModuleType,
+) -> None:
+    """The rule upstream changed in 3.7 and this library had wrong until now.
+
+    A match of no width does not move the cursor. The cursor stays where it is
+    and the pattern is asked again at that one position with its end refused, so
+    an arm that reads a character gets its turn where the arm that read nothing
+    had already answered. `a b` holds one space and `count(r"(?!x)|\\s")` is
+    five: nothing at each of the four positions, and the space as well.
+
+    A scan that stepped one character on instead answers four and leaves the
+    space in the row when it replaces, which is what this file used to do. Both
+    halves are asserted, because the two loops are two pieces of code and the
+    counting one was wrong in a way that only adds up to a number.
+    """
+    rows = ["a b", " ", "x {} y", "abc"]
+    mine, them = made(firepanda, rows), theirs(rows)
+    for pattern in (r"(?!x)|\s", "a*?", r"\b|a", "b*|a"):
+        got = mine.str.count(pattern, flags=re.IGNORECASE)
+        want = them.str.count(pattern, flags=re.IGNORECASE)
+        assert got.tolist() == counts_of(want), pattern
+        wrote = mine.str.replace(pattern, "#", flags=re.IGNORECASE, regex=True)
+        theirs_wrote = them.str.replace(pattern, "#", flags=re.IGNORECASE, regex=True)
+        assert wrote.tolist() == texts_of(theirs_wrote), pattern
+    assert mine.str.count(r"(?!x)|\s", flags=re.IGNORECASE).tolist() == [5, 3, 8, 4]
 
 
 @needs_pandas
@@ -212,10 +251,10 @@ def test_the_two_counting_loops_disagree_about_bytes_and_characters(
 def test_a_limit_stops_the_scan_where_the_last_match_ended(
     firepanda: ModuleType,
 ) -> None:
-    """The two cursors are what this asserts. A scan stopped by its count writes
-    the rest of the row out from the end of the last match rather than from
-    where it was about to look next, so the letter an empty match sat in front
-    of is still there. `##bc` and not `##c`."""
+    """Where the cursor was left is what this asserts. A scan stopped by its
+    count writes the rest of the row out from the end of the last match, so the
+    letter an empty match sat in front of is still there. `##bc` and not
+    `##c`."""
     mine, them = made(firepanda, ["abc"]), theirs(["abc"])
     for kwargs in ({"case": False}, {"flags": re.IGNORECASE}):
         assert mine.str.replace("a*", "#", n=2, regex=True, **kwargs).tolist() == ["##bc"]

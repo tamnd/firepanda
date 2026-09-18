@@ -43,7 +43,10 @@ wrong and is the thing that keeps the whole scan linear. A pair that failed from
 one starting position fails from every other, because an instruction and a
 position say everything about what is left to do. Nothing in the program reads
 where the attempt began: the assertions read the row and the cursor is not one of
-them.
+them. The one thing that does read it is the refusal a scan asks for after a
+match of no width, and that refusal only ever lands on the attempt that starts
+at the cursor and only ever on the position it starts at, which is a position no
+later attempt can reach, so it cannot write a cell a later attempt would want.
 
 Captures come out of the same walk. A save writes a position into a slot on the
 way in and puts back what it found on the way out, which on an explicit stack is
@@ -63,6 +66,7 @@ from firepanda.kernel.regex.pike import (
 from firepanda.kernel.regex.program import (
     IN_AT,
     IN_JUMP,
+    IN_LOOK,
     IN_MATCH,
     IN_SAVE,
     IN_SPLIT,
@@ -110,9 +114,11 @@ struct Bounded(Movable):
 
     var ok: Bool
     """Whether this can be asked anything at all, which is whether the program
-    compiled. There is no pattern shape this engine refuses, unlike the state
-    cache: it answers everything the machine answers, including the assertions
-    and the captures, and its only way out is the row being too long."""
+    compiled and whether it holds a question about the text ahead. The
+    assertions and the captures it answers itself, unlike the state cache, and
+    the row being too long is its other way out. A lookahead is the one shape it
+    hands straight back, because a lookahead is a search inside a search and
+    there is one stack and one bitmap here to run it on."""
 
     var seen: List[UInt64]
     """One bit per instruction per position, `pc * (length + 1) + at`. Cleared
@@ -155,13 +161,21 @@ struct Bounded(Movable):
         self.word = []
         for i in range(len(program.code)):
             var instruction = program.code[i]
-            if instruction.op != IN_AT:
+            if instruction.op == IN_LOOK:
+                # The machine runs a lookahead by starting a second machine on
+                # the text ahead, with buffers of its own, and comes back with
+                # one answer. There is no second stack and no second bitmap
+                # here, and giving this one a nested walk would mean a path
+                # that is two paths, so the whole program goes to the machine.
+                # Document 93.
+                self.ok = False
+                return
+            if instruction.op != IN_AT or len(self.word) > 0:
                 continue
             if instruction.a == Int32(Int(AT_BOUNDARY_UNICODE)) or (
                 instruction.a == Int32(Int(AT_NON_BOUNDARY_UNICODE))
             ):
                 self.word = word_ranges_unicode()
-                break
 
     def _push(mut self, pc: Int32, at: Int32):
         """Puts one entry on the stack.
@@ -181,6 +195,7 @@ struct Bounded(Movable):
         length: Int,
         start: Int,
         mut found: List[Int32],
+        advance: Bool = False,
     ) -> Int:
         """Follows every path from one starting position until one matches.
 
@@ -191,6 +206,8 @@ struct Bounded(Movable):
             length: One past the last position, counting those bytes.
             start: Where this attempt begins.
             found: Filled with the slots of the match, when there is one.
+            advance: Whether a match of no width is refused here, which is what
+                a scan asks for at the position its last match ended at.
 
         Returns:
             Where the match ends, or `NO_MATCH`.
@@ -214,6 +231,14 @@ struct Bounded(Movable):
             self.seen[word_at] |= bit
             var instruction = program.code[Int(pc)]
             if instruction.op == IN_MATCH:
+                if advance and Int(at) == start:
+                    # The end of the pattern refused rather than taken, with
+                    # the rest of the stack left standing, which is the part
+                    # that matters. The arm the pattern liked less gets its
+                    # turn at this position and can read a character here.
+                    # Ending the attempt instead would turn `(?!x)|\s` into a
+                    # pattern that never reads a space.
+                    continue
                 found.clear()
                 for k in range(self.nslots):
                     found.append(self.slots[k])
@@ -253,6 +278,7 @@ struct Bounded(Movable):
         lead: Int,
         first: Int,
         mut found: List[Int32],
+        advance: Bool = False,
     ) -> Int:
         """Where the leftmost first match at or after a cursor ends.
 
@@ -273,6 +299,11 @@ struct Bounded(Movable):
             found: Filled with the two ends of the whole match and the two ends
                 of every group, as `2k` and `2k + 1` for group `k`, and left
                 alone when nothing matched or when the program carries no slots.
+            advance: Whether a match of no width is refused at the cursor, which
+                is what a scan asks for at the position its last match ended at.
+                Only the attempt that starts at the cursor is affected, since an
+                attempt further along the row is a different position and a
+                match of no width there is one the scan has not seen yet.
 
         Returns:
             Where the match ends, `NO_MATCH` when there is none, or `GAVE_UP`
@@ -314,7 +345,13 @@ struct Bounded(Movable):
                 if position >= length:
                     break
             var end = self._attempt(
-                program, points, lead, length, position, found
+                program,
+                points,
+                lead,
+                length,
+                position,
+                found,
+                advance and position == first,
             )
             if end != NO_MATCH:
                 return end
@@ -329,6 +366,7 @@ def searched(
     mut machine: Machine,
     mut bounded: Bounded,
     mut found: List[Int32],
+    advance: Bool = False,
 ) -> Int:
     """The leftmost first match at or after a cursor, from whichever engine can
     answer.
@@ -347,14 +385,16 @@ def searched(
         machine: The machine's buffers, which the caller keeps across rows.
         bounded: The backtracker's, the same way.
         found: Filled with the two ends of the whole match and of every group.
+        advance: Whether a match of no width is refused at the cursor, which is
+            Python's rule for what happens after one and is document 93.
 
     Returns:
         Where the match ends, or -1 when there is none at or after the cursor.
     """
-    var end = bounded.search(program, points, 0, first, found)
+    var end = bounded.search(program, points, 0, first, found, advance)
     if end != GAVE_UP:
         return end
-    return machine.search(program, points, first, found)
+    return machine.search(program, points, first, found, advance)
 
 
 def located(
