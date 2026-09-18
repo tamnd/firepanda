@@ -263,25 +263,25 @@ def test_the_other_three_take_the_flag_to_the_other_engine(
 ) -> None:
     """`contains`, `fullmatch` and `count` hand a pattern with any flag argument
     to Python's engine upstream, ignore case included, and that engine scans
-    differently from Arrow. Two of the three are answered out of that engine now
-    and `test_str_flags_python_engine.py` is where they are measured. `count`
-    still refuses, because counting again from after a match is a rule the two
-    engines do not share and the second loop is not written."""
+    differently from Arrow. All three are answered out of it now.
+    `test_str_flags_python_engine.py` measures the two that ask for a mask and
+    `test_str_count_replace_python_engine.py` measures the counting loop, which
+    is the rule the two engines do not share."""
     mine = made(firepanda)
     for flags in (re.IGNORECASE, re.MULTILINE, re.UNICODE):
         for name in ("contains", "fullmatch"):
             assert getattr(mine.str, name)("abc", flags=flags).tolist()[0] is True
-        with pytest.raises(NotImplementedError):
-            mine.str.count("a", flags=flags)
+        assert mine.str.count("a", flags=flags).tolist()[0] >= 0
 
 
 @needs_pandas
-def test_replace_and_extract_still_refuse_a_flag(firepanda: ModuleType) -> None:
-    """The two that answer text rather than a question. Both are on Python's
-    engine upstream whatever is passed, so a flag there is a scan this library
-    has not written rather than a route it has not taken."""
+def test_extract_still_refuses_a_flag(firepanda: ModuleType) -> None:
+    """The one name left. `replace` is served out of the same engine now and is
+    measured in `test_str_count_replace_python_engine.py`. `extract` is on that
+    engine upstream whatever is passed, and a flag there is still refused, since
+    it hands back a frame of groups rather than a column and the door it crosses
+    by carries no flags."""
     mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.replace("a", "-", flags=re.IGNORECASE, regex=True)
+    assert mine.str.replace("a", "-", flags=re.IGNORECASE, regex=True).tolist()[0] is not None
     with pytest.raises(NotImplementedError):
         mine.str.extract("(a)", flags=re.IGNORECASE)

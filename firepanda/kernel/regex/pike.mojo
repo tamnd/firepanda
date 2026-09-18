@@ -818,6 +818,51 @@ struct Machine(Movable):
                         rest = 0
         return seen
 
+    def counts_python(
+        mut self, program: Program, points: Span[UInt32, _]
+    ) -> Int:
+        """How many times a compiled pattern matches in the text, Python's way.
+
+        The scan above is Arrow's and this one is `re.findall`'s, and the three
+        rules that made the other one worth spelling out are all absent from this
+        one. The text is never cut, so `^`, `\\A` and `\\b` are judged against
+        the row the caller has: `count("^a")` on `aaa` is one here and three
+        there. The cursor moves in characters, so an empty pattern against a row
+        holding an accented letter counts the letters rather than the bytes. And
+        a match of no width moves the cursor exactly one character on, wherever
+        it was found, so nothing is ever counted twice.
+
+        That leaves a loop of three lines, which is the whole of Python's rule:
+        look from the cursor, put the cursor where the match ended, and move it
+        one further when the match had no width. The replacing scan in
+        `firepanda/kernel/regex/replace.mojo` follows the same rule, which is the
+        other half of the difference between the two engines, since Arrow's two
+        scans follow two rules that are not each other.
+
+        Args:
+            program: The compiled pattern, which has to have been compiled with
+                captures, since the rule needs to know where a match started and
+                not only where it ended.
+            points: The text, as code points.
+
+        Returns:
+            How many matches, which is zero for a program that did not compile.
+        """
+        if not program.ok:
+            return 0
+        var n = len(points)
+        var found = List[Int32]()
+        var seen = 0
+        var p = 0
+        while p <= n:
+            var end = self.search(program, points, p, found)
+            if end < 0:
+                break
+            seen += 1
+            var start = Int(found[0])
+            p = end + 1 if start == end else end
+        return seen
+
 
 def runs(program: Program, points: Span[UInt32, _]) -> Bool:
     """Whether a compiled pattern matches anywhere in the text.
@@ -865,3 +910,20 @@ def counts_text(program: Program, text: StringSlice) -> Int:
     var points = decoded(text)
     var machine = Machine(program)
     return machine.counts(program, Span(points))
+
+
+def counts_python_text(program: Program, text: StringSlice) -> Int:
+    """How many times a compiled pattern matches in a piece of text, Python's way.
+
+    The one shot form of `Machine.counts_python`, which is where the rules are.
+
+    Args:
+        program: The compiled pattern, compiled with captures.
+        text: The text.
+
+    Returns:
+        How many matches.
+    """
+    var points = decoded(text)
+    var machine = Machine(program)
+    return machine.counts_python(program, Span(points))

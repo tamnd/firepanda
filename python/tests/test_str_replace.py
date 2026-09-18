@@ -185,20 +185,23 @@ def test_a_dictionary_is_several_replacements_in_order(firepanda: ModuleType) ->
 
 
 @needs_pandas
-def test_flags_are_refused_rather_than_ignored(
+def test_flags_move_the_call_to_the_other_engine(
     firepanda: ModuleType,
 ) -> None:
-    """The other half of this pair is answered now, and this half needs an engine.
+    """Both halves of this pair are answered now and both go to the same place.
 
-    `case=False` landed with the folded search and is covered by
-    `test_str_case_insensitive.py`, which is also where the odd fact lives that
-    pandas answers this one name out of `re.IGNORECASE` rather than out of Arrow.
+    `case=False` used to land with the folded byte search and does not any more,
+    because upstream turns it into `re.IGNORECASE` and compiles the pattern with
+    it rather than reaching for a second kernel. So the two spellings are one
+    call and the fold is the engine's either way, which the four Turkish I code
+    points are the proof of.
+    `test_str_count_replace_python_engine.py` has that and the rest of the scan.
     """
     import re
 
     mine = made(firepanda)
-    with pytest.raises(firepanda.errors.UnsupportedError):
-        mine.str.replace("a", "X", flags=re.IGNORECASE)
+    flagged = mine.str.replace("a", "X", flags=re.IGNORECASE, regex=True)
+    assert flagged.tolist() == mine.str.replace("a", "X", case=False, regex=True).tolist()
 
 
 @needs_pandas

@@ -60,7 +60,7 @@ from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_width
 from firepanda.kernel.regex.program import Program
-from firepanda.kernel.regex.replace import Rewrite, replaced
+from firepanda.kernel.regex.replace import Rewrite, replaced, replaced_python
 
 
 def text_matches_regex(
@@ -139,7 +139,9 @@ def text_count_regex(
         var points = List[UInt32]()
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
-            var seen = machine.counts(program, Span(points))
+            var seen = machine.counts_python(
+                program, Span(points)
+            ) if program.python else machine.counts(program, Span(points))
             dst.unsafe_offset(i).unsafe_write(Int64(seen))
         repair_range(out, validity, start, stop)
 
@@ -328,6 +330,12 @@ def text_replace_regex(
     and the machine, the offsets, the slots and the output buffer are made once
     inside each morsel and handed to every row in it.
 
+    Which scan runs down the row is a fact about the program rather than an
+    argument to this kernel. Arrow's loop cuts the row down after every match
+    and steps a byte past a match of no width, `re.sub` does neither, and a
+    program compiled for Python's engine says so. Document 86 section 4 has the
+    two rules side by side.
+
     Args:
         a: The column.
         program: The pattern, already compiled with captures. A program that did
@@ -375,17 +383,30 @@ def text_replace_regex(
                 continue
             var bytes = a.unsafe_bytes(i)
             decode_into(bytes, points)
-            replaced(
-                program,
-                rewrite,
-                bytes,
-                Span(points),
-                machine,
-                offsets,
-                found,
-                out,
-                limit,
-            )
+            if program.python:
+                replaced_python(
+                    program,
+                    rewrite,
+                    bytes,
+                    Span(points),
+                    machine,
+                    offsets,
+                    found,
+                    out,
+                    limit,
+                )
+            else:
+                replaced(
+                    program,
+                    rewrite,
+                    bytes,
+                    Span(points),
+                    machine,
+                    offsets,
+                    found,
+                    out,
+                    limit,
+                )
             if len(out) == 0:
                 dst.unsafe_offset(i)[] = StringView()
             elif len(out) <= INLINE_CAPACITY:

@@ -211,11 +211,11 @@ def test_a_flag_is_answered_or_refused_and_never_ignored(
     """An ignored argument is the one failure mode a compatibility layer must not have.
 
     `case=False` used to be refused here beside this and is answered now, which
-    `test_str_case_insensitive.py` covers. Two of these three are answered as
-    well, out of the engine pandas hands a flagged pattern to, which
-    `test_str_flags_python_engine.py` measures. `count` is the one left and it
-    refuses, because the engine it would land on counts again from a different
-    place than Arrow does and that loop is not written.
+    `test_str_case_insensitive.py` covers. All three of these are answered as
+    well, out of the engine pandas hands a flagged pattern to.
+    `test_str_flags_python_engine.py` measures the two that ask for a mask and
+    `test_str_count_replace_python_engine.py` measures the one that has to run a
+    scan around the engine to answer with a number.
 
     `match` is the fourth of the family and is no longer here. It compiles the
     pattern before it routes it, so a pattern carrying ignore case and nothing
@@ -226,8 +226,7 @@ def test_a_flag_is_answered_or_refused_and_never_ignored(
     mine = made(firepanda)
     for name in ("contains", "fullmatch"):
         assert getattr(mine.str, name)("ABCABC", flags=re.IGNORECASE).tolist()[0] is True
-    with pytest.raises(firepanda.errors.UnsupportedError):
-        mine.str.count("abc", flags=re.IGNORECASE)
+    assert mine.str.count("abc", flags=re.IGNORECASE).tolist()[0] == 2
 
 
 @needs_pandas

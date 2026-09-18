@@ -383,7 +383,14 @@ def program_for(
         return compile_program(
             parse_pattern(python_anchored(method, pattern), flags),
             ENGINE_PYTHON,
-            captures=method == METHOD_REPLACE,
+            # `count` asks for captures on this engine and not on the other one,
+            # which is the one place the two scans disagree about what they need
+            # rather than about what they do. Python's rule for where to look
+            # next is written in terms of where the match started, since a match
+            # of no width is one whose two ends agree wherever it was found, and
+            # Arrow's rule only ever compares the end against a cursor it kept
+            # itself.
+            captures=method == METHOD_REPLACE or method == METHOD_COUNT,
         )
     if holds_unsupported(tree):
         # Routed to Python, and Python's engine has none of the five yet. It is
