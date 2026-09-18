@@ -163,29 +163,34 @@ def compare_text_const[
     def compute(start: Int, stop: Int) {mut out, imm}:
         var dst = out.unsafe_mut_ptr()
         comptime if op == CMP_EQ or op == CMP_NE:
-            var i = start
+            # The two cases get a loop each rather than one loop asking which
+            # it is on every row. They were one loop with a branch in it, and
+            # a 13900K read the long case six percent slower that way once the
+            # block compare was sitting above it, on code the block compare
+            # does not otherwise touch.
             if short:
-                # A cache line of views at a time. The scalar loop below
-                # finishes whatever is left, which is at most three rows.
                 var pattern = short_pattern(probe)
+                var i = start
                 while i + EQUAL_BLOCK <= stop:
-                    var same = a.equal_short_block(i, pattern)
+                    var block = a.equal_short_block(i, pattern)
                     comptime if op == CMP_NE:
-                        same = ~same
-                    dst.unsafe_offset(i).unsafe_store(same)
+                        block = ~block
+                    dst.unsafe_offset(i).unsafe_store(block)
                     i += EQUAL_BLOCK
-            for j in range(i, stop):
-                var same: Bool
-                if short:
-                    same = views_equal_short(a.view(j), probe)
-                else:
-                    same = a.equals(j, b)
-                comptime if op == CMP_EQ:
-                    dst.unsafe_offset(j).unsafe_write(Scalar[DType.bool](same))
-                else:
-                    dst.unsafe_offset(j).unsafe_write(
-                        Scalar[DType.bool](not same)
-                    )
+
+                # At most three rows, since the block is four.
+                while i < stop:
+                    var same = views_equal_short(a.view(i), probe)
+                    comptime if op == CMP_NE:
+                        same = not same
+                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+                    i += 1
+            else:
+                for i in range(start, stop):
+                    var same = a.equals(i, b)
+                    comptime if op == CMP_NE:
+                        same = not same
+                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
         else:
             for i in range(start, stop):
                 var order = a.compare(i, b)
