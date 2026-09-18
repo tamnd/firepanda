@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: scoped flag groups, which are a letter with a reach
+
+`Series.str.contains("(?i:a)bc")` used to be refused with `a scoped flag group is not carried yet`, and with it every pattern writing a flag letter inside a bracket rather than in front of the whole pattern. All of them are answered now, on either engine, and the regex differential compares 434 more corpus patterns than it did, 8205 of 30052. Every one of the seven letters is read in both forms now but for locale, which Python will not take on a pattern made of text in either form. Issue #8 M6.
+
+A scoped group is the first place where `a` and `b` in the same pattern can be read under different rules, and a field with one value in it cannot hold that. The letters ride on a node of their own, and the compiler sets the flags, emits the children and puts the flags back, which is what makes `(?i:a)b` fold the `a` and leave the `b` alone. Putting them back rather than clearing them is what makes `(?i:(?-i:a)b)` fold the `b` and not the `a`.
+
+The node is this library's shape rather than CPython's. Python hangs the two flag sets on a subpattern whose group number is `None`, and a subpattern here carries a capture number that is a payload rather than an option, so borrowing that shape would teach every reader of it that zero might mean two things.
+
+Verbose mode is handled by the parser and not by the compiler, because it decides which characters there are rather than what a character means, and there is nothing left of it by the time a program is built. `(?x:a b)c d` matches `abc d` and not `abcd`, since the space after the bracket is outside the group.
+
+The router was taught the node. pandas walks the parsed pattern looking for a lookaround or a backreference and recurses into a subpattern, and a scoped group is a subpattern upstream, so `(?i:(?=a))` goes to Python's engine there and had to go to Python's engine here rather than to Arrow, which has never heard of `(?=`.
+
+One cell parts company with pandas and it is a CPython defect rather than a difference of opinion. `re.search` on a pattern opening with a scoped group that widens the alphabet skips positions the pattern matches, because the first character set is computed from the pattern's own flags rather than from the ones in force inside the group, and `re.fullmatch` on the same pattern and the same row answers correctly. So `Series.str.contains("(?u:\\w)", flags=re.ASCII)` on an e-acute is True here and False upstream while `str.fullmatch` is True in both. It is a registered divergence with a test asserting both sides, because reproducing it would mean building an optimisation this engine does not have in order to put a defect in it.
+
+RE2 keeps the three letters it has and keeps refusing the four it never had, so `(?x:a b)` and `(?a:\w)` with no flag beside them are an error here exactly as they are upstream. Document 89.
+
 ### Added: the `EXTRACT` fields that are arithmetic over a field firepanda already has
 
 `DECADE`, `CENTURY`, `MILLENNIUM`, `YEARWEEK`, `DAYOFMONTH`, `WEEKDAY` and `ERA`, with DuckDB's plural and abbreviated spellings of each. None of them needed a kernel. A decade is the year over ten, a century is the year one less over a hundred one more, because 1900 is in the nineteenth century and 1901 is in the twentieth, a year week is the ISO year times a hundred plus the ISO week, a day of the month is the day, a weekday is the day of the week that was already there, and an era is one for every row that holds a date. Writing them as arithmetic over the fields that do have kernels is also what makes it impossible for `EXTRACT(DECADE FROM d)` to disagree with `EXTRACT(YEAR FROM d)` on the same row.
@@ -27,6 +43,7 @@ Verbose mode and the ascii flag are the last two of the seven flag letters, so e
 TPC-H q13 answers, which takes `pixi run tpch` to twenty of twenty two. An outer join with a condition about its right side used to be refused because a residual above the join would test the padding on a left row that matched nothing. A part of the condition that reads only the right side goes under the right input instead, before the pairing is built, and the left rows are padded or dropped exactly as they were.
 
 ClickBench q28 at 1M is 1.26 s where the 0.8.9 notes had it at 1.95 s, on 3.39 cores where it was on 3.41, machine idle for both and q27 run beside it as the control. DuckDB 1.5.5 answered the same query in 0.154 s in the same minute, so this library is about eight times slower on it rather than about twelve. Almost all of that is the anchored pattern change below; the byte table beside it is about four percent. Issue #830 stays open on the third of its three costs, which is a lazy DFA and is milestone sized.
+
 
 ### Added: verbose mode and the ascii flag, which are the last two of the seven letters
 

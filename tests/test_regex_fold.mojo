@@ -265,14 +265,15 @@ def test_the_flag_still_reaches_the_pattern_the_anchoring_wrote() raises:
     assert_false(matches_text(program, "aB"))
 
 
-def test_a_scoped_flag_group_is_still_refused() raises:
-    """The parser reads a scoped group and throws the letters away, so a
-    program built from that tree would answer `(?i:b)` without folding while
-    both engines fold. The refusal is a gap and stays one."""
-    var program = program_for(METHOD_CONTAINS, "(?i:b)")
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(program.problem, "a scoped flag group is not carried yet")
+def test_a_scoped_flag_group_folds_inside_the_bracket_and_not_past_it() raises:
+    """This was the refusal `a scoped flag group is not carried yet` until the
+    letters got a node to ride on. The second row is what the sentence was
+    protecting against, since a tree with the letters thrown away answers it
+    False and a pattern wide `(?i)` answers it True."""
+    var program = program_for(METHOD_CONTAINS, "(?i:b)c")
+    assert_true(program.ok)
+    assert_true(matches_text(program, "Bc"))
+    assert_false(matches_text(program, "bC"))
 
 
 def main() raises:

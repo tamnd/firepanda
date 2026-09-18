@@ -43,6 +43,7 @@ from firepanda.kernel.regex.tokens import (
     OP_ASSERT_NOT,
     OP_BRANCH,
     OP_GROUPREF,
+    OP_SCOPE,
     OP_SEQ,
     OP_SUBPATTERN,
     Node,
@@ -76,7 +77,12 @@ def _walks(nodes: List[Node], node: Int32) -> Bool:
         var op = nodes[Int(child)].op
         if op == OP_ASSERT or op == OP_ASSERT_NOT or op == OP_GROUPREF:
             return True
-        if op == OP_SUBPATTERN or op == OP_BRANCH or op == OP_SEQ:
+        if (
+            op == OP_SUBPATTERN
+            or op == OP_BRANCH
+            or op == OP_SEQ
+            or op == OP_SCOPE
+        ):
             if _walks(nodes, child):
                 return True
         child = nodes[Int(child)].next
