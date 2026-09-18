@@ -1,0 +1,321 @@
+"""Backtracking over a short row, with a bitmap that makes it safe.
+
+The machine next door holds every position the pattern could be in at once, and
+that is what makes it safe against a pattern written to blow up: the work is the
+length of the row times the size of the program however the pattern is written.
+The price is that it pays that every time. A thread list is walked per character,
+a thread carries a copy of its slots, and a row that a plain backtracking engine
+would answer in forty steps is answered in four hundred.
+
+This is the plain backtracking engine with the blowing up taken out. It follows
+one path through the program at a time, and it writes down every pair of an
+instruction and a position it has already been to. Arriving at a pair it has
+already been to means the path from there has already been tried and has already
+failed, since whether a match can be found from an instruction and a position
+does not depend on how the search arrived there. So the pair is dropped. That
+gives the same bound the machine has, one visit per instruction per position, by
+memoising failure rather than by carrying every path at once. It is RE2's
+BitState and the name is the bitmap.
+
+What it buys is the constants. There are no thread lists, no stamp array to
+refill, and no slot vector per thread: one slot vector is written as the path
+goes forward and put back as it comes out, which is the same trick the machine's
+queue walk already uses inside a position. On the ClickBench q28 pattern over a
+URL that is most of the work of a row.
+
+What it costs is the bitmap, which is one bit per instruction per position and
+so grows with the row. That is the whole of the give up rule. A row long enough
+that the bitmap would be larger than a quarter of a million bits is handed back
+to the caller, who runs the machine on it, which is the same arrangement the
+state cache has and for the same reason: this is an accelerator with an engine
+underneath it rather than a second engine a caller has to choose between.
+
+The order matters as much as the bound does. A split pushes its second arm and
+then its first, so the first comes off the stack first and the path the pattern
+prefers is followed first. Attempts are started at one position after another
+from the cursor, and the first position that matches wins. Those two together
+are leftmost first, which is what the machine does and what both RE2 and Python
+do, and it is the reason a match is returned the moment it is reached rather than
+after the rest of the stack has been looked at.
+
+The bitmap is not cleared between attempts at different positions, which looks
+wrong and is the thing that keeps the whole scan linear. A pair that failed from
+one starting position fails from every other, because an instruction and a
+position say everything about what is left to do. Nothing in the program reads
+where the attempt began: the assertions read the row and the cursor is not one of
+them.
+
+Captures come out of the same walk. A save writes a position into a slot on the
+way in and puts back what it found on the way out, which on an explicit stack is
+a second kind of entry pushed under the path it protects. So the slots are right
+at the moment a match is reached and nowhere else, which is all anybody needs.
+"""
+
+from std.collections.span import Span
+
+from firepanda.kernel.regex.pike import (
+    accepts,
+    first_stop,
+    holds,
+    point_at,
+)
+from firepanda.kernel.regex.program import (
+    IN_AT,
+    IN_JUMP,
+    IN_MATCH,
+    IN_SAVE,
+    IN_SPLIT,
+    Program,
+    word_ranges_unicode,
+)
+from firepanda.kernel.regex.tokens import (
+    AT_BOUNDARY_UNICODE,
+    AT_NON_BOUNDARY_UNICODE,
+)
+
+
+comptime MAX_CELLS: Int = 1 << 18
+"""How large a bitmap a row is allowed to need, in bits.
+
+A quarter of a million of them, which is thirty two kilobytes and is RE2's
+number. It is a bound on the product of the row and the program rather than on
+either of them, so a program of forty instructions takes a row of six thousand
+characters and a program of four hundred takes a row of six hundred. Rows longer
+than that go to the machine, which needs no bitmap at all.
+
+The number could be larger. It is here because the bitmap is cleared per row and
+a bitmap the size of a cache is a clear that costs more than the row it is
+clearing, not because anything breaks above it.
+"""
+
+comptime GAVE_UP: Int = -2
+"""The row was too long for the bitmap. Run the machine on it."""
+
+comptime NO_MATCH: Int = -1
+"""There is no match at or after the cursor. The same value the machine's own
+search returns, so a caller that falls back reads one number."""
+
+
+struct Bounded(Movable):
+    """The bitmap, the stack and the slots, kept so that a column allocates once.
+
+    Sized for one program and usable on any row, which is the shape a column
+    wants. The program is passed to the constructor and to every search rather
+    than being held here, which is the arrangement the machine and the state
+    cache both have: handing this a program of a different size is a bug no
+    assertion here would catch, so the two calls are kept visibly next to each
+    other.
+    """
+
+    var ok: Bool
+    """Whether this can be asked anything at all, which is whether the program
+    compiled. There is no pattern shape this engine refuses, unlike the state
+    cache: it answers everything the machine answers, including the assertions
+    and the captures, and its only way out is the row being too long."""
+
+    var seen: List[UInt64]
+    """One bit per instruction per position, `pc * (length + 1) + at`. Cleared
+    per row, which is the reason the bound above is a small number."""
+
+    var slots: List[Int32]
+    """Where each group opened and closed on the path being walked, which is the
+    answer when a match is reached and is scaffolding at every other moment."""
+
+    var nslots: Int
+    """How many of those there are, which is zero for a program compiled without
+    captures and is then the whole of what the slot machinery costs."""
+
+    var word: List[Int32]
+    """Python's word characters as ranges, held for the same reason the machine
+    holds them: the table lives in the compiler's world and coming out of it
+    costs a copy of six kilobytes. Empty unless the program asks for one of the
+    two Unicode boundaries."""
+
+    var jobs_pc: List[Int32]
+    """The stack, as instructions. A negative entry is not an instruction: it is
+    the slot `-pc - 1` waiting to be put back, and the number beside it is what
+    to put back into it."""
+
+    var jobs_at: List[Int32]
+    """The positions of the entries in `jobs_pc`, or the values to restore."""
+
+    def __init__(out self, program: Program):
+        """Sizes everything for a program.
+
+        Args:
+            program: The compiled pattern this is going to run.
+        """
+        self.ok = program.ok
+        self.seen = []
+        self.nslots = program.slots
+        self.slots = List[Int32](length=self.nslots, fill=-1)
+        self.jobs_pc = []
+        self.jobs_at = []
+        self.word = []
+        for i in range(len(program.code)):
+            var instruction = program.code[i]
+            if instruction.op != IN_AT:
+                continue
+            if instruction.a == Int32(Int(AT_BOUNDARY_UNICODE)) or (
+                instruction.a == Int32(Int(AT_NON_BOUNDARY_UNICODE))
+            ):
+                self.word = word_ranges_unicode()
+                break
+
+    def _push(mut self, pc: Int32, at: Int32):
+        """Puts one entry on the stack.
+
+        Args:
+            pc: The instruction, or `-slot - 1` for a slot to put back.
+            at: The position, or the value to put back.
+        """
+        self.jobs_pc.append(pc)
+        self.jobs_at.append(at)
+
+    def _attempt(
+        mut self,
+        program: Program,
+        points: Span[UInt32, _],
+        lead: Int,
+        length: Int,
+        start: Int,
+        mut found: List[Int32],
+    ) -> Int:
+        """Follows every path from one starting position until one matches.
+
+        Args:
+            program: The compiled pattern.
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of them.
+            length: One past the last position, counting those bytes.
+            start: Where this attempt begins.
+            found: Filled with the slots of the match, when there is one.
+
+        Returns:
+            Where the match ends, or `NO_MATCH`.
+        """
+        self.jobs_pc.clear()
+        self.jobs_at.clear()
+        self._push(0, Int32(start))
+        while len(self.jobs_pc) > 0:
+            var pc = self.jobs_pc.pop()
+            var at = self.jobs_at.pop()
+            if pc < 0:
+                # The way out of a save. Everything the save protected has been
+                # walked, so the slot goes back to what it held before it.
+                self.slots[Int(-pc - 1)] = at
+                continue
+            var cell = Int(pc) * (length + 1) + Int(at)
+            var word_at = cell >> 6
+            var bit = UInt64(1) << UInt64(cell & 63)
+            if (self.seen[word_at] & bit) != 0:
+                continue
+            self.seen[word_at] |= bit
+            var instruction = program.code[Int(pc)]
+            if instruction.op == IN_MATCH:
+                found.clear()
+                for k in range(self.nslots):
+                    found.append(self.slots[k])
+                return Int(at)
+            elif instruction.op == IN_JUMP:
+                self._push(instruction.a, at)
+            elif instruction.op == IN_SPLIT:
+                # The second arm first, so that the first arm comes off the
+                # stack first and the path the pattern prefers is the path that
+                # is followed.
+                self._push(instruction.b, at)
+                self._push(instruction.a, at)
+            elif instruction.op == IN_AT:
+                if holds(instruction.a, points, lead, Int(at), Span(self.word)):
+                    self._push(pc + 1, at)
+            elif instruction.op == IN_SAVE:
+                if self.nslots == 0:
+                    # A program compiled with saves in it being asked a question
+                    # that has no use for them, which is the machine's rule as
+                    # well. The instruction is then a jump to the next one.
+                    self._push(pc + 1, at)
+                else:
+                    var slot = Int(instruction.a)
+                    self._push(Int32(-slot - 1), self.slots[slot])
+                    self.slots[slot] = at
+                    self._push(pc + 1, at)
+            elif Int(at) < length and accepts(
+                instruction, program.ranges, point_at(points, lead, Int(at))
+            ):
+                self._push(pc + 1, at + 1)
+        return NO_MATCH
+
+    def search(
+        mut self,
+        program: Program,
+        points: Span[UInt32, _],
+        lead: Int,
+        first: Int,
+        mut found: List[Int32],
+    ) -> Int:
+        """Where the leftmost first match at or after a cursor ends.
+
+        The same answer the machine's own search gives, to the same two rules.
+        The earliest starting position that can match wins, because the
+        positions are tried in order and the first one that matches returns. And
+        among the ways that position can match, the one the pattern prefers
+        wins, because the walk from it takes the first arm of every split first
+        and returns at the first match it reaches.
+
+        Args:
+            program: The compiled pattern.
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of the text, which is
+                how a search that begins in the middle of a character says so.
+            first: The cursor, which is the first position an attempt may start
+                at.
+            found: Filled with the two ends of the whole match and the two ends
+                of every group, as `2k` and `2k + 1` for group `k`, and left
+                alone when nothing matched or when the program carries no slots.
+
+        Returns:
+            Where the match ends, `NO_MATCH` when there is none, or `GAVE_UP`
+            when the row is too long for the bitmap and the caller has to run
+            the machine.
+        """
+        if not self.ok:
+            return GAVE_UP
+        var length = lead + len(points)
+        var cells = program.sized() * (length + 1)
+        if cells > MAX_CELLS:
+            return GAVE_UP
+        var words = (cells + 63) // 64
+        if len(self.seen) < words:
+            self.seen = List[UInt64](length=words, fill=0)
+        else:
+            for i in range(words):
+                self.seen[i] = 0
+        for k in range(self.nslots):
+            self.slots[k] = -1
+
+        var position = first
+        var skipping = program.first_count > 0
+        while position <= length:
+            if program.anchored and position > 0:
+                # The anchor is asked about the row rather than about the
+                # cursor, so a program whose first step is `^` has one attempt
+                # in it and it is the one at zero. A cursor above zero is a
+                # scan that has already replaced something, and there is nothing
+                # left for it to find.
+                break
+            if skipping:
+                # The set of characters a match can begin with, asked here for
+                # the same reason the machine asks it: an attempt at a position
+                # holding a character no first step accepts is an attempt that
+                # dies on its first instruction, and stepping over it costs a
+                # lookup rather than a walk.
+                position = first_stop(program, points, lead, position, length)
+                if position >= length:
+                    break
+            var end = self._attempt(
+                program, points, lead, length, position, found
+            )
+            if end != NO_MATCH:
+                return end
+            position += 1
+        return NO_MATCH
