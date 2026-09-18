@@ -559,6 +559,14 @@ struct Transform(Movable):
     be a hundred lines saying the same thing a hundred times.
     """
 
+    var slice_minus: UInt16
+    """The rule index of `EndSliceMinus`, the one slice bound with no value.
+
+    The grammar takes `x[1:-]` and DuckDB's own parser does not, so there is
+    nothing on the other side to agree with and the rule is worth naming here
+    rather than working out from the text of a bound that holds one byte.
+    """
+
     var units: Dict[UInt16, StaticString]
     """The one spelling of the interval unit a rule names, by rule index.
 
@@ -591,6 +599,7 @@ struct Transform(Movable):
         """
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
         self.refusals = List[UInt16](length=len(grammar.names), fill=0)
+        self.slice_minus = 0
         self.units = Dict[UInt16, StaticString]()
         self.expression_rule = -1
         self.statement_rule = -1
@@ -708,6 +717,8 @@ struct Transform(Movable):
         self._set(names, "ExtractExpression", _EXTRACT)
         self._set(names, "TrimExpression", _TRIM)
         self._set(names, "PositionExpression", _POSITION)
+        self.slice_minus = UInt16(self._index(names, "EndSliceMinus"))
+
         self._set(names, "IntervalLiteral", _INTERVAL)
 
         # The interval units, as a rule name and the one spelling of what it
@@ -2560,10 +2571,105 @@ struct Transform(Movable):
                 continue
 
             if lead == _LEFT_BRACKET:
-                raise _unsupported(tree, sql, what, SUBSCRIPT)
+                built = self._subscript(tree, sql, what, built, ast, work)
+                continue
 
             raise _unsupported(tree, sql, what, POSTFIX_OPERATOR)
         return built
+
+    def _subscript(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        operand: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `x[1]` or `x[1:2]`.
+
+        The grammar is `'[' SliceBound ']'`, and `SliceBound` is three optional
+        parts: an expression, a colon with an expression after it, and a second
+        colon with an expression after it. They are told apart here the way the
+        grammar tells them apart, by the order they come in and by whether one
+        starts with a colon, so `x[1]` and `x[1:]` differ by a part that holds
+        nothing but its colon.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SliceExpression` node.
+            operand: The expression being indexed.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the bounds.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a bound is a shape with no value in it.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var parts = tree.children(self._only(tree, node))
+
+        var start = NO_NODE
+        var next = 0
+        if len(parts) > 0 and _first_byte(tree, sql, parts[0]) != _COLON:
+            start = parts[0]
+            next = 1
+
+        var sliced = next < len(parts)
+        var end = NO_NODE
+        if sliced:
+            end = self._slice_value(tree, sql, parts[next])
+            next += 1
+
+        var step = NO_NODE
+        if next < len(parts):
+            step = self._slice_value(tree, sql, parts[next])
+
+        var wanted: List[UInt32] = [start, end, step]
+        work.warm(wanted)
+        return ast.subscript(
+            operand,
+            NO_NODE if start == NO_NODE else work.value(start),
+            NO_NODE if end == NO_NODE else work.value(end),
+            NO_NODE if step == NO_NODE else work.value(step),
+            sliced,
+            at,
+        )
+
+    def _slice_value(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """The expression a colon bound holds, or nothing for a bare colon.
+
+        The two bounds are not shaped alike. The end holds an `EndSliceValue`
+        and the step holds the expression itself, so this steps over the rules
+        that carry no value of their own until it reaches one that does.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `EndSliceBound` or `StepSliceBound` node.
+
+        Returns:
+            The expression node, or the null node for a colon with nothing
+            after it.
+
+        Raises:
+            Error: If the bound is the one spelling DuckDB does not take.
+        """
+        var kids = tree.children(node)
+        if len(kids) == 0:
+            return NO_NODE
+
+        var value = kids[0]
+        while self._action(tree, value) == _CONSUMED:
+            if tree.nodes[Int(value)].rule == self.slice_minus:
+                raise _unsupported(tree, sql, node, SUBSCRIPT)
+            value = self._only(tree, value)
+        return value
 
     def _function(
         self,

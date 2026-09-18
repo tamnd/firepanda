@@ -51,6 +51,7 @@ from .ast import (
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
+    EXPR_SUBSCRIPT,
     EXPR_UNARY,
     EXPR_WINDOW,
     BOUND_CURRENT_ROW,
@@ -714,6 +715,44 @@ def _write_step(
         if unit.byte_length() > 0:
             out += " "
             out += unit
+        return
+
+    if kind == EXPR_SUBSCRIPT:
+        # No parentheses of its own, because everything that binds looser than
+        # a subscript already prints inside its own pair, so `(a + b)[1]` comes
+        # back the way it was written and `a[1]` does not grow a pair it never
+        # had.
+        if ast.length(item.children) != 3:
+            raise Error("a subscript without exactly three bounds on it")
+        var start = ast.at(item.children, 0)
+        var end = ast.at(item.children, 1)
+        var step = ast.at(item.children, 2)
+        if phase == 0:
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += "["
+            if start != NO_NODE:
+                stack.append(_Step(node, 2))
+                stack.append(_Step(start, 0))
+                return
+            phase = 2
+        if phase == 2:
+            if item.payload == 1:
+                out += ":"
+            if end != NO_NODE:
+                stack.append(_Step(node, 3))
+                stack.append(_Step(end, 0))
+                return
+            phase = 3
+        if phase == 3:
+            if step != NO_NODE:
+                out += ":"
+                stack.append(_Step(node, 4))
+                stack.append(_Step(step, 0))
+                return
+        out += "]"
         return
 
     if kind == EXPR_PARAMETER:

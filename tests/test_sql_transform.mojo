@@ -521,6 +521,7 @@ def test_every_shape_here_round_trips() raises:
         "a ILIKE 'x'",
         "$1 + $two",
         "d + INTERVAL 3 MONTH",
+        "a[1] + b[2:3]",
         "INTERVAL (a + 1) DAY",
     ]
     for sample in cases:
@@ -644,20 +645,44 @@ def test_an_escaped_string_refuses_rather_than_decoding_half_of_it() raises:
         _ = _printed("E'a\\nb'", g, rules)
 
 
-def test_a_subscript_refuses() raises:
+def test_a_subscript_and_the_slices_around_it() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a slice or a subscript"):
-        _ = _printed("a[1]", g, rules)
+    assert_equal(_printed("a[1]", g, rules), "a[1]")
+    assert_equal(_printed("a[1:2]", g, rules), "a[1:2]")
+    assert_equal(_printed("a[1:4:2]", g, rules), "a[1:4:2]")
+
+
+def test_a_slice_that_left_a_bound_out_leaves_it_out_again() raises:
+    # `a[1]` and `a[1:]` both have a start and neither has an end, so the colon
+    # is the only thing that tells them apart and the node carries a flag for
+    # it. Printing one as the other would be a different query.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a[:2]", g, rules), "a[:2]")
+    assert_equal(_printed("a[1:]", g, rules), "a[1:]")
+    assert_equal(_printed("a[:]", g, rules), "a[:]")
+
+
+def test_a_subscript_takes_what_is_in_front_of_it_and_not_more() raises:
+    # A subscript binds tighter than any operator, and every operand that binds
+    # looser already prints inside its own parentheses, so nothing here has to
+    # add a pair to keep the shape.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a[1][2]", g, rules), "a[1][2]")
+    assert_equal(_printed("(a + b)[1]", g, rules), "(a + b)[1]")
+    assert_equal(_printed("f(x)[1]", g, rules), "f(x)[1]")
+    assert_equal(_printed("[1, 2, 3][2]", g, rules), "[1, 2, 3][2]")
 
 
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="LINE 1: a[1]"):
-        _ = _printed("a[1]", g, rules)
+    with assert_raises(contains="LINE 1: (1, 2)"):
+        _ = _printed("(1, 2)", g, rules)
     with assert_raises(contains="issues/"):
-        _ = _printed("a[1]", g, rules)
+        _ = _printed("(1, 2)", g, rules)
 
 
 def test_a_long_chain_of_tails_is_built_once() raises:

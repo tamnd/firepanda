@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads a subscript and the slices around it
+
+`a[1]`, `a[1:2]`, `a[:2]`, `a[1:]` and `a[1:4:2]` used to be refused by the transformer, and 660 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval is out of it. They parse, transform and print, and every one of those spellings comes back the way it was written.
+
+The refusal moved to lowering, the same way the interval literal's did. Which of the three families a subscript belongs to, a list, an array or a string, depends on what the operand turns out to hold, so the first stage with anything to say about it is the one that knows types, and what it says is the refusal that was already in the table.
+
+`a[1]` and `a[1:]` are the pair that makes this more than a pass through. Both have a start, neither has an end, and the colon is the whole of what separates them, so the node carries a flag for whether one was written rather than working it out from which bounds are there. `a[::2]` is not in, because it is not in DuckDB either: the tokenizer reads the two colons as a cast operator and both parsers say so.
+
 ## [0.8.14] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).

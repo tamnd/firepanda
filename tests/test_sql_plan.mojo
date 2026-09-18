@@ -1178,6 +1178,16 @@ def test_a_decimal_expression_of_literals_alone_is_refused() raises:
         _ = _plan("SELECT 1.1 + 2.2 AS a")
 
 
+def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
+    # Which of the three families a subscript belongs to, a list, an array or a
+    # string, depends on what the operand holds, so this is the first stage
+    # with anything to say about it and it says the refusal instead.
+    with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[1] FROM t")
+    with assert_raises(contains="rather than with brackets"):
+        _ = _plan("SELECT g[1:2] FROM t")
+
+
 def test_an_interval_is_refused_here_and_not_in_the_transformer() raises:
     # The transformer builds a duration and the printer writes it back, so the
     # round trip over DuckDB's corpus agrees on every interval in it. The type
