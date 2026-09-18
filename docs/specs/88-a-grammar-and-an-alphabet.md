@@ -4,7 +4,7 @@
 
 `re.VERBOSE` and `re.ASCII`, the last two of the seven letters any name on the `str` accessor still turned down. Document 85 section 12 called them gaps and document 87 section 9 said they were the only two refused for a reason inside this library rather than upstream, and they are taken together here because that is the one thing they have in common. Issue #8 M6.
 
-They have nothing else in common and the document is really two documents. Verbose mode changes what the characters of a pattern mean and is spent entirely in the parser, in one place, in nine lines. The ascii flag changes what six classes and a fold and a word boundary cover and is spent entirely in the compiler, in seven places, none of them new code so much as a second Bool arriving where one already was. Neither of them is visible to the machine that runs the program, which is now true of all five letters this library answers.
+They have nothing else in common and the document is really two documents. Verbose mode changes what the characters of a pattern mean and is spent entirely in the parser, in one place, in nine lines. The ascii flag changes what six classes and a fold and a word boundary cover and is spent entirely in the compiler, in seven places, none of them new code so much as a second Bool arriving where one already was. Six of the seven letters are read now and the one left is locale, which Python will not take on a pattern made of text either. Five of the six are invisible to the machine that runs the program, and the ascii flag is the first one that is not, for a reason section 7 is about.
 
 ## 2. Verbose mode is a rule about where, not about what
 
@@ -82,7 +82,7 @@ The sweep is what found both of the defects written up here. The `\B` one in sec
 
 `tests/test_regex_method.mojo` gained a test for the rewrite itself, which asserts the text that comes out rather than only the answer that comes back, because the text is the part that is easy to change by accident later.
 
-The three regex differentials were run because this slice changes the parser, which means it could move an answer for a pattern holding no flag at all. All nine sweeps are 10000 in ten thousand with 0 disagreements. Two lines left the held-out breakdown and no line joined it, which is what a slice that only adds answers is supposed to look like.
+The three regex differentials were run because this slice changes the parser, which means it could move an answer for a pattern holding no flag at all. All five sweeps are 10000 in ten thousand with 0 disagreements. Two lines left the held-out breakdown and no line joined it, which is what a slice that only adds answers is supposed to look like.
 
 The held-out count for `str.contains` is 22281 of 30052, and `verbose mode is not read yet` and `the ascii flag is not read yet` are no longer two of the reasons in it.
 
