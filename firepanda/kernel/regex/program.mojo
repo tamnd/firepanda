@@ -286,6 +286,26 @@ struct Program(Movable):
     routing decision that picked the engine.
     """
 
+    var anchored: Bool
+    """Whether the pattern can only match at the start of the text.
+
+    True when the first instruction that is not a save is `^` outside multiline
+    mode or `\\A`, which is the one shape where a fresh attempt at any position
+    but zero is known to die on its first step. A pattern beginning with an
+    alternation compiles to a split first and is left alone even when both
+    branches are anchored, because the scans read this as a promise about the
+    whole program and a split is where a second promise would have to be
+    checked.
+
+    What reads it is the scan rather than the machine. `_run` and `matches` in
+    `firepanda/kernel/regex/pike.mojo` start a fresh attempt at every position
+    of the row, and for a program with this flag set every one of those after the
+    first walks from instruction zero to the anchor and stops, which is a walk
+    per character of every row that answers nothing. A row of a hundred
+    characters pays it a hundred times, and q28 of ClickBench is a column of
+    URLs read by an anchored pattern, so document 80 has the number.
+    """
+
     var labels: List[String]
     """What each group is called, one entry per group and empty for an unnamed
     one.
@@ -308,6 +328,7 @@ struct Program(Movable):
         self.slots = 0
         self.groups = 0
         self.python = False
+        self.anchored = False
         self.labels = []
 
     def sized(self) -> Int:
@@ -1330,6 +1351,36 @@ def _refused_flags_python(flags: Int32) -> String:
     return String("")
 
 
+def _anchored(code: Span[Instruction, _]) -> Bool:
+    """Whether a program can only match at the start of the text.
+
+    Reads the instructions rather than the tree, because the tree has the flags
+    on one side and the anchor on the other and the compiler has already put the
+    two together: multiline turns `^` into `AT_BEGINNING_LINE` while it is being
+    emitted, so a program that still holds `AT_BEGINNING` was compiled without
+    the flag and there is nothing left to work out here.
+
+    The walk steps over the saves a program compiled with captures opens with
+    and then looks at one instruction. Anything else, a split from an
+    alternation or a character or a jump, answers False, so this says nothing
+    about a pattern that has an anchor somewhere other than in front.
+
+    Args:
+        code: The instructions, which start at zero.
+
+    Returns:
+        True when every attempt above position zero is known to fail.
+    """
+    var pc = 0
+    while pc < len(code) and code[pc].op == IN_SAVE:
+        pc += 1
+    if pc >= len(code) or code[pc].op != IN_AT:
+        return False
+    return code[pc].a == Int32(Int(AT_BEGINNING)) or code[pc].a == Int32(
+        Int(AT_BEGINNING_STRING)
+    )
+
+
 def compile_program(
     tree: Parsed, engine: UInt8, captures: Bool = False
 ) -> Program:
@@ -1455,6 +1506,7 @@ def compile_program(
         return out^
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
+    out.anchored = _anchored(Span(out.code))
     out.groups = Int(tree.groups)
     out.slots = 2 * (Int(tree.groups) + 1) if captures else 0
     # The parser keeps the names and the numbers as two lists the length of

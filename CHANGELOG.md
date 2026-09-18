@@ -33,6 +33,13 @@ What that missed is that some residuals do not have to go above the join at all.
 A part that reads the left side, or both sides, is still refused, and with the sentence it came back with before. There is nowhere for those to go: a left row that fails one has to come out padded rather than dropped, and neither above the join nor under one of its inputs is a place that can say so.
 
 `pixi run tpch` is twenty of twenty two. The two left stop in two different places, q20 on a left join with two key pairs and q21 on a correlated `EXISTS` that matches through an inequality as well as an equality.
+### Changed: a pattern anchored at the start is tried once rather than once a character
+
+The search is unanchored, so the machine starts a fresh attempt at every position of every row. For a pattern beginning with `^` outside multiline mode, or with `\A`, every one of those after the first walks from the first instruction to the anchor, asks whether the position is zero, and stops. The compiler records that shape on the program now and the two scans skip those attempts, so a row that does not match ends at the second position rather than at the last one.
+
+It is worth having because anchored patterns are not a corner. ClickBench q28 reads a column of URLs with one, `str.match` is `str.contains` with the pattern wrapped in `^(...)` by pandas itself, and `match` and `fullmatch` on Python's engine are answered by writing `\A(pattern)\z` around what the caller wrote, so all three have been paying this. Over 200000 synthetic URL rows the q28 replace went from 682 ms to 446 ms on the same machine in the same minute. q28 itself at 1M spent 32.6 s and 32.1 s of user CPU over three runs before the change and 24.6 s and 26.2 s after it, run one after another. There is no wall clock number beside those because the machine was carrying a load average above twenty the whole time. Issue #830.
+
+A pattern that begins with an alternation is left alone even when both of its arms are anchored, since it compiles to a split first and the flag is a promise about the program rather than about one path through it.
 
 ## [0.8.9] - 2026-09-18
 

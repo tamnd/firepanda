@@ -235,6 +235,47 @@ def test_an_anchor_is_a_position_rather_than_a_character() raises:
     assert_equal(built("(?m)^a$"), "0 at(2); 1 char(a); 2 at(5); 3 match")
 
 
+def anchored(pattern: StringSlice, captures: Bool = False) -> Bool:
+    """Whether a pattern compiles to a program that can only match at the start.
+
+    Args:
+        pattern: The pattern.
+        captures: Whether to compile it with the save instructions, which is the
+            case the walk has to step over.
+
+    Returns:
+        What the compiler wrote on the program.
+    """
+    return compile_program(
+        parse_pattern(pattern), ENGINE_RE2, captures
+    ).anchored
+
+
+def test_a_pattern_that_opens_with_a_start_anchor_says_so() raises:
+    """The flag the two scans read to stop starting attempts they know will
+    fail. `\\A` is the same promise as `^` here because the multiline flag is
+    the only thing that separates them and the compiler has already spent it."""
+    assert_true(anchored("^abc"))
+    assert_true(anchored("\\Aabc"))
+    assert_true(anchored("^https?://"))
+    assert_true(anchored("^abc", captures=True))
+    assert_true(anchored("^(a)(b)", captures=True))
+    assert_true(anchored("(^a)"))
+
+
+def test_a_pattern_that_can_match_further_along_says_nothing() raises:
+    """Including the two that look anchored and are not. Under multiline `^` is
+    a different position code and matches after every newline, and an
+    alternation compiles to a split whether or not both of its arms are
+    anchored, which this reads as unanchored rather than walking into the
+    arms."""
+    assert_false(anchored("abc"))
+    assert_false(anchored("(?m)^abc"))
+    assert_false(anchored("^a|^b"))
+    assert_false(anchored("a^b"))
+    assert_false(anchored("a*^b"))
+
+
 def test_what_re2_refuses_is_not_counted_as_a_gap() raises:
     """Six constructs Python's grammar reads and RE2 has never had. A caller
     writing one of these gets an Arrow error out of pandas today, so refusing it

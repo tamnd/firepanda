@@ -554,20 +554,27 @@ struct Machine(Movable):
         var length = len(points)
         var position = 0
         while position <= length:
-            _queue(
-                program.code,
-                self.here,
-                self.slots_here,
-                self.carry,
-                self.stamp,
-                Int32(position),
-                0,
-                points,
-                0,
-                position,
-                0,
-                Span(self.word),
-            )
+            if not (program.anchored and position > 0):
+                _queue(
+                    program.code,
+                    self.here,
+                    self.slots_here,
+                    self.carry,
+                    self.stamp,
+                    Int32(position),
+                    0,
+                    points,
+                    0,
+                    position,
+                    0,
+                    Span(self.word),
+                )
+            elif len(self.here) == 0:
+                # The same rule the other scan gives a paragraph to: an anchored
+                # program starts no attempt above position zero, so once the one
+                # attempt it does start has died there is nothing left to read
+                # the rest of the row for.
+                break
             var i = 0
             while i < len(self.here):
                 var pc = self.here[i]
@@ -652,10 +659,19 @@ struct Machine(Movable):
         var end = -1
         var position = first
         while position <= length:
-            if end < 0:
+            if end < 0 and not (program.anchored and position > 0):
                 # A fresh attempt knows nothing about any group, and it is added
                 # behind whatever survived the last character, which is what
                 # makes an earlier attempt win over this one.
+                #
+                # An anchored program is the one case where an attempt is known
+                # to fail before it is started, since its first step asks
+                # whether the position is zero. Skipping those leaves the loop
+                # with nothing in `here` as soon as the attempt at zero has
+                # died, and the branch below then ends the row. Position zero
+                # and not `first`, because the anchor is asked about the text
+                # and a caller searching from a cursor is asking about a
+                # position the anchor has already ruled out.
                 for k in range(self.nslots):
                     self.carry[k] = -1
                 _queue(
