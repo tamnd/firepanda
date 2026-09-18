@@ -19,6 +19,15 @@ So there are two new reductions rather than a flag on the old ones, `FIRST_ROW` 
 They do not fold a chunk at a time, which is the one design decision here worth writing down. A partial answer from one chunk is a value that may itself be null, and a running slot holding a null cannot say whether it is a group whose first row was missing or a group no chunk has reached yet. That is the trap a sum fell into in the entry below, where a zero meant both nothing added and a total of zero. The way out there was a second state slot; here it is cheaper to hold the column and reduce once at the end, which is the route a median already takes, because these two copy one element per group rather than accumulating anything.
 
 `FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
+### Added: a lookbehind, which is the other half of the construct below
+
+`str.contains("(?<=a)b")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both forms are in, the positive one and the negative one, and a lookbehind may hold another or hold a lookahead. With this the whole of the lookaround is read on the engine that copies Python, and no pattern in the held out corpus is turned down for one.
+
+The half below needed nothing from the compiler, because a lookahead starts its body where the pattern has got to. This half needs a number: the body has to end where the pattern has got to, the machine walks forwards, so the compiler has to know how many characters the body always reads and has to refuse a body that does not always read the same number. Python refuses exactly those, with `look-behind requires fixed-width pattern`, so `(?<=a*)b` raises here and raises there. That refusal is a `ValueError` rather than a `NotImplementedError`, which is the difference between a pattern nobody answers and a pattern pandas answers and this library does not.
+
+Which bodies count as one width is a rule with several edges on it and every one was measured against a running interpreter. An alternation is fixed when its arms agree, so `(?<=ab|cd)e` reads and `(?<=a|bc)d` does not. A repeat is fixed when its two bounds are the same number, so `a{2}` reads and `a{2,3}` does not. An assertion of any kind is worth nothing, which is what makes `(?<=^)` and `(?<=\b)` ordinary rather than special.
+
+The second machine is the one the lookahead already had and it does not know which direction it is answering, since the seed is the whole of the difference. It also stops now when no thread survives a pass, instead of walking to the end of the row to learn what it already knew, which a lookbehind would otherwise pay for on every position of every long row.
 
 ### Added: a lookahead, which is the first construct RE2 has not got
 
