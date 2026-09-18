@@ -1821,6 +1821,79 @@ def _emit_star(mut b: _Builder, nodes: List[Node], node: Int32, greedy: Bool):
         b.patch_b(split, body)
 
 
+def _reads_one(op: UInt8) -> Bool:
+    """Whether an instruction reads exactly one character and moves to the next.
+
+    Args:
+        op: The opcode.
+
+    Returns:
+        True for the five instructions that take a character.
+    """
+    return (
+        op == IN_CHAR
+        or op == IN_SET
+        or op == IN_NOT_SET
+        or op == IN_ANY
+        or op == IN_ANY_ALL
+    )
+
+
+def run_bodies(code: Span[Instruction, _]) -> List[Int32]:
+    """Which splits are a repeat of one character, and where the body is.
+
+    A repeat of a single class is written by `_emit_star` as three instructions:
+    a split, the one instruction the body is, and a jump back to the split. So
+    an engine walking `[^/]+` over a URL visits three instructions per character
+    and two of them only exist to get back to the first. This is the list that
+    lets one engine collapse the three into one step. The entry for a split of
+    that shape is where its body is, and every other entry is -1.
+
+    The shape is recognised from the program rather than written down while the
+    program is being built, and the two readings have to be kept together, which
+    is why this sits next to the emit it recognises. A split at `s` qualifies
+    when one of its arms is `s + 1`, the instruction there reads one character,
+    the instruction after that is a jump back to `s`, and the other arm is
+    `s + 3`. Greedy and lazy both come out of that, since the arm that is the
+    body says which one it is, and nothing else in the compiler writes those
+    four instructions in that order.
+
+    Nothing about the compiled program changes, which is the point of doing it
+    here. The note is read by the one engine that wants it, and the machine and
+    the state cache carry no extra comparison in the loop they spend most of
+    their time in. That was measured the other way round first, with the shape
+    written into the opcode: the machine went from four seconds to six and a half
+    on a million URLs, because its dispatch chain grew two comparisons in front
+    of the leaf it takes for every character. Issue #897.
+
+    Args:
+        code: The instructions.
+
+    Returns:
+        One entry per instruction, being the body of a one character repeat or
+        -1.
+    """
+    var runs = List[Int32](length=len(code), fill=-1)
+    for i in range(len(code)):
+        var instruction = code[i]
+        if instruction.op != IN_SPLIT:
+            continue
+        if i + 3 >= len(code):
+            continue
+        var body = Int32(i + 1)
+        var after = Int32(i + 3)
+        var greedy = instruction.a == body and instruction.b == after
+        var lazy = instruction.b == body and instruction.a == after
+        if not greedy and not lazy:
+            continue
+        if not _reads_one(code[i + 1].op):
+            continue
+        if code[i + 2].op != IN_JUMP or code[i + 2].a != Int32(i):
+            continue
+        runs[i] = body
+    return runs^
+
+
 def _emit_repeat(mut b: _Builder, nodes: List[Node], node: Int32, greedy: Bool):
     """Writes a quantifier, by copying its body as many times as it says.
 

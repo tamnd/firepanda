@@ -38,6 +38,7 @@ from firepanda.kernel.regex.program import (
     in_set,
     is_word_point,
     is_word_point_unicode,
+    run_bodies,
     word_ranges_unicode,
 )
 from firepanda.kernel.regex.tokens import (
@@ -141,6 +142,30 @@ def built(pattern: StringSlice) -> String:
     return drawn(compile_program(parse_pattern(pattern), ENGINE_RE2))
 
 
+def runs_of(pattern: StringSlice) -> String:
+    """Which splits of a pattern are a repeat of one character.
+
+    Args:
+        pattern: The pattern.
+
+    Returns:
+        Each split that qualifies as its own index, a colon and the index of its
+        body, separated by spaces, or `none`.
+    """
+    var program = compile_program(parse_pattern(pattern), ENGINE_RE2)
+    var runs = run_bodies(Span(program.code))
+    var out = String("")
+    for at in range(len(runs)):
+        if runs[at] < 0:
+            continue
+        if out.byte_length() != 0:
+            out += " "
+        out += String(at, ":", runs[at])
+    if out.byte_length() == 0:
+        return String("none")
+    return out^
+
+
 def test_a_plain_pattern_is_one_instruction_a_character() raises:
     """The simplest program there is, which fixes the shape the rest are read
     against."""
@@ -169,6 +194,27 @@ def test_a_plus_writes_the_body_once_before_the_loop() raises:
         built("a+"),
         "0 char(a); 1 split(2,4); 2 char(a); 3 jump(1); 4 match",
     )
+
+
+def test_a_repeat_of_one_character_is_recognised_from_the_program() raises:
+    """The backtracker walks these in one step instead of three, and what it
+    reads is the shape of the instructions rather than anything written down
+    while they were being built.
+
+    A lazy repeat is the same three instructions with the arms of the split the
+    other way round, so it qualifies as well and the arm that is the body is
+    what says which of the two it is. A body of more than one instruction does
+    not qualify, because then there is nothing to collapse.
+    """
+    assert_equal(runs_of("a*"), "0:1")
+    assert_equal(runs_of("a*?"), "0:1")
+    assert_equal(runs_of("a+"), "1:2")
+    assert_equal(runs_of("[^/]+"), "1:2")
+    assert_equal(runs_of(".*"), "0:1")
+    assert_equal(runs_of("a{2,}"), "2:3")
+    assert_equal(runs_of("(?:ab)*"), "none")
+    assert_equal(runs_of("a?"), "none")
+    assert_equal(runs_of("abc"), "none")
 
 
 def test_a_count_is_a_number_of_copies() raises:

@@ -23,6 +23,18 @@ goes forward and put back as it comes out, which is the same trick the machine's
 queue walk already uses inside a position. On the ClickBench q28 pattern over a
 URL that is most of the work of a row.
 
+One shape of repeat is walked in one step rather than three. A class under a
+plus or a star is a split, the class, and a jump back to the split, and on the
+q28 pattern over a URL that is most of what the engine does: two hundred and
+forty five steps a row against eighty six characters. The split is where the
+choice actually is, so the class is read at the split and the arm that goes
+round comes straight back to the split one position along, and the body and the
+jump behind it are never visited. Which splits those are is worked out once per
+program by `run_bodies` next door rather than being written into the program, so
+the machine and the state cache read the same instructions they always did and
+carry no extra comparison for a note they have no use for. It is worth about 1.8
+times on the pattern that asked for it. Issue #897.
+
 What it costs is the bitmap, which is one bit per instruction per position and
 so grows with the row. That is the whole of the give up rule. A row long enough
 that the bitmap would be larger than a quarter of a million bits is handed back
@@ -86,6 +98,7 @@ from firepanda.kernel.regex.program import (
     IN_SAVE,
     IN_SPLIT,
     Program,
+    run_bodies,
     word_ranges_unicode,
 )
 from firepanda.kernel.regex.tokens import (
@@ -268,6 +281,13 @@ struct Bounded(Movable):
     overrun is an error and this is several layers below the one that raises.
     """
 
+    var runs: List[Int32]
+    """Which splits are a repeat of one character and where the body of each
+    one is, worked out once per program by `run_bodies`. A split with an entry
+    here is walked in one step per character instead of three. Everything else
+    holds -1, which is every split in a pattern whose repeat is longer than a
+    single class."""
+
     def __init__(out self, program: Program):
         """Sizes everything for a program.
 
@@ -286,6 +306,7 @@ struct Bounded(Movable):
         self.marks = []
         self.steps = 0
         self.overrun = False
+        self.runs = run_bodies(Span(program.code))
         for i in range(len(program.code)):
             var instruction = program.code[i]
             if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
@@ -414,11 +435,41 @@ struct Bounded(Movable):
             elif instruction.op == IN_JUMP:
                 self._push(instruction.a, at)
             elif instruction.op == IN_SPLIT:
-                # The second arm first, so that the first arm comes off the
-                # stack first and the path the pattern prefers is the path that
-                # is followed.
-                self._push(instruction.b, at)
-                self._push(instruction.a, at)
+                var body = self.runs[Int(pc)]
+                if body < 0:
+                    # The second arm first, so that the first arm comes off the
+                    # stack first and the path the pattern prefers is the path
+                    # that is followed.
+                    self._push(instruction.b, at)
+                    self._push(instruction.a, at)
+                elif instruction.a == body:
+                    # A repeat of one character, greedy, walked in one step
+                    # rather than three. The arm that leaves the repeat is put
+                    # on the stack the same way it always was, and the arm that
+                    # goes round reads its character here and comes straight
+                    # back to this instruction one position along, so the body
+                    # and the jump behind it are never visited. Reading it here
+                    # is the same test the body would have done and it is done
+                    # once, so the one visit per instruction per position the
+                    # bitmap gives is untouched.
+                    self._push(instruction.b, at)
+                    if Int(at) < length and accepts(
+                        program.code[Int(body)],
+                        program.ranges,
+                        point_at(points, lead, Int(at)),
+                    ):
+                        self._push(pc, at + 1)
+                else:
+                    # The same repeat written lazily, so the order is the other
+                    # way round: the arm that leaves goes on last and comes off
+                    # first, which is what the split itself did.
+                    if Int(at) < length and accepts(
+                        program.code[Int(body)],
+                        program.ranges,
+                        point_at(points, lead, Int(at)),
+                    ):
+                        self._push(pc, at + 1)
+                    self._push(instruction.a, at)
             elif instruction.op == IN_AT:
                 if holds(instruction.a, points, lead, Int(at), Span(self.word)):
                     self._push(pc + 1, at)
