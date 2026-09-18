@@ -514,6 +514,11 @@ def replaced(
     caller's list so that a column pays for it once rather than once per row,
     and so are the machine, the slots and the output.
 
+    Every piece copied out of the row is copied as a run rather than a byte at
+    a time. Both ends of a piece are known before any of it is written, so
+    there is nothing for a loop to decide per byte and `extend` can move the
+    whole run at once.
+
     The limit is not the bounded replace the module says is not here. That one
     is Arrow's `n`, which finds a match and then replaces inside the text it
     found, and copying it would put wrong answers where a refusal puts a gap.
@@ -549,29 +554,31 @@ def replaced(
         if end < 0:
             break
         var start = Int(found[0])
-        for k in range(byte_of(offsets, p), byte_of(offsets, start)):
-            out.append(bytes[k])
+        out.extend(bytes[byte_of(offsets, p) : byte_of(offsets, start)])
         if start == lastend and start == end:
             # The refused empty match. There is nothing to copy across when the
             # cursor is already at the end of the row, and the cursor still
             # moves, which is what ends the loop.
             if p < n:
-                for k in range(byte_of(offsets, p), byte_of(offsets, p + 1)):
-                    out.append(bytes[k])
+                out.extend(bytes[byte_of(offsets, p) : byte_of(offsets, p + 1)])
             p += 1
             continue
         for part in range(len(rewrite.group)):
-            for k in range(Int(rewrite.start[part]), Int(rewrite.stop[part])):
-                out.append(rewrite.literal[k])
+            out.extend(
+                Span(rewrite.literal)[
+                    Int(rewrite.start[part]) : Int(rewrite.stop[part])
+                ]
+            )
             var g = Int(rewrite.group[part])
             if g >= 0:
                 var opened = Int(found[g * 2])
                 var closed = Int(found[g * 2 + 1])
                 if opened >= 0 and closed >= opened:
-                    for k in range(
-                        byte_of(offsets, opened), byte_of(offsets, closed)
-                    ):
-                        out.append(bytes[k])
+                    out.extend(
+                        bytes[
+                            byte_of(offsets, opened) : byte_of(offsets, closed)
+                        ]
+                    )
         p = end
         lastend = p
         done += 1
@@ -580,8 +587,7 @@ def replaced(
     # stopped by the limit is inside the row, and the same copy is what carries
     # the rest of it across untouched.
     if p <= n:
-        for k in range(byte_of(offsets, p), len(bytes)):
-            out.append(bytes[k])
+        out.extend(bytes[byte_of(offsets, p) : len(bytes)])
 
 
 def replaced_python(
@@ -645,25 +651,27 @@ def replaced_python(
         if end < 0:
             break
         var start = Int(found[0])
-        for k in range(byte_of(offsets, p), byte_of(offsets, start)):
-            out.append(bytes[k])
+        out.extend(bytes[byte_of(offsets, p) : byte_of(offsets, start)])
         for part in range(len(rewrite.group)):
-            for k in range(Int(rewrite.start[part]), Int(rewrite.stop[part])):
-                out.append(rewrite.literal[k])
+            out.extend(
+                Span(rewrite.literal)[
+                    Int(rewrite.start[part]) : Int(rewrite.stop[part])
+                ]
+            )
             var g = Int(rewrite.group[part])
             if g >= 0:
                 var opened = Int(found[g * 2])
                 var closed = Int(found[g * 2 + 1])
                 if opened >= 0 and closed >= opened:
-                    for k in range(
-                        byte_of(offsets, opened), byte_of(offsets, closed)
-                    ):
-                        out.append(bytes[k])
+                    out.extend(
+                        bytes[
+                            byte_of(offsets, opened) : byte_of(offsets, closed)
+                        ]
+                    )
         advance = start == end
         p = end
         done += 1
-    for k in range(byte_of(offsets, p), len(bytes)):
-        out.append(bytes[k])
+    out.extend(bytes[byte_of(offsets, p) : len(bytes)])
 
 
 def replaced_text(

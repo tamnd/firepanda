@@ -126,3 +126,19 @@ That was written before there was a number on it. The number arrived from ClickB
 `str.replace("\\B", "#")` on a row holding a character wider than a byte raises `ArrowException: Unknown error: Wrapping ... failed`, because RE2 reads a non boundary between the bytes of a character and the replacement is written between them, which produces something that is not UTF-8. The differential in section 8 carries a marker for the same shape arriving as a column pyarrow did not catch, which is the same bug one layer further along.
 
 The rest of the list is in document 76 section 12, document 77 section 9, document 78 section 12 and document 79 section 10, and is unchanged by this slice.
+
+## 12. What the row costs around the engine
+
+The kernel does three things per row that are not the scan. It decodes the bytes into code points, it builds a table that turns a character position back into a byte position, and it copies the pieces of the answer out. tamnd/firepanda#830 named those three and tamnd/firepanda#889 measured them, on the column ClickBench q28 runs over and with q28's pattern, after the backtracker in document 86 had taken the engine itself down by about two and a half times.
+
+The measurement is a section of `benchmarks/main.mojo` rather than a number written here, because a number written here is true on the day it is written. The rows are `regex/decode`, `regex/offsets`, `regex/search`, `regex/search_machine`, `regex/replace_serial` and `regex/replace_column`, each one contains the one above it, and a pass is the difference between two of them. The pattern is anchored and the limit is one, so one run of the engine really is the whole scan and the subtraction is honest.
+
+What it said on the day it was written is that the engine is about nine tenths of the serial row, that the decode is about two thirds of what is left, that the offset table is under ten nanoseconds a row, and that the copy on this pattern is one host name a row. The estimate #889 opened with was half the row for the engine and half for the three passes, and it was stitched out of a serial engine benchmark and a parallel kernel run, which is the kind of arithmetic that is wrong in exactly this way.
+
+The decode got cheaper rather than going away. A row cannot hold more characters than it holds bytes, so the list is grown once and written into rather than appended to a character at a time, and a block of bytes with no top bit set in any of them is widened into place in one go, which is most of the blocks of a column of URLs. The engine reads code points because the compiler emits code point instructions, so a kernel that never decoded at all is a change to what the engine reads rather than a change to this pass, and that is not done.
+
+The offset table stays as it is and the reason is measured rather than argued. Growing it to its size before filling it costs a fill of everything the last row did not use, and the row that empties the table is the ASCII row, which is most of them, so every row that needs a table would pay for the rows that did not. That came out slower than the appends it would have replaced.
+
+On the real column the decode goes from about 137 ms to about 48 ms over the 921225 rows q28 keeps, which is about 149 ns a row down to about 52. The kernel q28 actually calls goes from about 773 ms to about 800 ms over those same rows, which is the same number twice on a shared machine, and the suite says the same thing louder: q28 at 1M in memory mode landed anywhere between 0.57 s and 2.34 s across four paired runs the same afternoon, on both sides of the change and in both orders. A tenth of a tenth does not show up in a suite, and a suite run on a loaded machine will happily claim it did.
+
+What is left on q28 is the engine, which walks about three steps per character of the row.
