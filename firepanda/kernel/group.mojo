@@ -3124,6 +3124,49 @@ def _quantile_core[
     return out^
 
 
+comptime NUNIQUE_PAIRWISE = 16
+"""Up to this many values in a group are counted without being sorted.
+
+A sort is the right shape once a group is long enough to pay for one, and most
+groups are not. TPC-H has one to seven lines per order and db-benchmark's
+largest key column has a handful of rows per key, so the loop below spends most
+of its time calling a general sort on four elements and reading back a run
+length of one.
+
+Counting without sorting is asking of each value whether an earlier one in the
+same group already held it, which is `count * (count - 1) / 2` compares in the
+worst case and fewer when a repeat is found early. That is more compares than a
+sort does past a point and fewer below it, and it needs no swaps, no recursion
+and no call. Sixteen is where the two measured level on the reference machine.
+"""
+
+
+def _pairwise_distinct[
+    dt: DType, //, origin: MutOrigin
+](values: Pointer[Scalar[dt], origin], start: Int, count: Int) -> Int:
+    """Counts the distinct values of one short group without sorting it.
+
+    Args:
+        values: The slab.
+        start: Where this group's values begin.
+        count: How many it has. Meant for `NUNIQUE_PAIRWISE` or fewer.
+
+    Returns:
+        How many distinct values the group holds.
+    """
+    var distinct = 0
+    for i in range(start, start + count):
+        var value = values.unsafe_offset(i).unsafe_load()
+        var seen = False
+        for j in range(start, i):
+            if values.unsafe_offset(j).unsafe_load() == value:
+                seen = True
+                break
+        if not seen:
+            distinct += 1
+    return distinct
+
+
 def _nunique_core[
     dt: DType, //, origin: ImmOrigin
 ](
@@ -3182,6 +3225,11 @@ def _nunique_core[
             var start = bounds[g]
             var count = bounds[g + 1] - start
             if count == 0:
+                continue
+            if count <= NUNIQUE_PAIRWISE:
+                target.unsafe_offset(g).unsafe_store(
+                    Int64(_pairwise_distinct(values, start, count))
+                )
                 continue
             sort(
                 Span[Scalar[dt], origin_of(slab)](

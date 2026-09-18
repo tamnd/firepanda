@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a group short enough counts its distinct values without sorting them
+
+A grouped distinct count lays each group's values out in a slab, sorts each group's stretch of it and counts the runs. Sorting is the right shape for a group that is long enough to pay for one and most groups are not. TPC-H has one to seven lines per order, so the loop was calling a general sort on four elements six million times and reading back a run length of one.
+
+A group of sixteen values or fewer is now counted by asking of each value whether an earlier one in the same group already held it. That is at most `count * (count - 1) / 2` compares and fewer when a repeat turns up early, against a sort's swaps, its recursion and its call. Nothing else moves: the slab is still built the same way, a longer group is still sorted, and the answer is the same either way including what a null does, which is to be left out of the count rather than counted as a value.
+
+Measured on a 13900K at six million rows, three rounds in ABBA order, taking the best of nine runs a round, with the group size swept either side of the line. Microseconds for the whole count, before against after: two rows a group 13355 against 12622, three 13810 against 13219, four 12496 against 11957, five 11964 against 11436, seven 11453 against 10551, ten 10976 against 10339, and sixteen 11136 against 10171. That is between 1.04 and 1.09 times and every run of one side is below every run of the other.
+
+Sixteen is where the crossover measures rather than where it was guessed. Twenty, twenty four, thirty two and sixty four rows a group read 0.99, 0.99, 0.98 and 0.99, which is the same code on both sides and is the control.
+
+What this does not change is the shape of the pass. The count, the prefix sum and the scatter that fills the slab are most of what a grouped distinct count costs, and they cost the same whatever the group size is: the whole kernel reads between 10.9 and 13.8 milliseconds across group sizes from two to sixty four, which is a range too narrow for the sorting to have been the work. Issue #79.
+
 ## [0.8.16] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).

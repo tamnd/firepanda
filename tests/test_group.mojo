@@ -52,6 +52,7 @@ from firepanda.hash.grouping import (
 )
 from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
+    NUNIQUE_PAIRWISE,
     PARTITION_ROWS,
     PRIVATE_ROWS,
     SLAB_SERIAL_GROUPS,
@@ -3135,6 +3136,70 @@ def test_the_four_that_report_an_element_keep_the_column_type() raises:
             == LogicalType.STRING,
             String(kinds[k], " over a text column"),
         )
+
+
+def test_a_distinct_count_agrees_on_both_sides_of_the_sorting_threshold() raises:
+    """Counts distinct values in groups from one row up to past the threshold.
+
+    A group at or below `NUNIQUE_PAIRWISE` is counted by asking of each value
+    whether an earlier one in the group already held it, and a longer group is
+    sorted and walked. Those are two pieces of code answering one question, so
+    what this covers is the sizes either side of the line and the line itself.
+
+    Group `g` holds `g + 1` rows, so every size from one to `2 *
+    NUNIQUE_PAIRWISE + 4` appears exactly once and the fixture cannot stop
+    spanning the threshold if the threshold moves. The values of a group are a
+    walk with a stride that shares a factor with the modulus, so a group holds a
+    known number of distinct values rather than all different ones, and a null
+    every seventh row puts an absent value in most of the groups on both sides
+    of the line.
+
+    Raises:
+        AssertionError: On the first group counted wrong.
+    """
+    comptime GROUPS = 2 * NUNIQUE_PAIRWISE + 4
+    comptime ROWS = GROUPS * (GROUPS + 1) // 2
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    var at = 0
+    for g in range(GROUPS):
+        for k in range(g + 1):
+            codes[at] = UInt32(g)
+            if at % 7 == 3:
+                values.set_null(at)
+            else:
+                values[at] = Int64((k * 6) % 10)
+            at += 1
+    assert_equal(at, ROWS, "the fixture filled every row")
+
+    var distinct = group_nunique(values, codes, GROUPS)
+    assert_equal(len(distinct), GROUPS)
+
+    var small = 0
+    var large = 0
+    for g in range(GROUPS):
+        var seen = List[Int64]()
+        for i in range(ROWS):
+            if Int(codes[i]) != g or not values.data.validity.get(i):
+                continue
+            var already = False
+            for k in range(len(seen)):
+                if seen[k] == values[i]:
+                    already = True
+                    break
+            if not already:
+                seen.append(values[i])
+        assert_equal(
+            distinct[g], Int64(len(seen)), String("nunique of group ", g)
+        )
+        if g + 1 <= NUNIQUE_PAIRWISE:
+            small += 1
+        else:
+            large += 1
+
+    assert_true(small > 0, "the fixture has a group short enough to not sort")
+    assert_true(large > 0, "the fixture has a group long enough to sort")
 
 
 def test_a_million_groups_each_count_their_own_distinct_values() raises:
