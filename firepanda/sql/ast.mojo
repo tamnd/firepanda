@@ -285,6 +285,19 @@ constructor under another name: a struct names its fields and a row does not,
 and naming them here would be inventing text the query did not write.
 """
 
+comptime EXPR_NAMED_ARGUMENT: UInt8 = 24
+"""`a := 1`, an argument a call passes by name rather than by position.
+
+`a` is the value, `payload` is the interned name and `b` is 1 when `=>` was
+written and 0 when `:=` was. The two spellings mean the same thing and are kept
+apart so that the printer writes back what the query wrote.
+
+This is an expression because the argument list holds expressions, and it is
+the one kind that is only ever an argument. Nothing else may hold one, and the
+binder is where that is said, since a name with no call around it has nobody to
+give the name to.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1379,6 +1392,34 @@ struct Ast(Movable):
                 token=token,
                 children=run,
                 payload=UInt32(1) if written else UInt32(0),
+            )
+        )
+
+    def named_argument(
+        mut self,
+        name: StringSlice,
+        value: UInt32,
+        arrow: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `a := 1`, one argument of a call passed by name.
+
+        Args:
+            name: The parameter name, folded as the tokenizer folded it.
+            value: The expression being passed.
+            arrow: Whether the query wrote `=>` rather than `:=`.
+            token: The token the name is at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_NAMED_ARGUMENT,
+                token=token,
+                a=value,
+                b=UInt32(1) if arrow else UInt32(0),
+                payload=self.intern(name),
             )
         )
 

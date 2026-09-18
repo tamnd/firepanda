@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads an argument passed by name
+
+`f(a := 1)` and `f(a => 1)` used to be refused by the transformer. 346 statements in DuckDB's corpus stopped there, and 332 of them now round trip, the other 14 having a lambda or a `COLUMNS` in them as well. The three that account for most of them are `struct_pack`, `union_value` and `unnest`, which take the name as part of what they build rather than as a setting, and the rest are spread over table functions such as `read_csv` and over macros somebody defined in the test itself. They now build a node with the name and the value under it, print back in the spelling that was written, and are refused in lowering, where the catalog that could say whether the function has a parameter by that name lives.
+
+The name is quoted by a rule of its own, because the position it stands in takes a different set of keywords than any other. `TypeFuncName` is an unreserved keyword, a type or function name keyword, or an identifier, so `read_csv('x', header := TRUE)` keeps its bare `header` and `f(coalesce := 1)` comes back as `f("coalesce" := 1)`. Printing that one bare gives text that is a syntax error, which is the kind of mistake the corpus round trip is there to find.
+
+The published grammar allows a type on the name, as in `f(a INTEGER := 1)`, and DuckDB's own parser turns that down. That shape keeps the refusal.
+
 ### Added: SQL reads a row value in both of its spellings
 
 `(a, b)` and `ROW(a, b)` used to be refused by the transformer, and 430 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval and the subscript are out of it. They build a node and print back in the spelling they were written in, since the two mean the same thing and there is no reason for the printer to pick one.

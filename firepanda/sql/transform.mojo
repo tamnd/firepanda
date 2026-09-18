@@ -243,6 +243,9 @@ comptime _INTERVAL: UInt8 = 80
 comptime _ROW: UInt8 = 81
 """`ParenthesisExpression` and `RowExpression`, a value with parts in it."""
 
+comptime _NAMED_ARGUMENT: UInt8 = 82
+"""`NamedFunctionArgument`, an argument a call passes by name."""
+
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
 comptime _NULL: UInt8 = 21
@@ -917,14 +920,17 @@ struct Transform(Movable):
         self._set(names, "CTEDMLBody", _DESCEND)
         self._set(names, "Parens_Statement", _DESCEND)
 
+        # Forms that read and print here and are turned down further on, where
+        # the stage that has something to say about them is.
+        self._set(names, "ParenthesisExpression", _ROW)
+        self._set(names, "RowExpression", _ROW)
+        self._set(names, "NamedFunctionArgument", _NAMED_ARGUMENT)
+
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._set(names, "ParenthesisExpression", _ROW)
-        self._set(names, "RowExpression", _ROW)
         self._refuse(names, "LambdaExpression", LAMBDA)
         self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
-        self._refuse(names, "NamedFunctionArgument", NAMED_ARGUMENT)
         self._refuse(names, "ColumnsExpression", COLUMNS)
         self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "GroupingExpression", GROUPING)
@@ -1802,6 +1808,9 @@ struct Transform(Movable):
 
         if action == _ROW:
             return self._row(tree, sql, node, ast, work)
+
+        if action == _NAMED_ARGUMENT:
+            return self._named_argument(tree, sql, node, ast, work)
 
         if action == _INTERVAL:
             return self._interval(tree, sql, node, ast, work, at)
@@ -3539,6 +3548,47 @@ struct Transform(Movable):
         for item in items:
             elements.append(work.value(item))
         return ast.row(elements, written, at)
+
+    def _named_argument(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `a := 1`, one argument of a call passed by name.
+
+        `NamedParameter <- TypeFuncName Type? NamedParameterAssignment
+        Expression`, so a fourth child is a type written on the name. DuckDB's
+        own parser turns that down, so nothing in the corpus has one, and the
+        refusal stays here for the shape the published grammar allows and the
+        thing that reads the grammar does not.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `NamedFunctionArgument` node.
+            ast: Where to put the nodes.
+            work: The walk, for the value.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a type is written on the name, or the value has no case.
+        """
+        var inside = self._only(tree, node)
+        var kids = tree.children(inside)
+        if len(kids) != 3:
+            raise _unsupported(tree, sql, node, NAMED_ARGUMENT)
+        var value = work.value(kids[2])
+        return ast.named_argument(
+            self._plain(tree, sql, kids[0]),
+            value,
+            _first_byte(tree, sql, kids[1]) != _COLON,
+            tree.nodes[Int(node)].token_start,
+        )
 
     def _struct(
         self,

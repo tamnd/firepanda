@@ -46,6 +46,7 @@ from .ast import (
     EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
+    EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
     EXPR_ROW,
@@ -361,6 +362,31 @@ def _names(
             ast.text(ast.at(run, i)), grammar, calling and i == count - 1
         )
     return out^
+
+
+def _parameter_name(name: StringSlice, grammar: Grammar) -> String:
+    """Quotes the name in `a := 1`, a position with a keyword mask of its own.
+
+    `TypeFuncName <- UnreservedKeyword / TypeFuncKeyword / Identifier`, which
+    is the classes a called name takes less the column name one, so `header`
+    stands bare and `coalesce` does not even though a column may be called
+    either. It is the only position in the language with that mask, which is
+    why it is spelled here rather than as a third flag on `needs_quoting`.
+
+    Args:
+        name: The name, as the AST holds it.
+        grammar: A loaded grammar, for the keyword table.
+
+    Returns:
+        The name, bare or in double quotes.
+    """
+    var classes = grammar.keyword_class(name)
+    var allowed = KEYWORD_UNRESERVED | KEYWORD_FUNC_NAME | KEYWORD_TYPE_NAME
+    if needs_quoting(name, grammar, calling=True) or (
+        classes != 0 and classes & allowed == 0
+    ):
+        return _wrapped(name, DOUBLE_QUOTE)
+    return String(name)
 
 
 def _interval_amount_is_bare(ast: Ast, amount: UInt32) -> Bool:
@@ -716,6 +742,20 @@ def _write_step(
         if unit.byte_length() > 0:
             out += " "
             out += unit
+        return
+
+    if kind == EXPR_NAMED_ARGUMENT:
+        # Every keyword goes back in quotes here, not only the ones a column
+        # position would quote. `TypeFuncName` is the rule the name stands in
+        # and it takes fewer keyword classes than a column name does, so
+        # `f(coalesce := 1)` is a syntax error and `f("coalesce" := 1)` is not.
+        # DuckDB writes the quotes here too, even around a word its own parser
+        # would have taken bare.
+        if phase == 0:
+            out += _parameter_name(ast.text(item.payload), grammar)
+            out += " => " if item.b == 1 else " := "
+            stack.append(_Step(item.a, 0))
+            return
         return
 
     if kind == EXPR_ROW:

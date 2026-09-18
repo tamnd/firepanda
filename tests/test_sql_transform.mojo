@@ -524,6 +524,7 @@ def test_every_shape_here_round_trips() raises:
         "a[1] + b[2:3]",
         "(a, b) = ROW(1, 2)",
         "INTERVAL (a + 1) DAY",
+        "f(1, b := 2, c => 3)",
     ]
     for sample in cases:
         _ = _round_trips(sample, g, rules)
@@ -677,13 +678,56 @@ def test_a_subscript_takes_what_is_in_front_of_it_and_not_more() raises:
     assert_equal(_printed("[1, 2, 3][2]", g, rules), "[1, 2, 3][2]")
 
 
-def test_a_refusal_says_where_it_was() raises:
+def test_an_argument_passed_by_name_keeps_the_name_and_the_value() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="LINE 1: f(a := 1)"):
-        _ = _printed("f(a := 1)", g, rules)
+    assert_equal(_printed("f(a := 1)", g, rules), "f(a := 1)")
+    assert_equal(_printed("f(1, b := 2)", g, rules), "f(1, b := 2)")
+
+
+def test_the_two_spellings_of_the_assignment_are_both_written_back() raises:
+    # DuckDB prints `:=` for both and firepanda prints what was written. The
+    # two mean the same thing, so a query that wrote `=>` gets it back rather
+    # than being told it should have written the other one.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(a => 1)", g, rules), "f(a => 1)")
+    assert_equal(_printed("f(a := 1)", g, rules), "f(a := 1)")
+
+
+def test_a_parameter_name_is_quoted_by_the_rule_of_its_own_position() raises:
+    # `TypeFuncName` takes an unreserved keyword and a type or function name
+    # keyword bare, and a column name keyword not at all, so `header` comes
+    # back as it was written and `coalesce` comes back in quotes. Printing
+    # `coalesce` bare here gives text that does not parse.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("read_csv('x', header := TRUE)", g, rules),
+        "read_csv('x', header := TRUE)",
+    )
+    assert_equal(_printed("f(left := 1)", g, rules), "f(left := 1)")
+    assert_equal(_printed("f(coalesce := 1)", g, rules), 'f("coalesce" := 1)')
+
+
+def test_a_name_passed_by_name_is_folded_like_any_other_name() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(Header := 1)", g, rules), "f(header := 1)")
+    assert_equal(_printed('f("Header" := 1)', g, rules), 'f("Header" := 1)')
+
+
+def test_a_refusal_says_where_it_was() raises:
+    # A lambda is the example because it is the refusal least likely to stop
+    # being one. Firepanda has no value that is a function, so there is nowhere
+    # for this to go even once everything around it reads.
+    var g = Grammar()
+    var rules = Transform(g)
+    var sql = "list_apply(l, lambda x: x + 1)"
+    with assert_raises(contains="LINE 1: list_apply(l, lambda x: x + 1)"):
+        _ = _printed(sql, g, rules)
     with assert_raises(contains="issues/"):
-        _ = _printed("f(a := 1)", g, rules)
+        _ = _printed(sql, g, rules)
 
 
 def test_a_long_chain_of_tails_is_built_once() raises:
