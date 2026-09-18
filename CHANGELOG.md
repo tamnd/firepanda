@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a group by looks at whether its key is in order instead of waiting to be told
+
+A group by on one key has had two routes for a while. A key whose equal values are adjacent can be grouped by a walk that closes a group each time the value changes, which is one comparison a row, and anything else builds a hash table. Which route a frame took was decided by a flag on the column, and the flag is set by a sort and by a file reader and by almost nothing else, so a key that arrived in order for any other reason paid for a hash table it did not need. TPC-H q21 groups `l_orderkey` twice, both times on a column that is in order and neither time on one that says so.
+
+The flag is now proved rather than read when it is unknown. `is_sorted` stops at the first pair of rows out of order, so a key in no order costs a handful of rows, and a key in order costs one pass which is about a sixth of the hash table it replaces. That makes it a one sided bet: the case that wins saves roughly five times what the case that loses spends, and the case that loses is only a long run in order broken near the end. Frames under 65536 rows are left alone, because a group by that size is already under a millisecond and the scan would be the only thing either route added.
+
+Measured on a 13900K, TPC-H sf1 in memory, three rounds in ABBA order with seven runs a round. q21 goes from 0.141, 0.135, 0.142, 0.139, 0.137 and 0.140 seconds to 0.083, 0.083, 0.085, 0.083, 0.085 and 0.083, which is 1.66 times with no run of one side touching the other. q18 goes from 0.028, 0.028, 0.029, 0.028, 0.029 and 0.027 to 0.023, 0.020, 0.021, 0.022, 0.021 and 0.020, which is 1.33 times and also disjoint. Across all 22 queries nothing else moves outside run to run noise, which is what should happen: q1, q3 and q10 group on more than one key and never reach the new code at all.
+
+The answer does not change and the two routes are still checked against each other. What the scan will not do is remember what it found, because a group by borrows the frame and has nowhere to write it, so a frame grouped twice on the same key is scanned twice. `DataFrame.sortedness` is still the way to pay for the scan once and keep the answer. Issue #79.
+
 ## [0.8.15] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).
