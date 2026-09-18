@@ -249,6 +249,32 @@ that is upstream's arrangement rather than a shortcut here: `(?i)ss` matches
 `sſ` and `(?i)(s)\\1` does not. Document 97."""
 
 
+comptime IN_MARK: UInt8 = 14
+"""Remember where the stack stands, because what goes on it next is disposable.
+
+Both payloads are empty. The instruction is written in front of the body of an
+atomic group and in front of the repeat a possessive quantifier stands for, and
+it is paired with the `IN_CUT` written after that body.
+
+It means nothing at all to an engine that holds every position at once, which is
+why the two instructions are the second thing after a backreference that only
+the backtracker can run. Document 99.
+"""
+
+comptime IN_CUT: UInt8 = 15
+"""Throw away everything the group between here and the mark could have tried
+instead.
+
+Both payloads are empty. Reaching this means the body matched, and an atomic
+group keeps the first way its body matched and no other, so every choice the
+body left behind is taken off the stack and the walk goes on from here. The
+entries that put a slot back are not choices and are kept.
+
+`a*+` is `(?>a*)` and is written as exactly that, a mark, a greedy repeat and a
+cut, so there is one mechanism here and not two. Document 99.
+"""
+
+
 comptime MAX_INSTRUCTIONS: Int = 200000
 """How large a program may get before the compiler gives up.
 
@@ -415,6 +441,19 @@ struct Program(Movable):
     which of the three is allowed to answer. Document 95.
     """
 
+    var cuts: Bool
+    """Whether the program holds an atomic group, which a possessive quantifier
+    is written as.
+
+    True when the code holds an `IN_MARK`. It is the second reason a program can
+    only be run by the backtracker and it is a different reason from the one
+    above: a backreference is a question the other two engines cannot answer, and
+    a cut is an answer they cannot give, since throwing away a choice means
+    nothing where every choice is being followed at once. What it shares with
+    `refs` is the consequence, which is that there is no engine underneath to
+    hand a long row to. Document 99.
+    """
+
     var groups: Int
     """How many capturing groups the pattern opened.
 
@@ -552,6 +591,7 @@ struct Program(Movable):
         self.gap = False
         self.slots = 0
         self.refs = False
+        self.cuts = False
         self.groups = 0
         self.python = False
         self.anchored = False
@@ -1352,6 +1392,20 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
     if it.op == OP_MIN_REPEAT:
         _emit_repeat(b, nodes, node, False)
         return
+    if it.op == OP_ATOMIC_GROUP:
+        _ = b.emit(IN_MARK, 0, 0)
+        _emit_children(b, nodes, node)
+        _ = b.emit(IN_CUT, 0, 0)
+        return
+    if it.op == OP_POSSESSIVE_REPEAT:
+        # A possessive quantifier is an atomic group around a greedy repeat and
+        # is written as one, which is upstream's reading of it as well. There is
+        # nothing here that `(?>a*)` does not already say, so there is one
+        # mechanism to get right rather than two.
+        _ = b.emit(IN_MARK, 0, 0)
+        _emit_repeat(b, nodes, node, True)
+        _ = b.emit(IN_CUT, 0, 0)
+        return
     if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
         _emit_lookaround(b, nodes, node, it.op == OP_ASSERT)
         return
@@ -1440,12 +1494,16 @@ def _refuse_construct(mut b: _Builder, what: String):
     """Says that a construct will not compile, in the voice of whichever engine
     asked for it.
 
-    The six constructs below are the five RE2 has never had plus the collapse
-    the parser writes for an empty negative lookaround, and refusing them means
-    two different things. For RE2 the refusal is agreement with upstream, since
+    The constructs below are the ones RE2 has never had plus the collapse the
+    parser writes for an empty negative lookaround, and refusing them means two
+    different things. For RE2 the refusal is agreement with upstream, since
     pandas hands the pattern to RE2 and RE2 raises. For Python the same pattern
     is one pandas answers perfectly well, so a refusal here is a shortfall of
     this library and is flagged as a gap.
+
+    Two of them are RE2's alone now. The atomic group and the possessive
+    quantifier are compiled on Python's side and are still refused on RE2's, so
+    they reach this only in the voice that is agreement. Document 99.
 
     Args:
         b: The builder.
@@ -1620,6 +1678,29 @@ def _fixed_width(nodes: List[Node], node: Int32) -> Int:
             arms += 1
             child = nodes[Int(child)].next
         return width
+    if it.op == OP_GROUPREF_EXISTS:
+        # A conditional is an alternation between two arms the parser wrote as
+        # two children, so the rule is the alternation's rule with one addition:
+        # the arm that was not written reads nothing. `(?<=(?(1)^))` is a
+        # lookbehind upstream compiles, because both of its arms are empty, and
+        # `(?<=(?(1)b))` is one upstream refuses, because one arm reads a
+        # character and the other does not. This engine refuses the construct
+        # further down either way, and the reason it asks the width here is so
+        # that the refusal a caller sees is the one about the conditional rather
+        # than one about a lookbehind upstream had no quarrel with.
+        var arms = 0
+        var width = 0
+        var child = it.first
+        while child >= 0:
+            var one = _fixed_width(nodes, child)
+            if one < 0:
+                return -1
+            if arms > 0 and one != width:
+                return -1
+            width = one
+            arms += 1
+            child = nodes[Int(child)].next
+        return width if arms == 2 or width == 0 else -1
     if (
         it.op == OP_MAX_REPEAT
         or it.op == OP_MIN_REPEAT
@@ -1716,10 +1797,10 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
     if it.op == OP_GROUPREF_EXISTS:
         _refuse_construct(b, String("conditional group"))
         return
-    if it.op == OP_ATOMIC_GROUP:
+    if it.op == OP_ATOMIC_GROUP and not b.python:
         _refuse_construct(b, String("atomic group"))
         return
-    if it.op == OP_POSSESSIVE_REPEAT:
+    if it.op == OP_POSSESSIVE_REPEAT and not b.python:
         _refuse_construct(b, String("possessive quantifier"))
         return
     if it.op == OP_FAILURE:
@@ -1743,7 +1824,11 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         return
 
     var left = budget
-    if it.op == OP_MAX_REPEAT or it.op == OP_MIN_REPEAT:
+    if (
+        it.op == OP_MAX_REPEAT
+        or it.op == OP_MIN_REPEAT
+        or it.op == OP_POSSESSIVE_REPEAT
+    ):
         var asked = it.a if it.b == MAXREPEAT else it.b
         if asked < 1:
             asked = 1
@@ -2025,9 +2110,10 @@ def _anchored(code: Span[Instruction, _]) -> Bool:
     emitted, so a program that still holds `AT_BEGINNING` was compiled without
     the flag and there is nothing left to work out here.
 
-    The walk steps over the saves a program compiled with captures opens with
-    and then looks at one instruction. Anything else, a split from an
-    alternation or a character or a jump, answers False, so this says nothing
+    The walk steps over the saves a program compiled with captures opens with,
+    and over a mark, which is what a pattern opening with an atomic group
+    starts with, and then looks at one instruction. Anything else, a split from
+    an alternation or a character or a jump, answers False, so this says nothing
     about a pattern that has an anchor somewhere other than in front.
 
     Args:
@@ -2037,7 +2123,7 @@ def _anchored(code: Span[Instruction, _]) -> Bool:
         True when every attempt above position zero is known to fail.
     """
     var pc = 0
-    while pc < len(code) and code[pc].op == IN_SAVE:
+    while pc < len(code) and (code[pc].op == IN_SAVE or code[pc].op == IN_MARK):
         pc += 1
     if pc >= len(code) or code[pc].op != IN_AT:
         return False
@@ -2091,7 +2177,16 @@ def _first_ranges(
         elif instruction.op == IN_SPLIT:
             stack.append(instruction.a)
             stack.append(instruction.b)
-        elif instruction.op == IN_AT or instruction.op == IN_SAVE:
+        elif (
+            instruction.op == IN_AT
+            or instruction.op == IN_SAVE
+            or instruction.op == IN_MARK
+            or instruction.op == IN_CUT
+        ):
+            # A mark and a cut read no character and never fail, so the walk goes
+            # through them the way it goes through a save. What the cut throws
+            # away is a choice about how a match was reached and not a question
+            # about which character starts one.
             stack.append(Int32(pc + 1))
         elif instruction.op == IN_CHAR:
             out.append(instruction.a)
@@ -2651,14 +2746,25 @@ def compile_program(
         var op = b.code[i].op
         if op == IN_REF:
             out.refs = True
+        elif op == IN_MARK:
+            out.cuts = True
         elif op == IN_LOOK or op == IN_BEHIND:
             saw_look = True
-    if out.refs and saw_look:
+    if saw_look and (out.refs or out.cuts):
+        # The same refusal for the same reason twice over. A lookaround is a
+        # search inside a search, the machine runs one by starting a second
+        # machine, and the backtracker has one stack and one bitmap and so has
+        # nowhere to put a nested walk. That is fine while every program holding
+        # a lookaround can be given to the machine, and these two are the
+        # programs that cannot be.
         out.ok = False
-        out.refs = False
         out.problem = String(
             "this engine has no lookaround beside a backreference yet"
+        ) if out.refs else String(
+            "this engine has no lookaround beside an atomic group yet"
         )
+        out.refs = False
+        out.cuts = False
         out.gap = True
         return out^
     out.code = b.code.copy()

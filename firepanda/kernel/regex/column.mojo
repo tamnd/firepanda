@@ -121,13 +121,14 @@ def text_matches_regex(
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
             var found: Bool
-            if program.refs:
-                # The one kind of program neither of the two above can run, so
+            if program.refs or program.cuts:
+                # The two kinds of program neither of the two above can run, so
                 # the question is put to the third engine rather than being
                 # asked and handed on. It is the only kernel here that had no
                 # backtracker in it already, because whether a row matches is
                 # the one question a state machine answers better than anything
-                # else and a backreference is what takes that away. Document 95.
+                # else, and a backreference and a cut are the two things that
+                # take it away. Documents 95 and 99.
                 found = (
                     searched(program, Span(points), 0, machine, bounded, slots)
                     >= 0

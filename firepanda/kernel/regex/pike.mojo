@@ -74,8 +74,10 @@ from firepanda.kernel.regex.program import (
     IN_AT,
     IN_BEHIND,
     IN_CHAR,
+    IN_CUT,
     IN_JUMP,
     IN_LOOK,
+    IN_MARK,
     IN_MATCH,
     IN_NOT_SET,
     IN_REF,
@@ -583,6 +585,18 @@ def _queue(
         # back, and the state cache and this machine both turn it down. This
         # branch is the third of those refusals written where a reader of the
         # walk will meet it. Document 95.
+        pass
+    elif instruction.op == IN_MARK or instruction.op == IN_CUT:
+        # The thread dies here too, and again the merge is the reason. A cut
+        # says the choices the group could have made instead are thrown away,
+        # and there are no choices to throw away in a walk where every choice is
+        # being followed at once: the threads that stand for them are the other
+        # threads in this same list and they belong to paths that never entered
+        # the group. Obeying it would mean knowing which of them did, which is
+        # the merge undone.
+        #
+        # So no program holding one of these reaches here either, by the same
+        # three refusals a backreference gets. Document 99.
         pass
     elif instruction.op == IN_SAVE:
         if nslots == 0:

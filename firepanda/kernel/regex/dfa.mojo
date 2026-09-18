@@ -74,8 +74,10 @@ from firepanda.kernel.regex.pike import accepts
 from firepanda.kernel.regex.program import (
     IN_AT,
     IN_BEHIND,
+    IN_CUT,
     IN_JUMP,
     IN_LOOK,
+    IN_MARK,
     IN_MATCH,
     IN_REF,
     IN_SAVE,
@@ -308,6 +310,16 @@ struct Cache(Movable):
                 self.ok = False
                 self.problem = String(
                     "the pattern asks about what it matched before"
+                )
+                return
+            if instruction.op == IN_MARK or instruction.op == IN_CUT:
+                # A state here is a set of instructions and the set is where
+                # every choice the pattern has lives at once. A cut throws some
+                # of those choices away and keeps the rest, which on a set with
+                # no paths in it is not a thing that can be said. Document 99.
+                self.ok = False
+                self.problem = String(
+                    "the pattern throws away a choice it could have made"
                 )
                 return
             if instruction.op != IN_AT:

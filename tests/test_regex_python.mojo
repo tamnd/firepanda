@@ -198,18 +198,18 @@ def test_everything_the_two_readings_share_is_still_shared() raises:
 
 
 def test_a_pattern_python_answers_and_re2_refuses_is_still_a_gap() raises:
-    """The constructs are the part of the router that is not closed by this. An
-    atomic group is a pattern pandas answers and this engine does not, and
+    """The constructs are the part of the router that is not closed by this. A
+    conditional group is a pattern pandas answers and this engine does not, and
     saying so is the whole of what the flag is for.
 
     The lookahead was this row's example until document 93 answered it, the
-    lookbehind was until document 94 did and the backreference was until
-    document 95 did, which is three of the five constructs moving out of this
-    list."""
-    var program = compile_program(parse_pattern("(?>a)b"), ENGINE_PYTHON)
+    lookbehind was until document 94 did, the backreference was until document
+    95 did and the atomic group was until document 99 did, which is four of the
+    five constructs moving out of this list."""
+    var program = compile_program(parse_pattern("(a)(?(1)b|c)"), ENGINE_PYTHON)
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no atomic group yet")
+    assert_equal(program.problem, "this engine has no conditional group yet")
 
 
 def test_syntax_only_re2_refuses_is_not_refused_for_python() raises:

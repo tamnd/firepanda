@@ -28,6 +28,16 @@ Sixteen is where the crossover measures rather than where it was guessed. Twenty
 
 What this does not change is the shape of the pass. The count, the prefix sum and the scatter that fills the slab are most of what a grouped distinct count costs, and they cost the same whatever the group size is: the whole kernel reads between 10.9 and 13.8 milliseconds across group sizes from two to sixty four, which is a range too narrow for the sorting to have been the work. Issue #79.
 
+### Added: the atomic group and the possessive quantifier
+
+`(?>a*)b` and `a*+b` are one construct written two ways, and both of them answer now on the string accessor's regular expression methods. They compile to one pair of instructions, a mark where the group opened and a cut where it closed, and the possessive quantifier is the greedy repeat with that pair wrapped round it.
+
+The cut is obeyed by the backtracking engine, which is the only one of the three with a stack of choices it can throw part of away. The state cache makes a state out of a set of instructions and the machine merges two threads standing at the same instruction and the same position, and both of those are places where the choices a cut would throw away have stopped being separable things, so both turn such a program down and the routing is by the program rather than by the row.
+
+Like every Python-only construct in this accessor it is reached by passing a `flags` argument. Without one the call still goes to Arrow and Arrow still says `invalid perl operator` and `bad repetition operator`, which is what pandas does. `case=False` is not a route for this one, which was measured rather than assumed.
+
+529 corpus patterns that used to be held out are compared now, at zero disagreements, and a lookaround beside an atomic group is a refusal with a sentence of its own. Document 99.
+
 ## [0.8.16] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).
