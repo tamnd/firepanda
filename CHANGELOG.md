@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads a field access
+
+`(a).b` and `f(x).b` used to be refused by the transformer, and 114 statements in DuckDB's corpus stopped there. All 114 round trip now and none of them moved to another refusal. The refusal moved to lowering, where the sentence it says is that a field belongs to a struct and a firepanda column holds one scalar, so there is nothing here with a field in it to reach into.
+
+The transformer was already making the split this needed. A dot on a name is one longer name, because which part of `a.b` is the schema and which is the table and which is the column is the binder's question and a dotted name is how that question is carried. What was left over is a dot on something that cannot be a name at all, a call or a subscript or a struct literal or a value in parentheses, and a dot there can only be reaching into a field. So the new node is the other half of a decision already being made rather than a new decision.
+
+The name after the dot is a `ColLabel`, which is the widest identifier class in the language and takes every keyword, so `columns[1].type` comes back with `type` bare even though the same word as a column name would be quoted. That took splitting the quoting rule in two. Whether text would read back as one bare identifier is a property of the text, and which keywords may stand bare is a property of the position, and those were one function before. The shape half is its own function now and the label position is the one caller that wants it on its own.
+
 ### Added: SQL reads a list comprehension
 
 `[x + 1 FOR x IN l]` used to be refused by the transformer, and 68 statements in DuckDB's corpus stopped there. 67 of them round trip now and the other one holds something else the transformer still turns down. The refusal moved to lowering and kept the sentence it already had.

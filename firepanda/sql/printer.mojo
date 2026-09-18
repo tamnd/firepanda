@@ -40,6 +40,7 @@ from .ast import (
     EXPR_COLUMN,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
+    EXPR_FIELD,
     EXPR_FRAME,
     EXPR_FUNCTION,
     EXPR_IN,
@@ -249,6 +250,40 @@ def quote_string(value: StringSlice) -> String:
     return _wrapped(value, SINGLE_QUOTE)
 
 
+def _reads_back_bare(name: StringSlice) -> Bool:
+    """Whether the text would read back as one identifier with no quotes.
+
+    By the time a name reaches here a bare one is `[a-z_][a-z0-9_]*`, because
+    the tokenizer folded it on the way in. Anything else was quoted going in
+    and has to be quoted going out, whatever position it stands in.
+
+    Args:
+        name: The name, as the AST holds it.
+
+    Returns:
+        Whether the shape of the text is a bare identifier.
+    """
+    var bytes = name.as_bytes()
+    if len(bytes) == 0:
+        return False
+    var first = bytes[0]
+    if not (
+        (first >= Byte(ord("a")) and first <= Byte(ord("z")))
+        or first == Byte(ord("_"))
+    ):
+        return False
+    for i in range(1, len(bytes)):
+        var c = bytes[i]
+        var ordinary = (
+            (c >= Byte(ord("a")) and c <= Byte(ord("z")))
+            or (c >= Byte(ord("0")) and c <= Byte(ord("9")))
+            or c == Byte(ord("_"))
+        )
+        if not ordinary:
+            return False
+    return True
+
+
 def needs_quoting(
     name: StringSlice, grammar: Grammar, calling: Bool = False
 ) -> Bool:
@@ -262,27 +297,8 @@ def needs_quoting(
     Returns:
         Whether printing it bare would read back as something else.
     """
-    var bytes = name.as_bytes()
-    if len(bytes) == 0:
+    if not _reads_back_bare(name):
         return True
-    # By the time a name reaches here a bare one is `[a-z_][a-z0-9_]*`, because
-    # the tokenizer folded it on the way in. Anything else was quoted going in
-    # and has to be quoted going out.
-    var first = bytes[0]
-    if not (
-        (first >= Byte(ord("a")) and first <= Byte(ord("z")))
-        or first == Byte(ord("_"))
-    ):
-        return True
-    for i in range(1, len(bytes)):
-        var c = bytes[i]
-        var ordinary = (
-            (c >= Byte(ord("a")) and c <= Byte(ord("z")))
-            or (c >= Byte(ord("0")) and c <= Byte(ord("9")))
-            or c == Byte(ord("_"))
-        )
-        if not ordinary:
-            return True
     # Which keywords may stand bare is a property of the position and not of the
     # word, and DuckDB's own classes are what say which. An unreserved keyword
     # and a column name keyword may be a name anywhere, so `coalesce(a, b)`
@@ -370,6 +386,26 @@ def _names(
             ast.text(ast.at(run, i)), grammar, calling and i == count - 1
         )
     return out^
+
+
+def _label_name(name: StringSlice) -> String:
+    """Quotes the name after a dot, a position every keyword may stand in.
+
+    `ColLabel <- ReservedKeyword / UnreservedKeyword / ColumnNameKeyword /
+    FuncNameKeyword / TypeNameKeyword / Identifier` is the widest class the
+    language has, so a keyword is a name here and the only thing that needs
+    quoting is text that would not read back as an identifier at all. That is
+    why the grammar puts no table in front of this one.
+
+    Args:
+        name: The name, as the AST holds it.
+
+    Returns:
+        The name, bare or in double quotes.
+    """
+    if _reads_back_bare(name):
+        return String(name)
+    return _wrapped(name, DOUBLE_QUOTE)
 
 
 def _parameter_name(name: StringSlice, grammar: Grammar) -> String:
@@ -780,6 +816,19 @@ def _write_step(
             out += ": "
             stack.append(_Step(item.a, 0))
             return
+        return
+
+    if kind == EXPR_FIELD:
+        # No parentheses of its own, for the same reason a subscript has none:
+        # everything that binds looser already prints inside its own pair, and
+        # the operand is never a name, so what comes back cannot read as one
+        # longer dotted name.
+        if phase == 0:
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        out += "."
+        out += _label_name(ast.text(item.payload))
         return
 
     if kind == EXPR_COMPREHENSION:

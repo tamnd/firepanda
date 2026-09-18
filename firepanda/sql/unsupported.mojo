@@ -280,9 +280,9 @@ def sql_support() -> List[Refusal]:
             "field-access",
             "a field access",
             (
-                "A dotted name is a name to firepanda, and telling a struct"
-                " field from a column needs a binder that knows what the"
-                " columns are."
+                "It reads and prints back. A field belongs to a struct and a"
+                " firepanda column holds one scalar, so there is nothing here"
+                " with a field in it to reach into."
             ),
             STAGE_ISSUE,
         ),
