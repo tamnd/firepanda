@@ -1178,6 +1178,15 @@ def test_a_decimal_expression_of_literals_alone_is_refused() raises:
         _ = _plan("SELECT 1.1 + 2.2 AS a")
 
 
+def test_a_row_value_is_refused_here_and_not_in_the_transformer() raises:
+    # A row is a value with fields in it and a firepanda column holds one
+    # scalar, so this is where the query is told, in both spellings.
+    with assert_raises(contains="a row value"):
+        _ = _plan("SELECT (a, b) FROM t")
+    with assert_raises(contains="a row value"):
+        _ = _plan("SELECT ROW(a, b) FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage

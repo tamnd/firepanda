@@ -227,11 +227,19 @@ def test_a_grouping_set_of_several_columns_is_not_an_expression() raises:
     assert_equal(ast.length(first.children), 2)
 
 
-def test_a_row_is_still_refused_where_it_is_really_a_row() raises:
+def test_a_row_and_a_grouping_tuple_are_told_apart_by_where_they_are() raises:
+    # The two are spelled the same way and mean different things. The row used
+    # to refuse here, which is what kept them apart, and now both build, so
+    # each one has to come back where it was written and not as the other.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="does not support"):
-        _ = _printed("SELECT (a, b) FROM t", g, rules)
+    assert_equal(
+        _printed("SELECT (a, b) FROM t", g, rules), "SELECT (a, b) FROM t"
+    )
+    assert_equal(
+        _printed("SELECT a FROM t GROUP BY GROUPING SETS ((a, b))", g, rules),
+        "SELECT a FROM t GROUP BY GROUPING SETS ((a, b))",
+    )
 
 
 def test_order_by_keeps_its_direction_and_its_null_placement() raises:
@@ -705,10 +713,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     # to print one.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a row value"):
-        _ = _printed("SELECT (1, 2)", g, rules)
-    with assert_raises(contains="a row value"):
-        _ = _printed("SELECT ROW(1, 2)", g, rules)
     with assert_raises(contains="a lambda"):
         _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
@@ -778,6 +782,23 @@ def test_an_interval_reaches_the_printer_and_is_refused_further_on() raises:
     )
 
 
+def test_a_row_value_reaches_the_printer_in_both_spellings() raises:
+    # `(a, b)` and `ROW(a, b)` are one thing written two ways, and the word is
+    # kept so that what comes back is what was written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT (a, b) FROM t", g, rules), "SELECT (a, b) FROM t"
+    )
+    assert_equal(
+        _printed("SELECT ROW(a, b) FROM t", g, rules),
+        "SELECT ROW(a, b) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT ROW() FROM t", g, rules), "SELECT ROW() FROM t"
+    )
+
+
 def test_a_subscript_reaches_the_printer_too() raises:
     # Same as the interval above it. The syntax is read and the stage that
     # would have to know what the operand holds is the one that refuses.
@@ -831,9 +852,9 @@ def test_a_query_that_is_not_a_select_refuses_by_name() raises:
 
 
 def test_a_parenthesised_expression_is_still_just_the_expression() raises:
-    # `ParenthesisExpression` is the rule that refuses a row value, and it is
-    # also the rule around `(1 + 2)`. The one that is a plain expression has to
-    # keep working.
+    # `ParenthesisExpression` is the rule that builds a row value, and a single
+    # expression in parentheses is a different rule that has to keep going
+    # through untouched.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(

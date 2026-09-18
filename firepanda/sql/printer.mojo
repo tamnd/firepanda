@@ -48,6 +48,7 @@ from .ast import (
     EXPR_LITERAL,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
+    EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
@@ -715,6 +716,31 @@ def _write_step(
         if unit.byte_length() > 0:
             out += " "
             out += unit
+        return
+
+    if kind == EXPR_ROW:
+        # A row of one written without the word is `(a,)`, and the comma is the
+        # whole of what makes it a row rather than an expression in
+        # parentheses, so it goes back in. DuckDB's own parser turns that
+        # spelling down, so nothing in the corpus takes this path, but a
+        # printer that dropped the comma would not read back as what it was.
+        var count = ast.length(item.children)
+        if phase == 0:
+            out += "ROW(" if item.payload == 1 else "("
+            if count == 0:
+                out += ")"
+                return
+            stack.append(_Step(node, 1))
+            stack.append(_Step(ast.at(item.children, 0), 0))
+            return
+        if phase < count:
+            out += ", "
+            stack.append(_Step(node, UInt32(phase + 1)))
+            stack.append(_Step(ast.at(item.children, phase), 0))
+            return
+        if count == 1 and item.payload != 1:
+            out += ","
+        out += ")"
         return
 
     if kind == EXPR_SUBSCRIPT:
