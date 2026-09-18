@@ -1594,5 +1594,205 @@ def test_a_semi_join_whose_keys_never_meet_keeps_nothing() raises:
     )
 
 
+def anti_survivors(
+    left: DataFrame,
+    left_rows: Int,
+    right: DataFrame,
+    right_rows: Int,
+    span: Int,
+) raises -> List[Int]:
+    """How many left rows an anti join should keep of each key, counted by hand.
+
+    The same membership pass as `semi_survivors` reading the other answer, and
+    written out rather than subtracted from it so that a fixture whose keys are
+    not what its name claims cannot cancel out between the two.
+
+    Args:
+        left: The probe side.
+        left_rows: How many of its rows to read.
+        right: The built side.
+        right_rows: How many of its rows to read.
+        span: One past the largest key either side holds.
+
+    Returns:
+        One count a key, indexed by the key itself.
+
+    Raises:
+        As reading a column does.
+    """
+    var seen = List[Bool](length=span, fill=False)
+    var rk = right.column("k").as_typed[DType.int64]()
+    for j in range(right_rows):
+        seen[Int(rk[j])] = True
+    var out = List[Int](length=span, fill=0)
+    var lk = left.column("k").as_typed[DType.int64]()
+    for i in range(left_rows):
+        var key = Int(lk[i])
+        if not seen[key]:
+            out[key] += 1
+    return out^
+
+
+def test_an_anti_join_on_two_sorted_keys_keeps_what_the_hash_route_keeps() raises:
+    """Runs one anti join sorted and the same one scrambled, and compares.
+
+    Same two fixtures as the semi join reads, so the two tests together say the
+    walk splits one left column into the same two halves the hash table does.
+    The anti side is the larger of the two here, which is worth having: a semi
+    join that quietly kept nothing would still pass a row count check against a
+    right side this sparse, and an anti join that quietly kept everything would
+    not.
+    """
+    comptime SPAN = MERGE_LEFT_ROWS // 4 + 2
+    comptime RIGHT_ROWS = 6_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+    var right = stepping_keys(RIGHT_ROWS, 3, 2)
+    var want = anti_survivors(left, MERGE_LEFT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.ANTI,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the walk counted wrong",
+    )
+
+    # An anti join carries no right column either, and its output is a subset of
+    # the left rows in left row order for the same reason a semi join's is.
+    var bad = -1
+    for r in range(len(walked)):
+        if walked.right_at[r] != -1:
+            bad = r
+            break
+        if r > 0 and walked.left_at[r] <= walked.left_at[r - 1]:
+            bad = r
+            break
+    assert_equal(bad, -1, "the first pair out of left row order")
+
+    # Every left row is kept by exactly one of the two, which is the property
+    # that says the flipped condition is a partition and not just a different
+    # answer that happens to have the right size.
+    var semi = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    assert_equal(
+        len(walked) + len(semi),
+        MERGE_LEFT_ROWS,
+        "left rows kept by the two halves together",
+    )
+
+    var mixed_left = climbing_keys(MERGE_LEFT_ROWS, 4, 40_503)
+    var mixed_right = stepping_keys(RIGHT_ROWS, 3, 2, 3_571)
+    var hashed = join_indices(
+        mixed_left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        mixed_right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.ANTI,
+    )
+    assert_equal(len(hashed), len(walked), "row count against the hash route")
+    assert_equal(
+        first_gap(kept_by_key(hashed, mixed_left, SPAN), want),
+        -1,
+        "the first key the two routes disagreed on",
+    )
+
+
+def test_an_anti_join_past_the_split_walks_every_morsel_from_the_right_place() raises:
+    """Runs the anti walk long enough that it splits, over runs of seven rows.
+
+    Seven does not divide the morsel length, so morsel boundaries land inside
+    runs of equal left keys. A worker that started its cursor in the wrong place
+    would report a match where there is none, and in an anti join that drops a
+    row rather than adding one, which is the direction a row count alone is
+    least likely to catch.
+    """
+    comptime SPAN = MERGE_SPLIT_ROWS // 7 + 2
+    comptime RIGHT_ROWS = 5_000
+    var left = climbing_keys(MERGE_SPLIT_ROWS, 7)
+    var right = stepping_keys(RIGHT_ROWS, 4, 1)
+    var want = anti_survivors(left, MERGE_SPLIT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_SPLIT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.ANTI,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the split walk counted wrong",
+    )
+
+
+def test_an_anti_join_whose_keys_never_meet_keeps_everything() raises:
+    """Walks a right column entirely above the left, then entirely below it.
+
+    The complement of what the semi join does at the same two ends, and the more
+    useful of the two to check, because keeping nothing is what a walk that
+    falls off an end returns by accident and keeping everything is not.
+    """
+    comptime RIGHT_ROWS = 4_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+
+    var high = Array[DType.int64](RIGHT_ROWS)
+    var low = Array[DType.int64](RIGHT_ROWS)
+    for j in range(RIGHT_ROWS):
+        high[j] = Int64(100_000 + j)
+        low[j] = Int64(j - RIGHT_ROWS)
+    var above = one_column(Series("k", high^))
+    var below = one_column(Series("k", low^))
+
+    assert_equal(
+        len(
+            join_indices(
+                left.column_refs(),
+                keys(0),
+                MERGE_LEFT_ROWS,
+                above.column_refs(),
+                keys(0),
+                RIGHT_ROWS,
+                JoinKind.ANTI,
+            )
+        ),
+        MERGE_LEFT_ROWS,
+        "rows kept against a right side above every left key",
+    )
+    assert_equal(
+        len(
+            join_indices(
+                left.column_refs(),
+                keys(0),
+                MERGE_LEFT_ROWS,
+                below.column_refs(),
+                keys(0),
+                RIGHT_ROWS,
+                JoinKind.ANTI,
+            )
+        ),
+        MERGE_LEFT_ROWS,
+        "rows kept against a right side below every left key",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

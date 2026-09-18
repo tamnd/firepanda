@@ -437,23 +437,29 @@ def _lower_bound[
     return lo
 
 
-def _merge_semi[
-    dt: DType
+def _merge_subset[
+    dt: DType, //, matched: Bool
 ](
     left: Array[dt], left_rows: Int, right: Array[dt], right_rows: Int
 ) raises -> JoinIndices:
-    """Pairs a semi join by walking two sorted key columns together.
+    """Pairs a semi or anti join by walking two sorted key columns together.
 
-    A semi join asks of each left row whether the right side holds its key
-    anywhere, and when both sides are sorted that is one cursor into each. The
-    right cursor never goes backwards, because the left keys never fall, so the
-    whole join is one pass over each column with nothing built in between.
+    Both kinds ask of each left row whether the right side holds its key
+    anywhere, and differ only in which answer they keep. When both sides are
+    sorted that question is one cursor into each. The right cursor never goes
+    backwards, because the left keys never fall, so the whole join is one pass
+    over each column with nothing built in between.
 
     The shape is the same count then emit as `pair_probe`, and for the same
     reason: the output height is not known until the walk has run, and a morsel
     can only write where the morsels before it stopped. Each morsel places its
     own first key in the right side with a binary search and walks from there,
     which is what makes the pass splittable at all.
+
+    Parameters:
+        dt: The key type, taken from the two columns.
+        matched: True keeps the left rows that found a key, which is a semi
+            join. False keeps the ones that did not, which is an anti join.
 
     Args:
         left: The probe side's keys, sorted and with no nulls.
@@ -462,8 +468,8 @@ def _merge_semi[
         right_rows: How many of them to read.
 
     Returns:
-        One entry per matched left row, in left row order, with the right entry
-        negative because a semi join carries no right column.
+        One entry per kept left row, in left row order, with the right entry
+        negative because neither kind carries a right column.
 
     Raises:
         If the parallel walk raises.
@@ -488,7 +494,10 @@ def _merge_semi[
             var value = lp.unsafe_offset(i).unsafe_load()
             while j < right_rows and rp.unsafe_offset(j).unsafe_load() < value:
                 j += 1
-            if j < right_rows and rp.unsafe_offset(j).unsafe_load() == value:
+            var hit = (
+                j < right_rows and rp.unsafe_offset(j).unsafe_load() == value
+            )
+            if hit == matched:
                 here += 1
         counts[start // chunk + 1] = here
 
@@ -517,7 +526,10 @@ def _merge_semi[
             var value = lp.unsafe_offset(i).unsafe_load()
             while j < right_rows and rp.unsafe_offset(j).unsafe_load() < value:
                 j += 1
-            if j < right_rows and rp.unsafe_offset(j).unsafe_load() == value:
+            var hit = (
+                j < right_rows and rp.unsafe_offset(j).unsafe_load() == value
+            )
+            if hit == matched:
                 left_out.unsafe_offset(put).unsafe_write(i)
                 right_out.unsafe_offset(put).unsafe_write(-1)
                 put += 1
@@ -547,16 +559,20 @@ def _merge_route[
     at the first pair out of order, so a join whose keys are in no order pays for
     a handful of rows and goes where it was going.
 
-    Only a semi join is here. It is the one kind whose output is a subset of the
-    left rows in left row order, which is exactly what walking the two columns
-    produces, so there is nothing to sort afterwards and nothing to gather from
-    the right. An inner join on sorted keys is the same walk with the emit
-    fanning out over a run of equal right keys, and it is a separate change.
+    A semi join and an anti join are here, and they are the two kinds whose
+    output is a subset of the left rows in left row order, which is exactly what
+    walking the two columns produces. So there is nothing to sort afterwards and
+    nothing to gather from the right, and the two differ only in which answer to
+    the one question they keep. An inner join on sorted keys is the same walk
+    with the emit fanning out over a run of equal right keys, and it is a
+    separate change.
 
-    Nulls are declined rather than handled. A null key matches nothing in a semi
-    join, but it also has no place in an ordering, so a column holding one is a
-    column the walk cannot read as sorted and the ordinary route is where it
-    belongs.
+    Nulls are declined rather than handled. A null key has no place in an
+    ordering, so a column holding one is a column the walk cannot read as sorted
+    and the ordinary route is where it belongs. That matters more for the anti
+    join than the semi one, because a null key there is a row the ordinary route
+    keeps rather than a row it drops, so getting it wrong would add rows instead
+    of losing them.
 
     Args:
         left_columns: The left frame's columns.
@@ -573,7 +589,9 @@ def _merge_route[
     Raises:
         If reading either key column raises.
     """
-    if kind != JoinKind.SEMI or len(left_keys) != 1:
+    if kind != JoinKind.SEMI and kind != JoinKind.ANTI:
+        return None
+    if len(left_keys) != 1:
         return None
     if left_rows < MERGE_PROBE_ROWS or left_rows == 0 or right_rows == 0:
         return None
@@ -591,11 +609,19 @@ def _merge_route[
     if not is_sorted_any(left) or not is_sorted_any(right):
         return None
 
+    var wants_matched = kind == JoinKind.SEMI
     var kind_of = left.dtype()
     comptime for dt in ALL:
         comptime if dt.is_integral():
             if kind_of == dt:
-                return _merge_semi(
+                if wants_matched:
+                    return _merge_subset[True](
+                        left.as_typed_view[dt](),
+                        left_rows,
+                        right.as_typed_view[dt](),
+                        right_rows,
+                    )
+                return _merge_subset[False](
                     left.as_typed_view[dt](),
                     left_rows,
                     right.as_typed_view[dt](),
@@ -697,9 +723,9 @@ def join_indices[
             left_rows,
         )
 
-    # Two sorted keys and a semi join is a walk rather than a table. The
-    # question costs two scans that stop at the first pair out of order, and
-    # `_merge_route` has the argument and the measurement.
+    # Two sorted keys and a semi or anti join is a walk rather than a table.
+    # The question costs two scans that stop at the first pair out of order,
+    # and `_merge_route` has the argument and the measurement.
     var walked = _merge_route(
         left_columns,
         left_keys,
