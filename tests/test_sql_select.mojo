@@ -709,8 +709,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
         _ = _printed("SELECT (1, 2)", g, rules)
     with assert_raises(contains="a row value"):
         _ = _printed("SELECT ROW(1, 2)", g, rules)
-    with assert_raises(contains="an INTERVAL literal"):
-        _ = _printed("SELECT INTERVAL '1 day'", g, rules)
     with assert_raises(contains="a lambda"):
         _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
@@ -761,6 +759,22 @@ def test_the_keyword_calls_that_no_longer_refuse() raises:
     assert_equal(
         _printed("SELECT POSITION(a IN b) FROM t", g, rules),
         "SELECT instr(b, a) FROM t",
+    )
+
+
+def test_an_interval_reaches_the_printer_and_is_refused_further_on() raises:
+    # It was in the list above until the transformer learned to build one. The
+    # type is what is missing rather than the syntax, so the statement prints
+    # and the refusal waits for the stage that would have to name a type.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT INTERVAL '1 day' FROM t", g, rules),
+        "SELECT INTERVAL '1 day' FROM t",
+    )
+    assert_equal(
+        _printed("SELECT a + INTERVAL 3 MONTHS FROM t", g, rules),
+        "SELECT (a + INTERVAL 3 MONTH) FROM t",
     )
 
 

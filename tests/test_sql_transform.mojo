@@ -375,6 +375,60 @@ def test_collate_keeps_a_name_and_not_a_column() raises:
     assert_equal(_printed("a COLLATE nocase", g, rules), "(a COLLATE nocase)")
 
 
+def test_an_interval_keeps_its_amount_and_its_unit() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL '1' DAY", g, rules), "INTERVAL '1' DAY")
+    assert_equal(_printed("INTERVAL 5 MONTH", g, rules), "INTERVAL 5 MONTH")
+
+
+def test_a_plural_unit_and_a_singular_one_are_the_same_unit() raises:
+    # The grammar gives the two spellings one rule, and the unit comes off the
+    # rule and not off the text, so there is no table of plurals anywhere.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL 5 MONTHS", g, rules), "INTERVAL 5 MONTH")
+    assert_equal(
+        _printed("INTERVAL '2' CENTURIES", g, rules), "INTERVAL '2' CENTURY"
+    )
+    assert_equal(_printed("INTERVAL 1 days", g, rules), "INTERVAL 1 DAY")
+
+
+def test_a_compound_unit_stays_one_unit() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("INTERVAL '1' YEAR TO MONTH", g, rules),
+        "INTERVAL '1' YEAR TO MONTH",
+    )
+    assert_equal(
+        _printed("INTERVAL '1' HOUR TO SECOND", g, rules),
+        "INTERVAL '1' HOUR TO SECOND",
+    )
+
+
+def test_an_interval_with_the_unit_inside_the_string_keeps_the_string() raises:
+    # Nothing here reads the string, because the text is the value and taking a
+    # duration out of it is the work a duration type does.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL '1 day'", g, rules), "INTERVAL '1 day'")
+    assert_equal(_printed("INTERVAL '1'", g, rules), "INTERVAL '1'")
+
+
+def test_an_amount_that_is_not_a_literal_keeps_its_parentheses() raises:
+    # The grammar takes a string, a number or a parenthesized expression there
+    # and nothing else, so an amount that is neither of the first two has to
+    # keep them or it stops being a query. A string or a number inside them
+    # loses them, which is the shorter way of writing the same interval.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("INTERVAL (x) DAY", g, rules), "INTERVAL (x) DAY")
+    assert_equal(
+        _printed("INTERVAL ('7') WEEKS", g, rules), "INTERVAL '7' WEEK"
+    )
+
+
 def test_a_list_constructor_and_the_array_spelling_agree() raises:
     var g = Grammar()
     var rules = Transform(g)
@@ -466,6 +520,8 @@ def test_every_shape_here_round_trips() raises:
         "a SIMILAR TO 'x'",
         "a ILIKE 'x'",
         "$1 + $two",
+        "d + INTERVAL 3 MONTH",
+        "INTERVAL (a + 1) DAY",
     ]
     for sample in cases:
         _ = _round_trips(sample, g, rules)
@@ -598,10 +654,10 @@ def test_a_subscript_refuses() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="LINE 1: INTERVAL 1 DAY"):
-        _ = _printed("INTERVAL 1 DAY", g, rules)
+    with assert_raises(contains="LINE 1: a[1]"):
+        _ = _printed("a[1]", g, rules)
     with assert_raises(contains="issues/"):
-        _ = _printed("INTERVAL 1 DAY", g, rules)
+        _ = _printed("a[1]", g, rules)
 
 
 def test_a_long_chain_of_tails_is_built_once() raises:

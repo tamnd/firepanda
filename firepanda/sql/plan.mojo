@@ -508,6 +508,7 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_INTERVAL,
     EXPR_LITERAL,
     EXPR_QUANTIFIED,
     EXPR_STAR,
@@ -553,6 +554,7 @@ from .star import (
 )
 from .table import Grammar
 from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
+from .unsupported import INTERVAL, not_implemented
 
 
 struct Lowered(Movable):
@@ -2990,6 +2992,8 @@ def _lower_expr(
             " aggregate, and an aggregate hands up its keys and its folds"
             " rather than everything it read"
         )
+    if node.kind == EXPR_INTERVAL:
+        raise not_implemented(INTERVAL, "", "")
     raise Error("an expression shape firepanda does not lower yet")
 
 

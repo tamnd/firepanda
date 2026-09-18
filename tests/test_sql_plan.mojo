@@ -1178,6 +1178,17 @@ def test_a_decimal_expression_of_literals_alone_is_refused() raises:
         _ = _plan("SELECT 1.1 + 2.2 AS a")
 
 
+def test_an_interval_is_refused_here_and_not_in_the_transformer() raises:
+    # The transformer builds a duration and the printer writes it back, so the
+    # round trip over DuckDB's corpus agrees on every interval in it. The type
+    # is what is missing, not the syntax, and this is the stage that would have
+    # to name one.
+    with assert_raises(contains="an INTERVAL literal"):
+        _ = _plan("SELECT INTERVAL '1' DAY AS d")
+    with assert_raises(contains="no column type for one yet"):
+        _ = _plan("SELECT a FROM t WHERE f > INTERVAL 3 MONTH")
+
+
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")

@@ -53,6 +53,7 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
     EXPR_PARAMETER,
@@ -172,7 +173,12 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         return out^
     if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS:
         return out^
-    if kind == EXPR_UNARY or kind == EXPR_CAST or kind == EXPR_COLLATE:
+    if (
+        kind == EXPR_UNARY
+        or kind == EXPR_CAST
+        or kind == EXPR_COLLATE
+        or kind == EXPR_INTERVAL
+    ):
         out.append(item.a)
         return out^
     if kind == EXPR_BINARY or kind == EXPR_FRAME:
@@ -677,7 +683,12 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(_folded_names(ast, item.payload), "/", item.a)
     if kind == EXPR_LITERAL:
         return String(item.b, "/", ast.text(item.payload))
-    if kind == EXPR_UNARY or kind == EXPR_BINARY or kind == EXPR_COLLATE:
+    if (
+        kind == EXPR_UNARY
+        or kind == EXPR_BINARY
+        or kind == EXPR_COLLATE
+        or kind == EXPR_INTERVAL
+    ):
         return String(ast.text(item.payload))
     if kind == EXPR_CAST:
         return String(item.b, "/", ast.text(item.payload))

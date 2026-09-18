@@ -43,6 +43,7 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
+    EXPR_INTERVAL,
     EXPR_LIST,
     EXPR_LITERAL,
     EXPR_PARAMETER,
@@ -360,6 +361,30 @@ def _names(
     return out^
 
 
+def _interval_amount_is_bare(ast: Ast, amount: UInt32) -> Bool:
+    """Whether an interval's amount can be written without parentheses.
+
+    `INTERVAL '1' DAY` and `INTERVAL 5 DAY` are the two forms the grammar takes
+    without them, and every other amount is a parenthesized expression. A
+    string or a number that arrived inside parentheses loses them here, which
+    is a shorter way of writing the same interval and is stable, since printing
+    the shorter form again gives the shorter form.
+
+    Args:
+        ast: The AST.
+        amount: The amount expression.
+
+    Returns:
+        True when it is a string or a number literal.
+    """
+    if amount == NO_NODE or Int(amount) >= len(ast.exprs):
+        return False
+    ref item = ast.exprs[Int(amount)]
+    if item.kind != EXPR_LITERAL:
+        return False
+    return item.b == LITERAL_STRING or item.b == LITERAL_NUMBER
+
+
 @fieldwise_init
 struct _Step(ImplicitlyCopyable, Movable):
     """A node, and which part of it is being written.
@@ -667,6 +692,28 @@ def _write_step(
         out += " COLLATE "
         out += quote_name(ast.text(item.payload), grammar)
         out += ")"
+        return
+
+    if kind == EXPR_INTERVAL:
+        # The amount keeps the parentheses the query needed, because the
+        # grammar takes a string, a number or a parenthesized expression there
+        # and nothing else, so `INTERVAL (a + 1) DAY` without them is not a
+        # query any more. A string or a number goes bare, which is what almost
+        # every interval in the world is written as.
+        var bare = _interval_amount_is_bare(ast, item.a)
+        if phase == 0:
+            out += "INTERVAL "
+            if not bare:
+                out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if not bare:
+            out += ")"
+        var unit = ast.text(item.payload)
+        if unit.byte_length() > 0:
+            out += " "
+            out += unit
         return
 
     if kind == EXPR_PARAMETER:
