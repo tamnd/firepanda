@@ -682,7 +682,14 @@ def _expr_json(
     else:
         out += String(
             '"kind": "window", "op": ',
-            _quoted(_agg_text(node.op)),
+            _quoted(_agg_text(node.op & AGG_CODE)),
+        )
+        # Written only when it is on, as on an aggregate and for the same
+        # reason. On a window it says a partition of nothing but nulls answers
+        # null, since a partition is never empty.
+        if folds_empty_to_null(node.op):
+            out += ', "empty_is_null": true'
+        out += String(
             ', "over": ',
             _expr_json(tree, node.children[0], naming),
             ', "partition": ',
@@ -1321,6 +1328,7 @@ def _expr_of(
                 bytes, members[_need(bytes, members, "op", "a window")].value
             )
         )
+        var marked = _at(bytes, members, "empty_is_null")
         var over = _expr_of(
             bytes,
             members[_need(bytes, members, "over", "a window")].value,
@@ -1341,7 +1349,14 @@ def _expr_of(
             tree,
             ids,
         )
-        at = tree.window(op, over, partition^, order^)
+        at = tree.window(
+            op,
+            over,
+            partition^,
+            order^,
+            marked != -1
+            and _flag(bytes, members[marked].value, "empty_is_null"),
+        )
     else:
         raise Error(String("no expression is a ", kind))
     var type = _at(bytes, members, "type")

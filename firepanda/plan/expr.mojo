@@ -186,10 +186,16 @@ zero in pandas, and both front ends build plans, so the plan has to say which
 was asked for rather than pick one. Every other fold already agrees: a count is
 zero on both sides and a minimum, a maximum and an average are null on both.
 
-Only a fold over no rows at all is decided here. A group that saw rows and found
-every one of them null is the same disagreement and is not fixed by this, for
-the reason issue #836 gives, which is that knowing it happened costs a count per
-group and this case costs nothing."""
+Two cases are decided here and they used to be one. A fold over no rows at all
+costs nothing to answer, because the operator already knows no chunk with rows
+in it arrived. A group that saw rows and found every one of them null is the
+same disagreement read from the other side, and answering it costs a count of
+the values that were really there, which is the second state slot a mean has
+always carried. That was issue #836 and the flag now decides both.
+
+A window reads the flag for the second case only. A partition exists because a
+row is in it, so a window never folds no rows, and the only question left is
+whether the rows it folded held anything."""
 
 
 def agg_kind(op: Int) -> AggKind:
@@ -689,6 +695,7 @@ struct Expressions(Movable, Sized):
         over: Int,
         var partition: List[Int],
         var order: List[Int],
+        empty_is_null: Bool = False,
     ) raises -> Int:
         """Builds a window aggregate.
 
@@ -701,6 +708,10 @@ struct Expressions(Movable, Sized):
             over: What is being aggregated.
             partition: The partition keys.
             order: The order keys.
+            empty_is_null: Whether a partition whose values were all missing
+                answers null rather than the fold's own identity. A partition is
+                never empty, so this is the only thing the flag decides on a
+                window. `EMPTY_IS_NULL` has the rest.
 
         Returns:
             The index of the new node.
@@ -723,7 +734,7 @@ struct Expressions(Movable, Sized):
                 UNBOUND,
                 UNBOUND,
                 Value(null=LogicalType.NULL),
-                Int(op.code),
+                Int(op.code) | (EMPTY_IS_NULL if empty_is_null else 0),
                 False,
                 len(partition),
                 children^,

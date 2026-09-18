@@ -26,6 +26,18 @@ On a million URLs with four threads, `replace` with the ClickBench q28 pattern g
 
 The replace differential now runs the pattern corpus through both engines, since it calls the same kernel function the column does. `extract` is the same change in one line, and the counting scan is still the machine because its loop cuts the row down after every match and hands the engine a different text rather than a cursor.
 
+### Fixed: a window sum over a partition of nothing but nulls answers null
+
+`sum(x) OVER (PARTITION BY k)` answered zero for a partition whose values were all missing, where DuckDB answers null. It is the last operator holding the disagreement the entry below closed everywhere else, and it is now closed too. Issue #877.
+
+A window never folds no rows, because a partition is a partition on account of a row being in it, so the only thing the mark can decide here is whether the rows it held had anything in them. That made the flag worth carrying on a window at all, which it was not before: `Expressions.window` takes `empty_is_null` the way `aggregate` already did, the JSON writes it and reads it back, and lowering hands it to the operator.
+
+The operator pays more for it than a group by does, in shape if not in time. A group carries the count as a second state slot and fills it in the pass it was already making. A window has no running state to add a slot to, since it holds every row and reduces once at the end, so the count is a second reduction over the flattened column. The grouping pass itself is still done once and the gather is unchanged. `group/pipeline_window` and `group/pipeline_window_marked` are a new pair of benchmark rows that isolate the count, beside the pair the entry below added. No number is quoted here, because the machine these were run on was not quiet enough to produce one worth writing down, and the rows are what the next quiet run reads.
+
+It is not paid where it cannot buy anything, on the same two gates as a fold: a column the schema says cannot hold a null had a value in every row it has, and a float column is asked about separately because a NaN is not a value here either.
+
+A count window is unmarked, as a counting fold is, so a partition of nothing but nulls still counts zero rather than answering null. That is what both front ends say.
+
 ### Fixed: a sum over values that are every one null answers null
 
 `SELECT sum(x) FROM t` where every `x` is null answered zero, and so did a group inside a `GROUP BY` whose values were all null. DuckDB answers null to both, because a total of nothing is not a total, and so does firepanda now. Issue #836.

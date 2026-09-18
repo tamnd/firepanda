@@ -1406,6 +1406,20 @@ struct Window(Movable):
     var kinds: List[AggKind]
     """Which reduction each window is."""
 
+    var marked: List[Bool]
+    """Per window, whether a partition that held no value answers null.
+
+    A partition is never empty, because it is a partition on account of a row
+    being in it, so this is the whole of what `EMPTY_IS_NULL` decides here. It
+    only changes a sum: the other folds answer null over nothing already."""
+
+    var counts: List[Bool]
+    """Per window, whether the partition's values have to be counted.
+
+    True where `marked` is on, the fold is a sum and the column could be holding
+    nothing, which is the same pair of gates `_sum_counts` applies to a group.
+    Filled in by `bind`, when the schema is known."""
+
     var names: List[String]
     """The name each appended column gets."""
 
@@ -1433,6 +1447,7 @@ struct Window(Movable):
         var sources: List[Int],
         var kinds: List[AggKind],
         var names: List[String],
+        var marked: List[Bool] = List[Bool](),
     ) raises:
         """Constructs a window.
 
@@ -1442,10 +1457,13 @@ struct Window(Movable):
             sources: The column each window reduces. Consumed.
             kinds: The reduction each window runs. Consumed.
             names: The name each appended column gets. Consumed.
+            marked: Per window, whether a partition that held no value answers
+                null. An empty list is none of them, which is what a plan built
+                by the pandas front end asks for. Consumed.
 
         Raises:
-            If there is no window to compute, or if the three lists that
-            describe them are a different length from each other.
+            If there is no window to compute, or if the lists that describe them
+            are a different length from each other.
         """
         if len(sources) == 0:
             raise Error(
@@ -1464,9 +1482,24 @@ struct Window(Movable):
                     " names",
                 )
             )
+        if len(marked) == 0:
+            for _ in range(len(sources)):
+                marked.append(False)
+        elif len(marked) != len(sources):
+            raise Error(
+                String(
+                    "window: ",
+                    len(sources),
+                    " columns and ",
+                    len(marked),
+                    " of them said whether folding nothing answers null",
+                )
+            )
         self.keys = keys^
         self.sources = sources^
         self.kinds = kinds^
+        self.marked = marked^
+        self.counts = List[Bool]()
         self.names = names^
         self.input = Schema()
         self.held = List[ChunkedArray]()
@@ -1537,6 +1570,9 @@ struct Window(Movable):
                 kind == AggKind.SUM or kind == AggKind.MEAN
             ):
                 raise Error(String("window: ", kind, " is not defined on text"))
+            self.counts.append(
+                _sum_counts(kind, self.marked[a], source, input[at].nullable)
+            )
             fields.append(
                 Field(
                     self.names[a],
@@ -1656,15 +1692,32 @@ struct Window(Movable):
 
         var made = List[AnyArray](capacity=len(self.sources))
         for a in range(len(self.sources)):
-            made.append(
-                aggregate_group_any(
-                    flat[self.sources[a]],
-                    self.kinds[a],
-                    codes,
-                    groups,
-                    trusted=True,
-                )
+            var one = aggregate_group_any(
+                flat[self.sources[a]],
+                self.kinds[a],
+                codes,
+                groups,
+                trusted=True,
             )
+            if self.counts[a]:
+                # A second pass over the same column and the same ordinals, for
+                # the reason `_sum_counts` gives: the sum reads no validity, so
+                # a partition that added nothing and one that added to zero are
+                # the same zero and only a count can separate them. A window
+                # already flattens and groups the whole column, so this is one
+                # more reduction over work that is done rather than a second
+                # shape of operator.
+                one = _seen_of(
+                    one,
+                    aggregate_group_any(
+                        flat[self.sources[a]],
+                        AggKind.COUNT,
+                        codes,
+                        groups,
+                        trusted=True,
+                    ),
+                )
+            made.append(one^)
 
         # Backwards, and columns backwards inside a chunk, because `finish`
         # takes what it hands over off the end of this list.
