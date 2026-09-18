@@ -383,16 +383,39 @@ def test_a_flag_beside_a_literal_search_is_refused(firepanda: ModuleType) -> Non
             mine.str.contains("a", flags=flags, regex=False)
 
 
-def test_one_name_still_refuses_a_flag(firepanda: ModuleType) -> None:
-    """`count` and `replace` are served now and live in
-    `test_str_count_replace_python_engine.py`. `extract` is on Python's engine
-    whatever anybody passes and still refuses, because it hands back a frame of
-    groups rather than a column and the door it crosses by carries no flags.
-    `match` keeps its flags on Arrow and has two refusals of its own in
-    `test_str_regex_case_and_flags.py`."""
+def test_every_name_takes_a_flag_now(firepanda: ModuleType) -> None:
+    """`count` and `replace` are served out of this engine and live in
+    `test_str_count_replace_python_engine.py`. `extract` was the last one left
+    and it never needed a route, only a number, because it is on this engine
+    whatever anybody passes. `match` keeps its flags on Arrow and has two
+    refusals of its own in `test_str_regex_case_and_flags.py`, which are about
+    what upstream lets it keep rather than about what is written here."""
     mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.extract("(a)", flags=re.MULTILINE)
+    assert mine.str.extract("(a)", flags=re.MULTILINE).shape[1] == 1
+    assert mine.str.extract("(A)", flags=re.IGNORECASE)["0"].tolist()[0] == "a"
+
+
+def test_a_bit_that_re_never_named_is_refused_like_any_other(firepanda: ModuleType) -> None:
+    """A flag value holding a bit none of the seven letters own is refused, and the bits `re` does
+    not name are refused the same way as the bits it does.
+
+    This is one assertion about two different things. `re.DEBUG` belongs to the flag enumeration
+    and was always refused. Bit ten belongs to nothing at all, and the mask the refusal compares
+    against was built by oring seven enumeration members together, which makes it an enumeration
+    member too, and the complement of one of those is bounded by the bits the enumeration defines
+    rather than by the integer. So every bit `re` never named read as already known and was thrown
+    away without a word. Every pattern method here shares the one helper, so every one of them had
+    it.
+    """
+    mine = made(firepanda)
+    for name in ("contains", "fullmatch", "count"):
+        for flags in (1024, re.DEBUG, 1 << 30):
+            with pytest.raises(firepanda.errors.UnsupportedError, match="flag value"):
+                getattr(mine.str, name)("a", flags=flags)
+    with pytest.raises(firepanda.errors.UnsupportedError, match="flag value"):
+        mine.str.replace("a", "-", flags=1024, regex=True)
+    with pytest.raises(firepanda.errors.UnsupportedError, match="flag value"):
+        mine.str.extract("(a)", flags=1024)
 
 
 def test_a_pattern_that_is_not_text_is_refused_before_the_flag_is_read(

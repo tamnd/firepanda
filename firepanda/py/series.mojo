@@ -1441,7 +1441,7 @@ struct PySeries(Movable, Writable):
 
     @staticmethod
     def string_extract(
-        py_self: PythonObject, pattern: PythonObject
+        py_self: PythonObject, pattern: PythonObject, flags: PythonObject
     ) raises -> PythonObject:
         """Pulls the groups of the first match out of every row, as columns.
 
@@ -1461,6 +1461,10 @@ struct PySeries(Movable, Writable):
             py_self: The series.
             pattern: The pattern, which the Python layer has already checked is
                 a string and opens at least one group.
+            flags: The regular expression flags passed beside the pattern, as
+                `FLAG_` bits, and zero when there were none. They say what the
+                letters say and nothing about which engine runs, because this
+                name has only ever had the one.
 
         Returns:
             A Python tuple of the list of labels and the list of wrapped text
@@ -1473,7 +1477,9 @@ struct PySeries(Movable, Writable):
                 library's own.
         """
         var found = text_extract(
-            Self._held(py_self)[].series[], words(pattern, "pat")
+            Self._held(py_self)[].series[],
+            words(pattern, "pat"),
+            whole(flags, "flags"),
         )
         var names = found[0].copy()
         var parts = found[1].copy()

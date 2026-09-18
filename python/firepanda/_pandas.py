@@ -8610,17 +8610,28 @@ def _door_flags(flags: int, name: str) -> int:
     it by printing the parsed pattern to the screen on the way past, which is
     not something this library can do quietly or loudly. Dropping it would be
     answering a question nobody asked.
+
+    The `int` around each letter is doing work. `re.IGNORECASE` is a member of
+    an `IntFlag`, and the complement of an `IntFlag` is bounded by the bits that
+    enumeration defines rather than by the integer, so a mask built by oring the
+    seven together answers that every bit `re` never named is already known. Bit
+    ten belongs to no flag in the module and was being dropped silently. The
+    ones `re` does name were refused correctly the whole time, which is why this
+    took a pattern method that did not exist yet to turn up. The argument is
+    read as an index once at the top for the same reason, so that everything
+    below it is ordinary integer arithmetic.
     """
+    asked = operator.index(flags)
     known = 0
     out = 0
     for theirs, ours in _DOOR_FLAGS:
-        known |= theirs
-        if flags & theirs:
+        known |= int(theirs)
+        if asked & int(theirs):
             out |= ours
-    if flags & ~known:
+    if asked & ~known:
         raise UnsupportedError(
             f"firepanda:unsupported: str.{name} was passed the flag value"
-            f" {flags & ~known}, which is not one of the seven letters a pattern can"
+            f" {asked & ~known}, which is not one of the seven letters a pattern can"
             " be read with"
         )
     return out
@@ -8938,23 +8949,6 @@ class StringMixin:
                     f" no engine is written yet{way_out}"
                 )
         return text
-
-    @staticmethod
-    def _no_flags(flags: Any, name: str) -> None:
-        """Refuses a flag for the one name that still cannot carry one.
-
-        That name is `extract`, and the reason is no longer that Python's engine
-        has no scan, since it has all three now. It is that `extract` reaches
-        that engine already and by a different door: it hands back a frame of
-        groups rather than a column, so the flags would have to cross beside the
-        group count rather than beside the pattern, and the door it uses takes
-        neither. The five names that answer with one column go through
-        `_folding` instead and all of them carry flags.
-        """
-        if flags:
-            raise UnsupportedError(
-                f"firepanda:unsupported: str.{name} takes no regular expression flags yet"
-            )
 
     @staticmethod
     def _folding(kind: str, case: Any, flags: Any, regex: bool = True) -> tuple[bool, int, bool]:
@@ -9426,14 +9420,25 @@ class StringMixin:
         for that name. A group with no name leaves the name alone rather than
         clearing it, which is upstream and is the reason this renames only when
         there is something to rename to.
+
+        `flags` is the one argument on this accessor that arrives here with no
+        route attached to it. Everywhere else a flags argument means two things,
+        what the letters mean and that the call has left Arrow, and the second
+        meaning is what costs a word at the door. `extract` is one of the three
+        names pandas never sends to Arrow in the first place, so there is
+        nothing for the argument to move and the letters cross on their own.
+        That is also why this is the one pattern method where a flag cannot
+        disagree with a `case` argument: there is no `case` argument here to
+        disagree with.
         """
         from ._frame import DataFrame, Series
 
         if not isinstance(expand, bool):
             raise InvalidArgumentError("firepanda:value: expand must be True or False")
-        self._no_flags(flags, "extract")
+        pat = self._a_pattern(pat)
+        argued = _door_flags(flags, "extract") if flags else 0
         try:
-            names, columns = self._series._inner.string_extract(pat)
+            names, columns = self._series._inner.string_extract(pat, argued)
         except Exception as error:
             raise translate(error) from None
         labels = [name if name else str(i) for i, name in enumerate(names)]

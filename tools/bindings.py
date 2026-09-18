@@ -3097,7 +3097,7 @@ SERIES = Exposed(
             mojo="PySeries.string_extract",
             name="string_extract",
             doc="The group labels and one column of what each group held.",
-            params=(("pat", "str"),),
+            params=(("pat", "str"), ("flags", "int")),
             returns="tuple[list[str], list[Series]]",
         ),
         Binding(

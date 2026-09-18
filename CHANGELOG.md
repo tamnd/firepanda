@@ -21,6 +21,23 @@ Three refusals came off that were never about flags. A replacement holding `\g<`
 A bad replacement template raises `InvalidArgumentError`, which is a `ValueError`. Upstream raises `re.PatternError`, which is not one, and an unknown group name comes back from `re` as an `IndexError`. That is a divergence rather than a bug and document 86 says why matching it would be worse.
 
 A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width. `str.extract` still refuses a flag, and the reason is now that it crosses by a door that takes no flags rather than that the scan is missing.
+### Added: `str.extract` under a flag, which is the last of the six
+
+`Series.str.extract(r"([a-z])(\d)", flags=re.IGNORECASE)` used to be refused. It is answered now, and with it every pattern method on the accessor reads a `flags` argument. Issue #8 M6.
+
+This one is the odd member of the six and the reason is worth a sentence. Everywhere else a flags argument says two things at once, what the letters mean and that the call has left Arrow, and the second is what costs a word at the door the call crosses by. `extract` is one of the three names pandas never sends to Arrow at all, so there is no route for the argument to carry and the letters cross on their own beside the pattern. It is also the only pattern method with no `case` argument, so it is the only one where the two spellings of a fold cannot disagree with each other.
+
+The letters are read before the groups are counted rather than after. A pattern that opens no group is refused with pandas' own sentence and a flag this library cannot carry is refused with its own, and a pattern that is both should be refused over the flag, because upstream compiles before it counts.
+
+The type check on the pattern moved to the entrance. It lived on the path a pattern took to reach the byte search, which was correct while every call took that path, and `extract` under a flag is a second path. That is the same shape as the check that went wrong one slice ago and it is why this one was moved rather than copied.
+
+`re.LOCALE` is a `ValueError` here because Python turns it down on text and pandas hands text to `re`. Verbose mode and the ascii flag are refused, which is this library's gap rather than anything upstream does, and they are the last two of the seven letters.
+
+### Fixed: a flag bit `re` never named was dropped instead of refused
+
+`Series.str.contains("a", flags=1024)` answered as though no flag had been passed. Every pattern method had it, because they share the one helper that reads the argument.
+
+The helper builds a mask by oring the seven letters together and then asks whether the caller's value has a bit outside it. The letters are `re.RegexFlag` members and `re.RegexFlag` is an `IntFlag`, whose complement is bounded by the bits the enumeration defines rather than by the integer, so every bit `re` does not name read as already known. `re.DEBUG` and the other named ones were refused correctly the whole time, which is why this lasted two releases: the values anybody would write the test with were the values it got right. Document 87 section 6.
 
 ### Changed: the other two replaces run on every core as well
 

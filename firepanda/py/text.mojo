@@ -648,7 +648,7 @@ def partition(
 
 
 def extract(
-    column: Series, pattern: String
+    column: Series, pattern: String, flags: Int = 0
 ) raises -> Tuple[List[String], List[Series]]:
     """Pulls the groups of the first match out of every row, as columns.
 
@@ -673,11 +673,23 @@ def extract(
     this library has not written is the other message too. Compiling first would
     get the last of those three backwards.
 
+    A `flags` argument moves nothing here, which is what makes this the one
+    name on the accessor where the number arrives without a word beside it.
+    The other five cross a door that also has to say which engine is meant,
+    because they have two and the caller's spelling picks one. This one has
+    always been on Python's engine and has no second engine to be moved to, so
+    the letters are read for what they mean and for nothing else. They still
+    have to be read before the groups are counted, since a group is opened by
+    a bracket that verbose mode does not change and a flag this library cannot
+    carry should be refused over the pattern rather than over its groups.
+
     Args:
         column: The column to read.
         pattern: The pattern as the caller wrote it, which is compiled for
             Python's engine because this is one of the three names pandas never
             sends to Arrow.
+        flags: The flags the caller passed beside the pattern, as `FLAG_` bits,
+            and zero when they passed none.
 
     Returns:
         The group labels and the columns, in the order the groups were opened
@@ -689,10 +701,10 @@ def extract(
             own.
     """
     _text_column(column)
-    var tree = parse_pattern(pattern)
+    var tree = parse_pattern(pattern, Int32(flags))
     if tree.ok and tree.groups == 0:
         raise tagged(VALUE, String("pattern contains no capture groups"))
-    var program = _compiled(String("extract_regex"), pattern)
+    var program = _compiled(String("extract_regex"), pattern, Int32(flags))
     var labels = program.labels.copy()
     return (labels^, column.chars_extract_regex(program))
 
