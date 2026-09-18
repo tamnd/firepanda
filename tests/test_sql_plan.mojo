@@ -2515,13 +2515,55 @@ def test_an_outer_name_nothing_is_called_is_still_refused() raises:
         )
 
 
-def test_a_subquery_above_an_aggregate_says_why_it_cannot_be_read() raises:
-    with assert_raises(contains="hands up its keys and its folds"):
-        _ = _plan(
+def test_a_subquery_a_having_reads_is_joined_on_above_the_aggregate() raises:
+    # Above rather than below, which is the whole of it. A column joined on
+    # under the aggregate is not a key and is not a fold, so nothing up here
+    # would be able to read it.
+    assert_equal(
+        _plan(
             "SELECT g FROM t GROUP BY g HAVING sum(a) > (SELECT max(b) FROM u)"
+        ),
+        (
+            "PROJECT [g]\n"
+            "  FILTER __agg_0 > __sub_0\n"
+            "    JOIN cross []\n"
+            "      AGGREGATE [g] -> [sum(a)]\n"
+            "        SCAN t []\n"
+            "      PROJECT [max(b) as __sub_0]\n"
+            "        PROJECT [__agg_0 as max(b)]\n"
+            "          AGGREGATE [] -> [max(b)]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_a_subquery_a_folding_select_list_reads_goes_there_too() raises:
+    # The same join in the same place with no HAVING over it, read by the
+    # projection instead.
+    assert_equal(
+        _plan("SELECT sum(a) + (SELECT max(b) FROM u) FROM t"),
+        (
+            "PROJECT [__agg_0 + __sub_0 as (sum(a) + (SELECT max(b) FROM u))]\n"
+            "  JOIN cross []\n"
+            "    AGGREGATE [] -> [sum(a)]\n"
+            "      SCAN t []\n"
+            "    PROJECT [max(b) as __sub_0]\n"
+            "      PROJECT [__agg_0 as max(b)]\n"
+            "        AGGREGATE [] -> [max(b)]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_a_correlated_subquery_above_an_aggregate_is_refused() raises:
+    # The uncorrelated one is a cross join onto a row and goes wherever it is
+    # needed. This one is a fold and a left join under the FROM, and what it
+    # joins against is the outer rows, which up here have been folded away.
+    with assert_raises(contains="written above the aggregate"):
+        _ = _plan(
+            "SELECT g FROM t GROUP BY g HAVING sum(a) > (SELECT max(k) FROM u"
+            " WHERE u.b = t.b)"
         )
-    with assert_raises(contains="hands up its keys and its folds"):
-        _ = _plan("SELECT sum(a) + (SELECT max(b) FROM u) FROM t")
 
 
 def test_a_correlated_exists_is_a_semi_join() raises:

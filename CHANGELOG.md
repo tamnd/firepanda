@@ -21,6 +21,7 @@ Three refusals came off that were never about flags. A replacement holding `\g<`
 A bad replacement template raises `InvalidArgumentError`, which is a `ValueError`. Upstream raises `re.PatternError`, which is not one, and an unknown group name comes back from `re` as an `IndexError`. That is a divergence rather than a bug and document 86 says why matching it would be worse.
 
 A count beside a real pattern with no flag and no `case` still lands on Arrow's bounded loop and is still refused, because that loop replaces nothing after the first match and raises on a pattern of no width. `str.extract` still refuses a flag, and the reason is now that it crosses by a door that takes no flags rather than that the scan is missing.
+
 ### Added: `str.extract` under a flag, which is the last of the six
 
 `Series.str.extract(r"([a-z])(\d)", flags=re.IGNORECASE)` used to be refused. It is answered now, and with it every pattern method on the accessor reads a `flags` argument. Issue #8 M6.
@@ -38,6 +39,18 @@ The type check on the pattern moved to the entrance. It lived on the path a patt
 `Series.str.contains("a", flags=1024)` answered as though no flag had been passed. Every pattern method had it, because they share the one helper that reads the argument.
 
 The helper builds a mask by oring the seven letters together and then asks whether the caller's value has a bit outside it. The letters are `re.RegexFlag` members and `re.RegexFlag` is an `IntFlag`, whose complement is bounded by the bits the enumeration defines rather than by the integer, so every bit `re` does not name read as already known. `re.DEBUG` and the other named ones were refused correctly the whole time, which is why this lasted two releases: the values anybody would write the test with were the values it got right. Document 87 section 6.
+
+### Fixed: a subquery that answers one value may be written in a HAVING
+
+`SELECT ps_partkey, sum(ps_supplycost * ps_availqty) FROM ... GROUP BY ps_partkey HAVING sum(ps_supplycost * ps_availqty) > (SELECT sum(ps_supplycost * ps_availqty) * 0.0001 FROM ...)` was refused, and the same subquery written in the `WHERE` of the same query was not. TPC-H q11 is that query. Issue #816.
+
+A subquery written as a value is one row holding one value, so it lowers to a cross join onto that row and the expression that held it reads the column back by a generated name. The join went above the `FROM` in every case, which is under the aggregate, and an aggregate hands up its keys and its folds rather than everything it read, so the column was gone by the time the `HAVING` above it asked for it. The lowering said so in the refusal and that was the whole of the gap: the join was in the wrong place, not missing.
+
+Where the join goes is now decided by the clause that wrote it. One in a `WHERE` goes where it went, above the `FROM` and under the filter that reads it. One in a `HAVING`, or in the select list of a query that folds, goes above the aggregate instead. Both are built at the same point, before either of those clauses is lowered, because building one is what settles the name they read it back by, and only the node the join is put over differs.
+
+A correlated one above an aggregate is still refused, with a message about the correlation rather than about the aggregate. It lowers to a fold and a left join under the `FROM`, and what that left join pairs against is the outer rows, which up there have been folded away.
+
+TPC-H q11 answers now and agrees with DuckDB. `pixi run tpch` is nineteen of twenty two, and the three left are refused in two places.
 
 ### Changed: the other two replaces run on every core as well
 
