@@ -4160,7 +4160,14 @@ def _joined(
     An outer join is not the same. Its condition decides which rows are padded
     rather than only which rows match, so moving a part of it above the join
     would test the padded rows too and answer a different query. A residual on
-    one is refused rather than moved.
+    one is refused rather than moved, unless it reads the right side and nothing
+    else, and then it goes under the right input instead of over the join. A
+    left, a semi and an anti join all ask the same question of their right side,
+    which is whether a row there matches, so a right row the condition throws
+    away is a row that was never going to match and throwing it away first is
+    the same answer. A left row that then matches nothing is padded by the join,
+    which is what the query asked for and is the whole difference from testing
+    it above.
 
     A `USING` or a `NATURAL` join has no condition to split. It names its keys
     by column name instead, and `_merged` is that half.
@@ -4234,6 +4241,18 @@ def _joined(
     var right_keys = List[Int]()
     var rest = List[Int]()
 
+    # Where a residual can go under the right input rather than over the join.
+    # A left, a semi and an anti join each keep their left rows whatever the
+    # right side holds, and all they ask of the right side is whether a row
+    # there matches, so a part of the condition that reads only the right side
+    # is picking which right rows are candidates. Tested first, it removes rows
+    # that were not going to match, and the join pads or drops the left rows as
+    # it would have anyway.
+    var under = List[Int]()
+    var pushable = (
+        kind == JoinKind.LEFT or kind == JoinKind.SEMI or kind == JoinKind.ANTI
+    )
+
     # A join condition is not part of any block, so the aggregates it finds
     # belong to nothing. It cannot hold one, which `_lower_expr` refuses on its
     # own because nothing here is grouped, so this walk stays empty.
@@ -4253,9 +4272,16 @@ def _joined(
                 left_keys.append(b)
                 right_keys.append(a)
                 continue
+            if pushable and first == _RIGHT and second == _RIGHT:
+                under.append(plan.exprs.binary(BinaryOp.EQ, a, b))
+                continue
             rest.append(plan.exprs.binary(BinaryOp.EQ, a, b))
             continue
-        rest.append(_lower_expr(ast, conjuncts[i], plan, walk, scope, False))
+        var one_expr = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
+        if pushable and _side(plan, one_expr, left, right) == _RIGHT:
+            under.append(one_expr)
+            continue
+        rest.append(one_expr)
 
     if not kind.keeps_right_columns():
         scope.hide(reach, pairs)
@@ -4289,6 +4315,11 @@ def _joined(
                 ),
             )
         )
+
+    # Under the right input, where the reason they were kept apart says they go,
+    # and before the join is built because the join is what reads them.
+    for i in range(len(under)):
+        right.at = plan.filter(right.at, under[i])
 
     var built = kind
     if len(left_keys) == 0:

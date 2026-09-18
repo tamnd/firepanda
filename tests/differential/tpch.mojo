@@ -7,10 +7,10 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Nineteen agree today. The other three are refused rather than wrong, and they
-are refused in two places rather than three: a left join on two key pairs, and a
-join condition that is not an equality. `recorded` below carries one reason per
-query and issue #816 has the two written out.
+Twenty agree today. The other two are refused rather than wrong, and they stop
+in two different places: a left join on two key pairs, and a correlated EXISTS
+that matches on an inequality. `recorded` below carries one reason per query and
+issue #816 has both written out.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -94,8 +94,8 @@ def queries() -> List[Int]:
     was the wrong list to ask for: the rest are refused rather than wrong, a
     refusal is a fact about this engine worth checking, and `recorded` below is
     where each one says why. Asking all of them is also what makes the printed
-    count mean anything, since nineteen of twenty two is the number this
-    exists to move and nineteen of nineteen is not.
+    count mean anything, since twenty of twenty two is the number this exists
+    to move and twenty of twenty is not.
 
     This list and `QUERIES` in `tools/tpch.py` are the same list written twice,
     because the Python side is what writes an answer out and the Mojo side is
@@ -119,9 +119,8 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    Three entries and two reasons between them, which is the useful thing the
-    list says. Issue #816 has the two written out with the refusal each one
-    comes back with.
+    Two entries with a reason each, and the two are not the same gap. Issue
+    #816 has both written out with the refusal each one comes back with.
 
     Args:
         number: The query number.
@@ -134,10 +133,10 @@ def recorded(number: Int) -> String:
             "a left join on two key pairs, which needs the ordinal space that"
             " concatenating both key columns builds. Issue #816"
         )
-    if number == 13 or number == 21:
+    if number == 21:
         return String(
-            "a join condition that is not an equality, which q13 writes in a"
-            " LEFT JOIN ON and q21 correlates an EXISTS through. Issue #816"
+            "a correlated EXISTS that matches on an inequality as well as an"
+            " equality, which is not a key pair. Issue #816"
         )
     return String()
 
