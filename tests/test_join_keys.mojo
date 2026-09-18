@@ -23,8 +23,9 @@ appears here at least once, and the assertions are the same ones in every case.
 
 The compound key tests come in pairs for that reason. One drives the packed
 route and the next puts the same question to a tuple that cannot pack, by
-spreading a key over forty bits, by putting a null in one, or by giving the two
-keys different dtypes. Both have to answer the same way.
+spreading a key over forty bits, by putting a null in one, by giving the two keys
+different dtypes, or by making one of them text. Both have to answer the same
+way.
 
 The string table is the one with a trap in it. Every other route settles a row by
 comparing hashes, which is exact for a fixed width key. A string is not, so the
@@ -404,6 +405,26 @@ def test_a_compound_key_of_two_dtypes_still_aligns() raises:
     assert_equal(got.codes[1], got.codes[3], "(1, 8)")
     assert_equal(got.codes[2], got.codes[4], "(2, 9)")
     assert_true(not matched(got, 3, 2, 0), "(1, 9) matches nothing")
+
+
+def test_a_compound_key_with_a_text_part_still_aligns() raises:
+    # A string has no range, so the packed route declines the tuple, and there
+    # are two keys, so the single key string table is not it either. That leaves
+    # the concatenating route, where the string is factorized as a column of its
+    # own and the tuple is the fold of the two sets of codes. The keys below
+    # share a prefix so that a pairing decided on the first key alone would get
+    # one of them wrong.
+    var got = align_owned(
+        paired(AnyArray(text(["ab", "a", "ab"])), AnyArray(ints([1, 2, 2]))),
+        two(0, 1),
+        3,
+        paired(AnyArray(text(["ab", "a"])), AnyArray(ints([1, 1]))),
+        two(0, 1),
+        2,
+    )
+    assert_equal(got.codes[0], got.codes[3], '("ab", 1) pairs')
+    assert_true(not matched(got, 3, 2, 1), '("a", 2) matches nothing')
+    assert_true(not matched(got, 3, 2, 2), '("ab", 2) matches nothing')
 
 
 def test_a_compound_key_past_the_split_aligns_what_one_thread_would() raises:

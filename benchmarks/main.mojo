@@ -6469,17 +6469,34 @@ def bench_join(mut harness: Harness) raises:
     inner on the same inputs. Outer has to track which right rows were hit, which
     is a bitmap write per matched row.
 
-    What does a compound key cost. Three rows, and they are a set rather than
-    three samples. `join/two_keys` is a pair of integers close enough together
+    What does a compound key cost. Five rows, and they are a set rather than
+    five samples. `join/two_keys` is a pair of integers close enough together
     that the tuple packs into one uint32, which turns the join into the single
     key join above with a packing pass in front of it.
     `join/two_keys_far_apart` is the same join with the second key shifted forty
-    bits, which is the same result over the same shape and cannot pack, so it
-    takes the concatenating route; the gap between the two is what packing the
-    pair is worth and it is also what says the scans that decide are cheap when
-    they decide no. `join/two_keys_equal_sides` is the packed pair with a build
-    side as tall as the probe side, which is to the compound rows what
-    `join/inner_equal_sides` is to the single key ones.
+    bits, which is the same result over the same shape and is past what an
+    integer packing can hold; the gap between the two is what packing the pair
+    into an integer is worth and it is also what says the scans that decide are
+    cheap when they decide no. `join/two_keys_equal_sides` is the packed pair
+    with a build side as tall as the probe side, which is to the compound rows
+    what `join/inner_equal_sides` is to the single key ones.
+
+    The six after those are two ladders. `join/two_keys_far_apart_100k` and
+    `join/two_keys_far_apart_equal_sides` are the far apart pair against build
+    sides of a hundred thousand rows and of one row per probe row, so the three
+    far apart rows come in the eight thousand, hundred thousand and equal sides
+    rungs the text rows also come in. `join/two_keys_text`,
+    `join/two_keys_text_100k` and `join/two_keys_text_equal_sides` are the same
+    three rungs again with the first key written as text.
+
+    Those two ladders are the same question asked of the two ways a tuple can
+    leave the integer packing, and they are not the same shape underneath. A pair
+    of integers too far apart to pack still gets one hash of the whole tuple out
+    of the factorize the concatenating route uses. A tuple with a string in it
+    does not, and falls back to a factorize a key and a fold over the results. So
+    the alternative route, which packs the tuple into a byte string a row and
+    probes a table of those, has much less to beat on the first ladder than on
+    the second, and the two ladders are what say where it is worth taking.
 
     What does multiplicity cost. `join/many_to_many` is two small frames with
     sixty four keys each, so every key produces a block of output rows and the
@@ -6697,34 +6714,15 @@ def bench_join(mut harness: Harness) raises:
     harness.record("join/two_keys", "rows", rows, two_key)
 
     # The same two keys with the second one spread over forty bits, which puts
-    # the pair past a uint32 and sends it to the concatenating route. Every other
-    # thing about the two rows is the same, so the gap between them is the whole
-    # of what packing the pair is worth, and this row is also what says the two
-    # scans that decide it are cheap when the answer is no.
+    # the pair past a uint32 and off the integer packing. Every other thing about
+    # this row and the one above is the same, so the gap between them is the
+    # whole of what packing the pair into an integer is worth, and this row is
+    # also what says the two scans that decide it are cheap when the answer is
+    # no. The rng is seeded the way the fact table's was, so the draws are the
+    # same draws and only the shift differs.
     var far_rng = Rng(0x105E5)
-    var far_fact_key = Array[DType.int64](rows)
-    var far_fact_other = Array[DType.int64](rows)
-    for i in range(rows):
-        var draw = far_rng.next_u64()
-        far_fact_key[i] = Int64(draw % UInt64(dim_rows))
-        far_fact_other[i] = Int64((draw >> 20) % 8) << 40
-    var far_fact_series = List[Series]()
-    far_fact_series.append(Series("key", far_fact_key^))
-    far_fact_series.append(Series("other", far_fact_other^))
-    var far_fact = DataFrame.from_series(far_fact_series^)
-
-    var far_key = Array[DType.int64](pair_rows)
-    var far_other = Array[DType.int64](pair_rows)
-    var far_label = Array[DType.int64](pair_rows)
-    for i in range(pair_rows):
-        far_key[i] = Int64(i // 8)
-        far_other[i] = Int64(i % 8) << 40
-        far_label[i] = Int64(i)
-    var far_series = List[Series]()
-    far_series.append(Series("key", far_key^))
-    far_series.append(Series("other", far_other^))
-    far_series.append(Series("label", far_label^))
-    var far_dim = DataFrame.from_series(far_series^)
+    var far_fact = _far_fact(rows, dim_rows, far_rng)
+    var far_dim = _far_dimension(pair_rows, "label")
 
     def two_key_far() raises {imm far_fact, imm far_dim, imm two}:
         keep(far_fact.rows)
@@ -6732,6 +6730,83 @@ def bench_join(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("join/two_keys_far_apart", "rows", rows, two_key_far)
+
+    # The two rungs above that one, so the pair that cannot pack into an integer
+    # has the ladder the single key rows and the text rows both have. A tuple
+    # that declines the integer packing either packs into bytes and takes the
+    # probe route or concatenates both sides and factorizes the lot, and which of
+    # those is cheaper depends on the build side's share of the work in the same
+    # way it does for a text key. These are the rungs `BYTE_KEY_BUILD_SHARE` is
+    # drawn from.
+    var far_wide_fact = _far_fact(rows, wide_rows // 8, rng)
+    var far_wide_dim = _far_dimension(wide_rows, "label")
+
+    def two_key_far_wide() raises {
+        imm far_wide_fact, imm far_wide_dim, imm two
+    }:
+        keep(far_wide_fact.rows)
+        var out = far_wide_fact.join(far_wide_dim, two)
+        keep(out.rows)
+
+    harness.record(
+        "join/two_keys_far_apart_100k", "rows", rows, two_key_far_wide
+    )
+
+    var far_tall_fact = _far_fact(rows, rows // 8, rng)
+    var far_tall_dim = _far_dimension(rows, "label")
+
+    def two_key_far_tall() raises {
+        imm far_tall_fact, imm far_tall_dim, imm two
+    }:
+        keep(far_tall_fact.rows)
+        var out = far_tall_fact.join(far_tall_dim, two)
+        keep(out.rows)
+
+    harness.record(
+        "join/two_keys_far_apart_equal_sides", "rows", rows, two_key_far_tall
+    )
+
+    # The same ladder with the first key written as text, which is the other way
+    # a tuple leaves the integer packing and a harder one. A pair of integers the
+    # packing declines still gets one hash of the tuple out of the factorize
+    # underneath it. A tuple with a string in it does not, so the concatenating
+    # route falls back to a factorize a key and a fold, and that is the shape
+    # where packing the tuple into bytes has something to beat.
+    var mixed_fact = _mixed_fact(rows, dim_rows, rng)
+    var mixed_dim = _mixed_dimension(pair_rows, "label")
+
+    def two_key_text() raises {imm mixed_fact, imm mixed_dim, imm two}:
+        keep(mixed_fact.rows)
+        var out = mixed_fact.join(mixed_dim, two)
+        keep(out.rows)
+
+    harness.record("join/two_keys_text", "rows", rows, two_key_text)
+
+    var mixed_wide_fact = _mixed_fact(rows, wide_rows // 8, rng)
+    var mixed_wide_dim = _mixed_dimension(wide_rows, "label")
+
+    def two_key_text_wide() raises {
+        imm mixed_wide_fact, imm mixed_wide_dim, imm two
+    }:
+        keep(mixed_wide_fact.rows)
+        var out = mixed_wide_fact.join(mixed_wide_dim, two)
+        keep(out.rows)
+
+    harness.record("join/two_keys_text_100k", "rows", rows, two_key_text_wide)
+
+    var mixed_tall_fact = _mixed_fact(rows, rows // 8, rng)
+    var mixed_tall_dim = _mixed_dimension(rows, "label")
+
+    def two_key_text_tall() raises {
+        imm mixed_tall_fact, imm mixed_tall_dim, imm two
+    }:
+        keep(mixed_tall_fact.rows)
+        var out = mixed_tall_fact.join(mixed_tall_dim, two)
+        keep(out.rows)
+
+    harness.record(
+        "join/two_keys_text_equal_sides", "rows", rows, two_key_text_tall
+    )
 
     # Two keys with a build side as tall as the probe side, which is what
     # `join/inner_equal_sides` is to the single key rows. The pair still packs,
@@ -6833,6 +6908,133 @@ def _dimension(rows: Int, base: Int, label: String) raises -> DataFrame:
     var series = List[Series]()
     series.append(Series("key", key^))
     series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _far_dimension(rows: Int, label: String) raises -> DataFrame:
+    """Builds a dimension table keyed by a pair too far apart to pack.
+
+    Eight rows per first key and the second key shifted forty bits up, so the
+    two keys together want more than the thirty two bits an integer packing has
+    to give and the join has to reach the pair some other way.
+
+    Args:
+        rows: The height. An eighth of it is the number of distinct first keys.
+        label: The name of the payload column.
+
+    Returns:
+        A three column frame keyed by `key` and `other`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var key = Array[DType.int64](rows)
+    var other = Array[DType.int64](rows)
+    var payload = Array[DType.int64](rows)
+    for i in range(rows):
+        key[i] = Int64(i // 8)
+        other[i] = Int64(i % 8) << 40
+        payload[i] = Int64(i)
+    var series = List[Series]()
+    series.append(Series("key", key^))
+    series.append(Series("other", other^))
+    series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _far_fact(rows: Int, keys: Int, mut rng: Rng) raises -> DataFrame:
+    """Builds a fact table keyed by a pair too far apart to pack.
+
+    The probe side `_far_dimension` is meant to be joined against. Every row
+    finds a match, since the dimension holds every pair these draws can make.
+
+    Args:
+        rows: The height.
+        keys: How many distinct first keys to draw from, which is an eighth of
+            the dimension table's height.
+        rng: The generator, so that two calls do not produce the same draws.
+
+    Returns:
+        A two column frame keyed by `key` and `other`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var span = UInt64(keys if keys > 0 else 1)
+    var key = Array[DType.int64](rows)
+    var other = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key[i] = Int64(draw % span)
+        other[i] = Int64((draw >> 20) % 8) << 40
+    var series = List[Series]()
+    series.append(Series("key", key^))
+    series.append(Series("other", other^))
+    return DataFrame.from_series(series^)
+
+
+def _mixed_dimension(rows: Int, label: String) raises -> DataFrame:
+    """Builds a dimension table keyed by a string and a number together.
+
+    `_far_dimension` with the first key written the way `_text_dimension` writes
+    its keys. Nothing about the pair packs into an integer, because a string has
+    no range to pack, so the route this reaches is a different one again.
+
+    Args:
+        rows: The height. An eighth of it is the number of distinct first keys.
+        label: The name of the payload column.
+
+    Returns:
+        A three column frame keyed by `key` and `other`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var key = List[String](capacity=rows)
+    var other = Array[DType.int64](rows)
+    var payload = Array[DType.int64](rows)
+    for i in range(rows):
+        key.append(String("id", i // 8))
+        other[i] = Int64(i % 8)
+        payload[i] = Int64(i)
+    var series = List[Series]()
+    series.append(Series("key", strings_from_list(key)))
+    series.append(Series("other", other^))
+    series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _mixed_fact(rows: Int, keys: Int, mut rng: Rng) raises -> DataFrame:
+    """Builds a fact table keyed by a string and a number together.
+
+    The probe side `_mixed_dimension` is meant to be joined against. Every row
+    finds a match, since the dimension holds every pair these draws can make.
+
+    Args:
+        rows: The height.
+        keys: How many distinct first keys to draw from, which is an eighth of
+            the dimension table's height.
+        rng: The generator, so that two calls do not produce the same draws.
+
+    Returns:
+        A two column frame keyed by `key` and `other`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var span = UInt64(keys if keys > 0 else 1)
+    var key = List[String](capacity=rows)
+    var other = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key.append(String("id", draw % span))
+        other[i] = Int64((draw >> 20) % 8)
+    var series = List[Series]()
+    series.append(Series("key", strings_from_list(key)))
+    series.append(Series("other", other^))
+    # The column has its own copy of every element by now and the list is the
+    # larger of the two, so it goes before the caller starts timing anything.
+    _ = key^
     return DataFrame.from_series(series^)
 
 

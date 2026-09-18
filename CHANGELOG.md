@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the join's two compound key packings now have the measurement that says which one a whole frame join uses
+
+The streaming join packs a key tuple into one byte string per row, because it holds the build side whole and the probe side a chunk at a time and cannot make a plan that both sides agree on. A whole frame join has both sides, so it uses `_pair_plan` to pack the tuple into a single integer, and when that declines it concatenates every key column with its opposite number and factorizes the lot. The obvious follow-up to the streaming work was to give the whole frame join the byte packing as well, for the tuples the integer packing declines. That is the thing this entry is about not doing.
+
+The byte packing was wired into `align_keys` behind a build side share threshold, the way the text key route is, and then measured on an i9-13900K at ten million probe rows, three sessions a side in ABBA order, against the concatenating route. It lost on every lopsided shape and by a lot: on a pair of int64 keys shifted too far apart to share a uint32, 322.7 ms against 63.7 at a build side of eight thousand rows and 335.6 against 77.1 at a hundred thousand. On a pair with the first key written as text, which was expected to be the byte packing's best case, 482.2 ms against 55.6 and 507.3 against 65.1. Every run of one side sits outside the range of the other. The two rows with a build side as tall as the probe side are the only ones that are close, 960.2 against 951.4 and 1.342 s against 1.430, and their runs interleave.
+
+The reason is that the concatenating route is not the naive thing its name suggests. Its copy is a parallel memcpy and costs almost nothing, and what it hands the copy to is `group_ordinals`, which has its own tuple handling: an integer pair no table can be laid over still gets one fused hash of the whole tuple in a single parallel pass, and a tuple with a string in it gets a factorize a key and a parallel fold. Packing to bytes writes a byte string a row on each side in a serial pass and then hashes and compares those strings, which is more bytes touched and less of it spread across cores.
+
+So the route was taken back out and the measurement written into `firepanda/join/keys.mojo` in its place, with the reason it loses and the one condition under which it would be worth asking again. Six benchmark rows stay behind: `join/two_keys_far_apart_100k` and `join/two_keys_far_apart_equal_sides` complete the far apart pair's ladder, and `join/two_keys_text`, `join/two_keys_text_100k` and `join/two_keys_text_equal_sides` are the same three rungs with the first key written as text, which is the other way a tuple leaves the integer packing and had no row at all. Issue #372.
+
+Two tests came out of it that are worth keeping on the route that ships. A compound key with a text part had no test in `tests/test_join_keys.mojo`, and the null and two dtype cases now say which route answers them rather than only that the answer is right.
+
 ### Added: a cache of the sets of positions the regular expression machine holds
 
 The machine holds every position a pattern could be in at once and walks the whole set for every character it reads, and it works that set out again at every position of every row. A column of a million rows over a program of forty instructions asks the same question about the same set an enormous number of times, so there is now a cache that answers it once. A state is one of those sets, a transition is a state and one character giving the next state, and both are built the first time they are reached rather than up front, which is the only way to have them at all for a pattern with more states than anyone would want to enumerate.
@@ -125,7 +137,6 @@ Verbose mode and the ascii flag are the last two of the seven flag letters, so e
 TPC-H q13 answers, which takes `pixi run tpch` to twenty of twenty two. An outer join with a condition about its right side used to be refused because a residual above the join would test the padding on a left row that matched nothing. A part of the condition that reads only the right side goes under the right input instead, before the pairing is built, and the left rows are padded or dropped exactly as they were.
 
 ClickBench q28 at 1M is 1.26 s where the 0.8.9 notes had it at 1.95 s, on 3.39 cores where it was on 3.41, machine idle for both and q27 run beside it as the control. DuckDB 1.5.5 answered the same query in 0.154 s in the same minute, so this library is about eight times slower on it rather than about twelve. Almost all of that is the anchored pattern change below; the byte table beside it is about four percent. Issue #830 stays open on the third of its three costs, which is a lazy DFA and is milestone sized.
-
 
 ### Added: verbose mode and the ascii flag, which are the last two of the seven letters
 
