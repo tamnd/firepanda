@@ -17,6 +17,15 @@ The two `ORDER BY` spellings share one run of entries. DuckDB turns down a call 
 That makes the argument run a run with two parts in it, so everything that walks a call's arguments now stops where the sort entries start. Eight of them are in `classify.mojo` and `plan.mojo` and the ninth is the printer arm that writes the call out. A sort entry is a statement node and an argument is an expression node, so a walker that ran off the end would be reading one arena with the other one's indices, which is the kind of mistake that gives a wrong answer rather than an error.
 
 `f(ignore)` is why the four groups inside the parentheses are told apart by grammar rule and not by first word. `IGNORE` and `RESPECT` are words a column may be called, and a reader that looks at the word would take that column for a null treatment and drop it.
+### Changed: A class under a plus is one step a character instead of three
+
+ClickBench q28 rewrites a column of URLs with `^https?://(?:www\.)?([^/]+)/.*$`, and the regex engine is about nine tenths of what that query does per row. It was doing 226256004 steps over 921225 rows, which is about 245 steps a row against rows that average 86 characters, and the reason the ratio is close to three is that a Thompson program writes a repeat as a split, the body, and a jump back to the split. Two of those three are bookkeeping, and `.*` on the tail of that pattern is most of the row.
+
+The backtracker now walks a repeat whose body is a single class in one step. It reads the character at the split, and the arm that goes round comes straight back to the split one position along, so the body and the jump behind it are never visited. The decision is still taken once per character, which is what keeps the one visit per instruction per position that the bitmap is there to give. The character class loop RE2 has, which consumes a whole run in one step, is not that and is not here: backing off inside a run visits the run again once per position it was entered at, and a pattern with two of them next to each other would be the row length squared.
+
+Measured on the real Referer column of the 1M file, paired back to back against the same tree with the change reverted, taking the minimum of three pairs on a loaded machine: the backtracker went from 2031 ms to 1126 ms and the kernel around it from 740 ms to 472 ms. The Pike machine is unchanged and measured unchanged.
+
+Which splits are that shape is worked out by `run_bodies`, which reads the shape back out of the compiled program and is called once per program by the backtracker's constructor. The first version wrote it into the program instead, as two opcodes the compiler emitted, and that cost the Pike machine about 1.4 times, going from 4068 to 6166 ms before to 6351 to 6608 ms after: its dispatch chain grew two comparisons in front of the leaf every character instruction falls through, for a note it has no use for. Document 96 has the rest of it.
 
 ### Added: SQL reads an argument passed by name
 
