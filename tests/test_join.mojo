@@ -1245,5 +1245,354 @@ def test_an_outer_join_marks_the_same_built_rows_however_many_cores_it_used() ra
     assert_equal(wrong, -1, String("built row ", wrong))
 
 
+comptime MERGE_LEFT_ROWS = 70_000
+"""Left rows for the merge fixture that does not split.
+
+Above `MERGE_PROBE_ROWS`, which is what makes a join ask whether its keys are
+sorted at all, and below `PARALLEL_LEFT_ROWS`, which is what makes the walk hand
+ranges of rows to workers. Every join test that came before this one is shorter
+than the first of those, so none of them reaches the walk and the fixtures here
+are the only cover it has.
+"""
+
+comptime MERGE_SPLIT_ROWS = 200_000
+"""Left rows for the merge fixture that does split.
+
+Past `PARALLEL_LEFT_ROWS`, so the walk runs a morsel at a time and each worker
+places its own first key in the right column with a binary search rather than
+inheriting the cursor the worker before it left. That search is the only part of
+the walk the shorter fixture cannot exercise, and it is the part that is wrong if
+a morsel boundary lands inside a run of equal keys.
+"""
+
+
+def climbing_keys(rows: Int, run: Int, stride: Int = 1) raises -> DataFrame:
+    """A one column frame whose key climbs by one every `run` rows.
+
+    Sorted with duplicates, which is the shape a filter of a table sorted on its
+    key has and the shape the walk has to get right: a left key that repeats
+    contributes one output row a row, not one an equal pair.
+
+    Args:
+        rows: How tall the frame is.
+        run: How many rows in a row share a key.
+        stride: Coprime with `rows` to read the same keys in a scrambled order,
+            or one to leave them sorted.
+
+    Returns:
+        The frame, with its only column named `k`.
+
+    Raises:
+        As building a frame does.
+    """
+    var k = Array[DType.int64](rows)
+    for i in range(rows):
+        k[i] = Int64(((i * stride) % rows) // run)
+    return one_column(Series("k", k^))
+
+
+def stepping_keys(
+    rows: Int, step: Int, each: Int, stride: Int = 1
+) raises -> DataFrame:
+    """A one column frame holding every `step`th key, each of them `each` times.
+
+    The gaps are what make the walk's right cursor move more than a row at a
+    time, and the repeats are what put a run of equal right keys under a single
+    left row, which a semi join has to collapse back to one.
+
+    Args:
+        rows: How tall the frame is.
+        step: The distance between one key and the next.
+        each: How many rows in a row share a key.
+        stride: Coprime with `rows` to scramble the order, or one to leave it
+            sorted.
+
+    Returns:
+        The frame, with its only column named `k`.
+
+    Raises:
+        As building a frame does.
+    """
+    var k = Array[DType.int64](rows)
+    for j in range(rows):
+        k[j] = Int64((((j * stride) % rows) // each) * step)
+    return one_column(Series("k", k^))
+
+
+def semi_survivors(
+    left: DataFrame,
+    left_rows: Int,
+    right: DataFrame,
+    right_rows: Int,
+    span: Int,
+) raises -> List[Int]:
+    """How many left rows a semi join should keep of each key, counted by hand.
+
+    One membership pass over the right keys and then one lookup a left row. It
+    reads the two frames rather than the formulas that filled them, so a fixture
+    that is not the shape its name claims shows up here instead of being
+    cancelled out on both sides of the comparison.
+
+    Args:
+        left: The probe side.
+        left_rows: How many of its rows to read.
+        right: The built side.
+        right_rows: How many of its rows to read.
+        span: One past the largest key either side holds.
+
+    Returns:
+        One count a key, indexed by the key itself.
+
+    Raises:
+        As reading a column does.
+    """
+    var seen = List[Bool](length=span, fill=False)
+    var rk = right.column("k").as_typed[DType.int64]()
+    for j in range(right_rows):
+        seen[Int(rk[j])] = True
+    var out = List[Int](length=span, fill=0)
+    var lk = left.column("k").as_typed[DType.int64]()
+    for i in range(left_rows):
+        var key = Int(lk[i])
+        if seen[key]:
+            out[key] += 1
+    return out^
+
+
+def kept_by_key(
+    pairs: JoinIndices, left: DataFrame, span: Int
+) raises -> List[Int]:
+    """The same count taken off a pairing, so the two can be compared.
+
+    Counting by key rather than comparing the pair lists row by row is what lets
+    a walk and a hash table be checked against each other at all: they keep the
+    same rows and they do not keep them in the same order, because the two
+    frames are the same keys in different places.
+
+    Args:
+        pairs: What the join produced.
+        left: The probe side it ran over.
+        span: One past the largest key.
+
+    Returns:
+        One count a key.
+
+    Raises:
+        As reading a column does.
+    """
+    var out = List[Int](length=span, fill=0)
+    var lk = left.column("k").as_typed[DType.int64]()
+    for r in range(len(pairs)):
+        out[Int(lk[pairs.left_at[r]])] += 1
+    return out^
+
+
+def first_gap(got: List[Int], want: List[Int]) -> Int:
+    """The first key the two counts disagree on, or minus one."""
+    for key in range(len(want)):
+        if got[key] != want[key]:
+            return key
+    return -1
+
+
+def test_a_semi_join_on_two_sorted_keys_keeps_what_the_hash_route_keeps() raises:
+    """Runs one semi join sorted and the same one scrambled, and compares.
+
+    The left key climbs by one every four rows and the right key holds every
+    third one twice, so a surviving left key is four left rows against two right
+    rows and the join has to answer four rather than eight. The right side runs
+    out well before the left does, which leaves most of the left column past the
+    end of the right and is the stretch where the walk is only a bounds check.
+
+    The scrambled pair is the same two multisets in an order no walk can read, so
+    it goes down the ordinary route and has to keep the same rows. Comparing the
+    two by key rather than by row is the point: they keep the same rows and they
+    cannot keep them in the same order.
+    """
+    comptime SPAN = MERGE_LEFT_ROWS // 4 + 2
+    comptime RIGHT_ROWS = 6_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+    var right = stepping_keys(RIGHT_ROWS, 3, 2)
+    var want = semi_survivors(left, MERGE_LEFT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the walk counted wrong",
+    )
+
+    # A semi join carries no right column, and its output is a subset of the
+    # left rows in left row order. Both are what the ordinary route promises and
+    # both are what the merge route has to keep promising.
+    var bad = -1
+    for r in range(len(walked)):
+        if walked.right_at[r] != -1:
+            bad = r
+            break
+        if r > 0 and walked.left_at[r] <= walked.left_at[r - 1]:
+            bad = r
+            break
+    assert_equal(bad, -1, "the first pair out of left row order")
+
+    var mixed_left = climbing_keys(MERGE_LEFT_ROWS, 4, 40_503)
+    var mixed_right = stepping_keys(RIGHT_ROWS, 3, 2, 3_571)
+    var hashed = join_indices(
+        mixed_left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        mixed_right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    assert_equal(len(hashed), len(walked), "row count against the hash route")
+    assert_equal(
+        first_gap(kept_by_key(hashed, mixed_left, SPAN), want),
+        -1,
+        "the first key the two routes disagreed on",
+    )
+
+
+def test_a_semi_join_past_the_split_walks_every_morsel_from_the_right_place() raises:
+    """Runs the walk long enough that it splits, over runs of seven rows.
+
+    Seven does not divide the morsel length, so morsel boundaries land inside
+    runs of equal left keys, which is the case where a worker that inherited a
+    cursor rather than finding its own would start too far along. Every fourth
+    key is on the right and each of them once, so a key that is dropped and a key
+    that is kept alternate all the way down the column.
+    """
+    comptime SPAN = MERGE_SPLIT_ROWS // 7 + 2
+    comptime RIGHT_ROWS = 5_000
+    var left = climbing_keys(MERGE_SPLIT_ROWS, 7)
+    var right = stepping_keys(RIGHT_ROWS, 4, 1)
+    var want = semi_survivors(left, MERGE_SPLIT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_SPLIT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the split walk counted wrong",
+    )
+
+    var bad = -1
+    for r in range(len(walked)):
+        if r > 0 and walked.left_at[r] <= walked.left_at[r - 1]:
+            bad = r
+            break
+    assert_equal(bad, -1, "the first pair out of left row order")
+
+
+def test_a_semi_join_whose_right_key_falls_once_still_pairs() raises:
+    """Puts one pair of right keys the wrong way round and asks for the same
+    answer.
+
+    The walk is only right on a right column that never falls, so the check in
+    front of it has to notice a single inversion in six thousand rows. The keys
+    here are the same multiset as the sorted fixture's, so the answer is the same
+    answer, and a check that missed the swap would produce a different one
+    rather than merely a slower route.
+    """
+    comptime SPAN = MERGE_LEFT_ROWS // 4 + 2
+    comptime RIGHT_ROWS = 6_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+
+    var k = Array[DType.int64](RIGHT_ROWS)
+    for j in range(RIGHT_ROWS):
+        k[j] = Int64((j // 2) * 3)
+    k[10] = Int64(18)
+    k[13] = Int64(15)
+    var right = one_column(Series("k", k^))
+
+    var sorted_right = stepping_keys(RIGHT_ROWS, 3, 2)
+    var want = semi_survivors(
+        left, MERGE_LEFT_ROWS, sorted_right, RIGHT_ROWS, SPAN
+    )
+
+    var pairs = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    assert_equal(
+        first_gap(kept_by_key(pairs, left, SPAN), want),
+        -1,
+        "the first key the fallen right column counted wrong",
+    )
+
+
+def test_a_semi_join_whose_keys_never_meet_keeps_nothing() raises:
+    """Walks a right column entirely above the left, then entirely below it.
+
+    Both are the ends the cursors can run off. Above, the search lands on the
+    first right row and stays there while every left key falls short of it.
+    Below, it lands one past the last right row on every morsel and has to stay
+    there rather than read what is not the column, which is the case a bounds
+    check in the wrong place turns into a wrong answer instead of a crash.
+    """
+    comptime RIGHT_ROWS = 4_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+
+    var high = Array[DType.int64](RIGHT_ROWS)
+    var low = Array[DType.int64](RIGHT_ROWS)
+    for j in range(RIGHT_ROWS):
+        high[j] = Int64(100_000 + j)
+        low[j] = Int64(j - RIGHT_ROWS)
+    var above = one_column(Series("k", high^))
+    var below = one_column(Series("k", low^))
+
+    assert_equal(
+        len(
+            join_indices(
+                left.column_refs(),
+                keys(0),
+                MERGE_LEFT_ROWS,
+                above.column_refs(),
+                keys(0),
+                RIGHT_ROWS,
+                JoinKind.SEMI,
+            )
+        ),
+        0,
+        "rows kept against a right side above every left key",
+    )
+    assert_equal(
+        len(
+            join_indices(
+                left.column_refs(),
+                keys(0),
+                MERGE_LEFT_ROWS,
+                below.column_refs(),
+                keys(0),
+                RIGHT_ROWS,
+                JoinKind.SEMI,
+            )
+        ),
+        0,
+        "rows kept against a right side below every left key",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
