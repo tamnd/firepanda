@@ -713,8 +713,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     # to print one.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a lambda"):
-        _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
     with assert_raises(contains="a list comprehension"):
         _ = _printed("SELECT [x FOR x IN l]", g, rules)
     with assert_raises(contains="COLUMNS"):

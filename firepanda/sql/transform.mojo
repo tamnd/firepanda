@@ -134,7 +134,6 @@ from .unsupported import (
     IN_BARE_VALUE,
     IS_UNKNOWN,
     JOIN_FORM,
-    LAMBDA,
     LIKE_ESCAPE,
     LIST_COMPREHENSION,
     MAP_LITERAL,
@@ -250,6 +249,9 @@ comptime _ROW: UInt8 = 81
 
 comptime _NAMED_ARGUMENT: UInt8 = 82
 """`NamedFunctionArgument`, an argument a call passes by name."""
+
+comptime _LAMBDA: UInt8 = 83
+"""`LambdaExpression`, a function written where a value goes."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -946,11 +948,11 @@ struct Transform(Movable):
         self._set(names, "ParenthesisExpression", _ROW)
         self._set(names, "RowExpression", _ROW)
         self._set(names, "NamedFunctionArgument", _NAMED_ARGUMENT)
+        self._set(names, "LambdaExpression", _LAMBDA)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "LambdaExpression", LAMBDA)
         self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
         self._refuse(names, "ColumnsExpression", COLUMNS)
         self._refuse(names, "MapExpression", MAP_LITERAL)
@@ -1832,6 +1834,9 @@ struct Transform(Movable):
 
         if action == _NAMED_ARGUMENT:
             return self._named_argument(tree, sql, node, ast, work)
+
+        if action == _LAMBDA:
+            return self._lambda(tree, sql, node, ast, work)
 
         if action == _INTERVAL:
             return self._interval(tree, sql, node, ast, work, at)
@@ -3650,6 +3655,48 @@ struct Transform(Movable):
             self._plain(tree, sql, kids[0]),
             value,
             _first_byte(tree, sql, kids[1]) != _COLON,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _lambda(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `lambda x: x + 1`, a function written where a value goes.
+
+        `LambdaExpression <- 'LAMBDA' List(ColIdOrString) ':' Expression`, so
+        the two children are the name list and the body and the two keywords
+        are tokens rather than nodes.
+
+        The parameters are read as text and not as expressions. A parameter is
+        a name being bound, so there is nothing under it to walk and nothing in
+        the body that can be resolved until somebody knows what the lambda is
+        being handed to.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `LambdaExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the body.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a parameter is a dotted name, or the body has no case.
+        """
+        var kids = tree.children(node)
+        var parameters = List[String]()
+        for name in tree.children(kids[0]):
+            parameters.append(self._plain(tree, sql, name))
+        return ast.closure(
+            parameters,
+            work.value(kids[1]),
             tree.nodes[Int(node)].token_start,
         )
 
