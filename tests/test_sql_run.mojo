@@ -4952,6 +4952,135 @@ def test_a_day_of_week_is_numbered_the_way_duckdb_numbers_it() raises:
         [7, 1, 1, 4],
         "and the ISO numbering makes it a seven",
     )
+    same(
+        answer("SELECT EXTRACT(WEEKDAY FROM eventdate) AS n FROM hits", "n"),
+        [0, 1, 1, 4],
+        "and weekday is a second spelling of the first question",
+    )
+
+
+def test_the_periods_longer_than_a_year() raises:
+    # All four days are in 2013, so the three answers are the same on every row
+    # and what the test is about is which number each period gets. A decade
+    # counts from zero and the other two count from one, which is why 2013 is
+    # in decade 201 and in century 21 rather than in century 20.
+    same(
+        answer("SELECT EXTRACT(DECADE FROM eventdate) AS n FROM hits", "n"),
+        [201, 201, 201, 201],
+        "the decade",
+    )
+    same(
+        answer("SELECT EXTRACT(CENTURY FROM eventdate) AS n FROM hits", "n"),
+        [21, 21, 21, 21],
+        "the century",
+    )
+    same(
+        answer("SELECT EXTRACT(MILLENNIUM FROM eventdate) AS n FROM hits", "n"),
+        [3, 3, 3, 3],
+        "the millennium",
+    )
+
+
+def test_the_century_and_the_millennium_count_from_one() raises:
+    # The year a period ends on is the one worth checking, because it is the
+    # one an arithmetic that counted from zero would get wrong. 1900 is the
+    # last year of the nineteenth century and 2000 is the last of the twentieth.
+    same(
+        answer(
+            (
+                "SELECT EXTRACT(CENTURY FROM col0) AS n FROM (VALUES (DATE"
+                " '1900-12-31'), (DATE '1901-01-01'), (DATE '2000-12-31'),"
+                " (DATE '2001-01-01')) AS t"
+            ),
+            "n",
+        ),
+        [19, 20, 20, 21],
+        "the century each year is in",
+    )
+    same(
+        answer(
+            (
+                "SELECT EXTRACT(MILLENNIUM FROM col0) AS n FROM (VALUES (DATE"
+                " '2000-12-31'), (DATE '2001-01-01')) AS t"
+            ),
+            "n",
+        ),
+        [2, 3],
+        "and the millennium",
+    )
+
+
+def test_a_year_week_is_the_iso_year_and_the_iso_week_together() raises:
+    # The ISO year rather than the year, which is the whole point of the field.
+    # The last days of a December can fall in the first ISO week of the year
+    # after, and a number built from the year would put them in week one of the
+    # year that is ending.
+    same(
+        answer("SELECT EXTRACT(YEARWEEK FROM eventdate) AS n FROM hits", "n"),
+        [201326, 201327, 201329, 201331],
+        "the four days",
+    )
+    same(
+        answer(
+            (
+                "SELECT EXTRACT(YEARWEEK FROM col0) AS n FROM (VALUES (DATE"
+                " '2024-12-30'), (DATE '2021-01-03')) AS t"
+            ),
+            "n",
+        ),
+        [202501, 202053],
+        "a day either side of a year boundary",
+    )
+
+
+def test_a_day_of_month_is_the_day() raises:
+    same(
+        answer("SELECT EXTRACT(DAYOFMONTH FROM eventdate) AS n FROM hits", "n"),
+        [30, 1, 15, 1],
+        "the same number DAY answers",
+    )
+
+
+def test_an_era_is_one_for_every_date_and_null_for_no_date() raises:
+    # Every date firepanda can hold is after the year zero, so the number is a
+    # one wherever there is a date at all. The second half is why it is not
+    # written as the literal one: a row with no date has no era either.
+    same(
+        answer("SELECT EXTRACT(ERA FROM eventdate) AS n FROM hits", "n"),
+        [1, 1, 1, 1],
+        "one for each of the four days",
+    )
+    same(
+        gapped(
+            run(
+                (
+                    "SELECT EXTRACT(ERA FROM CASE WHEN advengineid = 0 THEN"
+                    " NULL ELSE eventdate END) AS n FROM hits"
+                ),
+                session(),
+            ),
+            "n",
+        ),
+        [-1, 1, 1, 1],
+        "and null where the date was null",
+    )
+
+
+def test_a_field_duckdb_has_and_firepanda_does_not_says_what_is_missing() raises:
+    # Four specifiers DuckDB answers and this does not, and the point of each
+    # message is that the gap is under the name rather than in it.
+    with assert_raises(contains="no cast that does that yet"):
+        _ = run("SELECT EXTRACT(EPOCH FROM eventdate) FROM hits", session())
+    with assert_raises(contains="the whole of the seconds and the fraction"):
+        _ = run(
+            "SELECT EXTRACT(MICROSECOND FROM eventdate) FROM hits", session()
+        )
+    with assert_raises(contains="the whole of the seconds and the fraction"):
+        _ = run(
+            "SELECT EXTRACT(MILLISECOND FROM eventdate) FROM hits", session()
+        )
+    with assert_raises(contains="no time zone aware timestamp"):
+        _ = run("SELECT EXTRACT(TIMEZONE FROM eventdate) FROM hits", session())
 
 
 def test_a_field_read_in_a_where_keeps_the_rows_it_names() raises:
@@ -5027,8 +5156,8 @@ def test_an_extract_answers_a_whole_number_the_width_duckdb_answers() raises:
 
 
 def test_a_field_nobody_has_a_kernel_for_says_so_by_name() raises:
-    with assert_raises(contains="no field SQL calls epoch"):
-        _ = run("SELECT EXTRACT(EPOCH FROM eventdate) FROM hits", session())
+    with assert_raises(contains="no field SQL calls fortnight"):
+        _ = run("SELECT EXTRACT(FORTNIGHT FROM eventdate) FROM hits", session())
 
 
 def test_an_extract_off_a_column_that_is_not_a_date_is_refused() raises:

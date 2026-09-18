@@ -3335,6 +3335,70 @@ def test_a_day_of_week_is_written_as_the_iso_day_read_modulo_seven() raises:
         _plan("SELECT EXTRACT(DAYOFWEEK FROM d) AS x FROM w"),
         _plan("SELECT EXTRACT(DOW FROM d) AS x FROM w"),
     )
+    assert_equal(
+        _plan("SELECT EXTRACT(WEEKDAY FROM d) AS x FROM w"),
+        _plan("SELECT EXTRACT(DOW FROM d) AS x FROM w"),
+    )
+
+
+def test_the_long_periods_are_arithmetic_over_the_year() raises:
+    # None of the three has a field code or a kernel. A decade counts from zero
+    # and the other two count from one, and writing them this way is what makes
+    # it impossible for one of them to disagree with the year it came from.
+    assert_equal(
+        _plan("SELECT EXTRACT(DECADE FROM d) FROM w"),
+        (
+            "PROJECT [(date_part(year, d)) //sql 10 as date_part('decade',"
+            " d)]\n  SCAN w []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT EXTRACT(CENTURY FROM d) FROM w"),
+        (
+            "PROJECT [(((date_part(year, d)) - 1) //sql 100) + 1 as"
+            " date_part('century', d)]\n"
+            "  SCAN w []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT EXTRACT(MILLENNIUM FROM d) FROM w"),
+        (
+            "PROJECT [(((date_part(year, d)) - 1) //sql 1000) + 1 as"
+            " date_part('millennium', d)]\n"
+            "  SCAN w []\n"
+        ),
+    )
+
+
+def test_a_year_week_is_the_two_iso_fields_written_as_one_number() raises:
+    # The number DuckDB answers is the ISO year and the ISO week side by side,
+    # so it is the one times a hundred plus the other and not a field of its own.
+    assert_equal(
+        _plan("SELECT EXTRACT(YEARWEEK FROM d) FROM w"),
+        (
+            "PROJECT [((date_part(isoyear, d)) * 100) + (date_part(isoweek, d))"
+            " as date_part('yearweek', d)]\n"
+            "  SCAN w []\n"
+        ),
+    )
+
+
+def test_a_day_of_month_is_the_day_under_another_name() raises:
+    assert_equal(
+        _plan("SELECT EXTRACT(DAYOFMONTH FROM d) AS x FROM w"),
+        _plan("SELECT EXTRACT(DAY FROM d) AS x FROM w"),
+    )
+
+
+def test_an_era_is_a_conditional_rather_than_a_constant() raises:
+    # A literal one would answer for a row with no date in it, which has no era.
+    assert_equal(
+        _plan("SELECT EXTRACT(ERA FROM d) FROM w"),
+        (
+            "PROJECT [if is_null(d) then null else 1 as date_part('era', d)]\n"
+            "  SCAN w []\n"
+        ),
+    )
 
 
 def test_a_field_read_off_a_timestamp_is_the_same_call() raises:
@@ -3349,9 +3413,19 @@ def test_an_extract_of_a_number_is_refused_while_it_binds() raises:
         _ = _plan("SELECT EXTRACT(YEAR FROM n) FROM w")
 
 
-def test_a_field_nobody_has_a_kernel_for_is_refused_by_name() raises:
-    with assert_raises(contains="no field SQL calls epoch"):
+def test_a_field_duckdb_has_and_firepanda_lacks_says_which() raises:
+    # DuckDB answers all four of these and firepanda is missing the thing
+    # underneath rather than the name, so each one says which thing. Reaching
+    # the table instead would come back saying nothing is called that, which
+    # reads as a typo in a query that has none in it.
+    with assert_raises(contains="no cast that does that yet"):
         _ = _plan("SELECT EXTRACT(EPOCH FROM ts) FROM w")
+    with assert_raises(contains="the seconds and the fraction together"):
+        _ = _plan("SELECT EXTRACT(MILLISECOND FROM ts) FROM w")
+    with assert_raises(contains="the seconds and the fraction together"):
+        _ = _plan("SELECT EXTRACT(MICROSECOND FROM ts) FROM w")
+    with assert_raises(contains="no time zone aware timestamp yet"):
+        _ = _plan("SELECT EXTRACT(TIMEZONE FROM ts) FROM w")
 
 
 def test_a_field_that_is_not_a_name_at_all_is_refused() raises:

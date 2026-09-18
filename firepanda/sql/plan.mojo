@@ -1188,20 +1188,56 @@ def _lower_date_trunc(mut plan: Plan, var args: List[Int]) raises -> Int:
     return plan.exprs.call("date_trunc", lowered^, True)
 
 
+def _part(mut plan: Plan, field: String, over: Int) raises -> Int:
+    """Builds the `date_part` call that reads one field firepanda has a code for.
+
+    The name is written in lower case rather than left as the query spelled it.
+    `date_part('YEAR', d)` is the same call as `date_part('year', d)` and the
+    operator looks the name up in a table that has it in lower case only, so
+    this is where the two become one.
+
+    Args:
+        plan: The plan, whose arena the call goes in.
+        field: The field, in the spelling `sql_field_named` knows.
+        over: The column the field is read out of.
+
+    Returns:
+        The call.
+
+    Raises:
+        Error: If either piece is not in the arena.
+    """
+    var named = List[Int]()
+    named.append(plan.exprs.literal(Value(String(field))))
+    named.append(over)
+    return plan.exprs.call("date_part", named^, True)
+
+
 def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
-    """Builds what a `date_part` means, and rewrites the one field that differs.
+    """Builds what a `date_part` means, and rewrites the fields that differ.
 
     Most of the fields are the same number in both systems and go straight
-    through. The day of the week is not. DuckDB numbers it from zero for Sunday
-    and every other part of firepanda numbers it from zero for Monday, which is
-    what pandas does, so one of the two has to move and it is this one, because
-    this is the side that knows a query asked the question.
+    through. Seven are not, and every one of them is arithmetic over a field
+    that does go through, so none of them needs a field code or a kernel of its
+    own and none of them can drift away from the field it is computed from.
 
-    It moves by taking the ISO day, which runs from one for Monday to seven for
-    Sunday and agrees with DuckDB's `isodow` exactly, and reading it modulo
-    seven. Monday is one either way and Sunday comes back as zero, which is the
-    whole of the difference. Doing it that way means there is no second field
-    code for the same field and no chance of the two drifting apart.
+    The day of the week is the first. DuckDB numbers it from zero for Sunday and
+    every other part of firepanda numbers it from zero for Monday, which is what
+    pandas does, so one of the two has to move and it is this one, because this
+    is the side that knows a query asked the question. It moves by taking the
+    ISO day, which runs from one for Monday to seven for Sunday and agrees with
+    DuckDB's `isodow` exactly, and reading it modulo seven. Monday is one either
+    way and Sunday comes back as zero, which is the whole of the difference.
+    `weekday` is a second spelling of the same question and gets the same answer.
+
+    `dayofmonth` is the day. `decade` is the year divided by ten and truncated.
+    `century` and `millennium` both count from one rather than from zero, so
+    1900 is in the nineteenth century and 2001 is in the twenty first, and both
+    are a year one less divided and one more. `yearweek` is the ISO year and the
+    ISO week written as one number, so the first week of 2025 is 202501 whatever
+    year the days in it fall in. `era` is one for every date firepanda can hold,
+    because the range starts after the year zero, and it is a conditional rather
+    than a literal so that a null row still answers null.
 
     The field is read and checked here rather than left to the engine, because
     this is where the query is still close enough to say `EXTRACT(EPOCH FROM x)`
@@ -1217,7 +1253,8 @@ def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
 
     Raises:
         Error: If the call was not given two arguments, or the field is not a
-            name written in the query, or nothing is called that.
+            name written in the query, or it is one of the four DuckDB has and
+            firepanda cannot answer, or nothing is called that.
     """
     if len(args) != 2:
         raise Error(
@@ -1240,26 +1277,136 @@ def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
         )
 
     var field = plan.exprs.nodes[args[0]].value.as_string().lower()
-    if field != "dow" and field != "dayofweek":
-        _ = sql_field_named(field)
+    var over = args[1]
 
-        # The field is put back in lower case rather than left as it was
-        # written. `date_part('YEAR', d)` is the same call as
-        # `date_part('year', d)` and the operator looks the name up in a table
-        # that has it in lower case only, so this is where the two become one.
-        var named = List[Int]()
-        named.append(plan.exprs.literal(Value(String(field))))
-        named.append(args[1])
-        return plan.exprs.call("date_part", named^, True)
+    if field == "dow" or field == "dayofweek" or field == "weekday":
+        return plan.exprs.binary(
+            BinaryOp.MOD,
+            _part(plan, "isodow", over),
+            plan.exprs.literal(Value(Int64(7))),
+        )
+    if field == "dayofmonth":
+        return _part(plan, "day", over)
+    if field == "decade" or field == "decades":
+        return plan.exprs.binary(
+            BinaryOp.SQLDIV,
+            _part(plan, "year", over),
+            plan.exprs.literal(Value(Int64(10))),
+        )
+    if field == "century" or field == "centuries":
+        return _counted_from_one(plan, over, 100)
+    if field == "millennium" or field == "millennia" or field == "millenniums":
+        return _counted_from_one(plan, over, 1000)
+    if field == "yearweek":
+        return plan.exprs.binary(
+            BinaryOp.ADD,
+            plan.exprs.binary(
+                BinaryOp.MUL,
+                _part(plan, "isoyear", over),
+                plan.exprs.literal(Value(Int64(100))),
+            ),
+            _part(plan, "isoweek", over),
+        )
+    if field == "era":
+        # Every date firepanda can hold is after the year zero, so the number is
+        # one for every row that has a date in it. It is written as a
+        # conditional rather than as the literal one because a null row has no
+        # era and a literal would answer for it anyway.
+        return plan.exprs.conditional(
+            plan.exprs.call("is_null", [over], True),
+            plan.exprs.literal(Value(null=LogicalType.NULL)),
+            plan.exprs.literal(Value(Int64(1))),
+        )
 
-    var iso = List[Int]()
-    iso.append(plan.exprs.literal(Value(String("isodow"))))
-    iso.append(args[1])
+    _refused_field(field)
+    _ = sql_field_named(field)
+    return _part(plan, field, over)
+
+
+def _counted_from_one(mut plan: Plan, over: Int, size: Int) raises -> Int:
+    """Builds the century or the millennium, which both count from one.
+
+    1900 is in the nineteenth century and 1901 is in the twentieth, so the
+    number is the year one less over the size of the period, one more. Written
+    once for both because the two differ in the size and in nothing else.
+
+    Args:
+        plan: The plan, whose arena the pieces go in.
+        over: The column the year is read out of.
+        size: How many years the period holds.
+
+    Returns:
+        The expression.
+
+    Raises:
+        Error: If a piece is not in the arena.
+    """
     return plan.exprs.binary(
-        BinaryOp.MOD,
-        plan.exprs.call("date_part", iso^, True),
-        plan.exprs.literal(Value(Int64(7))),
+        BinaryOp.ADD,
+        plan.exprs.binary(
+            BinaryOp.SQLDIV,
+            plan.exprs.binary(
+                BinaryOp.SUB,
+                _part(plan, "year", over),
+                plan.exprs.literal(Value(Int64(1))),
+            ),
+            plan.exprs.literal(Value(Int64(size))),
+        ),
+        plan.exprs.literal(Value(Int64(1))),
     )
+
+
+def _refused_field(field: String) raises:
+    """Raises for a DuckDB specifier firepanda knows about and cannot answer.
+
+    These four reach `sql_field_named` otherwise and come back with a sentence
+    saying nothing is called that, which is true of the field code and wrong
+    about the specifier: DuckDB has all four and firepanda is missing the thing
+    underneath rather than the name. Saying which thing is missing is the
+    difference between a gap somebody can plan around and one that reads as a
+    typo.
+
+    Args:
+        field: The specifier, already folded to lower case.
+
+    Raises:
+        Error: If it is one of the four.
+    """
+    if field == "epoch":
+        raise Error(
+            "an EXTRACT of the epoch is the instant as a count of seconds,"
+            " which means reading a date or a timestamp as the number it is"
+            " stored as, and firepanda has no cast that does that yet"
+        )
+    if (
+        field == "millisecond"
+        or field == "milliseconds"
+        or field == "msec"
+        or field == "msecs"
+        or field == "ms"
+        or field == "microsecond"
+        or field == "microseconds"
+        or field == "usec"
+        or field == "usecs"
+        or field == "us"
+    ):
+        raise Error(
+            "an EXTRACT of the milliseconds or the microseconds is the whole of"
+            " the seconds and the fraction together in DuckDB, and firepanda"
+            " has a field for the seconds and one for the fraction under a name"
+            " that means something else in SQL, so there is nothing here to add"
+            " the two together from yet"
+        )
+    if (
+        field == "timezone"
+        or field == "timezone_hour"
+        or field == "timezone_minute"
+    ):
+        raise Error(
+            "an EXTRACT of the time zone reads the offset a timestamp carries,"
+            " and firepanda has no time zone aware timestamp yet, so it would"
+            " be answering zero for a column that was never asked the question"
+        )
 
 
 def _agg_kind(name: String, distinct: Bool = False) raises -> AggKind:

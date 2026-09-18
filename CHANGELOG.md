@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the `EXTRACT` fields that are arithmetic over a field firepanda already has
+
+`DECADE`, `CENTURY`, `MILLENNIUM`, `YEARWEEK`, `DAYOFMONTH`, `WEEKDAY` and `ERA`, with DuckDB's plural and abbreviated spellings of each. None of them needed a kernel. A decade is the year over ten, a century is the year one less over a hundred one more, because 1900 is in the nineteenth century and 1901 is in the twentieth, a year week is the ISO year times a hundred plus the ISO week, a day of the month is the day, a weekday is the day of the week that was already there, and an era is one for every row that holds a date. Writing them as arithmetic over the fields that do have kernels is also what makes it impossible for `EXTRACT(DECADE FROM d)` to disagree with `EXTRACT(YEAR FROM d)` on the same row.
+
+An era is written as a conditional rather than as the number one. A row with no date in it has no era, and a literal would have answered for it anyway.
+
+Four fields DuckDB has stay refused, and each now says which piece is missing rather than saying nothing is called that. `EPOCH` wants a cast from a date or a timestamp to the number it is stored as. `MILLISECOND` and `MICROSECOND` are the whole of the seconds and the fraction together in DuckDB, and the fraction here lives under a name that means a different thing in SQL, so there is nothing to add the two from yet. The `TIMEZONE` three read an offset off a timestamp that has none to read, and answering zero would be answering a question the column was never asked.
+
 ## [0.8.10] - 2026-09-18
 
 Built against Mojo 1.0.0 (ed45d567).
