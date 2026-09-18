@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a backreference under the ignore case flag, which is a second case table
+
+`str.contains(r"(\w)\1", case=False)` used to raise and now answers, which is one of the two things the backreference entry in 0.8.15 left refused.
+
+It wanted a table because `(?i)` means two different things and upstream implements it twice. A literal under the flag is widened while the pattern is compiled, into the set of everything that folds onto it, so `(?i)s` becomes `s`, `S` and the long s. A backreference cannot be widened that way, because what it is going to be compared against is not known until the row is being walked, so upstream compares the two characters at run time by lowering each of them and asking whether the results are equal. Those two relations disagree: `(?i)ss` matches `sſ` and `(?i)(s)\1` does not, and the sigma pair goes the same way. It is measured against a running CPython rather than reasoned about, and it is upstream's arrangement rather than a defect in it.
+
+So there are two case tables now. `folddata.mojo` is the orbits and `lowerdata.mojo` is the simple lowercase, written by `tools/gen_regexlower.py` beside the fold generator and against the same interpreter, CPython 3.13.12 with Unicode 15.1.0. 1433 code points move, in 214 runs, which takes a marker of its own: the fold table's says a run alternates up and down because folding is a cycle, and this one says the even code point steps up and the odd one stays, because lowering is not. Without it the same table is 668 runs. The generator walks its own runs over every code point in Unicode and checks each against `_sre.unicode_tolower`, so a release that moves an answer fails there rather than drifting.
+
+The table is read by one function and held on the engine rather than copied per row, and only a program that actually holds a reference under the wide flag asks for it at all. `(?ai)` is a third rule rather than the wide one narrowed: it is the twenty six ASCII letters and nothing else, so the Kelvin sign is not a `k` there. The Python differential moves from 28729 patterns compared to 28739, which is the ten that were held out for this, and stays at zero disagreements. Document 97.
+
 ## [0.8.15] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -133,36 +143,6 @@ So there are two new reductions rather than a flag on the old ones, `FIRST_ROW` 
 They do not fold a chunk at a time, which is the one design decision here worth writing down. A partial answer from one chunk is a value that may itself be null, and a running slot holding a null cannot say whether it is a group whose first row was missing or a group no chunk has reached yet. That is the trap a sum fell into in the entry below, where a zero meant both nothing added and a total of zero. The way out there was a second state slot; here it is cheaper to hold the column and reduce once at the end, which is the route a median already takes, because these two copy one element per group rather than accumulating anything.
 
 `FILTER` on `any_value` used to be refused alongside the other two and runs now. The rewrite turns a row the predicate dropped into a null, and a fold that passes over a null cannot tell that from a row that was taken away, so the `CASE` says what the filter said. For `first` and `last` it does not, and they are still refused by name.
-
-### Added: a backreference under the ignore case flag, which is a second case table
-
-`str.contains(r"(\w)\1", case=False)` used to raise and now answers, which is the last of the three things the entry below left refused.
-
-It wanted a table because `(?i)` means two different things and upstream implements it twice. A literal under the flag is widened while the pattern is compiled, into the set of everything that folds onto it, so `(?i)s` becomes `s`, `S` and the long s. A backreference cannot be widened that way, because what it is going to be compared against is not known until the row is being walked, so upstream compares the two characters at run time by lowering each of them and asking whether the results are equal. Those two relations disagree: `(?i)ss` matches `sſ` and `(?i)(s)\1` does not, and the sigma pair goes the same way. It is measured against a running CPython rather than reasoned about, and it is upstream's arrangement rather than a defect in it.
-
-So there are two case tables now. `folddata.mojo` is the orbits and `lowerdata.mojo` is the simple lowercase, written by `tools/gen_regexlower.py` beside the fold generator and against the same interpreter, CPython 3.13.12 with Unicode 15.1.0. 1433 code points move, in 214 runs, which takes a marker of its own: the fold table's says a run alternates up and down because folding is a cycle, and this one says the even code point steps up and the odd one stays, because lowering is not. Without it the same table is 668 runs. The generator walks its own runs over every code point in Unicode and checks each against `_sre.unicode_tolower`, so a release that moves an answer fails there rather than drifting.
-
-The table is read by one function and held on the engine rather than copied per row, and only a program that actually holds a reference under the wide flag asks for it at all. `(?ai)` is a third rule rather than the wide one narrowed: it is the twenty six ASCII letters and nothing else, so the Kelvin sign is not a `k` there. The Python differential moves from 28729 patterns compared to 28739, which is the ten that were held out for this, and stays at zero disagreements. Document 96.
-
-### Added: a backreference, which is the construct that decided which engine answers
-
-`str.contains(r"(\w)\1")` used to raise and now answers, and so do `count`, `replace`, `fullmatch` and `extract`. Both spellings are in, the numbered one and `(?P=name)`. It is the largest of the five constructs RE2 has not got that Python has, at 839 of the 30052 held out patterns.
-
-This one is about an engine rather than about a construct. There are three under the compiler and two of them are built on one claim: that an instruction and a position say everything about what is left to do. The state cache makes a state out of a set of instructions, and the Pike machine merges two threads the moment they stand at the same instruction and the same position, which is the whole of its bound. A backreference asks what the path that arrived matched, so both of those have to turn it down, and the bounded backtracker, which follows one path at a time, is the only one that can answer it.
-
-The same claim is what the backtracker's bitmap rests on, so the bitmap cannot be read the same way for a program holding one. It is kept under a narrower rule instead: an instruction and a position and the slots do say everything, so everything in the bitmap is forgotten the moment a slot changes value, and only the arrivals with no change between them are dropped. Forgetting is the length of a short list rather than the length of the bitmap, and a write that puts back the number that was already there is not a change, which is what ends a repeat over a body that matches nothing.
-
-The bound underneath that is a count of steps, four million of them, and a row that runs out raises `this pattern is taking too long on this row`. That is a divergence and a deliberate one: upstream in the same place says nothing and does not come back, and a library that can be hung inside a kernel by one cell of one column is worse than one that says it gave up. No pattern in the corpus reaches it.
-
-A group that never took part fails the reference rather than matching nothing, so `(a)?\1b` does not match `b` and `(a?)\1b` does, which is upstream's rule and is the pair that separates a group that was skipped from one that ran and matched nothing.
-
-Two things were still refused when this landed. A backreference under the wide reading of the ignore case flag, which the entry above is about and which is now in. And a lookaround beside a backreference, because the two constructs live on different engines here and a pattern holding both has nowhere to go, which is still refused.
-
-### Fixed: the anchoring rewrite no longer renumbers the caller's groups
-
-`match` and `fullmatch` on the Python engine are answered by writing `\A` and `\Z` around the caller's pattern and a bracket around the middle, because upstream anchors from outside the pattern with `re.match` and this library has to put the anchor inside it. That bracket was a capturing one, which numbered every group the caller wrote one higher.
-
-Nothing could reach it while a backreference was refused, and a backreference is the one thing that follows the numbering. `(a)\1` would have come out as `\A((a)\1)\Z`, where the reference names the wrapper, the wrapper is still open where the reference stands, and a group that is still open reads as one that never took part, so the pattern quietly matches nothing at all. The bracket is now `(?:`, which changes nothing anywhere else.
 
 ### Added: a lookbehind, which is the other half of the construct below
 

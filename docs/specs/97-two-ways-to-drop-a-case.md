@@ -1,4 +1,4 @@
-# 96. Two ways to drop a case
+# 97. Two ways to drop a case
 
 ## 1. What this is
 

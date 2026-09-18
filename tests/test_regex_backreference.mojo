@@ -23,7 +23,7 @@ against a running Python 3.13, including the folding ones, because a
 backreference under the ignore case flag is compared by simple lowercase where a
 literal is compared by the whole fold orbit and the two disagree on real text.
 
-Documents 95 and 96.
+Documents 95 and 97.
 """
 
 from std.testing import (
@@ -235,7 +235,7 @@ def test_a_reference_is_lowered_where_a_literal_beside_it_is_folded() raises:
     `(?i)ss` reads one. A reference is lowered while the row is walked instead,
     and the long s lowers to itself, so `(?i)(s)\\1` reads none. Upstream
     answers those two exactly that way and the sigma pair goes the same way.
-    Document 96."""
+    Document 97."""
     assert_true(hits("(?i)ss", "sſ"))
     assert_false(hits("(?i)(s)\\1", "sſ"))
     assert_true(hits("(?i)σσ", "σς"))

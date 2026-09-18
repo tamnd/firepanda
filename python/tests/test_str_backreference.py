@@ -19,7 +19,7 @@ empty `flags` and would have reached Arrow without the reference in them.
 The rows compare against pandas rather than against a written down answer,
 because the claim of the slice is agreement and not correctness in the abstract.
 
-Documents 95 and 96.
+Documents 95 and 97.
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def test_the_ignore_case_flag_reads_the_two_characters_lowered(
     The two rows after it are the disagreement itself. A column holding the long
     s answers True to `(?i)ss` and False to `(?i)(s)\\1`, and pandas answers it
     the same two ways, because upstream is where the two rules came from.
-    Document 96.
+    Document 97.
     """
     mine, them = made(firepanda), theirs()
     assert mask_of(them.str.contains(r"(\w)\1", case=False))[5] is True

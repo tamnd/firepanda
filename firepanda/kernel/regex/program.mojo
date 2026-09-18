@@ -246,7 +246,7 @@ comptime REF_WIDE: Int32 = 2
 
 It is not the fold the literals in the same pattern were compiled under, and
 that is upstream's arrangement rather than a shortcut here: `(?i)ss` matches
-`sſ` and `(?i)(s)\\1` does not. Document 96."""
+`sſ` and `(?i)(s)\\1` does not. Document 97."""
 
 
 comptime MAX_INSTRUCTIONS: Int = 200000
@@ -1375,7 +1375,7 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         # lowercase, which is not the fold the literals in this same pattern were
         # compiled under: `(?i)(s)\1` does not match `sſ` while `(?i)ss` does,
         # because a literal is widened into its orbit and a reference is lowered.
-        # Document 96.
+        # Document 97.
         if not b.captures:
             # Unreachable, and here because the alternative to a refusal is an
             # instruction reading a slot that was never written. The compiler

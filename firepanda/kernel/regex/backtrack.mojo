@@ -215,7 +215,7 @@ def simple_lower(
     backreference cannot be widened that way because what it will be compared
     against is not known until the row is being walked, so it is compared here
     instead, and upstream compares it by this rather than by the fold that the
-    literals beside it were compiled under. Document 96.
+    literals beside it were compiled under. Document 97.
 
     Args:
         lows: Where each run starts.
@@ -289,7 +289,7 @@ struct Bounded(Movable):
     var lower: List[List[Int32]]
     """The simple lowercase runs, held for exactly that reason and empty unless
     the program reads a backreference under the wide reading of `(?i)`. Three
-    lists, the lows, the highs and the deltas. Document 96."""
+    lists, the lows, the highs and the deltas. Document 97."""
 
     var jobs_pc: List[Int32]
     """The stack, as instructions. A negative entry is not an instruction: it is
@@ -405,7 +405,7 @@ struct Bounded(Movable):
         ASCII letters and nothing else. `(?i)` is the simple lowercase of both
         characters, which is not the fold the literals in the same pattern were
         compiled under, and the difference shows in ordinary text rather than in
-        a corner. Document 96.
+        a corner. Document 97.
 
         A pair that is already equal is left alone rather than lowered twice,
         which is the common case and costs nothing to ask.

@@ -12,7 +12,7 @@ text. `(?i)ss` matches `s\u017f` because the long s is in the orbit of `s`,
 while `(?i)(s)\1` does not match it because the long s lowers to itself.
 `(?i)(\u03c3)\1` does not match sigma followed by final sigma for the same
 reason. And it goes the other way round for the dotted capital I, which lowers
-to a plain `i`, so `(?i)(\u0130)\1` matches `\u0130i`. Document 96.
+to a plain `i`, so `(?i)(\u0130)\1` matches `\u0130i`. Document 97.
 
 Only Python is asked, because a backreference is a construct RE2 has not got,
 so there is no second engine here to reconcile with and no second table.
