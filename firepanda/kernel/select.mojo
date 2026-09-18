@@ -69,30 +69,57 @@ nanoseconds and the split pays off sooner than it does for a loop over
 consecutive memory. Half of `join`'s threshold, and picked the same way.
 """
 
-comptime PARALLEL_MIN_TAKE_SLICE = 1 << 15
-"""Gathered rows a worker gets at least, once the string take is parallel.
+comptime PARALLEL_TAKE_TEXT_ROWS = 1 << 15
+"""Below this many gathered rows a text take stays on one thread.
+
+Half of `PARALLEL_TAKE_ROWS`, because a gathered text row is not a gathered
+fixed width row. `select/gather_text` is 10.3 nanoseconds a row against 0.6 for
+a four byte column, so the same threshold buys seventeen times the work before
+it lets go of it, and what `PARALLEL_TAKE_ROWS` is calibrated on is the cheap
+one.
+
+The join of customer against a quarter of orders in TPC-H q10 emits 57,069 rows,
+which is under the old line, so every one of customer's five wide text columns
+was gathered on one thread while thirty one cores waited. On a 13900K that step
+is 9.5 ms with the threshold at 1 << 16 and 4.6 ms at 1 << 15, measured as
+medians of seven with two sessions a setting.
+
+It is not lower than this because the ladder stops paying below it, and because
+a smaller threshold needs a smaller slice to give it any workers and the slice
+has its own floor. At 1 << 14 that step is 4.7 ms, which is no better, and at
+1 << 13 it is 5.1 and q10's join against nation has gone from 4.3 ms to 5.6.
+"""
+
+comptime PARALLEL_MIN_TAKE_SLICE = 1 << 14
+"""Gathered rows a worker gets at least, once the text take is parallel.
 
 A floor on the whole column and a floor on one worker's slice are different
 rules, the way `PARALLEL_MIN_SLICE` and `PARALLEL_ROWS` are different rules in
-the factorize. `PARALLEL_TAKE_ROWS` above says when the split is worth starting
-at all, and this says how finely to cut what it starts on, and using one number
-for both means the first worker only arrives at twice the floor and every core
-only at thirty two times it. TPC-H q10's joins emit 114,705 rows, which is one
-worker under that arithmetic and three under this one.
+the factorize. `PARALLEL_TAKE_TEXT_ROWS` says when the split is worth starting
+at all and this says how finely to cut what it starts on, and one number doing
+both jobs, which is what was here, means the second worker only arrives at twice
+the threshold and the thirty second only at thirty two times it. TPC-H q10's
+join against lineitem emits 114,705 rows, which was one worker.
 
-Measured on a 13900K against q10's three joins at sf1, medians of seven with two
-sessions a setting, the slice moved and nothing else. The join against lineitem
-is 11.9 ms at 1 << 16, 8.8 at 1 << 15, and then back up: 7.1 at 1 << 14, 8.1 at
-1 << 13 and 11.9 at 1 << 12. The join against nation is 6.9, 4.1, 4.2, 5.1 and
-6.8 on the same ladder. The whole query is 55.8 ms, 44.8, 46.8, 46.4 and 51.3.
+Measured on a 13900K against q10's joins at sf1, medians of seven with two
+sessions a setting, the threshold held at 1 << 16 and the slice moved: the join
+against lineitem is 11.9 ms at 1 << 16, 8.8 at 1 << 15, 7.1 at 1 << 14, 8.1 at
+1 << 13 and 11.9 at 1 << 12, and the join against nation is 6.9, 4.1, 4.2, 5.1
+and 6.8 on the same ladder.
 
 So it has a floor rather than an edge, and the floor is a few workers wide
-rather than all of them. A string gather's output write is sequential inside a
-worker and starts at that worker's own base, so the cores are writing to as many
-places at once as there are cores, and past a handful of them the write
-combining does worse than the extra hands do better. That is an argument for a
-slice and not for a worker count, since it is the number of open write streams
-that hurts and a taller column wants both more workers and the same slice.
+rather than all of them. A text gather's output write is sequential inside a
+worker and starts at that worker's own base, so the number of places being
+written at once is the number of workers, and past a handful of them the write
+combining loses more than the extra hands gain. That is an argument for a slice
+and not for a worker count, since it is the count of open write streams that
+hurts and a taller column wants more workers at the same slice.
+
+It sits at half the threshold rather than at the bottom of that ladder because
+the two are not independent: the threshold is what decides whether 57,069 rows
+are gathered on one core, and it cannot come down to 1 << 15 unless the slice
+comes down with it, since a slice at or above the threshold leaves the first
+column past the line with a single worker and a counting pass it did not need.
 """
 
 comptime TAKE_MORSEL_ROWS = 1 << 16
@@ -307,9 +334,9 @@ def _take_strings(
     is skipped when the column has no payload at all, which is every column of
     labels and is the case a group by's key gather actually hits.
 
-    How finely to cut is `PARALLEL_MIN_TAKE_SLICE` and not `PARALLEL_TAKE_ROWS`,
-    which is only the question of whether to cut at all. They were one number
-    for a while and its docstring has what that cost.
+    Whether to cut at all is `PARALLEL_TAKE_TEXT_ROWS` and how finely to cut is
+    `PARALLEL_MIN_TAKE_SLICE`. Both of those were `PARALLEL_TAKE_ROWS` for a
+    while, which is neither question, and their docstrings have what that cost.
 
     Args:
         col: The column to gather from.
@@ -330,7 +357,7 @@ def _take_strings(
     """
     var n = len(indices)
     var workers = worker_count()
-    if n < PARALLEL_TAKE_ROWS or workers <= 1 or not spread:
+    if n < PARALLEL_TAKE_TEXT_ROWS or workers <= 1 or not spread:
         var builder = StringBuilder(capacity=n)
         for k in range(n):
             var at = indices[k]

@@ -121,8 +121,9 @@ def test_take_gathers_text_and_a_negative_index_is_a_null() raises:
 
 
 def test_a_text_take_past_the_split_gathers_only_short_values() raises:
-    # Past `PARALLEL_TAKE_ROWS` the gather runs on every core, and a column with
-    # nothing in its payload takes the arm that skips the counting pass and
+    # Past `PARALLEL_TAKE_TEXT_ROWS` the gather runs on several cores, and a
+    # column with nothing in its payload takes the arm that skips the counting
+    # pass and
     # copies the sixteen bytes of the view straight across. This is what a group
     # by's key gather does, since a label fits inside its own view. The length is
     # one past a multiple of sixty four so the last worker is left holding a
@@ -199,13 +200,16 @@ def test_a_text_take_past_the_split_carries_the_payload_across() raises:
 
 
 def test_a_text_take_on_several_workers_gathers_what_one_worker_gathers() raises:
-    # The two tests above are each one worker wide, because the slice was
-    # `PARALLEL_TAKE_ROWS` and they are barely past it. `PARALLEL_MIN_TAKE_SLICE`
-    # is half of it, so this height is four workers and a partial fifth, which is
-    # the first time the prefix sum over the workers' payload totals has more
-    # than one term to add. A worker given the wrong base would write its rows
-    # over another worker's, and both routes below are handed the same indices so
-    # the comparison is row for row rather than against a rule.
+    # The two tests above each check one arm of the split against what the value
+    # should be. This checks both arms in the same column against the other
+    # route: a quarter of the rows are too long for their views, a half are null,
+    # and the two calls below are handed the same indices, so the comparison is
+    # row for row rather than against a rule and a worker that wrote its payload
+    # at somebody else's base fails it.
+    #
+    # The height is nine slices, which is more workers than either test above
+    # gets, and it is deliberately not a multiple of the slice so the last worker
+    # is short and holding a partial validity word on the way out.
     var builder = StringBuilder(capacity=2048)
     for i in range(2048):
         if i % 4 == 0:

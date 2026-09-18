@@ -78,14 +78,19 @@ The order is the correctness argument. A split pushes its second arm and then it
 
 The scans that call it are the entry above, and issue #863 has the order the rest go in.
 ### Changed: a parallel text gather cuts its work by the slice rather than by the threshold that started it
+### Changed: a text gather asks when to split and how finely as two questions
 
-`_take_strings` had one constant doing two jobs. `PARALLEL_TAKE_ROWS` is the height at which a gather is worth splitting at all, and the split then cut the work into pieces of that same size, which means the second worker only arrives at twice the threshold and the thirty second only at thirty two times it. A column of 114,705 rows took the parallel route, did a counting pass to work out where each worker's payload goes, and then ran the whole gather on one worker.
+`_take_strings` had one constant answering both. `PARALLEL_TAKE_ROWS` is the height at which a gather is worth splitting at all, and the split then cut the work into pieces of that same size, which means the second worker only arrives at twice the threshold and the thirty second only at thirty two times it.
 
-That height is not arbitrary. It is what TPC-H q10's joins emit at sf1, and the three of them were 25.6 ms of the query's 53.8. `PARALLEL_MIN_TAKE_SLICE` is now a separate constant at 1 << 15, so the same column gets three workers, and on a 13900K the join against lineitem went from 11.9 ms to 8.8 and the join against nation from 6.9 to 4.1, with the whole query from 55.8 ms to 44.8. The factorize has had this distinction since it was written, in `PARALLEL_MIN_SLICE` against `PARALLEL_ROWS`, and the take used to have it too until the two were merged when the morsel walk landed.
+Both answers were wrong for text, and TPC-H q10 pays for each of them once. Its join of customer against a quarter of orders emits 57,069 rows, which is under the threshold, so all five of customer's wide text columns were gathered on one thread. Its join against lineitem emits 114,705, which is over the threshold and under twice it, so that one took the parallel route, ran the counting pass that works out where each worker's payload goes, and then did the whole gather on one worker anyway.
 
-The slice has a floor rather than an edge and the floor is a few workers wide, not all of them. Cutting finer than 1 << 15 gives the work back: on the same two joins the ladder 1 << 16, 1 << 15, 1 << 14, 1 << 13, 1 << 12 reads 11.9, 8.8, 7.1, 8.1, 11.9 against lineitem and 6.9, 4.1, 4.2, 5.1, 6.8 against nation. A string gather's output write is sequential inside a worker and starts at that worker's own base, so the number of places being written at once is the number of workers, and past a handful of them the write combining loses more than the extra hands gain.
+There are now two constants. `PARALLEL_TAKE_TEXT_ROWS` is 1 << 15, half the fixed width threshold, because `select/gather_text` is 10.3 nanoseconds a row against 0.6 for a four byte column and the fixed width number is calibrated on the cheap one. `PARALLEL_MIN_TAKE_SLICE` is 1 << 14, which is the distinction the factorize has had since it was written in `PARALLEL_MIN_SLICE` against `PARALLEL_ROWS`.
 
-The fixed width gather was measured the same way and left alone. Lowering `TAKE_MORSEL_ROWS` to 1 << 15 on its own takes the query from 55.8 ms to 50.9, which looks like something until the string take is fixed as well, and then it is 45.6 against 44.8 with the morsel untouched, which is inside the run to run spread. A fixed width gather writes at a computed offset and does not care how many workers are open. Its docstring had been arguing for eight thousand rows a morsel while the constant said sixty five thousand, left over from the merge, and now says what was measured.
+On a 13900K at sf1, medians of seven with two sessions a setting, q10's join against customer goes from 9.5 ms to 4.6, its join against lineitem from 11.9 to 8.4, its join against nation from 6.9 to 4.3, and the query as a whole from 55.8 ms to 44.8.
+
+The slice has a floor rather than an edge and the floor is a few workers wide, not all of them. Cutting finer gives the work back: with the threshold held still, the ladder 1 << 16, 1 << 15, 1 << 14, 1 << 13, 1 << 12 reads 11.9, 8.8, 7.1, 8.1, 11.9 ms on the lineitem join and 6.9, 4.1, 4.2, 5.1, 6.8 on the nation join. A text gather's output write is sequential inside a worker and starts at that worker's own base, so the number of places being written at once is the number of workers, and past a handful of them the write combining loses more than the extra hands gain.
+
+The fixed width gather was measured the same way and left alone. Lowering `TAKE_MORSEL_ROWS` to 1 << 15 on its own takes the query from 55.8 ms to 50.9, which looks like something until the text take is fixed as well, and then it is 45.6 against 44.8 with the morsel left alone, which is inside the run to run spread. A fixed width gather writes at a computed offset and does not care how many workers are open. Its docstring had been arguing for eight thousand rows a morsel while the constant said sixty five thousand, left over from when the two were merged, and now says what was measured.
 
 Issue #79.
 
@@ -96,6 +101,11 @@ A group by on more than one key gives each key its own dense ordinals and then f
 TPC-H q10 is what found it, and it was the one query in that suite firepanda was measurably behind a rival on. It groups a four way join on seven columns, five of them text, and at sf1 the intermediate is 114,705 rows, which is under the height any one of those factorizes splits at. On a 13900K with 32 workers the seven keys cost 15.3 ms of the 17.9 ms the whole step spent, and one key per worker brings that to 7.0 ms. End to end q10 goes from 0.065 s to 0.055 s and q3, which goes through the same function on two keys and is the control, does not move.
 
 The route is taken only when no key would have gone parallel inside its own factorize, since a split inside a split is the same cores twice and neither split knows about the other, and only when there is enough work to pay for the fork. Issue #878 has the sweep the threshold was fitted on.
+### Fixed: the test runner keeps its logs where nothing else prunes them
+
+`tools/run_tests.sh` collected each file's output in a `mktemp -d` under `TMPDIR`, which on macOS is a per session directory under /var/folders that the system reaps on its own schedule. Two runs in a row lost theirs, one reporting twenty four of a hundred and fifty five files failed and the next reporting all hundred and fifty five, with every one of them saying only that its log did not exist and the tests passing when run one at a time straight afterwards.
+
+The logs now live under `build/`, named by process id so two runs in one checkout still do not collide. A missing log is also reported as a run that produced no result rather than counted as a test failure, since a tally that says a test failed when the test passed is worse than no tally.
 
 ## [0.8.12] - 2026-09-18
 
