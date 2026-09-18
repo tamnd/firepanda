@@ -1221,6 +1221,16 @@ def test_a_modifier_on_a_windowed_call_is_refused_too() raises:
         _ = _plan("SELECT sum(a IGNORE NULLS) OVER () FROM t")
 
 
+def test_a_lambda_is_refused_here_not_in_the_transformer() raises:
+    # A lambda reads and prints, and firepanda has no value that is a function
+    # to hand it to, so the refusal is the one the table already had and it is
+    # raised where the value would have been built. The call around it is one
+    # firepanda has a kernel for, because a name it does not know is reported
+    # before anything under the call is looked at.
+    with assert_raises(contains="a lambda"):
+        _ = _plan("SELECT upper(lambda x: x) FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage

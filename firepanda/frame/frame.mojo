@@ -118,6 +118,21 @@ from .align import (
 from .groupby import AggSpec
 from .series import Series, _check_range, _head_end, _tail_start, _to_positions
 
+comptime PROVE_SORTED_ROWS = 1 << 16
+"""Below this many rows a group by does not scan its key for an order.
+
+The scan is worth running on a key that turns out to be in order and wasted on
+one that turns out not to be, and what decides it is the size of the hash table
+the order would have avoided. A frame of a few thousand rows builds that table
+in well under a millisecond, so neither route is worth choosing between and the
+scan is the only thing either one added.
+
+Sixty five thousand rows is where a hash factorize starts to cost enough that a
+scan a fraction of its size is worth spending to skip it. It is not a crossover
+between two curves, because there is no size at which proving loses badly, and
+a threshold much lower would only mean scanning frames whose group by was
+already free."""
+
 
 struct DataFrame(Copyable, Movable, Sized, Writable):
     """A set of equal length named columns, addressed by position."""
@@ -331,14 +346,32 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         `group_ordinals` itself, so that there is one place the choice between
         the two routes is made and one place a third would be added.
 
-        The choice is not a guess. A single key column carrying the sortedness
-        flag has its equal values adjacent already, and a walk that closes a
-        group each time the value changes gives the same ordinals as the hash
-        table for one comparison a row. Anything else, which is every unflagged
-        column and every group by on more than one key, goes the ordinary way.
+        The choice is not a guess. A single key column whose equal values are
+        adjacent already can be grouped by a walk that closes a group each time
+        the value changes, which is one comparison a row against a hash table's
+        hash, probe and insert. Anything else, which is every column that is in
+        no order and every group by on more than one key, goes the ordinary way.
         The two produce the same groups over the same rows; `sorted_ordinals`
         says what it refuses and hands back nothing rather than a wrong answer,
         and this falls through when it does.
+
+        A column that does not carry the flag is scanned for it here rather than
+        being assumed to be in no order, because the flag is set by a sort and
+        by a reader and by almost nothing else, so a key that arrives in order
+        for any other reason used to pay for a hash table it did not need. A
+        primary key read from a file, a column a join emitted in key order, and
+        anything derived from those by a filter are all in order and none of
+        them are marked.
+
+        The scan is `is_sorted`, which stops at the first pair out of order, so
+        a column in no order costs a few rows and a column in order costs one
+        pass. That pass is measured at around a sixth of what the hash table it
+        replaces costs, so the bet is one sided: the case that wins saves five
+        times what the case that loses spends, and the case that loses is only
+        the one where a long run in order is broken near the end.
+
+        `PROVE_SORTED_ROWS` keeps the scan off short frames, where a group by is
+        already fast enough that neither route is worth choosing between.
 
         Args:
             at: Which columns are keys, in the order they should be combined.
@@ -350,17 +383,46 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no keys were given or a key dtype has no physical layout.
         """
         if len(at) == 1:
-            ref order = self.columns[at[0]].order
+            ref column = self.columns[at[0]]
+            var order = column.order
+            if not order.is_known() and self._worth_proving(column):
+                order = column.sortedness()
             # Either direction. What the walk needs is that equal values are
             # adjacent, which a descending column has just as much as an
             # ascending one, and the ordinals come out in first appearance order
             # both ways round because for a column in any order that is the
             # order the runs are in.
             if order.is_ascending() or order.is_descending():
-                var walked = sorted_ordinals(self.columns[at[0]].only())
+                var walked = sorted_ordinals(column.only())
                 if walked:
                     return walked.take()
         return group_ordinals(self.column_refs(), at, self.rows)
+
+    def _worth_proving(self, column: ChunkedArray) -> Bool:
+        """Reports whether scanning this key for its order could pay for itself.
+
+        Everything asked here is either free or a popcount, and everything it
+        refuses is a column the walk would have refused anyway, so what this
+        saves is the scan rather than the answer.
+
+        Text is the one worth naming. `sorted_ordinals` refuses a string column
+        because the walk would compare the first byte of each view, and scanning
+        a string column for its order is a byte loop per row, so proving one
+        would be the most expensive way to reach a route it cannot take.
+
+        Args:
+            column: The key column.
+
+        Returns:
+            Whether to scan it.
+        """
+        if self.rows < PROVE_SORTED_ROWS or column.nulls > 0:
+            return False
+        return not (
+            column.type.is_variable_width()
+            or column.type.is_dictionary()
+            or column.type.is_nested()
+        )
 
     def into_columns(deinit self) -> List[ChunkedArray]:
         """Gives up the columns without copying them, consuming the frame.

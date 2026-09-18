@@ -525,6 +525,8 @@ def test_every_shape_here_round_trips() raises:
         "(a, b) = ROW(1, 2)",
         "INTERVAL (a + 1) DAY",
         "f(1, b := 2, c => 3)",
+        "list_apply(l, lambda x: x + 1)",
+        "list_reduce(l, lambda acc, e: acc + e)",
         "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
         "mode() WITHIN GROUP (ORDER BY a)",
         "lag(a IGNORE NULLS) OVER ()",
@@ -791,14 +793,52 @@ def test_a_name_passed_by_name_is_folded_like_any_other_name() raises:
     assert_equal(_printed('f("Header" := 1)', g, rules), 'f("Header" := 1)')
 
 
-def test_a_refusal_says_where_it_was() raises:
-    # A lambda is the example because it is the refusal least likely to stop
-    # being one. Firepanda has no value that is a function, so there is nowhere
-    # for this to go even once everything around it reads.
+def test_a_lambda_keeps_its_parameters_and_its_body() raises:
+    # The body is printed the way every other operand is, fully parenthesized,
+    # because the printer parenthesizes for a reparse rather than for a reader.
     var g = Grammar()
     var rules = Transform(g)
-    var sql = "list_apply(l, lambda x: x + 1)"
-    with assert_raises(contains="LINE 1: list_apply(l, lambda x: x + 1)"):
+    assert_equal(
+        _printed("list_apply(l, lambda x: x + 1)", g, rules),
+        "list_apply(l, lambda x: (x + 1))",
+    )
+    assert_equal(
+        _printed("list_reduce(l, lambda acc, e: acc + e)", g, rules),
+        "list_reduce(l, lambda acc, e: (acc + e))",
+    )
+
+
+def test_a_lambda_parameter_is_quoted_like_a_column_name() raises:
+    # `ColIdOrString` is the rule, which is the ordinary column name position
+    # and also takes a string literal standing in for a name. Both come back in
+    # the one spelling a name has here.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("lambda year: year", g, rules), "lambda year: year")
+    assert_equal(
+        _printed('lambda "odd name": 1', g, rules), 'lambda "odd name": 1'
+    )
+    assert_equal(_printed("lambda 'q': 1", g, rules), "lambda q: 1")
+
+
+def test_the_arrow_spelling_is_an_operator_and_not_a_lambda() raises:
+    # `->` reaches into a JSON value as well as writing a lambda, so the two
+    # are the same text and the grammar reads both as one operator. Telling
+    # them apart is a question about what is on either side of it, which is a
+    # question for whoever has the types.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("x -> x + 1", g, rules), "(x -> (x + 1))")
+
+
+def test_a_refusal_says_where_it_was() raises:
+    # The example is whichever refusal the transformer still makes. What is
+    # under test is the shape of the message and not the feature, so any of
+    # them would do and this one changes as the list gets shorter.
+    var g = Grammar()
+    var rules = Transform(g)
+    var sql = "[x + 1 FOR x IN l]"
+    with assert_raises(contains="LINE 1: [x + 1 FOR x IN l]"):
         _ = _printed(sql, g, rules)
     with assert_raises(contains="issues/"):
         _ = _printed(sql, g, rules)

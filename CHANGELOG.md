@@ -17,6 +17,25 @@ It wanted a table because `(?i)` means two different things and upstream impleme
 So there are two case tables now. `folddata.mojo` is the orbits and `lowerdata.mojo` is the simple lowercase, written by `tools/gen_regexlower.py` beside the fold generator and against the same interpreter, CPython 3.13.12 with Unicode 15.1.0. 1433 code points move, in 214 runs, which takes a marker of its own: the fold table's says a run alternates up and down because folding is a cycle, and this one says the even code point steps up and the odd one stays, because lowering is not. Without it the same table is 668 runs. The generator walks its own runs over every code point in Unicode and checks each against `_sre.unicode_tolower`, so a release that moves an answer fails there rather than drifting.
 
 The table is read by one function and held on the engine rather than copied per row, and only a program that actually holds a reference under the wide flag asks for it at all. `(?ai)` is a third rule rather than the wide one narrowed: it is the twenty six ASCII letters and nothing else, so the Kelvin sign is not a `k` there. The Python differential moves from 28729 patterns compared to 28739, which is the ten that were held out for this, and stays at zero disagreements. Document 97.
+### Added: SQL reads a lambda
+
+`lambda x: x + 1` used to be refused by the transformer, and 349 statements in DuckDB's corpus stopped there, which was the largest entry left in the refusal histogram. 333 of them round trip now and the other 16 hold something else the transformer still turns down. The refusal moved to lowering and kept its sentence, because the sentence was already the right one: firepanda runs the functions it already has, and a function written inside a query would have to be compiled along with it.
+
+The node holds the body and a run of interned parameter names. There is no node for a parameter, because a parameter is a name being bound and there is nothing under it, and the body refers to it the way it refers to a column. Nothing before the binder can tell the two apart, which is the same reason the refusal is where it is.
+
+`x -> x + 1` is not this and never was. The grammar reads the arrow as an operator at a precedence level of its own, and `->` is also how DuckDB reaches into a JSON value, so the two spellings are the same text and telling them apart is a question about what stands on either side of it.
+
+The printer writes the keyword spelling whatever was written, since the arrow is the ambiguous one and the keyword never is. A parameter is quoted by the ordinary column name rule, so `lambda year: year` keeps its bare `year` and `lambda 'q': 1` comes back as `lambda q: 1`, the string literal standing in for a name being the same name in the other spelling.
+
+### Changed: a group by looks at whether its key is in order instead of waiting to be told
+
+A group by on one key has had two routes for a while. A key whose equal values are adjacent can be grouped by a walk that closes a group each time the value changes, which is one comparison a row, and anything else builds a hash table. Which route a frame took was decided by a flag on the column, and the flag is set by a sort and by a file reader and by almost nothing else, so a key that arrived in order for any other reason paid for a hash table it did not need. TPC-H q21 groups `l_orderkey` twice, both times on a column that is in order and neither time on one that says so.
+
+The flag is now proved rather than read when it is unknown. `is_sorted` stops at the first pair of rows out of order, so a key in no order costs a handful of rows, and a key in order costs one pass which is about a sixth of the hash table it replaces. That makes it a one sided bet: the case that wins saves roughly five times what the case that loses spends, and the case that loses is only a long run in order broken near the end. Frames under 65536 rows are left alone, because a group by that size is already under a millisecond and the scan would be the only thing either route added.
+
+Measured on a 13900K, TPC-H sf1 in memory, three rounds in ABBA order with seven runs a round. q21 goes from 0.141, 0.135, 0.142, 0.139, 0.137 and 0.140 seconds to 0.083, 0.083, 0.085, 0.083, 0.085 and 0.083, which is 1.66 times with no run of one side touching the other. q18 goes from 0.028, 0.028, 0.029, 0.028, 0.029 and 0.027 to 0.023, 0.020, 0.021, 0.022, 0.021 and 0.020, which is 1.33 times and also disjoint. Across all 22 queries nothing else moves outside run to run noise, which is what should happen: q1, q3 and q10 group on more than one key and never reach the new code at all.
+
+The answer does not change and the two routes are still checked against each other. What the scan will not do is remember what it found, because a group by borrows the frame and has nowhere to write it, so a frame grouped twice on the same key is scanned twice. `DataFrame.sortedness` is still the way to pay for the scan once and keep the answer. Issue #79.
 
 ## [0.8.15] - 2026-09-19
 
