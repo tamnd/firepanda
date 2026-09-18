@@ -504,9 +504,25 @@ struct Pipeline(Movable):
         """Returns how many operators at the front of the line run in parallel.
 
         Zero means the whole pipeline runs on the calling thread, which is the
-        answer when the first operator carries state, when there is a limit
-        anywhere in the line, when there is only one chunk to run, when the
+        answer when the first operator carries state, when there is a limit that
+        can still stop the source, when there is only one chunk to run, when the
         runtime has one worker, or when the prefix is not worth a task.
+
+        A limit only stops the source while rows are still reaching it. Put a
+        breaker under one and they are not: a sort or a group by holds every row
+        it is given and emits nothing until the source has run out, so the limit
+        above it counts its first row after the last chunk has been read. The
+        search for a limit therefore stops at the first breaker, and the rows
+        below that breaker are read on every core whatever sits above it.
+
+        `SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime LIMIT
+        10` is the query that made this worth writing down. Ninety five rows out
+        of a million survive the filter and ten of those are the answer, so
+        almost the whole query is the search down the million, and it was running
+        on one core because of a limit that could not have stopped it. At 1M the
+        same statement without the `LIMIT 10` was 11.5 milliseconds and with it
+        was 23.8, on the same rows through the same operators. With this it is
+        13.6. See #682 and document 98.
 
         Returns:
             The number of leading operators to run on every core, or zero.
@@ -514,6 +530,8 @@ struct Pipeline(Movable):
         if worker_count() < 2 or self.source.num_chunks() < 2:
             return 0
         for i in range(len(self.operators)):
+            if node_is_breaker(self.operators[i]):
+                break
             if node_ends_early(self.operators[i]):
                 return 0
         var lead = 0
@@ -553,8 +571,11 @@ struct Pipeline(Movable):
             If any operator raises.
         """
         # No `_finished` check anywhere in here. This route is only taken when
-        # no operator can end early, which is what `_parallel_lead` checked, so
-        # the answer would be False every time it was asked.
+        # nothing can end early while the source is being read, which is what
+        # `_parallel_lead` checked, so the answer would be False every time it
+        # was asked. A limit beyond a breaker is the one that gets past that
+        # check, and it has emitted no row and cannot report FINISHED until the
+        # breaker under it has seen the last chunk, which is after this returns.
         var batch = worker_count() * BATCH_CHUNKS_PER_WORKER
         while True:
             var taken = List[Optional[Chunk]](capacity=batch)
