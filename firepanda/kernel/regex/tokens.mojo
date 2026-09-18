@@ -93,6 +93,25 @@ lookaround always fail, and that collapse is why `(?!)` is routed to RE2 and
 raises an Arrow error for a pattern Python answers as a column of False."""
 
 
+comptime OP_SCOPE: UInt8 = 21
+"""`(?i:...)` and every other scoped flag group. `a` is the flags it turns on
+and `b` the flags it turns off, both as `FLAG_` bits.
+
+Python has no such node. Its parser hangs the two sets on a `SUBPATTERN` whose
+group number is `None`, which is a shape this arena cannot borrow, because a
+subpattern here is a capturing group and its number is a payload rather than an
+option. A node of its own says the same thing without teaching every reader of
+`OP_SUBPATTERN` that zero might mean two different things.
+
+The node carries every letter that was written, including verbose mode, and the
+compiler then ignores that one. Verbose mode is spent while the pattern is being
+read rather than while it is being compiled, so the parser turns it on and off
+around the inner read and there is nothing left of it by the time a program is
+built. Dropping the letter here instead would make the node a report of what the
+compiler cares about rather than of what the caller wrote, and the tree is read
+by the router as well."""
+
+
 comptime AT_BEGINNING: UInt8 = 1
 """`^` outside multiline mode, which is the start of the text."""
 

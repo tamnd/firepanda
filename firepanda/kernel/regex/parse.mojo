@@ -97,6 +97,7 @@ from firepanda.kernel.regex.tokens import (
     OP_NEGATE,
     OP_POSSESSIVE_REPEAT,
     OP_RANGE,
+    OP_SCOPE,
     OP_SEQ,
     OP_SUBPATTERN,
     Node,
@@ -232,16 +233,16 @@ struct Parsed(Movable):
     var scoped: Int32
     """Every flag any scoped group mentioned, whether it turned it on or off.
 
-    The scoped form is still parsed and dropped, so the tree says nothing about
-    where the group was or what was inside it. That is enough to refuse on and
-    not enough to run, which is exactly what this field is for: a pattern
-    writing `(?i:b)` means something RE2 acts on, and a compiler that read the
-    tree alone would answer as though the letters were never there.
+    The group itself is an `OP_SCOPE` node carrying the same two sets, and that
+    is what the compiler acts on. This field is the flat reading of the whole
+    pattern, which answers a different question: was this letter written
+    anywhere at all. RE2 needs that question answered, because it reads
+    `(?i:a)` and has never heard of `(?x:a)` or `(?a:a)` in any position, so a
+    letter it refuses has to be found without knowing where it sat.
 
-    Turning a flag off counts the same as turning it on. `(?-i:a)` inside a
-    pattern with no global `(?i)` really is a group that changes nothing, and
-    refusing it is a handful of patterns given up for a rule somebody can state
-    in one sentence.
+    Turning a flag off counts the same as turning it on. `(?-x:a)` is a letter
+    RE2 refuses just as much as `(?x:a)` is, since the refusal is about the
+    letter being in the pattern rather than about what it was asked to do.
     """
 
     def __init__(out self):
@@ -1695,25 +1696,40 @@ def _flags(mut c: _Cursor) -> Int32:
     if (add & off) != 0:
         c.give_up(String("bad inline flags: flag turned on and off"))
         return -1
-    # The same node `(?:...)` leaves, because the flags themselves are not
-    # carried yet. A subpattern with a group number of zero would have been the
-    # obvious place to hang them and it would also have been a lie, since zero
-    # is the whole match and anything walking the tree later would read this as
-    # a capture. The flags belong on the node once there is an engine that acts
-    # on them here, and until then the honest shape is the one that says
-    # nothing and the letters are recorded on the parse so that the compiler
-    # can refuse rather than answer as though they were never written.
+    # The letters are still recorded on the parse as well as on the node, and
+    # the two are for different readers. The node is what the compiler acts on.
+    # The set is what says a letter was written anywhere in the pattern, which
+    # is what RE2 has to be told, since RE2 reads `(?i:a)` and has never heard
+    # of `(?x:a)` or `(?a:a)` in any position.
     c.scoped |= add | off
+
+    # Verbose mode is spent here rather than passed on, because it decides what
+    # the characters inside the group mean and the reading of them happens
+    # below this line. Everything else on the node is a question about a
+    # character that the compiler asks later. Saving the outer value rather
+    # than clearing the bits afterwards is what makes nesting work, since the
+    # group this one sits inside may have turned the same letter the other way.
+    #
+    # The three alphabet letters go into the set too and nothing here reads
+    # them, since which alphabet a class comes out of is settled while the
+    # program is built. So the rule that naming one of the three clears all
+    # three is in the compiler and only there, rather than written twice in two
+    # places where one of the two could never be seen to be wrong.
+    var outer = c.flagged
+    c.flagged = (c.flagged | add) & ~off
     c.depth += 1
     var inner = _branch(c)
     c.depth -= 1
+    c.flagged = outer
     if inner < 0:
         return -1
     if c.peek() != 0x29:
         c.give_up(String("missing ), unterminated subpattern"))
         return -1
     c.at += 1
-    return inner
+    var node = c.add(OP_SCOPE, add, off)
+    c.attach(node, inner)
+    return node
 
 
 def _seq(mut c: _Cursor) -> Int32:

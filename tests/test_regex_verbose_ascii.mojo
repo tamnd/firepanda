@@ -259,15 +259,15 @@ def test_re2_still_refuses_both_letters_in_its_own_words() raises:
     assert_equal(narrow.problem, "invalid perl operator: (?a")
 
 
-def test_a_scoped_group_is_still_the_thing_with_nowhere_to_go() raises:
-    """The parser reads `(?x:...)` and throws the letters away, so the refusal
-    moved from one sentence to another rather than going. What is missing is a
-    place to hang a flag on a node, which is the same thing missing for every
-    other letter in a scoped group."""
+def test_a_scoped_group_got_somewhere_to_go() raises:
+    """This file shipped saying `(?x:a b)` was refused because there was nowhere
+    to hang a flag on a node. There is one now, and verbose mode is the letter
+    that shows the scope is the parser's rather than the compiler's, because the
+    space after the bracket is still a character the text has to hold."""
     var scoped = compile_program(parse_pattern("(?x:a b)"), ENGINE_PYTHON)
-    assert_false(scoped.ok)
-    assert_true(scoped.gap)
-    assert_equal(scoped.problem, "a scoped flag group is not carried yet")
+    assert_true(scoped.ok)
+    assert_true(ours("(?x:a b)c d", "abc d"))
+    assert_false(ours("(?x:a b)c d", "abcd"))
 
 
 def main() raises:

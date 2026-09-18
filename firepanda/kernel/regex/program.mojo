@@ -52,7 +52,7 @@ from firepanda.kernel.regex.folddata import (
     FOLD_HIGH,
     FOLD_LOW,
 )
-from firepanda.kernel.regex.parse import Parsed
+from firepanda.kernel.regex.parse import TYPE_FLAGS, Parsed
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
 from firepanda.kernel.regex.tokens import (
     AT_BEGINNING,
@@ -100,6 +100,7 @@ from firepanda.kernel.regex.tokens import (
     OP_NOT_LITERAL,
     OP_POSSESSIVE_REPEAT,
     OP_RANGE,
+    OP_SCOPE,
     OP_SEQ,
     OP_SUBPATTERN,
 )
@@ -241,8 +242,8 @@ struct Program(Movable):
     lookaround, a backreference, a conditional, an atomic group, a possessive
     quantifier and four of the seven inline flag letters, and pandas hands it
     those patterns anyway, so refusing them here is agreement rather than a
-    shortfall. Refusing a scoped flag group because the parser drops the letters
-    is a shortfall.
+    shortfall. Refusing a pattern Python answers, for a reason of this library's
+    own, is a shortfall.
 
     A caller deciding what to do next needs the two told apart, and so does the
     differential, which compares the first kind against pandas' own refusal and
@@ -1050,6 +1051,33 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
             return
         _emit_children(b, nodes, node)
         return
+    if it.op == OP_SCOPE:
+        # The whole of a scoped flag group, and most of it is a save and a put
+        # back because every question a flag answers was already being asked of
+        # the builder rather than of the tree. Restoring the outer pair is what
+        # makes nesting work and is also what makes `(?i:a)b` fold the `a` and
+        # not the `b`, since the sibling is emitted after this node returns.
+        #
+        # The three alphabet letters do not combine the way the other four do.
+        # Naming one of them clears all three first, so `(?u:\w)` under a
+        # global ascii flag is the wide alphabet rather than both letters at
+        # once, and that is upstream's `_combine_flags` rather than a reading of
+        # it. The other four letters are independent and are a plain on and off.
+        #
+        # `narrow` is recomputed rather than saved and set, because it is a
+        # reading of the flags and two fields that can disagree are worse than
+        # one line that cannot. Verbose mode is in `it.a` and is ignored here,
+        # having been spent by the parser.
+        var flags = b.flags
+        var narrow = b.narrow
+        if (it.a & TYPE_FLAGS) != 0:
+            b.flags &= ~TYPE_FLAGS
+        b.flags = (b.flags | it.a) & ~it.b
+        b.narrow = b.python and (b.flags & FLAG_ASCII) != 0
+        _emit_children(b, nodes, node)
+        b.flags = flags
+        b.narrow = narrow
+        return
     if it.op == OP_SEQ:
         _emit_children(b, nodes, node)
         return
@@ -1461,15 +1489,17 @@ def compile_program(
         return out^
 
     # The same four letters are refused in a scoped group on RE2, so `(?x:a)` is
-    # an error upstream exactly as `(?x)a` is. Every letter is a gap rather than
-    # an error on Python's engine, and so is every letter on RE2 that RE2 has,
-    # because the parser reads a scoped group and throws the letters away and a
-    # program built from that tree would answer `(?i:b)` without folding while
-    # both engines fold. Verbose mode is the one that shows it is the letters
-    # being thrown away and not the reading of them: the parser reads `(?x)`
-    # now, and `(?x:a b)` still cannot be answered because the scope is what
-    # there is nowhere to put. Carrying the flags on the node is what closes
-    # this, and document 77 section 8 has it.
+    # an error upstream exactly as `(?x)a` is. The three RE2 does have are
+    # carried now, on an `OP_SCOPE` node, so nothing else about a scoped group
+    # is refused on either engine.
+    #
+    # The Python half of this cannot fire and is kept anyway. `L` is the only
+    # letter `_refused_flags_python` turns down and the parser turns it down
+    # first, with Python's own sentence about a `str` pattern, so a locale flag
+    # never reaches a tree at all. Writing the line as a constant would say
+    # something different from the line above it about a question that is the
+    # same question, and the day a sixth letter is refused here it would be the
+    # line somebody forgot.
     var scoped_refused = _refused_flags_python(
         tree.scoped
     ) if python else _refused_flags(tree.scoped)
@@ -1479,11 +1509,6 @@ def compile_program(
         out.gap = ((tree.scoped & FLAG_LOCALE) == 0) if python else (
             (tree.scoped & theirs) == 0
         )
-        return out^
-    if tree.scoped != 0:
-        out.ok = False
-        out.problem = String("a scoped flag group is not carried yet")
-        out.gap = True
         return out^
 
     var b = _Builder(tree.flags, captures, python)

@@ -348,13 +348,14 @@ def test_case_folding_is_spent_here_rather_than_refused() raises:
     assert_equal(program.problem, "")
 
 
-def test_a_scoped_flag_group_is_refused_because_the_flags_are_dropped() raises:
-    """The parser reads `(?m:...)` and throws the letters away, so a program
-    built from that tree would answer as though they were never written."""
-    var program = compile_program(parse_pattern("(?m:a$)"), ENGINE_RE2)
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(program.problem, "a scoped flag group is not carried yet")
+def test_a_scoped_flag_group_carries_its_letters_on_a_node() raises:
+    """The letters used to be thrown away, and a program built from that tree
+    answered as though they were never written. The listing is where that shows
+    with nothing running: the dollar sign inside the bracket is the end of a
+    line and the one after it is the end of the text, from the same pattern."""
+    assert_equal(built("(?m:a$)"), "0 char(a); 1 at(5); 2 match")
+    assert_equal(built("a$"), "0 char(a); 1 at(4); 2 match")
+    assert_equal(built("(?m:a$)$"), "0 char(a); 1 at(5); 2 at(4); 3 match")
 
 
 def test_what_re2_reads_differently_is_refused_rather_than_answered() raises:

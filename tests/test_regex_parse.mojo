@@ -44,6 +44,7 @@ from firepanda.kernel.regex.tokens import (
     OP_NOT_LITERAL,
     OP_POSSESSIVE_REPEAT,
     OP_RANGE,
+    OP_SCOPE,
     OP_SEQ,
     OP_SUBPATTERN,
     Node,
@@ -135,6 +136,8 @@ def drawn(nodes: List[Node], node: Int32) -> String:
         out = String("cond(", it.a, ")")
     elif it.op == OP_FAILURE:
         out = String("fail")
+    elif it.op == OP_SCOPE:
+        out = String("scope(", it.a, ",", it.b, ")")
     else:
         out = String("op", it.op)
 
@@ -467,8 +470,14 @@ def test_a_comment_does_not_count_as_something_in_front() raises:
 
 def test_flags_can_only_be_turned_off_in_the_scoped_form() raises:
     """`(?-i)` is a parse error rather than a global flag group with a minus
-    sign, which is the kind of refusal a caller would never predict."""
-    assert_equal(shape("(?-i:a)"), "seq{seq{lit(a)}}")
+    sign, which is the kind of refusal a caller would never predict.
+
+    The scoped form keeps its letters on a node of its own, with the ones it
+    turns on first and the ones it turns off second, and the two payloads are
+    `FLAG_` bits rather than the values `re` gives the same letters."""
+    assert_equal(shape("(?-i:a)"), "seq{scope(0,1){seq{lit(a)}}}")
+    assert_equal(shape("(?i:a)"), "seq{scope(1,0){seq{lit(a)}}}")
+    assert_equal(shape("(?i-s:a)"), "seq{scope(1,8){seq{lit(a)}}}")
     assert_equal(shape("(?-i)a"), "!missing :")
     assert_equal(shape("(?i-s)a"), "!missing :")
 

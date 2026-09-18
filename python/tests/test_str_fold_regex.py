@@ -247,13 +247,15 @@ def test_the_flag_reaches_a_pattern_that_was_anchored_first(firepanda: ModuleTyp
 
 
 @needs_pandas
-def test_a_scoped_flag_group_is_still_refused(firepanda: ModuleType) -> None:
-    """The parser reads `(?i:a)` and throws the letters away, so a program built
-    from that tree would answer without folding while both engines fold. It is a
-    gap and says so."""
-    mine = made(firepanda)
-    with pytest.raises(NotImplementedError):
-        mine.str.contains("(?i:a)")
+def test_a_scoped_flag_group_folds_where_the_bracket_reaches(firepanda: ModuleType) -> None:
+    """This was a refusal until the letters got a node to ride on. The second
+    pattern is the one that says the scope ends at the bracket, since a global
+    `(?i)` would fold the `c` as well and a tree with the letters dropped would
+    fold nothing."""
+    rows = ["abc", "ABC", "aBc", "Abc"]
+    mine, them = made(firepanda, rows), theirs(rows)
+    for pattern in ("(?i:a)bc", "(?i:ab)c", "a(?i:b)c", "(?i:(?-i:a)b)c"):
+        assert mine.str.contains(pattern).tolist() == mask_of(them.str.contains(pattern)), pattern
 
 
 @needs_pandas
