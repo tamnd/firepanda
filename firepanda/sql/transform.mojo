@@ -142,7 +142,6 @@ from .unsupported import (
     POSTFIX_OPERATOR,
     QUANTIFIED_VALUE,
     QUOTED_NAME,
-    ROW_VALUE,
     SELECT_CLAUSE,
     SELECT_SAMPLE,
     SPECIAL_CALL,
@@ -240,6 +239,9 @@ comptime _TYPE_LITERAL: UInt8 = 79
 
 comptime _INTERVAL: UInt8 = 80
 """`IntervalLiteral`, a duration written as an amount and a unit."""
+
+comptime _ROW: UInt8 = 81
+"""`ParenthesisExpression` and `RowExpression`, a value with parts in it."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -918,8 +920,8 @@ struct Transform(Movable):
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "ParenthesisExpression", ROW_VALUE)
-        self._refuse(names, "RowExpression", ROW_VALUE)
+        self._set(names, "ParenthesisExpression", _ROW)
+        self._set(names, "RowExpression", _ROW)
         self._refuse(names, "LambdaExpression", LAMBDA)
         self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
         self._refuse(names, "NamedFunctionArgument", NAMED_ARGUMENT)
@@ -1797,6 +1799,9 @@ struct Transform(Movable):
 
         if action == _TRIM:
             return self._trim(tree, sql, node, ast, work, at)
+
+        if action == _ROW:
+            return self._row(tree, sql, node, ast, work)
 
         if action == _INTERVAL:
             return self._interval(tree, sql, node, ast, work, at)
@@ -3497,6 +3502,43 @@ struct Transform(Movable):
         for item in items:
             elements.append(work.value(item))
         return ast.list_of(elements, tree.nodes[Int(node)].token_start)
+
+    def _row(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `(a, b)` or `ROW(a, b)`.
+
+        The two rules are shaped alike, since `ROW` adds a word in front of the
+        same parenthesized list, so the word is what tells them apart and the
+        parts are read the same way for both. A single expression in
+        parentheses is a different rule and never reaches here.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ParenthesisExpression` or `RowExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the parts.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a part has no case.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var written = _first_byte(tree, sql, node) != _LEFT_PAREN
+        var items = self._items(tree, self._only(tree, node))
+        work.warm(items)
+        var elements = List[UInt32]()
+        for item in items:
+            elements.append(work.value(item))
+        return ast.row(elements, written, at)
 
     def _struct(
         self,

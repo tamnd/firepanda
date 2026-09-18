@@ -58,6 +58,7 @@ from .ast import (
     EXPR_LITERAL,
     EXPR_PARAMETER,
     EXPR_QUANTIFIED,
+    EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
@@ -182,6 +183,10 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         or kind == EXPR_INTERVAL
     ):
         out.append(item.a)
+        return out^
+    if kind == EXPR_ROW:
+        for i in range(ast.length(item.children)):
+            out.append(ast.at(item.children, i))
         return out^
     if kind == EXPR_SUBSCRIPT:
         out.append(item.a)
@@ -705,7 +710,7 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(ast.text(item.b), "/", ast.text(item.payload))
     if kind == EXPR_BETWEEN or kind == EXPR_IN or kind == EXPR_IN_SUBQUERY:
         return String(item.payload)
-    if kind == EXPR_SUBSCRIPT:
+    if kind == EXPR_SUBSCRIPT or kind == EXPR_ROW:
         return String(item.payload)
     if kind == EXPR_STRUCT:
         var out = String()

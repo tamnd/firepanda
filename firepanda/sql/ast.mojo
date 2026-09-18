@@ -271,6 +271,20 @@ a string, and that is a question for a stage that knows types. This gets as far
 as the printer.
 """
 
+comptime EXPR_ROW: UInt8 = 23
+"""`(a, b)` and `ROW(a, b)`, several expressions written as one value.
+
+`children` is a run of elements, which may be empty, and `payload` is 1 when
+`ROW` was written and 0 when the parentheses stood on their own. The two
+spellings mean the same thing and are kept apart so that the printer writes
+back what the query wrote.
+
+A row is a value with fields in it and a firepanda column holds one scalar, so
+this gets as far as the printer and no further. It is not the struct
+constructor under another name: a struct names its fields and a row does not,
+and naming them here would be inventing text the query did not write.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1339,6 +1353,32 @@ struct Ast(Movable):
                 a=operand,
                 children=run,
                 payload=UInt32(1) if sliced else UInt32(0),
+            )
+        )
+
+    def row(
+        mut self,
+        elements: List[UInt32],
+        written: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `(a, b)` or `ROW(a, b)`.
+
+        Args:
+            elements: The parts, in order, which may be none at all.
+            written: Whether the query wrote the word `ROW`.
+            token: The token it starts at.
+
+        Returns:
+            The node index.
+        """
+        var run = self.run(elements)
+        return self.add(
+            Expr(
+                kind=EXPR_ROW,
+                token=token,
+                children=run,
+                payload=UInt32(1) if written else UInt32(0),
             )
         )
 

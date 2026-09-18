@@ -522,6 +522,7 @@ def test_every_shape_here_round_trips() raises:
         "$1 + $two",
         "d + INTERVAL 3 MONTH",
         "a[1] + b[2:3]",
+        "(a, b) = ROW(1, 2)",
         "INTERVAL (a + 1) DAY",
     ]
     for sample in cases:
@@ -679,10 +680,10 @@ def test_a_subscript_takes_what_is_in_front_of_it_and_not_more() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="LINE 1: (1, 2)"):
-        _ = _printed("(1, 2)", g, rules)
+    with assert_raises(contains="LINE 1: f(a := 1)"):
+        _ = _printed("f(a := 1)", g, rules)
     with assert_raises(contains="issues/"):
-        _ = _printed("(1, 2)", g, rules)
+        _ = _printed("f(a := 1)", g, rules)
 
 
 def test_a_long_chain_of_tails_is_built_once() raises:

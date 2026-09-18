@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL reads a row value in both of its spellings
+
+`(a, b)` and `ROW(a, b)` used to be refused by the transformer, and 430 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval and the subscript are out of it. They build a node and print back in the spelling they were written in, since the two mean the same thing and there is no reason for the printer to pick one.
+
+The refusal moved to lowering, for the third time this week and for the same reason each time. A row is a value with fields in it and a firepanda column holds one scalar, so lowering is the stage with something to say and it says the entry that was already in the table.
+
+It is not the struct constructor under another name. A struct names its fields and a row does not, and giving the parts names here would be inventing text the query never wrote, which the printer would then hand back as though the user had asked for it.
+
+`(a,)` is a row of one and comes back with its comma, because the comma is the whole of what separates it from an expression in parentheses. DuckDB's parser turns that spelling down, so nothing in the corpus reaches it, but a printer that dropped the comma would be printing something that does not read back as what it was.
+
 ### Added: SQL reads a subscript and the slices around it
 
 `a[1]`, `a[1:2]`, `a[:2]`, `a[1:]` and `a[1:4:2]` used to be refused by the transformer, and 660 statements in DuckDB's corpus stopped there, which is the largest entry left in the refusal histogram now that the interval is out of it. They parse, transform and print, and every one of those spellings comes back the way it was written.
