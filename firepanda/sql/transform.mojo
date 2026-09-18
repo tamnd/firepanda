@@ -135,7 +135,6 @@ from .unsupported import (
     IS_UNKNOWN,
     JOIN_FORM,
     LIKE_ESCAPE,
-    LIST_COMPREHENSION,
     MAP_LITERAL,
     METHOD_CALL,
     NAMED_ARGUMENT,
@@ -252,6 +251,9 @@ comptime _NAMED_ARGUMENT: UInt8 = 82
 
 comptime _LAMBDA: UInt8 = 83
 """`LambdaExpression`, a function written where a value goes."""
+
+comptime _COMPREHENSION: UInt8 = 84
+"""`ListComprehensionExpression`, a list built out of another one."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -949,11 +951,11 @@ struct Transform(Movable):
         self._set(names, "RowExpression", _ROW)
         self._set(names, "NamedFunctionArgument", _NAMED_ARGUMENT)
         self._set(names, "LambdaExpression", _LAMBDA)
+        self._set(names, "ListComprehensionExpression", _COMPREHENSION)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
         self._refuse(names, "ColumnsExpression", COLUMNS)
         self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "GroupingExpression", GROUPING)
@@ -1837,6 +1839,9 @@ struct Transform(Movable):
 
         if action == _LAMBDA:
             return self._lambda(tree, sql, node, ast, work)
+
+        if action == _COMPREHENSION:
+            return self._comprehension(tree, sql, node, ast, work)
 
         if action == _INTERVAL:
             return self._interval(tree, sql, node, ast, work, at)
@@ -3697,6 +3702,56 @@ struct Transform(Movable):
         return ast.closure(
             parameters,
             work.value(kids[1]),
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _comprehension(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `[x + 1 FOR x IN l]`, a list built out of another one.
+
+        `ListComprehensionExpression <- '[' Expression 'FOR' List(ColIdOrString)
+        'IN' Expression ListComprehensionFilter? ']'`, so the children are the
+        element, the names, the source and the condition when one was written.
+
+        The names are read as text, the way a lambda's parameters are, and for
+        the same reason: a name here is being bound rather than looked up, and
+        the element and the condition both refer to it the way they refer to a
+        column.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ListComprehensionExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the element, the source and the condition.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a name is a dotted one, or a part has no case.
+        """
+        var kids = tree.children(node)
+        var parameters = List[String]()
+        for name in tree.children(kids[1]):
+            parameters.append(self._plain(tree, sql, name))
+        var wanted: List[UInt32] = [kids[0], kids[2]]
+        var filtered = len(kids) > 3
+        if filtered:
+            wanted.append(self._only(tree, kids[3]))
+        work.warm(wanted)
+        var condition = work.value(wanted[2]) if filtered else NO_NODE
+        return ast.comprehension(
+            work.value(kids[0]),
+            parameters,
+            work.value(kids[2]),
+            condition,
             tree.nodes[Int(node)].token_start,
         )
 

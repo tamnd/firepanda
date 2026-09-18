@@ -1231,6 +1231,16 @@ def test_a_lambda_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT upper(lambda x: x) FROM t")
 
 
+def test_a_comprehension_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and what it means is a lambda run over every element
+    # of a list, so it stops for the same reason a lambda does and stops where
+    # the value would have been built.
+    with assert_raises(contains="a list comprehension"):
+        _ = _plan("SELECT [x FOR x IN l] FROM t")
+    with assert_raises(contains="a list comprehension"):
+        _ = _plan("SELECT [x FOR x IN l IF x > 2] FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage

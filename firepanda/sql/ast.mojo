@@ -314,6 +314,22 @@ into a JSON value, so the two are the same text and the binder is what tells
 them apart.
 """
 
+comptime EXPR_COMPREHENSION: UInt8 = 26
+"""`[x + 1 FOR x IN l]`, a list built out of another one.
+
+`a` is the element, the expression written before `FOR`. `b` is the source, the
+one written after `IN`. `payload` is a run of interned names, one for each name
+between them, bound the way a lambda binds its parameters. `children` is a run
+of the one expression an `IF` put on the end, or an empty run when nothing was
+written there.
+
+DuckDB reads this as calls, `list_apply` around the source with a lambda for
+the element and `list_filter` under it when there is a condition. That is what
+it means and not what it says, and this keeps what it says, so the printer
+hands back the brackets the query wrote rather than a pair of calls the reader
+would have to turn back into them.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1534,6 +1550,43 @@ struct Ast(Movable):
                 kind=EXPR_LAMBDA,
                 token=token,
                 a=body,
+                payload=self.run(names),
+            )
+        )
+
+    def comprehension(
+        mut self,
+        element: UInt32,
+        parameters: List[String],
+        source: UInt32,
+        condition: UInt32 = NO_NODE,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `[x + 1 FOR x IN l]`, a list built out of another one.
+
+        Args:
+            element: The expression before `FOR`.
+            parameters: The names between it and the source, in order.
+            source: The expression after `IN`.
+            condition: The expression after `IF`, or nothing.
+            token: The token the bracket is at.
+
+        Returns:
+            The node index.
+        """
+        var names = List[UInt32]()
+        for part in parameters:
+            names.append(self.intern(part))
+        var guard = List[UInt32]()
+        if condition != NO_NODE:
+            guard.append(condition)
+        return self.add(
+            Expr(
+                kind=EXPR_COMPREHENSION,
+                token=token,
+                a=element,
+                b=source,
+                children=self.run(guard),
                 payload=self.run(names),
             )
         )
