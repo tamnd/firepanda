@@ -123,6 +123,7 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
+from firepanda.kernel.sort import is_sorted_any
 
 from .keys import align_keys
 
@@ -163,6 +164,22 @@ holding the hot range decides when the join finishes.
 
 The count pass and the emit pass have to agree on the boundaries, since the emit
 starts writing where the count said it would, so both walk the same morsels.
+"""
+
+comptime MERGE_PROBE_ROWS = 1 << 16
+"""Below this many probe rows a join does not ask whether its keys are sorted.
+
+Asking means scanning both key columns, and what the answer buys is skipping the
+factorize and the hash table that the ordinary route builds. On a small join
+that table is already under a millisecond, so neither route is worth choosing
+between and the scan would be the only thing either one added.
+
+Sixty five thousand is where a factorize of both sides starts to cost enough
+that two sequential scans, which is what `is_sorted_any` runs and which stop at
+the first pair out of order, are worth spending to skip it. The same number and
+the same argument as `PROVE_SORTED_ROWS` in the frame, for the same reason: it
+is not a crossover between two curves, because there is no size at which asking
+loses badly.
 """
 
 
@@ -392,6 +409,201 @@ struct ProbeTable(Movable):
         self.rows = 0
 
 
+def _lower_bound[
+    dt: DType, //, o: ImmOrigin
+](at: Pointer[Scalar[dt], o], rows: Int, value: Scalar[dt]) -> Int:
+    """Finds the first row of a sorted column at or above a value.
+
+    A worker is handed a stretch of the probe side and has to know where in the
+    built side to start walking. Every other row it reads moves that cursor
+    forward by itself, so this runs once a morsel rather than once a row.
+
+    Args:
+        at: The built side's keys, which must never fall.
+        rows: How many of them there are.
+        value: The key to place.
+
+    Returns:
+        The first position holding a key at or above `value`, or `rows`.
+    """
+    var lo = 0
+    var hi = rows
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if at.unsafe_offset(mid).unsafe_load() < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _merge_semi[
+    dt: DType
+](
+    left: Array[dt], left_rows: Int, right: Array[dt], right_rows: Int
+) raises -> JoinIndices:
+    """Pairs a semi join by walking two sorted key columns together.
+
+    A semi join asks of each left row whether the right side holds its key
+    anywhere, and when both sides are sorted that is one cursor into each. The
+    right cursor never goes backwards, because the left keys never fall, so the
+    whole join is one pass over each column with nothing built in between.
+
+    The shape is the same count then emit as `pair_probe`, and for the same
+    reason: the output height is not known until the walk has run, and a morsel
+    can only write where the morsels before it stopped. Each morsel places its
+    own first key in the right side with a binary search and walks from there,
+    which is what makes the pass splittable at all.
+
+    Args:
+        left: The probe side's keys, sorted and with no nulls.
+        left_rows: How many of them to read.
+        right: The built side's keys, sorted and with no nulls.
+        right_rows: How many of them to read.
+
+    Returns:
+        One entry per matched left row, in left row order, with the right entry
+        negative because a semi join carries no right column.
+
+    Raises:
+        If the parallel walk raises.
+    """
+    var parallel = left_rows >= PARALLEL_LEFT_ROWS
+    var chunk = LEFT_MORSEL_ROWS if parallel else max(left_rows, 1)
+    var pieces = (left_rows + chunk - 1) // chunk
+    if pieces == 0:
+        pieces = 1
+    var counts = List[Int](length=pieces + 1, fill=0)
+
+    def tally(start: Int, stop: Int) raises {mut counts, imm}:
+        if start >= stop:
+            return
+        var lp = left.unsafe_ptr()
+        var rp = right.unsafe_ptr()
+        var here = 0
+        var j = _lower_bound(
+            rp, right_rows, lp.unsafe_offset(start).unsafe_load()
+        )
+        for i in range(start, stop):
+            var value = lp.unsafe_offset(i).unsafe_load()
+            while j < right_rows and rp.unsafe_offset(j).unsafe_load() < value:
+                j += 1
+            if j < right_rows and rp.unsafe_offset(j).unsafe_load() == value:
+                here += 1
+        counts[start // chunk + 1] = here
+
+    if not parallel:
+        tally(0, left_rows)
+    else:
+        parallel_morsels(tally, left_rows, chunk)
+    for m in range(pieces):
+        counts[m + 1] += counts[m]
+
+    var out_left = List[Int](unsafe_uninit_length=counts[pieces])
+    var out_right = List[Int](unsafe_uninit_length=counts[pieces])
+
+    def spill(start: Int, stop: Int) raises {mut out_left, mut out_right, imm}:
+        if start >= stop:
+            return
+        var lp = left.unsafe_ptr()
+        var rp = right.unsafe_ptr()
+        var left_out = out_left.unsafe_ptr()
+        var right_out = out_right.unsafe_ptr()
+        var put = counts[start // chunk]
+        var j = _lower_bound(
+            rp, right_rows, lp.unsafe_offset(start).unsafe_load()
+        )
+        for i in range(start, stop):
+            var value = lp.unsafe_offset(i).unsafe_load()
+            while j < right_rows and rp.unsafe_offset(j).unsafe_load() < value:
+                j += 1
+            if j < right_rows and rp.unsafe_offset(j).unsafe_load() == value:
+                left_out.unsafe_offset(put).unsafe_write(i)
+                right_out.unsafe_offset(put).unsafe_write(-1)
+                put += 1
+
+    if not parallel:
+        spill(0, left_rows)
+    else:
+        parallel_morsels(spill, left_rows, chunk)
+
+    return JoinIndices(out_left^, out_right^)
+
+
+def _merge_route[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
+    left_keys: List[Int],
+    left_rows: Int,
+    right_columns: ColumnRefs[r],
+    right_keys: List[Int],
+    right_rows: Int,
+    kind: JoinKind,
+) raises -> Optional[JoinIndices]:
+    """Runs the merge walk when both keys are sorted, or hands back nothing.
+
+    Everything asked before the two scans is free, and the scans themselves stop
+    at the first pair out of order, so a join whose keys are in no order pays for
+    a handful of rows and goes where it was going.
+
+    Only a semi join is here. It is the one kind whose output is a subset of the
+    left rows in left row order, which is exactly what walking the two columns
+    produces, so there is nothing to sort afterwards and nothing to gather from
+    the right. An inner join on sorted keys is the same walk with the emit
+    fanning out over a run of equal right keys, and it is a separate change.
+
+    Nulls are declined rather than handled. A null key matches nothing in a semi
+    join, but it also has no place in an ordering, so a column holding one is a
+    column the walk cannot read as sorted and the ordinary route is where it
+    belongs.
+
+    Args:
+        left_columns: The left frame's columns.
+        left_keys: Which of them are keys.
+        left_rows: The left frame's height.
+        right_columns: The right frame's columns.
+        right_keys: Which of them are keys.
+        right_rows: The right frame's height.
+        kind: Which rows to keep.
+
+    Returns:
+        The pairing, or nothing when this join is not one the walk can take.
+
+    Raises:
+        If reading either key column raises.
+    """
+    if kind != JoinKind.SEMI or len(left_keys) != 1:
+        return None
+    if left_rows < MERGE_PROBE_ROWS or left_rows == 0 or right_rows == 0:
+        return None
+
+    ref left = left_columns[left_keys[0]][]
+    ref right = right_columns[right_keys[0]][]
+    if left.is_string() or right.is_string():
+        return None
+    if left.dtype() != right.dtype() or not left.dtype().is_integral():
+        return None
+    if left.null_count() > 0 or right.null_count() > 0:
+        return None
+    if len(left) < left_rows or len(right) < right_rows:
+        return None
+    if not is_sorted_any(left) or not is_sorted_any(right):
+        return None
+
+    var kind_of = left.dtype()
+    comptime for dt in ALL:
+        comptime if dt.is_integral():
+            if kind_of == dt:
+                return _merge_semi(
+                    left.as_typed_view[dt](),
+                    left_rows,
+                    right.as_typed_view[dt](),
+                    right_rows,
+                )
+    return None
+
+
 def join_indices[
     l: ImmOrigin, r: ImmOrigin
 ](
@@ -484,6 +696,21 @@ def join_indices[
             ).swapped(),
             left_rows,
         )
+
+    # Two sorted keys and a semi join is a walk rather than a table. The
+    # question costs two scans that stop at the first pair out of order, and
+    # `_merge_route` has the argument and the measurement.
+    var walked = _merge_route(
+        left_columns,
+        left_keys,
+        left_rows,
+        right_columns,
+        right_keys,
+        right_rows,
+        kind,
+    )
+    if walked:
+        return walked.take()
 
     var aligned = align_keys(
         left_columns,
