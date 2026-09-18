@@ -56,7 +56,12 @@ from .ast import (
     BOUND_UNBOUNDED_FOLLOWING,
     BOUND_UNBOUNDED_PRECEDING,
     CALL_DISTINCT,
+    CALL_EXPORT_STATE,
+    CALL_IGNORE_NULLS,
+    CALL_RESPECT_NULLS,
     CALL_STAR,
+    CALL_WITHIN_GROUP,
+    call_tags,
     EXCLUDE_CURRENT_ROW,
     EXCLUDE_GROUP,
     EXCLUDE_NONE,
@@ -572,6 +577,18 @@ struct Transform(Movable):
     rather than working out from the text of a bound that holds one byte.
     """
 
+    var call_order: UInt16
+    """The rule index of `OrderByClause`, which a call may hold one of.
+
+    `FunctionExpressionArgumentList` puts four optional groups in a row and
+    they have to be told apart. By the rule and not by the first word, because
+    `IGNORE` and `RESPECT` are keywords a column may be called, so `f(ignore)`
+    reads as a null treatment to anything that looks at the word.
+    """
+
+    var null_treatment: UInt16
+    """The rule index of `IgnoreOrRespectNulls`, the last group of a call."""
+
     var units: Dict[UInt16, StaticString]
     """The one spelling of the interval unit a rule names, by rule index.
 
@@ -605,6 +622,8 @@ struct Transform(Movable):
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
         self.refusals = List[UInt16](length=len(grammar.names), fill=0)
         self.slice_minus = 0
+        self.call_order = 0
+        self.null_treatment = 0
         self.units = Dict[UInt16, StaticString]()
         self.expression_rule = -1
         self.statement_rule = -1
@@ -723,6 +742,8 @@ struct Transform(Movable):
         self._set(names, "TrimExpression", _TRIM)
         self._set(names, "PositionExpression", _POSITION)
         self.slice_minus = UInt16(self._index(names, "EndSliceMinus"))
+        self.call_order = UInt16(self._index(names, "OrderByClause"))
+        self.null_treatment = UInt16(self._index(names, "IgnoreOrRespectNulls"))
 
         self._set(names, "IntervalLiteral", _INTERVAL)
 
@@ -2713,10 +2734,14 @@ struct Transform(Movable):
         # WithinGroupClause? FilterClause? ExportClause? OverClause?`. The four
         # optional ones are told apart by their first word rather than by
         # position, because any of them can be absent and then the rest move up.
+        # Each of the four starts with a word no expression may start with, so
+        # the word is enough here and is not enough inside the parentheses.
         var kids = tree.children(node)
         var at = tree.nodes[Int(node)].token_start
         var over = NO_NODE
         var filtering = NO_NODE
+        var within = NO_NODE
+        var flags = UInt32(0)
         for i in range(2, len(kids)):
             var word = _word(tree, sql, kids[i])
             if word == "OVER":
@@ -2724,6 +2749,16 @@ struct Transform(Movable):
                 continue
             if word == "FILTER":
                 filtering = kids[i]
+                continue
+            if word == "WITHIN":
+                # `WithinGroupClause <- 'WITHIN' 'GROUP' Parens(OrderByClause)`
+                # and the parenthesized rule is a node of its own with nothing
+                # to do, so the order clause is two steps down rather than one.
+                within = self._only(tree, self._only(tree, kids[i]))
+                flags |= CALL_WITHIN_GROUP
+                continue
+            if word == "EXPORT_STATE":
+                flags |= CALL_EXPORT_STATE
                 continue
             raise _unsupported(
                 tree,
@@ -2733,9 +2768,45 @@ struct Transform(Movable):
                 word,
             )
 
+        # `FunctionExpressionArguments <- Parens(FunctionExpressionArgumentList)`
+        # and the list rule holds up to four groups: the `DISTINCT` or `ALL` in
+        # front, the arguments themselves, an `ORDER BY` and a null treatment.
+        # These go by rule and not by first word, because `IGNORE` and
+        # `RESPECT` are words a column may be called and `f(ignore)` would read
+        # as a null treatment to anything that only looks at the word.
+        var groups = self._only(tree, self._only(tree, kids[1]))
+        var ordering = within
+        var argument_list = NO_NODE
+        for group in tree.children(groups):
+            var rule = tree.nodes[Int(group)].rule
+            if rule == self.call_order:
+                if ordering != NO_NODE:
+                    # DuckDB says "cannot use multiple ORDER BY clauses with
+                    # WITHIN GROUP" and turns the query down. The grammar takes
+                    # it, so this is where it is turned down here.
+                    raise _unsupported(tree, sql, group, CALL_ARGUMENT, "ORDER")
+                ordering = group
+                continue
+            if rule == self.null_treatment:
+                if _word(tree, sql, group) == "IGNORE":
+                    flags |= CALL_IGNORE_NULLS
+                else:
+                    flags |= CALL_RESPECT_NULLS
+                continue
+            var lead = _word(tree, sql, group)
+            if lead == "DISTINCT":
+                flags |= CALL_DISTINCT
+                continue
+            if lead == "ALL":
+                # The default, so it carries nothing and is not written back.
+                continue
+            argument_list = group
+
         var warming = List[UInt32]()
         if over != NO_NODE:
             warming.append(over)
+        if ordering != NO_NODE:
+            warming.append(ordering)
         var predicate = NO_NODE
         if filtering != NO_NODE:
             # `FilterClause <- 'FILTER' Parens('WHERE'? Expression)`, and the
@@ -2746,6 +2817,8 @@ struct Transform(Movable):
             )
             predicate = inside[len(inside) - 1]
             warming.append(predicate)
+        if argument_list != NO_NODE:
+            warming.extend(self._items(tree, argument_list))
         if len(warming) != 0:
             work.warm(warming)
 
@@ -2754,27 +2827,14 @@ struct Transform(Movable):
         for part in parts:
             names.append(ast.intern(part))
 
-        var flags = UInt32(0)
         var arguments = List[UInt32]()
-
-        # `FunctionExpressionArguments <- Parens(FunctionExpressionArgumentList)`
-        # and the list rule holds up to four groups: the `DISTINCT` or `ALL` in
-        # front, the arguments themselves, an `ORDER BY` and a null treatment.
-        var groups = self._only(tree, self._only(tree, kids[1]))
-        for group in tree.children(groups):
-            var lead = _word(tree, sql, group)
-            if lead == "DISTINCT":
-                flags |= CALL_DISTINCT
-                continue
-            if lead == "ALL":
-                # The default, so it carries nothing and is not written back.
-                continue
-            if lead == "ORDER" or lead == "IGNORE" or lead == "RESPECT":
-                raise _unsupported(tree, sql, group, CALL_ARGUMENT, lead)
-            var items = self._items(tree, group)
-            work.warm(items)
-            for item in items:
+        if argument_list != NO_NODE:
+            for item in self._items(tree, argument_list):
                 arguments.append(work.value(item))
+
+        var sorts = List[UInt32]()
+        if ordering != NO_NODE:
+            sorts = ast.items(work.value(ordering))
 
         # `count(*)` is a call with no arguments and a flag, not a call with one
         # star argument, because the star there is a spelling and not a value.
@@ -2821,13 +2881,16 @@ struct Transform(Movable):
                 flags &= ~CALL_STAR
             arguments = kept^
 
+        var ordered = len(sorts)
+        var entries = arguments^
+        entries.extend(sorts^)
         return ast.add(
             Expr(
                 kind=EXPR_FUNCTION,
                 token=at,
-                a=flags,
+                a=call_tags(flags, ordered),
                 b=work.value(over) if over != NO_NODE else NO_NODE,
-                children=ast.run(arguments),
+                children=ast.run(entries),
                 payload=ast.run(names),
             )
         )

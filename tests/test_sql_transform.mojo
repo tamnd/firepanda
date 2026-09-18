@@ -525,6 +525,10 @@ def test_every_shape_here_round_trips() raises:
         "(a, b) = ROW(1, 2)",
         "INTERVAL (a + 1) DAY",
         "f(1, b := 2, c => 3)",
+        "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
+        "mode() WITHIN GROUP (ORDER BY a)",
+        "lag(a IGNORE NULLS) OVER ()",
+        "sum(a) EXPORT_STATE",
     ]
     for sample in cases:
         _ = _round_trips(sample, g, rules)
@@ -548,8 +552,8 @@ def test_a_subquery_in_an_expression_reaches_the_statement_arena() raises:
 
 def test_a_call_carries_the_window_that_over_names() raises:
     # The window itself is tested in `test_sql_window.mojo`. This is here for
-    # the call side of it, since `OVER` used to be one of the four call
-    # modifiers that refused and two of them still do.
+    # the call side of it, `OVER` being one of the six things a call may carry
+    # after its name.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(_printed("sum(a) OVER ()", g, rules), "sum(a) OVER ()")
@@ -619,18 +623,88 @@ def test_a_filter_on_any_value_is_rewritten_like_the_rest() raises:
     )
 
 
-def test_the_two_call_modifiers_left_still_refuse() raises:
+def test_within_group_is_read_and_written_back_where_it_was() raises:
+    # The entries are the same run the in call `ORDER BY` uses, and the flag is
+    # what says which side of the closing parenthesis they go back on.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="WITHIN on a call"):
-        _ = _printed("quantile(a, 0.5) WITHIN GROUP (ORDER BY a)", g, rules)
+    assert_equal(
+        _printed("quantile(a, 0.5) WITHIN GROUP (ORDER BY a)", g, rules),
+        "quantile(a, 0.5) WITHIN GROUP (ORDER BY a)",
+    )
+    assert_equal(
+        _printed("mode() WITHIN GROUP (ORDER BY a DESC, b)", g, rules),
+        "mode() WITHIN GROUP (ORDER BY a DESC, b)",
+    )
 
 
-def test_an_ordered_aggregate_refuses() raises:
+def test_an_ordered_aggregate_keeps_the_order_it_was_given() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("string_agg(a ORDER BY b)", g, rules),
+        "string_agg(a ORDER BY b)",
+    )
+    assert_equal(
+        _printed("string_agg(a, ',' ORDER BY b NULLS FIRST)", g, rules),
+        "string_agg(a, ',' ORDER BY b NULLS FIRST)",
+    )
+
+
+def test_a_call_with_only_an_order_by_in_it_still_reads() raises:
+    # The argument list is optional in the grammar, so the run is the order
+    # entries and nothing else and the printer has no comma to write.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("f(ORDER BY a)", g, rules), "f(ORDER BY a)")
+
+
+def test_a_null_treatment_is_kept_in_the_spelling_it_was_written() raises:
+    # `RESPECT NULLS` is the default said out loud, and it is kept apart from
+    # not saying it so that the printer writes back what the query wrote.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("lag(a IGNORE NULLS) OVER ()", g, rules),
+        "lag(a IGNORE NULLS) OVER ()",
+    )
+    assert_equal(
+        _printed("lag(a RESPECT NULLS) OVER ()", g, rules),
+        "lag(a RESPECT NULLS) OVER ()",
+    )
+    assert_equal(_printed("lag(a) OVER ()", g, rules), "lag(a) OVER ()")
+
+
+def test_export_state_goes_after_the_parenthesis() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("sum(a) EXPORT_STATE", g, rules), "sum(a) EXPORT_STATE"
+    )
+
+
+def test_a_filter_and_an_order_by_are_both_kept() raises:
+    # The filter rewrites the arguments and the order entries sit behind them
+    # in the same run, so this is the test that the rewrite stops where the
+    # arguments do.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("sum(a ORDER BY b) FILTER (WHERE b > 1)", g, rules),
+        "sum(CASE WHEN (b > 1) THEN a END ORDER BY b)",
+    )
+
+
+def test_two_order_by_clauses_on_one_call_refuse() raises:
+    # DuckDB says "cannot use multiple ORDER BY clauses with WITHIN GROUP" and
+    # turns the query down. The grammar takes it, so the transformer is where
+    # it is turned down here.
     var g = Grammar()
     var rules = Transform(g)
     with assert_raises(contains="ORDER inside a call"):
-        _ = _printed("string_agg(a ORDER BY b)", g, rules)
+        _ = _printed(
+            "string_agg(a ORDER BY b) WITHIN GROUP (ORDER BY a)", g, rules
+        )
 
 
 def test_is_unknown_refuses_rather_than_becoming_is_null() raises:

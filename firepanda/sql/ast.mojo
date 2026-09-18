@@ -82,9 +82,11 @@ comptime EXPR_FUNCTION: UInt8 = 4
 """A call, `f(x)`.
 
 `payload` is a run of interned name parts, so a qualified `main.f` keeps its
-qualification. `children` is a run of argument expressions. `a` is a bit set of
-the `CALL_` flags. `b` is the `EXPR_WINDOW` the `OVER` names, and is 0 for a
-call with no `OVER` on it, which is most of them.
+qualification. `children` is a run of argument expressions with the call's own
+`ORDER BY` entries on the end of it. `a` holds the `CALL_` flags and the count
+of those entries, packed by `call_tags` and read back by `call_flags` and
+`call_sorts`. `b` is the `EXPR_WINDOW` the `OVER` names, and is 0 for a call
+with no `OVER` on it, which is most of them.
 
 An operator is not one of these even where the grammar spells it as one. The
 printer has to know that `+` goes between its operands and `f` goes before
@@ -455,6 +457,73 @@ comptime CALL_DISTINCT: UInt32 = 1
 
 comptime CALL_STAR: UInt32 = 2
 """`count(*)`, which has no arguments rather than one star argument."""
+
+comptime CALL_WITHIN_GROUP: UInt32 = 4
+"""The call's `ORDER BY` was written as `WITHIN GROUP (ORDER BY x)`.
+
+The two spellings put the same entries in the same place, and DuckDB turns down
+a call that writes both, so one run of entries and this flag is the whole of
+what a call needs to say which it was.
+"""
+
+comptime CALL_IGNORE_NULLS: UInt32 = 8
+"""`f(x IGNORE NULLS)`."""
+
+comptime CALL_RESPECT_NULLS: UInt32 = 16
+"""`f(x RESPECT NULLS)`, the default said out loud and kept for the printer."""
+
+comptime CALL_EXPORT_STATE: UInt32 = 32
+"""`f(x) EXPORT_STATE`, which hands back the fold's state and not its answer."""
+
+
+comptime _CALL_FLAG_FIELD: UInt32 = 0xFFFF
+"""The half of a call's `a` the flags live in."""
+
+comptime _CALL_SORT_SHIFT: UInt32 = 16
+"""Where the count of the call's `ORDER BY` entries starts."""
+
+
+def call_tags(flags: UInt32, sorts: Int) -> UInt32:
+    """Packs a call's flags and the length of its `ORDER BY` into one field.
+
+    A call has four fields and five things to keep: the flags, the name, the
+    arguments, the `OVER` and the `ORDER BY` written inside it. The last one
+    goes on the end of the argument run, so all that is left to record is how
+    many of the entries there are arguments and how many are sort entries, and
+    that is a small number sharing a field with a small bit set.
+
+    Args:
+        flags: A bit set of the `CALL_` constants.
+        sorts: How many sort entries are on the end of the argument run.
+
+    Returns:
+        The packed value, for an `EXPR_FUNCTION` `a`.
+    """
+    return flags | (UInt32(sorts) << _CALL_SORT_SHIFT)
+
+
+def call_flags(tags: UInt32) -> UInt32:
+    """Reads the flags out of a packed call field.
+
+    Args:
+        tags: An `EXPR_FUNCTION` `a`.
+
+    Returns:
+        A bit set of the `CALL_` constants.
+    """
+    return tags & _CALL_FLAG_FIELD
+
+
+def call_sorts(tags: UInt32) -> Int:
+    """Reads the length of a call's `ORDER BY` out of a packed call field.
+
+    Args:
+        tags: An `EXPR_FUNCTION` `a`.
+
+    Returns:
+        How many entries on the end of the argument run are sort entries.
+    """
+    return Int(tags >> _CALL_SORT_SHIFT)
 
 
 struct Expr(ImplicitlyCopyable, Movable):
@@ -1200,6 +1269,7 @@ struct Ast(Movable):
         arguments: List[UInt32],
         flags: UInt32 = 0,
         token: UInt32 = 0,
+        sorts: List[UInt32] = List[UInt32](),
     ) -> UInt32:
         """Builds a function call with an unqualified name.
 
@@ -1208,6 +1278,7 @@ struct Ast(Movable):
             arguments: The argument expressions, in order.
             flags: A bit set of the `CALL_` constants.
             token: The token the name is at.
+            sorts: The call's own `ORDER BY` entries, `STMT_ORDER` nodes.
 
         Returns:
             The node index.
@@ -1215,12 +1286,14 @@ struct Ast(Movable):
         var parts = List[UInt32]()
         parts.append(self.intern(name))
         var named = self.run(parts)
-        var args = self.run(arguments)
+        var all = arguments.copy()
+        all.extend(sorts.copy())
+        var args = self.run(all)
         return self.add(
             Expr(
                 kind=EXPR_FUNCTION,
                 token=token,
-                a=flags,
+                a=call_tags(flags, len(sorts)),
                 children=args,
                 payload=named,
             )

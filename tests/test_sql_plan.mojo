@@ -1196,6 +1196,31 @@ def test_an_argument_by_name_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT upper(a := 'x') FROM t")
 
 
+def test_a_call_modifier_is_refused_here_not_in_the_transformer() raises:
+    # Each of the four asks the fold itself for something firepanda's folds do
+    # not do: an order to see the rows in, a rule for what to do with a null,
+    # or the fold's own state instead of its answer. All four read and print,
+    # so a query holding one still round trips.
+    with assert_raises(contains="WITHIN GROUP on a call"):
+        _ = _plan("SELECT sum(a) WITHIN GROUP (ORDER BY a) FROM t")
+    with assert_raises(contains="EXPORT_STATE on a call"):
+        _ = _plan("SELECT sum(a) EXPORT_STATE FROM t")
+    with assert_raises(contains="ORDER BY inside a call"):
+        _ = _plan("SELECT sum(a ORDER BY a) FROM t")
+    with assert_raises(contains="IGNORE NULLS inside a call"):
+        _ = _plan("SELECT sum(a IGNORE NULLS) FROM t")
+    with assert_raises(contains="RESPECT NULLS inside a call"):
+        _ = _plan("SELECT sum(a RESPECT NULLS) FROM t")
+
+
+def test_a_modifier_on_a_windowed_call_is_refused_too() raises:
+    # The `OVER` path lowers somewhere else, and it reads the same flags on the
+    # way past, so a null treatment beside a window stops rather than being
+    # dropped on the floor.
+    with assert_raises(contains="IGNORE NULLS inside a call"):
+        _ = _plan("SELECT sum(a IGNORE NULLS) OVER () FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage
