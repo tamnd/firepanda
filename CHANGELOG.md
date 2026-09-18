@@ -71,6 +71,17 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+### Changed: a text column compared against a short constant is settled four rows at a time
+
+A filter like `l_returnflag = 'R'` reads a column of sixteen byte views and compares each one against the constant's view, which is four register compares and a branch per row. The comparison itself is the cheap part and the loop around it was most of the cost.
+
+Four views is sixty four bytes, which is a cache line, and a view is two 64-bit words, so one load and one exclusive or against a register holding four copies of the constant settles four rows at once. Deinterleaving the result splits every view's two halves apart again, and a view matched when both of its halves are zero. The tail, which is at most three rows, still goes one at a time.
+
+A long element answers false out of the same instruction rather than needing a branch of its own. Its length field is above twelve and the constant's is at or below, so the low word can never agree, and the payload address in its top two words is never read.
+
+On a ten core M4 at four million rows, three builds a side run alternately, `text/equal_constant_short` reads 877, 681 and 1076 microseconds before and 200, 268 and 395 after. The machine had other work on it throughout, which is where the spread comes from, and every run of one side still sits outside the range of the other. That is between 1.14 and 1.47 billion rows a second before and between 2.53 and 4.99 after.
+
+Nothing above the kernel changes. Issue #79.
 
 ### Changed: the passes a regular expression kernel makes around the engine are measured, and the decode reads a block at a time
 
