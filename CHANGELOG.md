@@ -30,7 +30,7 @@ That reason stopped being one when `stack_payloads` landed in 0.8.8. Both kernel
 
 The test is the one the regular expression kernel got, asked twice over one column. The same rows are replaced once short enough to fit a single morsel and once doubled past the row count where every core takes a share, and row `i` of the tall answer has to be what row `i` of the short one was, for the exact search and then for the folded one. Three of the sample's rows come out too long to sit inside a view and go into a payload, the rest stay inside one, and two are null. Taking the offset shift out of the join on purpose fails it.
 
-`text_extract_regex` was the last kernel of this shape still running on one thread when this landed. It wants the same join done once per capturing group, which is the other kernel entry in this release.
+`text_extract_regex` was the last kernel of this shape still running on one thread when this landed. It wants the same join done once per capturing group, which is what the extract entry in this release does.
 
 ### Changed: pulling capture groups out of a column runs on every core
 
