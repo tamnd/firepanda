@@ -48,6 +48,15 @@ The cache of position sets added above refuses any pattern holding one outright,
 The rule was written down as a step one character on after a match of no width and that is what upstream did until 3.7. What it does now is look at the same position a second time with the end of the pattern refused there, so an arm of the pattern that reads a character gets a turn where an arm that reads nothing has already answered, and only then does the search move along. The two rules agree for every pattern that cannot prefer an empty match over a wider one at the same place, which is why this stood through two slices and through a sweep of 30052 patterns.
 
 The lookahead above is what surfaced it, by making a pattern with no flags anywhere in it reach these two loops for the first time, which put it in front of the differential that compares them against pandas. Both scans and the documents that state the rule are corrected, and both engines learned the rule, the machine and the backtracker, with the test that compares the two asking it of every cursor of every row. Document 93 section 10.
+### Changed: a Parquet read assembles a group of chunks at a time
+
+A read fetched every chunk out of DuckDB, described all of them as Arrow, and only then copied the lot into a frame, because the assembler sizes the buffer it allocates from every batch it is handed and cannot begin until it has them all. So the Arrow copy of the whole answer and the frame it turns into were both resident, and the peak of a read was the sum of the two.
+
+It now assembles half a million rows at a time and lets that group's Arrow arrays go before fetching the next, then stacks the groups into one chunk a column after DuckDB's own result has been destroyed. Nothing downstream can tell: the frame comes back in one chunk the way it always did, which matters because a column with more than one chunk cannot be borrowed and most of this library borrows.
+
+Measured on a 13900K reading sf1 lineitem, six million rows and sixteen columns, with the two builds run alternately four times each, the peak resident set goes from 3498 MB to 3037 MB and the read from 1083 to 1189 ms down to 1011 to 1129. The read gets faster rather than slower because a group that fits in cache is assembled out of cache, and that pays for the stacking step at the end.
+
+The group size is half a million rows because the ladder flattens there. The read peaks at 2896 MB at two million rows a group, 2625 MB at half a million and 2556 MB at a hundred and twenty eight thousand, and at the last of those the read has gone back up to 1220 ms because the fixed cost of an assemble is being paid forty six times. What is left is mostly DuckDB's materialised result, about 1400 MB of it, which is not ours to release a piece at a time. Issue #427.
 
 ## [0.8.13] - 2026-09-18
 
@@ -72,15 +81,6 @@ Both counting loops moved to a new file, `firepanda/kernel/regex/count.mojo`, an
 `counts` and `counts_python` are gone from `Machine` and `counts_text` and `counts_python_text` are gone from `firepanda/kernel/regex/pike.mojo`. The replacements are `counted`, `counted_python`, `counted_text` and `counted_python_text` in the new file, and the two one shot forms take the same arguments they took before. Nothing pandas-facing changes and no answer moves.
 
 The count differential now runs the whole generated corpus through both engines, which was the last of the three that did not.
-### Changed: a Parquet read assembles a group of chunks at a time
-
-A read fetched every chunk out of DuckDB, described all of them as Arrow, and only then copied the lot into a frame, because the assembler sizes the buffer it allocates from every batch it is handed and cannot begin until it has them all. So the Arrow copy of the whole answer and the frame it turns into were both resident, and the peak of a read was the sum of the two.
-
-It now assembles half a million rows at a time and lets that group's Arrow arrays go before fetching the next, then stacks the groups into one chunk a column after DuckDB's own result has been destroyed. Nothing downstream can tell: the frame comes back in one chunk the way it always did, which matters because a column with more than one chunk cannot be borrowed and most of this library borrows.
-
-Measured on a 13900K reading sf1 lineitem, six million rows and sixteen columns, with the two builds run alternately four times each, the peak resident set goes from 3498 MB to 3037 MB and the read from 1083 to 1189 ms down to 1011 to 1129. The read gets faster rather than slower because a group that fits in cache is assembled out of cache, and that pays for the stacking step at the end.
-
-The group size is half a million rows because the ladder flattens there. The read peaks at 2896 MB at two million rows a group, 2625 MB at half a million and 2556 MB at a hundred and twenty eight thousand, and at the last of those the read has gone back up to 1220 ms because the fixed cost of an assemble is being paid forty six times. What is left is mostly DuckDB's materialised result, about 1400 MB of it, which is not ours to release a piece at a time. Issue #427.
 
 ### Changed: `replace` and `extract` run the backtracker
 
