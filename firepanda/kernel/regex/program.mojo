@@ -65,8 +65,8 @@ from firepanda.kernel.regex.tokens import (
     AT_END_STRING,
     AT_END_TEXT,
     AT_NON_BOUNDARY,
-    AT_NON_BOUNDARY_ASCII,
     AT_NON_BOUNDARY_UNICODE,
+    AT_TEXT_NOT_EMPTY,
     CATEGORY_DIGIT,
     CATEGORY_NOT_DIGIT,
     CATEGORY_NOT_SPACE,
@@ -191,6 +191,33 @@ firepanda that answered would be answering where pandas raises.
 comptime UNICODE_LAST: Int32 = 0x10FFFF
 """The last code point, which is the top of the range a negated class is
 complemented against."""
+
+
+comptime PYTHON_NEWEST: Int = 14
+"""The newest CPython this library has been measured against.
+
+What this library copies on one of its two engines is the `re` module, and `re`
+is not the same module in every version of Python this project supports.
+`pixi.toml` says 3.12 and up, and one rule this file writes down changed inside
+that range, so a program is compiled for a version of Python rather than for
+Python.
+
+This is the default for every caller with no interpreter to ask, which is every
+test and every differential that is not already standing inside one. The Python
+door reads the real number off `sys.version_info` and passes it, because the
+answer that matters there is the answer pandas would have given in the process
+the call arrived in.
+"""
+
+
+comptime PYTHON_PLAIN_NON_BOUNDARY: Int = 14
+"""The first CPython where `\\B` is simply the negation of `\\b`.
+
+Up to 3.13 it fails on an empty row instead, whichever alphabet was asked for,
+which is a case written into the engine rather than a consequence of any rule
+about word characters, and 3.14 took it out. Every other engine, RE2 included,
+has always had the plain reading. Document 90.
+"""
 
 
 @fieldwise_init
@@ -400,13 +427,30 @@ struct _Builder(Movable):
     a field says that once.
     """
 
-    def __init__(out self, flags: Int32, captures: Bool, python: Bool = False):
+    var minor: Int
+    """Which CPython this program is being compiled beside.
+
+    A number rather than a flag saying whether one rule is on, because the
+    question a reader has here is which interpreter and not which rule, and
+    because there is no reason to think `\\B` is the last thing `re` will change
+    inside a range of versions this library supports. Only ever read on Python's
+    engine, since RE2 has not got a version of Python.
+    """
+
+    def __init__(
+        out self,
+        flags: Int32,
+        captures: Bool,
+        python: Bool = False,
+        minor: Int = PYTHON_NEWEST,
+    ):
         """Starts an empty program.
 
         Args:
             flags: The pattern's global flags.
             captures: Whether to write the save instructions.
             python: Whether the program is for Python's engine.
+            minor: Which CPython the program is being compiled beside.
         """
         self.code = []
         self.ranges = []
@@ -417,6 +461,7 @@ struct _Builder(Movable):
         self.captures = captures
         self.python = python
         self.narrow = python and (flags & FLAG_ASCII) != 0
+        self.minor = minor
 
     def give_up(mut self, problem: String, gap: Bool = False):
         """Records the first reason the pattern cannot be compiled.
@@ -936,14 +981,17 @@ def _at_value(b: _Builder, which: Int32) -> Int32:
     before a newline that ends the text to Python and only at the end to RE2.
     Both are settled here so that nothing downstream has to know.
 
-    The word boundary is also the anchor `(?a)` moves, and the two halves of it
-    do not move to the same place. `\\b` moves onto RE2's, because the ASCII
-    word class is the same set for both engines and RE2's `\\b` asks about
-    nothing else. `\\B` gets a value of its own, because Python fails a `\\B` on
-    an empty row whichever alphabet was asked for and RE2 matches one, so RE2's
-    value would have brought its answer for the empty row along with its
-    alphabet. `$` is not moved at all, since the alphabet has nothing to say
-    about where a line ends.
+    The word boundary is also the anchor `(?a)` moves, and both halves of it
+    move onto RE2's, because the ASCII word class is the same set of characters
+    for both engines and neither of RE2's two questions asks about anything
+    else. `$` is not moved at all, since the alphabet has nothing to say about
+    where a line ends.
+
+    `\\B` used to need a value of its own under that letter, because Python up
+    to 3.13 fails a `\\B` on an empty row and RE2 matches one, so RE2's value
+    brought its answer for the empty row along with its alphabet. That case is
+    an instruction of its own now, written in front of this one by the caller of
+    this function, which is what lets the two alphabets be two alphabets again.
 
     Args:
         b: The builder, for its flags and its engine.
@@ -955,9 +1003,7 @@ def _at_value(b: _Builder, which: Int32) -> Int32:
     if b.python:
         if which == Int32(Int(AT_BOUNDARY)) and not b.narrow:
             return Int32(Int(AT_BOUNDARY_UNICODE))
-        if which == Int32(Int(AT_NON_BOUNDARY)):
-            if b.narrow:
-                return Int32(Int(AT_NON_BOUNDARY_ASCII))
+        if which == Int32(Int(AT_NON_BOUNDARY)) and not b.narrow:
             return Int32(Int(AT_NON_BOUNDARY_UNICODE))
         if which == Int32(Int(AT_END)):
             if (b.flags & FLAG_MULTILINE) == 0:
@@ -1013,6 +1059,19 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
             _ = b.emit(IN_ANY, 0, 0)
         return
     if it.op == OP_AT:
+        if (
+            b.python
+            and b.minor < PYTHON_PLAIN_NON_BOUNDARY
+            and it.a == Int32(Int(AT_NON_BOUNDARY))
+        ):
+            # Two instructions for one node, and the first of them is the whole
+            # of what the older interpreters have that 3.14 does not. A thread
+            # has to satisfy both to go on, so a row with nothing in it dies
+            # here and a row with something in it reads the second one and gets
+            # the plain answer. Which alphabet was asked for does not come into
+            # it, which is the point: `(?a)` narrows which characters count as
+            # word characters and says nothing about a row that holds none.
+            _ = b.emit(IN_AT, Int32(Int(AT_TEXT_NOT_EMPTY)), 0)
         _ = b.emit(IN_AT, _at_value(b, it.a), 0)
         return
     if it.op == OP_CATEGORY:
@@ -1410,7 +1469,10 @@ def _anchored(code: Span[Instruction, _]) -> Bool:
 
 
 def compile_program(
-    tree: Parsed, engine: UInt8, captures: Bool = False
+    tree: Parsed,
+    engine: UInt8,
+    captures: Bool = False,
+    minor: Int = PYTHON_NEWEST,
 ) -> Program:
     """Turns a parsed pattern into a program for one of the two engines.
 
@@ -1423,6 +1485,11 @@ def compile_program(
             and every thread running it carries a copy of the slots, so it is
             the slower of the two and only the callers that need the text of a
             match ask for it.
+        minor: Which CPython this program is being compiled beside, as the
+            minor number alone. Ignored on RE2, which has not got one. On
+            Python's engine it decides one rule, which is whether `\\B` matches
+            a row with nothing in it, and the default is the newest version
+            this library has been measured against.
 
     Returns:
         The program, or the reason there is not one. A refusal is a value here
@@ -1511,7 +1578,7 @@ def compile_program(
         )
         return out^
 
-    var b = _Builder(tree.flags, captures, python)
+    var b = _Builder(tree.flags, captures, python, minor)
     _check_node(b, tree.nodes, tree.root, MAX_REPEAT_COUNT)
     if b.failed:
         out.ok = False

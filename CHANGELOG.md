@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `\B` on an empty row now follows the interpreter the call arrived in
+
+`Series.str.contains("\\B", flags=re.MULTILINE)` answered False for a row with nothing in it whatever Python was running. CPython up to 3.13 fails a `\B` on an empty subject and 3.14 took the case out and made `\B` the plain negation of `\b`, which is what RE2 has always had, so the old answer was right under one interpreter and wrong under the next. This library now reads `sys.version_info.minor` at its own door and compiles for the Python it is beside. Issue #8 M6.
+
+The rule was found by a differential sweep that came back with 106 disagreements at the end of an unrelated slice. Every pattern it named held a `\B`, none of the new code in that slice ran for any of them, and the two test suites turned out to be asking two different interpreters: the accessor tests run under 3.13 and the sweep runs under the pixi environment, which is 3.14.
+
+The empty row case is now an instruction of its own rather than a third value of the position code. `(?a)` narrows which characters count as word characters and says nothing at all about a row that holds none of any kind, so `AT_NON_BOUNDARY_ASCII` is deleted and the narrow reading of `\B` is RE2's code again. `\b` has two codes, one per alphabet, and `\B` now has the same two.
+
+Nothing moved for RE2, which has no version of Python and no `\B` either, since this library refuses that one on that engine on the separate ground that RE2 asks the word boundary question between bytes rather than between characters.
+
+280 of the 30052 held-out corpus patterns answer differently on 3.13 and on 3.14, and 130 of them are this one. The other 150 are `\z`, which became a legal escape in the same release and is a slice of its own. Document 90.
+
 ### Added: scoped flag groups, which are a letter with a reach
 
 `Series.str.contains("(?i:a)bc")` used to be refused with `a scoped flag group is not carried yet`, and with it every pattern writing a flag letter inside a bracket rather than in front of the whole pattern. All of them are answered now, on either engine, and the regex differential compares 434 more corpus patterns than it did, 8205 of 30052. Every one of the seven letters is read in both forms now but for locale, which Python will not take on a pattern made of text in either form. Issue #8 M6.

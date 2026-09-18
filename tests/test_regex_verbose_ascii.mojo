@@ -212,14 +212,15 @@ def test_the_ascii_flag_narrows_the_word_boundary_too() raises:
 
 
 def test_the_empty_row_is_not_an_alphabet_question() raises:
-    """The row this nearly went out wrong on. Python fails a `\\B` on an empty
-    row and RE2 matches one, which is a special case about the row rather than
-    about which characters are word characters, so it survives the narrowing.
-    Sending `\\B` to RE2's value under the letter would have taken RE2's answer
-    here along with RE2's alphabet, and the sweep next door caught it on this
-    exact cell."""
-    assert_false(ours("\\B", "", FLAG_ASCII))
-    assert_false(ours("\\B", ""))
+    """The row this nearly went out wrong on. Whether a `\\B` matches an empty
+    row is a question about the row rather than about which characters are word
+    characters, so the letter moves neither answer, and sending `\\B` to RE2's
+    value under the letter would have moved one of them. The sweep next door
+    caught that on this exact cell. Which of the two answers it is turned out to
+    depend on which CPython the call arrived in, and document 90 is where that
+    was measured and is where these two rows now come from."""
+    assert_true(ours("\\B", "", FLAG_ASCII))
+    assert_true(ours("\\B", ""))
     assert_false(ours("\\b", "", FLAG_ASCII))
     assert_false(ours("\\b", ""))
     var re2 = compile_program(parse_pattern("\\B"), ENGINE_RE2)

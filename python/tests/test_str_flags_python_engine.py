@@ -11,7 +11,8 @@ engine needed. `count` and `replace` want those scans and are in
 The move is not cosmetic and this file is mostly about the ways it shows. The
 two engines fold four code points differently, read `\\w` as 63 characters and
 as 138558, disagree about a dollar sign in front of a trailing newline, and
-disagree about whether `\\B` matches an empty row. All four of those are
+disagreed about whether `\\B` matches an empty row until 3.14 settled it in
+RE2's favour, which document 90 is about. All four of those are
 reachable from here with one keyword, in pandas and in this library, and every
 assertion below is made against live pandas rather than against that list.
 
@@ -238,24 +239,29 @@ def test_a_flag_changes_where_a_dollar_sign_may_sit(firepanda: ModuleType) -> No
 def test_the_non_boundary_gives_up_on_an_empty_row(firepanda: ModuleType) -> None:
     """The fourth difference, which was found by running this sweep.
 
-    Python's `\\B` fails on an empty subject rather than succeeding there, which
-    is a special case written into CPython in 3.12 and is not a consequence of
-    any rule about word characters. RE2 has no such case and answers True for an
-    empty row, so pandas answers two different things for the same pattern one
-    keyword apart.
+    CPython up to 3.13 fails a `\\B` on an empty subject, which is a special
+    case about the subject rather than a consequence of any rule about word
+    characters. 3.14 took the case out and made `\\B` the plain negation of
+    `\\b`, which is what RE2 has always had, so the empty row is one answer
+    under one interpreter and the other answer under the next. Document 90 is
+    where that was measured and this library reads the running interpreter
+    rather than the one it was written on, which is why the expected value here
+    is computed and not spelled.
 
-    Only one of the two is reachable here. The pattern with no flag beside it
-    goes to RE2, which asks the question between bytes rather than between
-    characters, and that is refused rather than answered wrongly. The refusal is
-    asserted alongside so that the day it becomes an answer this test says so.
+    Only one of the two flag states is reachable here. The pattern with no flag
+    beside it goes to RE2, which asks the question between bytes rather than
+    between characters, and that is refused rather than answered wrongly. The
+    refusal is asserted alongside so that the day it becomes an answer this test
+    says so.
     """
     rows = ["", " ", "ab", "a"]
+    empty = re.search("\\B", "") is not None
     mine, them = made(firepanda, rows), theirs(rows)
     assert mine.str.contains("\\B", flags=re.MULTILINE).tolist() == mask_of(
         them.str.contains("\\B", flags=re.MULTILINE)
     )
     assert mine.str.contains("\\B", flags=re.MULTILINE).tolist() == [
-        False,
+        empty,
         True,
         True,
         False,
