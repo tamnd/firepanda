@@ -94,13 +94,6 @@ The fixed width gather was measured the same way and left alone. Lowering `TAKE_
 
 Issue #79.
 
-### Changed: a group by on several keys factorizes them one per worker
-
-A group by on more than one key gives each key its own dense ordinals and then folds them into one number per row. Those factorizes are independent of each other, they were run one after another, and each is a serial pass until the column is tall enough to be worth splitting on its own. So a group by under those heights ran on one core however many keys it had.
-
-TPC-H q10 is what found it, and it was the one query in that suite firepanda was measurably behind a rival on. It groups a four way join on seven columns, five of them text, and at sf1 the intermediate is 114,705 rows, which is under the height any one of those factorizes splits at. On a 13900K with 32 workers the seven keys cost 15.3 ms of the 17.9 ms the whole step spent, and one key per worker brings that to 7.0 ms. End to end q10 goes from 0.065 s to 0.055 s and q3, which goes through the same function on two keys and is the control, does not move.
-
-The route is taken only when no key would have gone parallel inside its own factorize, since a split inside a split is the same cores twice and neither split knows about the other, and only when there is enough work to pay for the fork. Issue #878 has the sweep the threshold was fitted on.
 ### Fixed: the test runner keeps its logs where nothing else prunes them
 
 `tools/run_tests.sh` collected each file's output in a `mktemp -d` under `TMPDIR`, which on macOS is a per session directory under /var/folders that the system reaps on its own schedule. Two runs in a row lost theirs, one reporting twenty four of a hundred and fifty five files failed and the next reporting all hundred and fifty five, with every one of them saying only that its log did not exist and the tests passing when run one at a time straight afterwards.
