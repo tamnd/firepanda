@@ -66,6 +66,18 @@ Four kinds of pattern are left without a set. One that can match nothing begins 
 
 The set is what the first step could read and not what a match must begin with, which are different for a pattern whose first step is an assertion. `\bfoo` is walked through the boundary to the `f`, so the set is one letter and the assertion still decides. An alternation contributes both arms, a star contributes the letter it repeats and the letter after it, and anything the walk does not recognise ends it with no set at all. Issue #863.
 
+### Added: the `FILTER` clause on an aggregate
+
+`sum(qty) FILTER (WHERE price > 5)` is answered, and so is `count(*) FILTER (WHERE ...)` and a filter on a `DISTINCT` count or on a window aggregate. The clause used to be refused along with the other things that can follow a call, and `WITHIN GROUP` and `EXPORT_STATE` still are.
+
+A fold that passes over a null cannot tell a row that was taken away from a row handed to it as a null, so the clause is read as a `CASE` with no `ELSE` around the argument and there is no new node anywhere. `count(*)` has no argument to put under the `CASE` and counts a one instead, which is counting the rows the predicate keeps. Doing it in the transform is what makes a column written in the predicate an ordinary argument, checked against the group key like any other.
+
+The rewrite is exact for every fold here bar three. `first`, `last` and `any_value` read a null as a value rather than passing over it, so a filter on one of those is refused by name. A filter on a name that is not a fold at all is refused too, rather than erroring, because the name may be a macro the catalog defines and whether that is a fold is not something the transform can know.
+
+`EXPLAIN` prints the conditional rather than the words that were written, which is the one place this diverges from DuckDB, and the rows are the same either way.
+
+One interaction is worth naming. A filter does not take rows away, so a group where the predicate holds for nothing is a group that saw rows and found every value in it null, and `sum` answers zero for that where SQL says null. That is issue #836 rather than anything about the filter, and the same query written with a `WHERE` is null already. There is a test asserting both sides.
+
 ### Added: scoped flag groups, which are a letter with a reach
 
 `Series.str.contains("(?i:a)bc")` used to be refused with `a scoped flag group is not carried yet`, and with it every pattern writing a flag letter inside a bracket rather than in front of the whole pattern. All of them are answered now, on either engine, and the regex differential compares 434 more corpus patterns than it did, 8205 of 30052. Every one of the seven letters is read in both forms now but for locale, which Python will not take on a pattern made of text in either form. Issue #8 M6.

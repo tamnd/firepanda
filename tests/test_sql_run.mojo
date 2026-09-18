@@ -659,6 +659,103 @@ def test_a_group_by_folds_the_rows_into_groups() raises:
     same(read_back(out, "total"), [75, 84], "total")
 
 
+def test_a_filter_keeps_only_the_rows_it_names_out_of_a_fold() raises:
+    # Five of the ten rows have a price over five, and their quantities come to
+    # thirty two. The whole table is still read, so a filter that was quietly
+    # dropped would answer a hundred and fifty nine and be obvious.
+    var out = run(
+        (
+            "SELECT sum(qty) FILTER (WHERE price > 5) AS s,"
+            " count(*) FILTER (WHERE price > 5) AS c FROM sales"
+        ),
+        session(),
+    )
+    same(read_back(out, "s"), [32], "the quantities of the dearer rows")
+    same(read_back(out, "c"), [5], "how many of them there are")
+
+
+def test_a_filter_under_a_group_by_applies_inside_each_group() raises:
+    # Each group tests its own rows, so the two answers are not the whole
+    # table's answer split in half and a filter lifted into a `WHERE` would
+    # change the other column as well.
+    var out = run(
+        (
+            "SELECT shop, sum(qty) FILTER (WHERE price > 5) AS s,"
+            " count(*) FILTER (WHERE qty > 20) AS c, count(*) AS n FROM sales"
+            " GROUP BY shop ORDER BY shop"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2], "shop")
+    same(read_back(out, "s"), [8, 24], "the dearer rows of each shop")
+    same(read_back(out, "c"), [2, 1], "the larger rows of each shop")
+    same(read_back(out, "n"), [5, 5], "every row of each shop")
+
+
+def test_a_filter_rides_on_a_distinct_count_and_on_an_extreme() raises:
+    var out = run(
+        (
+            "SELECT count(DISTINCT shop) FILTER (WHERE price > 5) AS d,"
+            " max(qty) FILTER (WHERE price > 5) AS m FROM sales"
+        ),
+        session(),
+    )
+    same(read_back(out, "d"), [2], "both shops sold a dearer row")
+    same(read_back(out, "m"), [15], "the largest of the dearer rows")
+
+
+def test_a_filter_that_keeps_no_row_answers_zero_and_duckdb_says_null() raises:
+    # Registered divergence, and it is #836 rather than anything about the
+    # filter. A filter does not take rows away, it turns the ones it does not
+    # want into nulls, so the group is a group that saw rows and found every
+    # value in it null, and this engine's sum answers zero for that. Written
+    # with a `WHERE` instead the same query is null already, which is the test
+    # above this file's sum over no rows at all.
+    same(
+        gapped(
+            run(
+                "SELECT sum(qty) FILTER (WHERE price > 500) AS s FROM sales",
+                session(),
+            ),
+            "s",
+        ),
+        [0],
+        "zero here and null in DuckDB",
+    )
+
+
+def test_a_filter_on_a_fold_that_reads_a_null_as_a_value_is_refused() raises:
+    # These three take the first or the last value rather than folding over the
+    # values, and a null is one of the values to them. A row the filter turned
+    # into a null is not a row it took away as far as they are concerned, so
+    # the rewrite would answer a different question and there is no other one.
+    with assert_raises(contains="FILTER on first"):
+        _ = run(
+            "SELECT first(qty) FILTER (WHERE price > 5) AS f FROM sales",
+            session(),
+        )
+    with assert_raises(contains="FILTER on last"):
+        _ = run(
+            "SELECT last(qty) FILTER (WHERE price > 5) AS f FROM sales",
+            session(),
+        )
+    with assert_raises(contains="FILTER on any_value"):
+        _ = run(
+            "SELECT any_value(qty) FILTER (WHERE price > 5) AS f FROM sales",
+            session(),
+        )
+
+
+def test_a_filter_on_something_that_is_not_a_fold_is_refused() raises:
+    # DuckDB says the same thing about it, since a filter describes which rows
+    # a fold reads and a scalar call reads one row by definition.
+    with assert_raises(contains="FILTER on upper"):
+        _ = run(
+            "SELECT upper(word) FILTER (WHERE n > 1) AS u FROM words",
+            session(),
+        )
+
+
 def test_a_group_by_folds_by_a_name_the_select_list_gave() raises:
     # The same two groups as the query above, which wrote the column itself.
     var out = run(

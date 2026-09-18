@@ -107,7 +107,7 @@ comptime POSTFIX_OPERATOR: UInt16 = 8
 """An operator written after its operand."""
 
 comptime CALL_MODIFIER: UInt16 = 9
-"""`FILTER` or `OVER` after a call."""
+"""`WITHIN GROUP` or `EXPORT_STATE` after a call."""
 
 comptime CALL_ARGUMENT: UInt16 = 10
 """`ORDER BY` or a null treatment inside a call."""
@@ -204,6 +204,9 @@ comptime QUANTIFIED_VALUE: UInt16 = 40
 
 comptime NO_CASE: UInt16 = 41
 """A grammar rule the transformer has no case for at all."""
+
+comptime AGGREGATE_FILTER: UInt16 = 42
+"""`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
 
 def sql_support() -> List[Refusal]:
@@ -305,9 +308,9 @@ def sql_support() -> List[Refusal]:
             "call-modifier",
             "{} on a call",
             (
-                "A window specification is read now. The aggregate filter and"
-                " the two that change what a call reads are the rest of this"
-                " stage and are not in the AST yet."
+                "A window specification and an aggregate filter are read now."
+                " WITHIN GROUP and EXPORT_STATE change what a call reads, which"
+                " is the rest of this stage and is not in the AST yet."
             ),
             STAGE_ISSUE,
         ),
@@ -606,6 +609,18 @@ def sql_support() -> List[Refusal]:
                 " rule the transformer has no case for. Please file it."
             ),
             STAGE_ISSUE,
+        ),
+        Refusal(
+            "aggregate-filter",
+            "FILTER on {}",
+            (
+                "A filter is read as a CASE around the argument, which answers"
+                " the same number for a fold that passes over a null. first,"
+                " last and any_value read a null as a value, so it would not,"
+                " no fold here reads more than one argument, and a name that is"
+                " not a fold has nothing for the CASE to go inside."
+            ),
+            SQL_ISSUE,
         ),
     ]
 

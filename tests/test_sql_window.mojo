@@ -327,26 +327,29 @@ def test_an_expression_bound_is_an_expression() raises:
 
 
 def test_the_other_call_modifiers_still_refuse_by_name() raises:
-    # `OVER` is the only one of the four that is implemented, and the other
-    # three have to keep saying so rather than being silently ignored now that
-    # the loop over them no longer stops at the first.
+    # Two of the four are implemented and the other two have to keep saying so
+    # rather than being silently ignored now that the loop over them no longer
+    # stops at the first.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="FILTER"):
-        _ = _printed("SELECT sum(a) FILTER (WHERE b) FROM t", g, rules)
     with assert_raises(contains="WITHIN"):
         _ = _printed(
             "SELECT quantile(a) WITHIN GROUP (ORDER BY a) FROM t", g, rules
         )
 
 
-def test_a_filter_next_to_an_over_still_refuses() raises:
+def test_a_filter_next_to_an_over_is_read_beside_it() raises:
+    # Both clauses sit on the same call and neither one eats the other. The
+    # filter goes under the argument and the window stays where it was, which
+    # is worth a test because they are read in the same loop.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="FILTER"):
-        _ = _printed(
+    assert_equal(
+        _printed(
             "SELECT sum(a) FILTER (WHERE b) OVER (ORDER BY c) FROM t", g, rules
-        )
+        ),
+        "SELECT sum(CASE WHEN b THEN a END) OVER (ORDER BY c) FROM t",
+    )
 
 
 def test_the_nodes_a_window_query_builds() raises:

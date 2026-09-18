@@ -96,6 +96,8 @@ from .ast import (
     SORT_DEFAULT,
     SORT_DESCENDING,
 )
+from .catalog import fold
+from .classify import is_aggregate
 from .generated.rules import NODE_REF, RULE_END_OF_INPUT
 from .matcher import Parse, parse_rule
 from .table import Grammar
@@ -112,6 +114,7 @@ from .token import (
     token_text,
 )
 from .unsupported import (
+    AGGREGATE_FILTER,
     ALIAS_COLON,
     ARRAY_SUBQUERY,
     CALL_ARGUMENT,
@@ -2481,7 +2484,8 @@ struct Transform(Movable):
             The expression node.
 
         Raises:
-            Error: If the call carries a modifier this has no case for.
+            Error: If the call carries a modifier this has no case for, or if a
+                `FILTER` is written on something it cannot be rewritten into.
         """
         # `FunctionExpression <- FunctionIdentifier FunctionExpressionArguments
         # WithinGroupClause? FilterClause? ExportClause? OverClause?`. The four
@@ -2490,21 +2494,38 @@ struct Transform(Movable):
         var kids = tree.children(node)
         var at = tree.nodes[Int(node)].token_start
         var over = NO_NODE
+        var filtering = NO_NODE
         for i in range(2, len(kids)):
-            if _word(tree, sql, kids[i]) == "OVER":
+            var word = _word(tree, sql, kids[i])
+            if word == "OVER":
                 over = kids[i]
+                continue
+            if word == "FILTER":
+                filtering = kids[i]
                 continue
             raise _unsupported(
                 tree,
                 sql,
                 kids[i],
                 CALL_MODIFIER,
-                _word(tree, sql, kids[i]),
+                word,
             )
+
+        var warming = List[UInt32]()
         if over != NO_NODE:
-            var only = List[UInt32]()
-            only.append(over)
-            work.warm(only)
+            warming.append(over)
+        var predicate = NO_NODE
+        if filtering != NO_NODE:
+            # `FilterClause <- 'FILTER' Parens('WHERE'? Expression)`, and the
+            # `WHERE` is optional, so the expression is taken from the end
+            # rather than from a position that moves when the word is left out.
+            var inside = tree.children(
+                self._only(tree, self._only(tree, self._only(tree, filtering)))
+            )
+            predicate = inside[len(inside) - 1]
+            warming.append(predicate)
+        if len(warming) != 0:
+            work.warm(warming)
 
         var parts = self._parts(tree, sql, self._only(tree, kids[0]))
         var names = List[UInt32]()
@@ -2548,6 +2569,36 @@ struct Transform(Movable):
                 flags |= CALL_STAR
                 arguments = List[UInt32]()
 
+        if predicate != NO_NODE:
+            # `f(x) FILTER (WHERE c)` is `f(CASE WHEN c THEN x END)` for a fold
+            # that passes over a null, which is every fold this engine has, and
+            # the rewrite is done here so that nothing downstream has to carry a
+            # second place an expression can hide. A column written in the
+            # predicate is then an ordinary argument and is checked against the
+            # group key like any other.
+            #
+            # DuckDB keeps the clause instead of rewriting it, so `EXPLAIN` here
+            # prints the `CASE` rather than the words that were written. The
+            # rows are the same and the plan says what it is going to do, which
+            # is the trade this makes.
+            var kept = self._filtered(
+                tree,
+                sql,
+                filtering,
+                parts,
+                work.value(predicate),
+                flags,
+                arguments,
+                ast,
+            )
+            if flags & CALL_STAR != 0:
+                # `count(*) FILTER (WHERE c)` has no argument to put under the
+                # `CASE`, so it counts a one on the rows the predicate keeps.
+                # Counting a constant is counting rows, and the star goes with
+                # the argument it no longer stands in for.
+                flags &= ~CALL_STAR
+            arguments = kept^
+
         return ast.add(
             Expr(
                 kind=EXPR_FUNCTION,
@@ -2558,6 +2609,74 @@ struct Transform(Movable):
                 payload=ast.run(names),
             )
         )
+
+    def _filtered(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        parts: List[String],
+        predicate: UInt32,
+        flags: UInt32,
+        arguments: List[UInt32],
+        mut ast: Ast,
+    ) raises -> List[UInt32]:
+        """Puts a `FILTER` predicate under the argument of the call it is on.
+
+        A fold that passes over a null answers the same number whether the rows
+        it is not meant to see are taken away or handed to it as nulls, so the
+        clause is a `CASE` with no `ELSE` around the argument. That is exact for
+        every fold this engine has bar three, and the three say so by name, as
+        does a name that is not a fold at all.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `FilterClause` node, for where a refusal points.
+            parts: The name of the call, outermost part first.
+            predicate: The expression the `WHERE` holds.
+            flags: The call's flags, for whether it was `f(*)`.
+            arguments: The arguments as they were written.
+            ast: Where to put the `CASE`.
+
+        Returns:
+            The arguments to build the call with instead.
+
+        Raises:
+            Error: If the clause is on something the rewrite does not hold for.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var name = fold(parts[len(parts) - 1])
+        if not is_aggregate(name):
+            # A filter belongs to a fold, which is what DuckDB says about it
+            # too, and a name that is not one of the aggregates has nothing for
+            # the `CASE` to go inside. It refuses rather than erroring because
+            # the name may be a macro the catalog defines, and whether that is
+            # a fold is not something this pass can know.
+            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
+        if name == "first" or name == "last" or name == "any_value":
+            # These three read a null as a value rather than passing over it, so
+            # a row the predicate drops and a row it turns into a null are not
+            # the same row to them, and the rewrite would answer a different
+            # question. There is nothing else to rewrite it into.
+            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
+        if flags & CALL_STAR != 0:
+            var arms = List[UInt32]()
+            arms.append(predicate)
+            arms.append(ast.literal(LITERAL_NUMBER, "1", at))
+            var counted = List[UInt32]()
+            counted.append(ast.case(arms, NO_NODE, NO_NODE, at))
+            return counted^
+        if len(arguments) != 1:
+            # Every fold here reads one argument, so there is no case where
+            # wrapping several of them has been thought about.
+            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
+        var arms = List[UInt32]()
+        arms.append(predicate)
+        arms.append(arguments[0])
+        var out = List[UInt32]()
+        out.append(ast.case(arms, NO_NODE, NO_NODE, at))
+        return out^
 
     def _substring(
         self,

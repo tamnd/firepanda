@@ -13,6 +13,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import Ast
 from firepanda.sql.unsupported import (
+    AGGREGATE_FILTER,
     ALIAS_COLON,
     CALL_MODIFIER,
     ESCAPE_STRING,
@@ -40,10 +41,11 @@ def test_the_constants_line_up_with_the_table() raises:
     assert_equal(refusal(ALIAS_COLON).feature, "alias-colon")
     assert_equal(refusal(ESCAPE_STRING).feature, "escape-string")
     assert_equal(refusal(NO_CASE).feature, "no-case")
+    assert_equal(refusal(AGGREGATE_FILTER).feature, "aggregate-filter")
 
 
 def test_the_last_constant_is_the_last_entry() raises:
-    assert_equal(Int(NO_CASE) + 1, len(sql_support()))
+    assert_equal(Int(AGGREGATE_FILTER) + 1, len(sql_support()))
 
 
 def test_no_two_entries_share_a_name() raises:
