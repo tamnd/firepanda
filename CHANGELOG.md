@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: verbose mode and the ascii flag, which are the last two of the seven letters
+
+`Series.str.contains("a # comment\nb", flags=re.VERBOSE)` and `Series.str.contains(r"\w", flags=re.ASCII)` used to be refused, and with them every call on the accessor carrying either letter or a written `(?x)` or `(?a)`. All of them are answered now, out of Python's engine, which is where upstream sends a call carrying any flag. Six of the seven letters are read and the seventh is one Python will not take on a pattern made of text either. Issue #8 M6.
+
+Verbose mode is a rule about where the skip happens and not about which characters are skipped. The skip is at the top of the item loop and nowhere the item loop calls into, which is why `[a b]` still matches a space, why `a{1, 2}` is not a repeat, and why the `?` in `a * ?` is a second quantifier rather than a lazy marker. The whitespace set is the six characters `re` names and not Unicode's, so a file separator in a pattern still means something. A `#` runs to the end of the line and `\ ` and `\#` and a character class put both characters back.
+
+The ascii flag narrows six classes, the ignorecase fold and the word boundary, and it could not reuse RE2's tables to do it. Python's ASCII `\s` holds a vertical tab and RE2's never did, so there are three alphabets here where there were two. Under the letter the Kelvin sign stops folding onto `k` and an e-acute stops folding onto its own capital, and `(?a)(?u)` is refused in Python's own words.
+
+The word boundary moves too and its two halves do not move to the same place. `\b` takes RE2's reading, since the ASCII word class is one set both engines have. `\B` takes a reading of its own, because Python fails a `\B` on an empty row whichever alphabet was asked for and RE2 matches one, so RE2's reading would have brought its answer for the empty row along with its alphabet.
+
+`fullmatch` and `match` on Python's engine are answered by writing `\A(pattern)\z` around the pattern text, and verbose mode is the first flag that reaches into that rewrite. A verbose pattern may end in the middle of a comment, and gluing a bracket onto `a # c` puts the bracket inside the comment where the grammar never sees it. A newline goes in ahead of the closing bracket under verbose mode and nowhere else, because a newline is the only thing that ends a comment and verbose mode throws one away.
+
+A scoped flag group is still refused. `(?x:a b)` now reads as a scoped group rather than as an unread letter, so the refusal moved from one sentence to another and the thing missing is a place to hang a flag on a node. Document 88.
+
 ### Fixed: an outer join takes a condition about its right side, so TPC-H q13 answers
 
 `FROM customer LEFT JOIN orders ON c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%'` was refused. It runs now, and TPC-H q13 with it. Issue #816.
@@ -31,19 +45,6 @@ A patch release with three threads in it: the last of the flags work on the stri
 TPC-H q11 answers and agrees with DuckDB, which takes `pixi run tpch` to nineteen of twenty two. A subquery that answers one value was refused in a `HAVING` and allowed in the `WHERE` of the same query, and what differed was where the cross join carrying it was put rather than anything about the subquery. It goes above the aggregate when the clause that wrote it reads it from up there.
 
 Every text kernel of the builder shape runs on every core now. The literal `text_replace` and the folded one beside it followed the regular expression replace from 0.8.8, and `text_extract_regex` went last with the join run once per capturing group. The number 0.8.8 could not take, because the machine it would have been measured on was carrying a load average above ninety, is in this one: ClickBench q28 at 1M is 1.95 s where it was 5.48 s, on 3.41 cores where it was 1.00, with q27 run alongside as the control and unchanged either way. That leaves this library about twelve times slower than DuckDB on that query rather than about twenty, and issue #830 stays open on the rest of it.
-### Added: verbose mode and the ascii flag, which are the last two of the seven letters
-
-`Series.str.contains("a # comment\nb", flags=re.VERBOSE)` and `Series.str.contains(r"\w", flags=re.ASCII)` used to be refused, and with them every call on the accessor carrying either letter or a written `(?x)` or `(?a)`. All of them are answered now, out of Python's engine, which is where upstream sends a call carrying any flag. Six of the seven letters are read and the seventh is one Python will not take on a pattern made of text either. Issue #8 M6.
-
-Verbose mode is a rule about where the skip happens and not about which characters are skipped. The skip is at the top of the item loop and nowhere the item loop calls into, which is why `[a b]` still matches a space, why `a{1, 2}` is not a repeat, and why the `?` in `a * ?` is a second quantifier rather than a lazy marker. The whitespace set is the six characters `re` names and not Unicode's, so a file separator in a pattern still means something. A `#` runs to the end of the line and `\ ` and `\#` and a character class put both characters back.
-
-The ascii flag narrows six classes, the ignorecase fold and the word boundary, and it could not reuse RE2's tables to do it. Python's ASCII `\s` holds a vertical tab and RE2's never did, so there are three alphabets here where there were two. Under the letter the Kelvin sign stops folding onto `k` and an e-acute stops folding onto its own capital, and `(?a)(?u)` is refused in Python's own words.
-
-The word boundary moves too and its two halves do not move to the same place. `\b` takes RE2's reading, since the ASCII word class is one set both engines have. `\B` takes a reading of its own, because Python fails a `\B` on an empty row whichever alphabet was asked for and RE2 matches one, so RE2's reading would have brought its answer for the empty row along with its alphabet.
-
-`fullmatch` and `match` on Python's engine are answered by writing `\A(pattern)\z` around the pattern text, and verbose mode is the first flag that reaches into that rewrite. A verbose pattern may end in the middle of a comment, and gluing a bracket onto `a # c` puts the bracket inside the comment where the grammar never sees it. A newline goes in ahead of the closing bracket under verbose mode and nowhere else, because a newline is the only thing that ends a comment and verbose mode throws one away.
-
-A scoped flag group is still refused. `(?x:a b)` now reads as a scoped group rather than as an unread letter, so the refusal moved from one sentence to another and the thing missing is a place to hang a flag on a node. Document 88.
 
 ### Changed: the replace differential compares the sweeps it used to set aside
 
