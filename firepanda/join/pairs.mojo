@@ -542,6 +542,139 @@ def _merge_subset[
     return JoinIndices(out_left^, out_right^)
 
 
+def _merge_inner[
+    dt: DType, //
+](
+    left: Array[dt], left_rows: Int, right: Array[dt], right_rows: Int
+) raises -> JoinIndices:
+    """Pairs an inner join by walking two sorted key columns together.
+
+    The same walk as `_merge_subset` with the emit fanning out. A semi join asks
+    whether the right side holds a left row's key and answers once, where an
+    inner join has to name every right row holding it, so where the subset walk
+    emits one entry or none this emits as many as the run of equal right keys is
+    long.
+
+    Finding that run is a second cursor, and it is worth saying why it does not
+    cost a scan a row. The run is found once a distinct left key rather than once
+    a left row, because a left key that repeats meets the same run of right keys,
+    and the runs of two different left keys do not overlap. So the second cursor
+    walks each right row at most once across the whole morsel, the same bound the
+    first cursor has, and a left side that is one key repeated a million times
+    searches once.
+
+    The entries for one left row come out with their right rows increasing,
+    because the fan out reads the run forwards. That is the order `pair_probe`
+    produces and the order `_by_left_row` is careful to preserve, so a caller
+    cannot tell which route ran.
+
+    Parameters:
+        dt: The key type, taken from the two columns.
+
+    Args:
+        left: The probe side's keys, sorted and with no nulls.
+        left_rows: How many of them to read.
+        right: The built side's keys, sorted and with no nulls.
+        right_rows: How many of them to read.
+
+    Returns:
+        One entry per matching pair, in left row order, and within a left row in
+        right row order.
+
+    Raises:
+        If the parallel walk raises.
+    """
+    var parallel = left_rows >= PARALLEL_LEFT_ROWS
+    var chunk = LEFT_MORSEL_ROWS if parallel else max(left_rows, 1)
+    var pieces = (left_rows + chunk - 1) // chunk
+    if pieces == 0:
+        pieces = 1
+    var counts = List[Int](length=pieces + 1, fill=0)
+
+    def tally(start: Int, stop: Int) raises {mut counts, imm}:
+        if start >= stop:
+            return
+        var lp = left.unsafe_ptr()
+        var rp = right.unsafe_ptr()
+        var here = 0
+        var j = _lower_bound(
+            rp, right_rows, lp.unsafe_offset(start).unsafe_load()
+        )
+        var held = Scalar[dt](0)
+        var have = False
+        var run = 0
+        for i in range(start, stop):
+            var value = lp.unsafe_offset(i).unsafe_load()
+            if not have or value != held:
+                while (
+                    j < right_rows and rp.unsafe_offset(j).unsafe_load() < value
+                ):
+                    j += 1
+                var k = j
+                while (
+                    k < right_rows
+                    and rp.unsafe_offset(k).unsafe_load() == value
+                ):
+                    k += 1
+                run = k - j
+                held = value
+                have = True
+            here += run
+        counts[start // chunk + 1] = here
+
+    if not parallel:
+        tally(0, left_rows)
+    else:
+        parallel_morsels(tally, left_rows, chunk)
+    for m in range(pieces):
+        counts[m + 1] += counts[m]
+
+    var out_left = List[Int](unsafe_uninit_length=counts[pieces])
+    var out_right = List[Int](unsafe_uninit_length=counts[pieces])
+
+    def spill(start: Int, stop: Int) raises {mut out_left, mut out_right, imm}:
+        if start >= stop:
+            return
+        var lp = left.unsafe_ptr()
+        var rp = right.unsafe_ptr()
+        var left_out = out_left.unsafe_ptr()
+        var right_out = out_right.unsafe_ptr()
+        var put = counts[start // chunk]
+        var j = _lower_bound(
+            rp, right_rows, lp.unsafe_offset(start).unsafe_load()
+        )
+        var held = Scalar[dt](0)
+        var have = False
+        var run = 0
+        for i in range(start, stop):
+            var value = lp.unsafe_offset(i).unsafe_load()
+            if not have or value != held:
+                while (
+                    j < right_rows and rp.unsafe_offset(j).unsafe_load() < value
+                ):
+                    j += 1
+                var k = j
+                while (
+                    k < right_rows
+                    and rp.unsafe_offset(k).unsafe_load() == value
+                ):
+                    k += 1
+                run = k - j
+                held = value
+                have = True
+            for t in range(run):
+                left_out.unsafe_offset(put).unsafe_write(i)
+                right_out.unsafe_offset(put).unsafe_write(j + t)
+                put += 1
+
+    if not parallel:
+        spill(0, left_rows)
+    else:
+        parallel_morsels(spill, left_rows, chunk)
+
+    return JoinIndices(out_left^, out_right^)
+
+
 def _merge_route[
     l: ImmOrigin, r: ImmOrigin
 ](
@@ -559,13 +692,17 @@ def _merge_route[
     at the first pair out of order, so a join whose keys are in no order pays for
     a handful of rows and goes where it was going.
 
-    A semi join and an anti join are here, and they are the two kinds whose
-    output is a subset of the left rows in left row order, which is exactly what
-    walking the two columns produces. So there is nothing to sort afterwards and
-    nothing to gather from the right, and the two differ only in which answer to
-    the one question they keep. An inner join on sorted keys is the same walk
-    with the emit fanning out over a run of equal right keys, and it is a
-    separate change.
+    A semi join, an anti join and an inner join are here. The first two produce
+    a subset of the left rows in left row order and differ only in which answer
+    to the one question they keep. An inner join is the same walk with the emit
+    fanning out over the run of equal right keys, which comes out in left row
+    order too, and within a left row in right row order. So none of the three
+    has anything to sort afterwards.
+
+    A left, right or outer join is not here. Each of them has to emit a row for
+    a left or a right row that found nothing, and for the right side that means
+    knowing which right rows were never reached, which the walk does not record
+    and which is a separate change.
 
     Nulls are declined rather than handled. A null key has no place in an
     ordering, so a column holding one is a column the walk cannot read as sorted
@@ -589,7 +726,11 @@ def _merge_route[
     Raises:
         If reading either key column raises.
     """
-    if kind != JoinKind.SEMI and kind != JoinKind.ANTI:
+    if (
+        kind != JoinKind.SEMI
+        and kind != JoinKind.ANTI
+        and kind != JoinKind.INNER
+    ):
         return None
     if len(left_keys) != 1:
         return None
@@ -610,10 +751,18 @@ def _merge_route[
         return None
 
     var wants_matched = kind == JoinKind.SEMI
+    var wants_pairs = kind == JoinKind.INNER
     var kind_of = left.dtype()
     comptime for dt in ALL:
         comptime if dt.is_integral():
             if kind_of == dt:
+                if wants_pairs:
+                    return _merge_inner(
+                        left.as_typed_view[dt](),
+                        left_rows,
+                        right.as_typed_view[dt](),
+                        right_rows,
+                    )
                 if wants_matched:
                     return _merge_subset[True](
                         left.as_typed_view[dt](),
@@ -723,9 +872,9 @@ def join_indices[
             left_rows,
         )
 
-    # Two sorted keys and a semi or anti join is a walk rather than a table.
-    # The question costs two scans that stop at the first pair out of order,
-    # and `_merge_route` has the argument and the measurement.
+    # Two sorted keys and a semi, anti or inner join is a walk rather than a
+    # table. The question costs two scans that stop at the first pair out of
+    # order, and `_merge_route` has the argument and the measurement.
     var walked = _merge_route(
         left_columns,
         left_keys,
