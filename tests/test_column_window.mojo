@@ -24,7 +24,7 @@ from firepanda.buffer.buffer import ALIGNMENT, Buffer
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.morsel import MORSEL_ROWS
-from firepanda.exec import Node, Pipeline, Project
+from firepanda.exec import Node, Pipeline, Project, Scan
 from firepanda.frame.frame import DataFrame
 
 
@@ -252,12 +252,8 @@ def _lists(rows: Int) raises -> AnyArray:
     return AnyArray.nested_from(nodes^)
 
 
-def test_a_frame_holding_a_list_column_is_not_cut_at_all() raises:
-    # The scan cuts a tall chunk into morsels, and a list column is the one
-    # shape it cannot cut. If it cut the other columns anyway the frame would
-    # come out chunked differently from column to column and the scan would
-    # refuse its own work, so a frame with a list in it is left whole.
-    var rows = MORSEL_ROWS + 3
+def _nested_frame(rows: Int) raises -> DataFrame:
+    """One chunk of `rows` rows, a number beside a list of one element."""
     var plain = Array[DType.int64](rows)
     for i in range(rows):
         plain[i] = Int64(i)
@@ -268,9 +264,21 @@ def test_a_frame_holding_a_list_column_is_not_cut_at_all() raises:
     var fields = List[Field]()
     fields.append(Field("n", LogicalType.INT64))
     fields.append(Field("items", LogicalType.list_of(DType.int64)))
-    var frame = DataFrame(Schema(fields^), columns^)
+    return DataFrame(Schema(fields^), columns^)
 
-    var pipeline = Pipeline(frame^)
+
+def test_a_frame_holding_a_list_column_is_not_cut_at_all() raises:
+    # A scan that is asked to cut a tall chunk into morsels cuts every column,
+    # and a list column is the one shape it cannot cut. If it cut the others
+    # anyway the frame would be chunked differently from column to column and
+    # the scan would refuse its own work, so asking is refused quietly here and
+    # the frame is left whole.
+    var rows = MORSEL_ROWS + 3
+    var scan = Scan(_nested_frame(rows))
+    scan.cut()
+    assert_equal(scan.num_chunks(), 1, "the frame is left whole")
+
+    var pipeline = Pipeline(_nested_frame(rows))
     pipeline.add(Node(Project([0])))
     var out = pipeline^.run()
     assert_equal(out.rows, rows)

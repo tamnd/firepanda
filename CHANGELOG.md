@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a scan cuts a tall chunk into morsels only when there is something to spread them over
+
+A reader hands back a frame in one chunk however many rows it read, and a line of elementwise operators over such a frame used to run about 1.65 times slower than the same rows in chunks, because with one chunk there is nothing for the driver to hand out. The scan answered that by cutting any chunk taller than a morsel into morsels, and it did the cutting in its constructor, which is before a single operator has been added to the pipeline.
+
+That is too early to know whether the cut helps. A line whose first operator is a breaker has no prefix to run on the other cores, so the morsels are pushed through it one after another on the calling thread, and a kernel that used to be handed a million rows and spread the work itself is handed a hundred and twenty eight thousand eight times over, each piece under the width it splits at. Every ClickBench query with a group by or a reduction in it paid for that. At 1M through the SQL front end, medians of seven runs with both drivers built from the same source and run back to back: q33 161.1 against 51.2 milliseconds, q32 193.3 against 39.7, q16 63.2 against 30.9, and q29 110.8 against 68.2, before against after.
+
+The cut now happens in `run`, where both halves of the question are known: the scan is built before the operators are added and the line is complete by the time it runs. `Pipeline._prefix_lead` is the shape half of `_parallel_lead`, and the source is asked to cut only when there are two workers and a prefix worth handing out. Nothing else about the cut changes. The pieces are still windows rather than copies, a frame holding a nested column is still left exactly as it arrived, and a line that does spread its work still gets its morsels: q20, which filters and does not group and is the shape the original change was measured on, reads 6.8 against 6.7 milliseconds across the same pair, and q23 reads 10.0 against 10.1.
+
+`exec/pipeline_reduce_only_one_chunk` is new and is a reduction over a frame in one chunk. That shape had no benchmark, and `group/pipeline_stream_one_chunk`, which looks like it covers it, did not: while the source cut at construction, the one chunk row was the chunked row under another name and could not move. Issue #918.
+
 ### Added: SQL runs a call written with a dot
 
 `f(x).g(y)` used to be refused by the transformer, and 36 statements in DuckDB's corpus stopped there. They read now, they print back with the dot where it was written, and they lower and run, because `x.f(y)` is the call `f(x, y)` and nothing else. The operand is the first argument and a flag on the call says how it was written, so every stage after the transformer reads it as the ordinary call it is without knowing the flag is there.

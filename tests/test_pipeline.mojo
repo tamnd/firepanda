@@ -66,6 +66,7 @@ from firepanda.exec import (
     node_process,
     node_status,
 )
+from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
@@ -155,6 +156,29 @@ def many_chunk_frame() raises -> DataFrame:
     var columns = List[ChunkedArray]()
     columns.append(n^)
     columns.append(keep^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def tall_frame() raises -> DataFrame:
+    """One chunk of a morsel and three rows, with a mask over it.
+
+    This is the shape every reader hands back, one chunk however many rows were
+    read, and it is the only shape the morsel cut has anything to say about. The
+    three rows past the morsel are there so the second piece is a short one,
+    which is the piece an off by one in the cut gets wrong.
+    """
+    var rows = MORSEL_ROWS + 3
+    var values = List[Int64](capacity=rows)
+    var mask = List[Bool](capacity=rows)
+    for i in range(rows):
+        values.append(Int64(i + 1))
+        mask.append(i % 3 != 0)
+    var columns = List[AnyArray]()
+    columns.append(numbers(values))
+    columns.append(flags(mask))
     var fields = List[Field]()
     fields.append(Field("n", LogicalType.INT64))
     fields.append(Field("keep", LogicalType.BOOL))
@@ -317,6 +341,41 @@ def test_a_scan_hands_out_the_chunks_the_frame_was_made_of() raises:
     assert_equal(sizes[0], 2, "first chunk")
     assert_equal(sizes[1], 3, "second chunk")
     assert_equal(sizes[2], 1, "third chunk")
+
+
+def test_a_scan_leaves_a_tall_chunk_alone_until_it_is_asked() raises:
+    # A reader hands back one chunk however many rows it read, and whether that
+    # chunk is worth cutting into morsels depends on what is above it, which the
+    # scan does not know when it is built. So it is built whole and cut later.
+    var scan = Scan(tall_frame())
+    assert_equal(scan.num_chunks(), 1, "before the cut")
+    scan.cut()
+    assert_equal(scan.num_chunks(), 2, "after it")
+
+    var sizes = List[Int]()
+    var first = Int64(0)
+    while True:
+        var chunk = scan.next()
+        if not chunk:
+            break
+        var got = chunk.take()
+        sizes.append(len(got))
+        if len(sizes) == 1:
+            var col = got.column(0)
+            first = col.as_typed[DType.int64]()[0]
+    assert_equal(sizes[0], MORSEL_ROWS, "a whole morsel")
+    assert_equal(sizes[1], 3, "and the rows past it")
+    assert_equal(first, Int64(1), "the pieces come out in order")
+
+
+def test_cutting_a_scan_twice_changes_nothing_the_second_time() raises:
+    # `run` asks once, but the piece that is already a morsel long has to be
+    # left where it is rather than counted again, which is the off by one a
+    # second call would show.
+    var scan = Scan(tall_frame())
+    scan.cut()
+    scan.cut()
+    assert_equal(scan.num_chunks(), 2, "still two")
 
 
 def test_a_scan_refuses_columns_cut_in_different_places() raises:
@@ -1747,6 +1806,48 @@ def test_a_limit_with_nothing_holding_the_rows_under_it_still_stops() raises:
     pipeline.add(Node(Filter(1)))
     pipeline.add(Node(Limit(3)))
     assert_equal(pipeline._parallel_lead(), 0, "on the calling thread")
+
+
+def test_a_filter_over_a_tall_chunk_is_run_on_morsels() raises:
+    """A filter is row local and computes per row, so there is a prefix to hand
+    out and the tall chunk under it is worth cutting. The chunks that come out
+    are the morsels that went in, which is how the cut is visible from outside:
+    without it the whole column arrives at the filter in one piece and leaves in
+    one piece."""
+    var pipeline = Pipeline(tall_frame())
+    pipeline.add(Node(Filter(1)))
+    var out = pipeline^.run()
+    assert_equal(out.columns[0].num_chunks(), 2, "the two morsels")
+    assert_equal(len(out), 2 * (MORSEL_ROWS + 3) // 3, "two rows in three")
+
+
+def test_a_tall_chunk_under_a_breaker_is_left_in_one_piece() raises:
+    """The other half, and the reason the cut waits for the line to be built. A
+    sort holds every row it is given, so nothing above it runs while the source
+    is being read and there is no prefix to spread the morsels over. Cutting
+    would hand the sort its rows in eight pieces on one thread instead of once,
+    and a kernel given a morsel cannot spread the work itself. See #918."""
+    var pipeline = Pipeline(tall_frame())
+    pipeline.add(Node(Sort([0], [True], [False])))
+    assert_equal(pipeline._prefix_lead(), 0, "nothing to hand out")
+    var out = pipeline^.run()
+    assert_equal(len(out), MORSEL_ROWS + 3, "the rows are all still there")
+    # A sort cuts its answer where its input was cut, so one chunk out is the
+    # source saying it was never cut.
+    assert_equal(out.columns[0].num_chunks(), 1, "one piece in, one out")
+    var got = read_back(out, "n")
+    assert_equal(got[0], Int64(MORSEL_ROWS + 3), "sorted downwards")
+
+
+def test_a_project_over_a_tall_chunk_does_not_ask_for_morsels() raises:
+    """A project is row local but it is not worth a task, so `_prefix_lead` is
+    zero for the same reason it is zero in `_parallel_lead`, and a line that is
+    not going to spread the work has no use for pieces to spread."""
+    var pipeline = Pipeline(tall_frame())
+    pipeline.add(Node(Project([0])))
+    assert_equal(pipeline._prefix_lead(), 0, "not worth a task")
+    var out = pipeline^.run()
+    assert_equal(out.columns[0].num_chunks(), 1, "one chunk in, one out")
 
 
 def test_a_filter_under_a_sort_under_a_limit_answers_the_same() raises:

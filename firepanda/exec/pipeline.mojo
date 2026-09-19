@@ -93,28 +93,23 @@ struct Scan(Movable):
     slice if column A breaks at row 100 and column B breaks at row 150. A frame
     that does not satisfy that is rejected here rather than half way through.
 
-    A chunk taller than a morsel is cut into morsels on the way past. Every
-    reader hands back a frame in one chunk, because that is what an eager caller
-    wants, and a line over such a frame used to run about 1.65 times slower than
-    the same rows in chunks: with one chunk there is nothing for `_parallel_lead`
-    to hand out, so the whole line runs on the calling thread and every operator
-    forks and joins its own workers instead of the prefix forking once. Measured
-    on the i9-13900K at four million rows, one chunk was 3.46 milliseconds and
-    two chunks was 2.42, and the whole of the difference is that one step. See
-    #800.
+    A chunk taller than a morsel can be cut into morsels, but only when the
+    pipeline above asks for it by calling `cut`. Every reader hands back a frame
+    in one chunk, because that is what an eager caller wants, and a line over
+    such a frame used to run about 1.65 times slower than the same rows in
+    chunks: with one chunk there is nothing for `_parallel_lead` to hand out, so
+    the whole line runs on the calling thread and every operator forks and joins
+    its own workers instead of the prefix forking once. Measured on the
+    i9-13900K at four million rows, one chunk was 3.46 milliseconds and two
+    chunks was 2.42, and the whole of the difference is that one step. See #800.
 
-    The cut costs nothing because the pieces are windows rather than copies.
-    They share the chunk's buffers and go private only if something writes to
-    them, and cutting on whole morsels is what keeps every kernel's right to
-    read a register past the end of a column, which `AnyArray.window` sets out.
-    Cutting with `slice` instead was measured too and it is far worse than
-    leaving the frame alone, 11.9 milliseconds against 3.46, because a copy of
-    the source costs more than the query.
-
-    A frame holding a list or a struct column is left exactly as it arrived,
-    because a nested column is the one shape a window cannot be taken of and
-    cutting the rest would leave the columns chunked differently from each
-    other.
+    The asking is the point. A line whose front is a group by or a reduction has
+    no prefix to hand out, so the morsels are pushed through it one after
+    another on the calling thread, and the kernel that used to be given a
+    million rows and spread them itself is given a hundred and twenty eight
+    thousand eight times over, each under whatever width it splits at. That cost
+    two to four times on every ClickBench query with a group by in it, which is
+    #918.
     """
 
     var columns: List[List[AnyArray]]
@@ -122,6 +117,9 @@ struct Scan(Movable):
 
     var remaining: Int
     """The number of chunks left."""
+
+    var cuttable: Bool
+    """Whether `cut` would do anything, which is false for a nested column."""
 
     def __init__(out self, var frame: DataFrame) raises:
         """Constructs a scan over a frame, consuming it.
@@ -137,30 +135,17 @@ struct Scan(Movable):
         # decision has to be made for the frame rather than per column, since
         # cutting the others would leave the frame chunked differently from
         # column to column and the check below would refuse it.
-        var cut = True
+        var cuttable = True
         for i in range(len(owned)):
             if owned[i].type.is_nested():
-                cut = False
+                cuttable = False
                 break
         var flipped = List[List[AnyArray]](capacity=len(owned))
         while len(owned) > 0:
             var chunks = owned.pop().into_chunks()
             var backwards = List[AnyArray](capacity=len(chunks))
             while len(chunks) > 0:
-                var chunk = chunks.pop()
-                var rows = len(chunk)
-                if not cut or rows <= MORSEL_ROWS:
-                    backwards.append(chunk^)
-                    continue
-                # Descending, because this list is in reverse and `next` takes
-                # from the back of it.
-                var pieces = (rows + MORSEL_ROWS - 1) // MORSEL_ROWS
-                for p in range(pieces - 1, -1, -1):
-                    var at = p * MORSEL_ROWS
-                    var take = rows - at
-                    if take > MORSEL_ROWS:
-                        take = MORSEL_ROWS
-                    backwards.append(chunk.window(at, take))
+                backwards.append(chunks.pop())
             flipped.append(backwards^)
         var columns = List[List[AnyArray]](capacity=len(flipped))
         while len(flipped) > 0:
@@ -178,6 +163,56 @@ struct Scan(Movable):
                 )
         self.columns = columns^
         self.remaining = count
+        self.cuttable = cuttable
+
+    def cut(mut self) raises:
+        """Cuts every chunk taller than a morsel into morsels.
+
+        The pieces are windows rather than copies, so this costs nothing. They
+        share the chunk's buffers and go private only if something writes to
+        them, and cutting on whole morsels is what keeps every kernel's right to
+        read a register past the end of a column, which `AnyArray.window` sets
+        out. Cutting with `slice` instead was measured too and it is far worse
+        than leaving the frame alone, 11.9 milliseconds against 3.46, because a
+        copy of the source costs more than the query.
+
+        A frame holding a list or a struct column is left exactly as it arrived,
+        because a nested column is the one shape a window cannot be taken of and
+        cutting the rest would leave the columns chunked differently from each
+        other.
+
+        Raises:
+            If a window cannot be taken of a chunk.
+        """
+        if not self.cuttable:
+            return
+        var flipped = List[List[AnyArray]](capacity=len(self.columns))
+        while len(self.columns) > 0:
+            var backwards = self.columns.pop()
+            var forwards = List[AnyArray](capacity=len(backwards))
+            while len(backwards) > 0:
+                var chunk = backwards.pop()
+                var rows = len(chunk)
+                if rows <= MORSEL_ROWS:
+                    forwards.append(chunk^)
+                    continue
+                var pieces = (rows + MORSEL_ROWS - 1) // MORSEL_ROWS
+                for p in range(pieces):
+                    var at = p * MORSEL_ROWS
+                    var take = rows - at
+                    if take > MORSEL_ROWS:
+                        take = MORSEL_ROWS
+                    forwards.append(chunk.window(at, take))
+            # Back to front, because `next` takes from the back of the list.
+            var cut = List[AnyArray](capacity=len(forwards))
+            while len(forwards) > 0:
+                cut.append(forwards.pop())
+            flipped.append(cut^)
+        var columns = List[List[AnyArray]](capacity=len(flipped))
+        while len(flipped) > 0:
+            columns.append(flipped.pop())
+        self.remaining = 0 if len(columns) == 0 else len(columns[0])
+        self.columns = columns^
 
     def num_chunks(self) -> Int:
         """Returns how many chunks are left to hand out.
@@ -481,6 +516,13 @@ struct Pipeline(Movable):
             If any operator raises.
         """
         var sink = Collect()
+        # The source is cut into morsels here rather than when it was built,
+        # because a morsel is only worth having when there is a prefix to hand
+        # out over it. This is the first point where both halves of that are
+        # known: the scan was built before `add` was called, and the line is
+        # complete now.
+        if worker_count() > 1 and self._prefix_lead() > 0:
+            self.source.cut()
         var lead = self._parallel_lead()
         if lead > 0:
             self._run_batched(lead, sink)
@@ -529,6 +571,19 @@ struct Pipeline(Movable):
         """
         if worker_count() < 2 or self.source.num_chunks() < 2:
             return 0
+        return self._prefix_lead()
+
+    def _prefix_lead(self) raises -> Int:
+        """Returns the same as `_parallel_lead` for the shape of the line alone.
+
+        What is left out is how many chunks there are and how many workers the
+        machine has. `run` asks this before the source has been cut into
+        morsels, when the chunk count is still whatever the reader handed back
+        and is therefore not the count the decision is about.
+
+        Returns:
+            The number of leading operators worth handing out, or zero.
+        """
         for i in range(len(self.operators)):
             if node_is_breaker(self.operators[i]):
                 break
