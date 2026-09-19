@@ -692,23 +692,26 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
-    """A conditional group is refused on both sides, but the flag says
-    something different on each: for RE2 the refusal agrees with upstream and
-    for Python it is a shortfall here.
+    """A repeat counted higher than either compiler will unroll is refused on
+    both sides, but the flag says something different on each: for RE2 the
+    refusal agrees with upstream and for Python it is a shortfall here.
 
     A lookaround was this row's pattern until documents 93 and 94 answered both
-    halves of it on Python's engine, a backreference was until document 95 did
-    and an atomic group was until document 99 did, each of which left RE2 the
-    only side refusing it and so left nothing for the row to compare. The
-    construct here is the one that is left."""
-    var theirs = compile_program(parse_pattern("(a)(?(1)b|c)"), ENGINE_RE2)
+    halves of it on Python's engine, a backreference was until document 95 did,
+    an atomic group was until document 99 did and a conditional group was until
+    document 100 did, each of which left RE2 the only side refusing it and so
+    left nothing for the row to compare. What is left is not a construct at all
+    but a limit, which is the right thing for this row to be asking about now:
+    the two sentences are about two different engines rather than about two
+    different readings of a pattern, and that is what the flag is for."""
+    var theirs = compile_program(parse_pattern("a{2000}"), ENGINE_RE2)
     assert_false(theirs.ok)
     assert_false(theirs.gap)
-    assert_equal(theirs.problem, "RE2 has no conditional group")
-    var ours = compile_program(parse_pattern("(a)(?(1)b|c)"), ENGINE_PYTHON)
+    assert_equal(theirs.problem, "RE2 will not repeat that many times")
+    var ours = compile_program(parse_pattern("a{2000}"), ENGINE_PYTHON)
     assert_false(ours.ok)
     assert_true(ours.gap)
-    assert_equal(ours.problem, "this engine has no conditional group yet")
+    assert_equal(ours.problem, "this engine will not repeat that many times")
 
 
 def main() raises:

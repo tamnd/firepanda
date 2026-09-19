@@ -155,21 +155,24 @@ def test_a_pattern_the_engine_can_run_compiles_for_all_three() raises:
 
 
 def test_a_pattern_the_other_engine_would_run_is_a_gap_here() raises:
-    """A conditional group goes to Python's `re` upstream and this library's
-    Python engine has not got one, so the refusal is its own and names the
-    construct rather than naming the engine. It used to say the engine was not
-    written at all, which was true until document 81 wrote it and which threw
-    away the one thing the caller could act on.
+    """A lookahead beside a conditional group goes to Python's `re` upstream and
+    this library has no engine that can run both at once, so the refusal is its
+    own and names what is in the way rather than naming the engine. It used to
+    say the engine was not written at all, which was true until document 81
+    wrote it and which threw away the one thing the caller could act on.
 
-    This row used to ask about a lookaround, then about a backreference and
-    then about an atomic group, all of which are answered now, so it asks about
-    the one that is left. The lookahead in front of it is what routes the call,
-    since a conditional group is not one of the constructs the router walks
-    for. Documents 93, 94, 95 and 99."""
+    This row used to ask about a lookaround, then about a backreference, then
+    about an atomic group and then about a conditional group, all of which are
+    answered now, so what is left of it is the pairing. The lookahead in front
+    is still what routes the call, since a conditional group is not one of the
+    constructs the router walks for. Documents 93, 94, 95, 99 and 100."""
     var program = program_for(METHOD_MATCH, "(?=a)(a)(?(1)b|c)")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no conditional group yet")
+    assert_equal(
+        program.problem,
+        "this engine has no lookaround beside a conditional group yet",
+    )
 
 
 def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
