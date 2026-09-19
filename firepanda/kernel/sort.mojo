@@ -56,7 +56,7 @@ eight. The cost is that a long element's key needs its payload read once while t
 keys are built, and that read is in row order rather than scattered.
 """
 
-from std.sys.info import size_of
+from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -64,6 +64,8 @@ from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ORDERED
+from firepanda.exec.morsel import parallel_morsels
+from firepanda.exec.parallel import worker_count
 
 comptime SMALL_RUN = 16
 """Rows below which a tied run is insertion sorted rather than merged.
@@ -974,9 +976,89 @@ def sort_rows[
     return out^
 
 
+comptime SORTED_PARALLEL_ROWS = 1 << 18
+"""Below this many rows the sortedness scan stays on one thread.
+
+The scan reads the whole column and does almost nothing to each row, so on a
+column long enough to matter it is held up by how fast one core can pull bytes
+in rather than by the comparing. That is the shape of thing splitting helps
+most, because the cores are waiting on memory rather than competing for it. Set
+where a fork and join stops being a visible share of the scan.
+"""
+
+comptime SORTED_ABORT_BLOCKS = 64
+"""How many blocks a worker checks before asking whether to give up.
+
+A worker that has found nothing wrong still wants to stop once another worker
+has, or a column out of order would cost a full parallel scan where the serial
+scan gave up at the first bad pair. Asking every block would put a shared read
+in the inner loop, and asking once a morsel would let a worker run a whole
+morsel after the answer was known, so it is asked on a stride.
+"""
+
+
+def _run_is_sorted[
+    dt: DType, //, o: ImmOrigin
+](
+    values: Pointer[Scalar[dt], o], start: Int, stop: Int, descending: Bool
+) -> Bool:
+    """Whether every adjacent pair from `start` to `stop` is in order.
+
+    Compares row `i` against row `i + 1`, so the caller has to leave one row
+    readable past `stop`, and a range of `i` covers exactly the pairs that
+    begin in it. That is what lets the ranges be handed out without the seams
+    needing separate attention: two touching ranges cover two touching sets of
+    pairs with nothing between them.
+
+    A block at a time rather than a row at a time. The row at a time version
+    carries the previous key from one iteration to the next, so the processor
+    cannot run two comparisons at once no matter how much of the column is
+    already in cache. Reading the same stretch twice, once at `i` and once at
+    `i + 1`, turns that into one unaligned load and one lane wise compare with
+    no dependency between iterations. The second load is free in practice
+    because it is the same cache lines the first one just brought in.
+
+    Parameters:
+        dt: The dtype.
+        o: Where the values are borrowed from.
+
+    Args:
+        values: The column's values.
+        start: The first pair to check.
+        stop: One past the last pair to check.
+        descending: Check for largest first.
+
+    Returns:
+        Whether every pair in the range is in order.
+    """
+    comptime W = simd_width_of[DType.uint64]()
+    var i = start
+    while i + W <= stop:
+        var here = sort_key(values.unsafe_offset(i).unsafe_load[width=W]())
+        var next = sort_key(values.unsafe_offset(i + 1).unsafe_load[width=W]())
+        if descending:
+            here = ~here
+            next = ~next
+        if not here.le(next).reduce_and():
+            return False
+        i += W
+    while i < stop:
+        var here = sort_key(values.unsafe_offset(i).unsafe_load())
+        var next = sort_key(values.unsafe_offset(i + 1).unsafe_load())
+        if descending:
+            here = ~here
+            next = ~next
+        if here > next:
+            return False
+        i += 1
+    return True
+
+
 def is_sorted[
     dt: DType
-](col: Array[dt], descending: Bool = False, nulls_first: Bool = False) -> Bool:
+](
+    col: Array[dt], descending: Bool = False, nulls_first: Bool = False
+) raises -> Bool:
     """Reports whether a column is already in sorted order.
 
     Worth having on its own because an already sorted column is common enough
@@ -993,6 +1075,9 @@ def is_sorted[
 
     Returns:
         Whether the column is sorted the way the arguments describe.
+
+    Raises:
+        If the parallel scan raises.
     """
     var n = len(col)
     if n < 2:
@@ -1000,6 +1085,42 @@ def is_sorted[
 
     var values = col.unsafe_ptr()
     var has_null = col.null_count() > 0
+
+    # A column with no nulls is every pair of neighbours and nothing else, so
+    # there is no ordering question the block scan cannot answer and no state to
+    # carry between one pair and the next. A column with nulls keeps the row at a
+    # time walk below, which has to know whether it has passed the run of nulls
+    # yet and so is a different question than the one the blocks answer.
+    if not has_null:
+        if n < SORTED_PARALLEL_ROWS:
+            return _run_is_sorted(values, 0, n - 1, descending)
+
+        var pairs = n - 1
+        var chunk = max(
+            pairs // (worker_count() * 4), SORTED_PARALLEL_ROWS // 8
+        )
+        var pieces = (pairs + chunk - 1) // chunk
+        var oks = List[Bool](length=pieces, fill=True)
+        var give_up = List[Bool](length=1, fill=False)
+
+        def one(start: Int, stop: Int) raises {mut oks, mut give_up, imm}:
+            var at = start
+            var step = SORTED_ABORT_BLOCKS * simd_width_of[DType.uint64]()
+            while at < stop:
+                if give_up[0]:
+                    return
+                var upto = min(at + step, stop)
+                if not _run_is_sorted(values, at, upto, descending):
+                    oks[start // chunk] = False
+                    give_up[0] = True
+                    return
+                at = upto
+
+        parallel_morsels(one, pairs, chunk)
+        for m in range(pieces):
+            if not oks[m]:
+                return False
+        return True
 
     var seen_null = False
     var have_previous = False
