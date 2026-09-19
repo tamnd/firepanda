@@ -5741,7 +5741,9 @@ def bench_pipeline(mut harness: Harness) raises:
     everything the filter let through. `pipeline_reduce_only` against
     `agg_frame` is the price of folding a chunk at a time instead of reading the
     column in one pass, which is what the fusing has to pay for out of what it
-    saves.
+    saves, and `pipeline_reduce_only_one_chunk` is the same reduction over the
+    same rows in the one chunk a reader hands back, which is the row that says
+    whether the source has left that frame alone.
 
     The last four rows are the same two questions asked of the join node.
     `pipeline_join_reduce` against `pipeline_join_two_steps` is a join followed
@@ -6124,6 +6126,29 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/pipeline_reduce_only", "rows", rows, reduce_alone)
+
+    # The same reduction over the same rows in one chunk, which is the shape
+    # every reader hands back and the shape a scan can quietly take away. While
+    # the source cut a tall chunk into morsels the moment it was built, this row
+    # and `group/pipeline_stream_one_chunk` were not measuring a one chunk frame
+    # at all, they were measuring the chunked one under another name, and the
+    # ClickBench SQL route lost between one and a half and four times on every
+    # query of this shape with nothing in this file moving. A reduction is a
+    # breaker, so there is no prefix above it to spread the morsels over and the
+    # kernel that used to be handed the whole column is handed eight pieces of
+    # it one after another. See #918 and #803.
+    def reduce_alone_whole() raises {imm whole}:
+        keep(whole.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_reduce_only_one_chunk", "rows", rows, reduce_alone_whole
+    )
 
     # ClickBench q29 in miniature: one column summed under ninety different
     # constants. Fused, the reduction builds one shifted column at a time and
