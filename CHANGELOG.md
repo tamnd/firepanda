@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a column's sortedness is read a block at a time instead of a row at a time
+
+Several places ask whether a column is already sorted, and the answer decides whether a whole pass of work can be skipped. A group by on a sorted key walks it instead of building a hash table. A semi or anti join whose two key columns are both sorted walks them instead of factorizing both sides. The frame, the chunked array, the series and the index each have a gate that asks the same question. All of them went through one function that read the column one row at a time, comparing each sort key against the previous one held in a variable, which is a loop the machine cannot run ahead in because the next comparison needs the value the last iteration wrote.
+
+That cost showed up as a measurable tax rather than as theory. While measuring an unrelated change I built a branch that performs both sortedness scans on a join and then deliberately takes the ordinary route, so the scan is paid and nothing else changes, and it reproduced a regression I had been blaming on the new code. The scan was the cost. On TPC-H q3 the gates rescan about seven and a half million rows a run and get the same answer every time.
+
+The reading is now a block of sort keys against the same block shifted by one row. Two overlapping loads, the same bit twiddle that the sort itself uses to put floats and signed integers into an order a plain comparison gets right, one compare and one reduce, and the loop carries nothing from one block to the next. A column past a quarter of a million rows splits its pairs across the workers, and each worker checks a run of blocks and then asks a shared flag whether somebody has already found a break, so a column that is out of order in its first hundred rows still stops almost at once rather than reading to the end on every core. A column holding nulls keeps the row at a time walk, because there the question is not only whether each pair is in order but whether the run of nulls has been passed yet, and that is state the blocks do not carry.
+
+Measured on a 13900K, TPC-H sf1 in memory, ABBA order with nine runs a side. q21 goes from 0.041 to 0.032 seconds on the medians and q18 from 0.023 to 0.016, which is 1.28 and 1.44 times. q20 reads 0.039 against 0.038 and q4 0.021 against 0.021. q16 and q22 are the useful controls because both are turned away at the sortedness check and go down the ordinary route, so they pay the scan and get nothing back from it, and both are flat at 0.018 and 0.022, which says the faster reading does not cost anything on the queries it cannot help.
+
+What this does not do is remember the answer. Nothing in the codebase caches a column's sortedness, so every gate still rescans, and the scan is now cheap rather than absent.
+
 ### Fixed: a scan cuts a tall chunk into morsels only when there is something to spread them over
 
 A reader hands back a frame in one chunk however many rows it read, and a line of elementwise operators over such a frame used to run about 1.65 times slower than the same rows in chunks, because with one chunk there is nothing for the driver to hand out. The scan answered that by cutting any chunk taller than a morsel into morsels, and it did the cutting in its constructor, which is before a single operator has been added to the pipeline.
