@@ -86,6 +86,15 @@ the same whatever path arrived there, so a pair may still be dropped outright,
 and the only thing the cut changes is that a row too long for the bitmap runs
 under the step count rather than going to a machine that could not run it.
 Document 99.
+
+The conditional group is the third, and it is the first reason again rather than
+the second. Asking whether a group took part is asking about the path that
+arrived, so the other two engines cannot answer it and the bitmap here cannot
+hold the answer, and a program holding one runs under exactly the arrangement a
+backreference runs under: the bitmap kept, forgotten the moment a slot changes
+value, with the step count underneath. What it does not share is the cost, since
+the question is settled by looking at two numbers and going one way or the other
+rather than by reading the text again. Document 100.
 """
 
 from std.collections.span import Span
@@ -117,6 +126,7 @@ from firepanda.kernel.regex.program import (
     IN_REF,
     IN_SAVE,
     IN_SPLIT,
+    IN_TEST,
     REF_NARROW,
     REF_WIDE,
     Program,
@@ -422,8 +432,8 @@ struct Bounded(Movable):
         self.jobs_at = []
         self.word = []
         self.lower = []
-        self.memo = not program.refs
-        self.alone = program.refs or program.cuts
+        self.memo = not (program.refs or program.asks)
+        self.alone = program.refs or program.cuts or program.asks
         self.bitmap = False
         self.stamped = False
         self.counting = False
@@ -714,6 +724,15 @@ struct Bounded(Movable):
             elif instruction.op == IN_CUT:
                 self._cut()
                 self._push(pc + 1, at)
+            elif instruction.op == IN_TEST:
+                # One arm or the other and nothing pushed, because this is a
+                # question with an answer rather than a choice with two ways
+                # out. A group that never took part is a slot pair still at
+                # minus one, which is the same reading the reference below
+                # gives it, so `(a)?(?(1)b|c)` against `c` takes the second arm.
+                var slot = Int(instruction.a)
+                var took = self.slots[slot] >= 0 and self.slots[slot + 1] >= 0
+                self._push(pc + 1 if took else instruction.b, at)
             elif instruction.op == IN_REF:
                 var slot = Int(instruction.a)
                 var opened = Int(self.slots[slot])
@@ -788,10 +807,10 @@ struct Bounded(Movable):
         self.marks.clear()
         if cells > MAX_CELLS:
             # A row too long for the bitmap goes to the machine, and a program
-            # holding a backreference or an atomic group is one the machine
-            # cannot be handed at all. So that one runs the row without a bitmap
-            # and the step count is the whole of the bound. Document 95 section
-            # 3 and document 99 section 5.
+            # holding a backreference, an atomic group or a conditional is one
+            # the machine cannot be handed at all. So that one runs the row
+            # without a bitmap and the step count is the whole of the bound.
+            # Document 95 section 3 and document 99 section 5.
             if not self.alone:
                 return GAVE_UP
             self.bitmap = False
@@ -882,7 +901,7 @@ def searched(
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference or an atomic group can do.
+            backreference, an atomic group or a conditional can do.
     """
     var end = bounded.search(program, points, 0, first, found, advance)
     if bounded.overrun:
@@ -897,12 +916,12 @@ def held_text(program: Program, text: StringSlice) raises -> Bool:
 
     The same question `matches_text` next door answers and the same answer for
     every program that one can read, and here rather than there because a
-    program holding a backreference or an atomic group is one the machine cannot
-    read at all. That machine is written on threads that merge, this engine is
-    the one that keeps a path, and a backreference is a question about the path
-    while a cut is an answer only a path can give. So the choosing has to live
-    on this side of the two, since this is the side that can see both. Documents
-    95 and 98.
+    program holding a backreference, an atomic group or a conditional is one
+    the machine cannot read at all. That machine is written on threads that
+    merge, this engine is the one that keeps a path, a backreference and a
+    conditional are questions about the path and a cut is an answer only a path
+    can give. So the choosing has to live on this side of the two, since this is
+    the side that can see both. Documents 95, 99 and 100.
 
     The one shot form, which builds both sets of buffers, uses them once and
     drops them. A caller with a column to walk wants to keep them instead.
@@ -916,9 +935,9 @@ def held_text(program: Program, text: StringSlice) raises -> Bool:
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference or an atomic group can do.
+            backreference, an atomic group or a conditional can do.
     """
-    if not program.refs and not program.cuts:
+    if not program.refs and not program.cuts and not program.asks:
         return matches_text(program, text)
     var points = decoded(text)
     var machine = Machine(program)
@@ -958,9 +977,9 @@ def located(
 
     Raises:
         Error: If the row ran out of steps, which only a pattern holding a
-            backreference or an atomic group can do and which this door never
-            sees, since both of those are refused on the engine that comes
-            through here.
+            backreference, an atomic group or a conditional can do and which
+            this door never sees, since all three of those are refused on the
+            engine that comes through here.
     """
     var end = bounded.search(program, points, lead, 0, found)
     if bounded.overrun:

@@ -293,11 +293,16 @@ def test_a_pattern_python_refuses_is_refused_here_in_pythons_voice() raises:
     """This method never reaches RE2, so a construct neither engine has yet is
     a shortfall here rather than agreement with upstream, and the flag on the
     refusal says so. The construct was a backreference until document 95
-    answered it and an atomic group until document 99 did."""
-    var program = program_for(METHOD_EXTRACT, "(a)(?(1)b|c)")
+    answered it, an atomic group until document 99 did and a conditional group
+    until document 100 did. What is left is the one this method cannot avoid
+    asking about, since a capture inside a lookahead is only refused for a
+    caller who wants the groups and this method is the one that wants them."""
+    var program = program_for(METHOD_EXTRACT, "(?=(a))a")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(program.problem, "this engine has no conditional group yet")
+    assert_equal(
+        program.problem, "this engine has no capture inside a lookahead yet"
+    )
 
 
 def test_syntax_only_re2_refuses_is_compiled_rather_than_refused() raises:

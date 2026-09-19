@@ -274,6 +274,23 @@ entries that put a slot back are not choices and are kept.
 cut, so there is one mechanism here and not two. Document 99.
 """
 
+comptime IN_TEST: UInt8 = 16
+"""Go one way if a group took part and the other way if it did not.
+
+`a` is the first slot of the group asked about, the same number an `IN_REF`
+carries, and `b` is where to go when the group did not take part. The walk falls
+through to the next instruction when it did, so the arm the caller wrote first
+is the one written first here.
+
+It is not a choice and nothing is pushed for it. Both arms are written out and
+exactly one of them is entered, which is what separates this from the split an
+alternation compiles to and is why a conditional group costs no backtracking of
+its own. What it costs instead is the memo, because whether this instruction
+goes one way or the other is a fact about the path that arrived rather than
+about the position, and that is the same thing a backreference takes away.
+Document 100.
+"""
+
 
 comptime MAX_INSTRUCTIONS: Int = 200000
 """How large a program may get before the compiler gives up.
@@ -454,6 +471,19 @@ struct Program(Movable):
     hand a long row to. Document 99.
     """
 
+    var asks: Bool
+    """Whether the program asks whether a group took part.
+
+    True when the code holds an `IN_TEST`, which is what a conditional group
+    compiles to. It is the third reason a program can only be run by the
+    backtracker and it is the first reason again rather than the second: like a
+    backreference it is a question about the path that arrived, so the other two
+    engines cannot answer it and the bitmap here cannot hold the answer. What it
+    does not share with a backreference is the cost of reading the text twice,
+    since the question is answered by looking at two slots and going one way or
+    the other. Document 100.
+    """
+
     var groups: Int
     """How many capturing groups the pattern opened.
 
@@ -592,6 +622,7 @@ struct Program(Movable):
         self.slots = 0
         self.refs = False
         self.cuts = False
+        self.asks = False
         self.groups = 0
         self.python = False
         self.anchored = False
@@ -1406,6 +1437,9 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         _emit_repeat(b, nodes, node, True)
         _ = b.emit(IN_CUT, 0, 0)
         return
+    if it.op == OP_GROUPREF_EXISTS:
+        _emit_conditional(b, nodes, node)
+        return
     if it.op == OP_ASSERT or it.op == OP_ASSERT_NOT:
         _emit_lookaround(b, nodes, node, it.op == OP_ASSERT)
         return
@@ -1541,7 +1575,12 @@ def _holds_group(nodes: List[Node], node: Int32) -> Bool:
 
 
 def _holds_ref(nodes: List[Node], node: Int32) -> Bool:
-    """Whether a subtree reads back something a group matched.
+    """Whether a subtree reads a group rather than only matching one.
+
+    Two constructs do: a backreference reads what the group matched and a
+    conditional group reads whether it took part. Either of them makes the
+    slots part of the pattern rather than part of the question, so they are one
+    walk here and one decision.
 
     Asked before anything is written, because the answer decides whether the
     program carries slots and that has to be settled before the first save is
@@ -1556,12 +1595,13 @@ def _holds_ref(nodes: List[Node], node: Int32) -> Bool:
         node: Where to start, which may be a whole list of siblings.
 
     Returns:
-        True when there is a backreference anywhere under it.
+        True when there is a backreference or a conditional group anywhere
+        under it.
     """
     var at = node
     while at >= 0:
         var it = nodes[Int(at)]
-        if it.op == OP_GROUPREF:
+        if it.op == OP_GROUPREF or it.op == OP_GROUPREF_EXISTS:
             return True
         if _holds_ref(nodes, it.first):
             return True
@@ -1684,10 +1724,13 @@ def _fixed_width(nodes: List[Node], node: Int32) -> Int:
         # the arm that was not written reads nothing. `(?<=(?(1)^))` is a
         # lookbehind upstream compiles, because both of its arms are empty, and
         # `(?<=(?(1)b))` is one upstream refuses, because one arm reads a
-        # character and the other does not. This engine refuses the construct
-        # further down either way, and the reason it asks the width here is so
-        # that the refusal a caller sees is the one about the conditional rather
-        # than one about a lookbehind upstream had no quarrel with.
+        # character and the other does not. A lookbehind holding a conditional
+        # is turned down further along either way, since a lookaround beside one
+        # is a nested walk the backtracker has nowhere to put, but the two
+        # refusals are not the same refusal: the width one is a `ValueError` and
+        # agrees with upstream, and the other is a gap. So the width is asked
+        # here to keep a pattern upstream refuses out of the gap bucket, and to
+        # keep one upstream compiles out of the `ValueError`.
         var arms = 0
         var width = 0
         var child = it.first
@@ -1795,7 +1838,9 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         # enters bodies a scope has already been taken off. Document 95.
         return
     if it.op == OP_GROUPREF_EXISTS:
-        _refuse_construct(b, String("conditional group"))
+        if not b.python:
+            _refuse_construct(b, String("conditional group"))
+            return
         return
     if it.op == OP_ATOMIC_GROUP and not b.python:
         _refuse_construct(b, String("atomic group"))
@@ -1892,6 +1937,58 @@ def _emit_branch(mut b: _Builder, nodes: List[Node], node: Int32):
     var done = b.here()
     for i in range(len(ends)):
         b.patch_a(ends[i], done)
+
+
+def _emit_conditional(mut b: _Builder, nodes: List[Node], node: Int32):
+    """Writes a conditional group and the one or two arms it holds.
+
+    The shape is an alternation that nothing chooses. A test is written first,
+    the arm for a group that took part is written after it so that falling
+    through is the first arm, a jump over the rest ends that arm, and the arm
+    for a group that did not is what the test jumps to. A conditional written
+    with one arm has the other arm empty, so the test jumps to the end and the
+    pattern goes on.
+
+    Nothing is pushed and nothing is patched twice, which is the difference from
+    `_emit_branch` next door and the whole reason this construct costs no
+    backtracking. Exactly one arm is entered and the other is never looked at
+    again.
+
+    A group the pattern has not opened yet is a group that has not taken part,
+    so `(?(1)a|b)(x)` takes the second arm and upstream agrees. Nothing here
+    has to say so: the slots start at minus one and the test reads them.
+
+    Args:
+        b: The builder.
+        nodes: The arena.
+        node: The `OP_GROUPREF_EXISTS` node.
+    """
+    if not b.captures:
+        # Unreachable for the same reason the backreference's twin is. The
+        # compiler turns the slots on for any pattern holding one of these,
+        # whatever the caller asked for, because the instruction reads a slot
+        # and a slot that was never written is not a thing to guess about.
+        b.give_up(String("a conditional group needs the groups kept"))
+        return
+    var it = nodes[Int(node)]
+    var test = b.emit(IN_TEST, it.a * 2, 0)
+    var yes = it.first
+    if yes < 0:
+        # Unreachable, since the parser attaches a sequence for the first arm
+        # whether or not the caller wrote anything in it, and `(?(1))` is a
+        # conditional with an empty sequence rather than one with no arm. Here
+        # because the alternative to a branch is reading a node at minus one.
+        b.patch_b(test, b.here())
+        return
+    _emit_node(b, nodes, yes)
+    var no = nodes[Int(yes)].next
+    if no < 0:
+        b.patch_b(test, b.here())
+        return
+    var over = b.emit(IN_JUMP, 0, 0)
+    b.patch_b(test, b.here())
+    _emit_node(b, nodes, no)
+    b.patch_a(over, b.here())
 
 
 def _emit_star(mut b: _Builder, nodes: List[Node], node: Int32, greedy: Bool):
@@ -2176,6 +2273,13 @@ def _first_ranges(
             stack.append(instruction.a)
         elif instruction.op == IN_SPLIT:
             stack.append(instruction.a)
+            stack.append(instruction.b)
+        elif instruction.op == IN_TEST:
+            # Both arms, which is the same thing the split above does and is
+            # right for the same reason. Which arm a match really takes is a
+            # fact about the path, and a set that holds the characters both of
+            # them can start with is too large rather than wrong.
+            stack.append(Int32(pc + 1))
             stack.append(instruction.b)
         elif (
             instruction.op == IN_AT
@@ -2748,23 +2852,38 @@ def compile_program(
             out.refs = True
         elif op == IN_MARK:
             out.cuts = True
+        elif op == IN_TEST:
+            out.asks = True
         elif op == IN_LOOK or op == IN_BEHIND:
             saw_look = True
-    if saw_look and (out.refs or out.cuts):
-        # The same refusal for the same reason twice over. A lookaround is a
-        # search inside a search, the machine runs one by starting a second
+    if saw_look and (out.refs or out.cuts or out.asks):
+        # The same refusal for the same reason three times over. A lookaround is
+        # a search inside a search, the machine runs one by starting a second
         # machine, and the backtracker has one stack and one bitmap and so has
         # nowhere to put a nested walk. That is fine while every program holding
-        # a lookaround can be given to the machine, and these two are the
+        # a lookaround can be given to the machine, and these three are the
         # programs that cannot be.
+        #
+        # The naming is in the order the constructs landed rather than in the
+        # order they appear in the pattern, so a pattern holding two of them is
+        # named by the older one. Nothing reads the sentence but a person, and a
+        # person told about either of the two has been told what to take out.
         out.ok = False
-        out.problem = String(
-            "this engine has no lookaround beside a backreference yet"
-        ) if out.refs else String(
-            "this engine has no lookaround beside an atomic group yet"
-        )
+        if out.refs:
+            out.problem = String(
+                "this engine has no lookaround beside a backreference yet"
+            )
+        elif out.cuts:
+            out.problem = String(
+                "this engine has no lookaround beside an atomic group yet"
+            )
+        else:
+            out.problem = String(
+                "this engine has no lookaround beside a conditional group yet"
+            )
         out.refs = False
         out.cuts = False
+        out.asks = False
         out.gap = True
         return out^
     out.code = b.code.copy()

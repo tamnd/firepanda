@@ -48,6 +48,16 @@ Like every Python-only construct in this accessor it is reached by passing a `fl
 
 529 corpus patterns that used to be held out are compared now, at zero disagreements, and a lookaround beside an atomic group is a refusal with a sentence of its own. Document 99.
 
+### Added: the conditional group, which lets the pattern pick its own arm
+
+`(a)?(?(1)b|c)` reads a `b` when group one took part and a `c` when it did not, and it answers now on the string accessor's regular expression methods. It compiles to an alternation with the choosing taken out: a test, both arms written next to each other, nothing pushed and nothing patched twice, so exactly one arm is entered and the other is never looked at again. That makes it the cheapest of the three constructs only one engine can run, since it costs a comparison and a branch where a backreference costs a second reading of the text.
+
+What it does cost is the same thing a backreference costs, which is the record of where the walk has already been. Whether a group took part is a fact about the path that arrived rather than about the position reached, so two paths meeting at the same instruction and the same position can answer the test differently and neither may be dropped. The other two engines turn such a program down for the same reason, and the step count underneath is what bounds the walk instead.
+
+Like every Python-only construct in this accessor it is reached by passing a `flags` argument, except through `extract`, which never goes to Arrow on either library and so answers with no argument at all. Without a flag the call still goes to Arrow and Arrow still says `invalid perl operator`, which is what pandas does.
+
+A group that matched nothing has still taken part, a group the pattern has not opened yet has not, and a group the pattern does not have at all is refused by both libraries, in two different classes, because `re.error` is not a subclass of `ValueError` and every refusal here is. 194 corpus patterns that used to be held out are compared now, at zero disagreements, and a lookaround beside a conditional is a refusal with a sentence of its own, which is the third such pairing. Document 100.
+
 ## [0.8.16] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).

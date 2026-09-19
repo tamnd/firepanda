@@ -85,9 +85,10 @@ def text_matches_regex(
     cache can give up part way down a column and the row it gave up on still
     has to be answered.
 
-    A third engine stands beside them for the one program neither of those can
-    run, which is one holding a backreference, and that one is chosen by the
-    program rather than by the row. Document 95.
+    A third engine stands beside them for the programs neither of those can
+    run, which are the ones holding a backreference, an atomic group or a
+    conditional, and those are chosen by the program rather than by the row.
+    Documents 95, 99 and 100.
 
     Args:
         a: The column.
@@ -121,14 +122,14 @@ def text_matches_regex(
         for i in range(start, stop):
             decode_into(a.unsafe_bytes(i), points)
             var found: Bool
-            if program.refs or program.cuts:
-                # The two kinds of program neither of the two above can run, so
-                # the question is put to the third engine rather than being
+            if program.refs or program.cuts or program.asks:
+                # The three kinds of program neither of the two above can run,
+                # so the question is put to the third engine rather than being
                 # asked and handed on. It is the only kernel here that had no
                 # backtracker in it already, because whether a row matches is
                 # the one question a state machine answers better than anything
-                # else, and a backreference and a cut are the two things that
-                # take it away. Documents 95 and 99.
+                # else, and a backreference, a cut and a test are the three
+                # things that take it away. Documents 95, 99 and 100.
                 found = (
                     searched(program, Span(points), 0, machine, bounded, slots)
                     >= 0

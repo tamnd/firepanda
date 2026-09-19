@@ -82,6 +82,7 @@ from firepanda.kernel.regex.program import (
     IN_REF,
     IN_SAVE,
     IN_SPLIT,
+    IN_TEST,
     Program,
     class_of,
 )
@@ -320,6 +321,15 @@ struct Cache(Movable):
                 self.ok = False
                 self.problem = String(
                     "the pattern throws away a choice it could have made"
+                )
+                return
+            if instruction.op == IN_TEST:
+                # The same answer the backreference above gets and for the same
+                # reason. Whether a group took part is a question about the path
+                # and there is no path in a set of instructions. Document 100.
+                self.ok = False
+                self.problem = String(
+                    "the pattern asks whether a group took part"
                 )
                 return
             if instruction.op != IN_AT:

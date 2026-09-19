@@ -84,6 +84,7 @@ from firepanda.kernel.regex.program import (
     IN_SAVE,
     IN_SET,
     IN_SPLIT,
+    IN_TEST,
     Instruction,
     Program,
     in_set,
@@ -597,6 +598,12 @@ def _queue(
         #
         # So no program holding one of these reaches here either, by the same
         # three refusals a backreference gets. Document 99.
+        pass
+    elif instruction.op == IN_TEST:
+        # And the third, which is the first one over again. Whether a group took
+        # part is a question two merged threads can answer differently, exactly
+        # as a backreference is, so the test would have to be taken after the
+        # merge and the merge is what there is to keep. Document 100.
         pass
     elif instruction.op == IN_SAVE:
         if nslots == 0:
