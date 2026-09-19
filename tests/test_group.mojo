@@ -3278,5 +3278,148 @@ def test_a_million_groups_each_count_their_own_distinct_values() raises:
     )
 
 
+def _distinct_by_hand(
+    values: Array[DType.int64], codes: Array[DType.uint32], groups: Int
+) raises -> List[Int]:
+    """Counts each group's distinct values the slow obvious way.
+
+    Quadratic in the group and quadratic again over the groups, which is fine on
+    a fixture of a few thousand rows and is the point: nothing here is shared
+    with the kernel, so the two can only agree by both being right.
+
+    Args:
+        values: The column, nulls and all.
+        codes: Which group each row belongs to.
+        groups: How many groups there are.
+
+    Returns:
+        One count a group, nulls left out.
+
+    Raises:
+        As reading the column does.
+    """
+    var out = List[Int](capacity=groups)
+    for _ in range(groups):
+        out.append(0)
+    for i in range(len(codes)):
+        if not values.is_valid(i):
+            continue
+        var g = Int(codes[i])
+        var already = False
+        for j in range(i):
+            if Int(codes[j]) != g or not values.is_valid(j):
+                continue
+            if values[j] == values[i]:
+                already = True
+                break
+        if not already:
+            out[g] += 1
+    return out^
+
+
+def test_a_distinct_count_does_not_care_whether_the_ordinals_arrive_in_runs() raises:
+    """Counts the same groups twice, once in run order and once interleaved.
+
+    A group by that walked a sorted key hands down ordinals that never fall, so
+    a group's rows already sit next to each other and the count reads them where
+    they lie. A group by that hashed hands down ordinals in no order and the
+    count gathers each group's rows into a slab first. Those are two pieces of
+    code answering one question, and the fixture is built so both are asked the
+    same one: the group a row belongs to and the value it holds are functions of
+    the pair `(g, k)` rather than of where the row sits, so laying the pairs out
+    either way gives every group the same multiset including its nulls.
+
+    The interleaved layout walks `k` on the outside, so the ordinals climb to the
+    last group and drop back to a low one on every wrap, which is what a hash
+    table's ordinals look like.
+
+    Raises:
+        AssertionError: If the two orderings disagree, or either disagrees with
+            the count done by hand.
+    """
+    comptime GROUPS = 2 * NUNIQUE_PAIRWISE + 4
+    comptime ROWS = GROUPS * (GROUPS + 1) // 2
+
+    var walked = Array[DType.int64](ROWS)
+    var walked_codes = Array[DType.uint32](ROWS)
+    var at = 0
+    for g in range(GROUPS):
+        for k in range(g + 1):
+            walked_codes[at] = UInt32(g)
+            if (g + 2 * k) % 7 == 3:
+                walked.set_null(at)
+            else:
+                walked[at] = Int64((k * 6) % 10)
+            at += 1
+    assert_equal(at, ROWS, "the run ordered fixture filled every row")
+
+    var hashed = Array[DType.int64](ROWS)
+    var hashed_codes = Array[DType.uint32](ROWS)
+    at = 0
+    for k in range(GROUPS):
+        for g in range(k, GROUPS):
+            hashed_codes[at] = UInt32(g)
+            if (g + 2 * k) % 7 == 3:
+                hashed.set_null(at)
+            else:
+                hashed[at] = Int64((k * 6) % 10)
+            at += 1
+    assert_equal(at, ROWS, "the interleaved fixture filled every row")
+
+    var by_hand = _distinct_by_hand(walked, walked_codes, GROUPS)
+    var from_runs = group_nunique(walked, walked_codes, GROUPS)
+    var from_slab = group_nunique(hashed, hashed_codes, GROUPS)
+    assert_equal(len(from_runs), GROUPS)
+    assert_equal(len(from_slab), GROUPS)
+
+    var wrong = -1
+    for g in range(GROUPS):
+        if from_runs[g] != Int64(by_hand[g]) or from_slab[g] != Int64(
+            by_hand[g]
+        ):
+            wrong = g
+            break
+    assert_equal(wrong, -1, "the first group the two routes disagreed on")
+
+
+def test_one_fall_at_the_last_pair_of_ordinals_is_noticed() raises:
+    """Counts groups whose ordinals climb the whole way and fall once at the end.
+
+    The run route reaches a worker's rows with a binary search, which is right
+    only if the ordinals never fall, so the check that they never do has to look
+    at every pair rather than almost every pair. A block compare that ran a
+    block short, or a tail loop that stopped a row early, would miss exactly this
+    and hand the binary search a column it cannot search. The fall is put at the
+    very last pair because that is the one a fencepost drops, and the row is
+    given a value no other row in its group holds so that missing it changes the
+    answer rather than only the route.
+
+    Raises:
+        AssertionError: On the first group counted wrong.
+    """
+    comptime GROUPS = NUNIQUE_PAIRWISE + 8
+    comptime ROWS = GROUPS * 4
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        codes[i] = UInt32(i // 4)
+        values[i] = Int64(i % 3)
+    values.set_null(5)
+    codes[ROWS - 1] = 0
+    values[ROWS - 1] = Int64(7)
+
+    var by_hand = _distinct_by_hand(values, codes, GROUPS)
+    var distinct = group_nunique(values, codes, GROUPS)
+    assert_equal(len(distinct), GROUPS)
+
+    var wrong = -1
+    for g in range(GROUPS):
+        if distinct[g] != Int64(by_hand[g]):
+            wrong = g
+            break
+    assert_equal(wrong, -1, "the first group counted wrong")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
