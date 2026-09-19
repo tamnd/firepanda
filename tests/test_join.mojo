@@ -1794,5 +1794,241 @@ def test_an_anti_join_whose_keys_never_meet_keeps_everything() raises:
     )
 
 
+def inner_pairs(
+    left: DataFrame,
+    left_rows: Int,
+    right: DataFrame,
+    right_rows: Int,
+    span: Int,
+) raises -> List[Int]:
+    """How many pairs an inner join should emit for each key, counted by hand.
+
+    A key held by three left rows and two right rows is six pairs, so this is
+    two tallies multiplied rather than the membership test the semi and anti
+    counts do. That multiplication is the whole of what an inner join adds to
+    the walk, so counting it from the two columns rather than from either
+    fixture's formula is what makes the check worth running.
+
+    Args:
+        left: The probe side.
+        left_rows: How many of its rows to read.
+        right: The built side.
+        right_rows: How many of its rows to read.
+        span: One past the largest key either side holds.
+
+    Returns:
+        One pair count a key, indexed by the key itself.
+
+    Raises:
+        As reading a column does.
+    """
+    var here = List[Int](length=span, fill=0)
+    var rk = right.column("k").as_typed[DType.int64]()
+    for j in range(right_rows):
+        here[Int(rk[j])] += 1
+    var out = List[Int](length=span, fill=0)
+    var lk = left.column("k").as_typed[DType.int64]()
+    for i in range(left_rows):
+        var key = Int(lk[i])
+        out[key] += here[key]
+    return out^
+
+
+def first_unpaired(
+    pairs: JoinIndices, left: DataFrame, right: DataFrame
+) raises -> Int:
+    """The first entry naming two rows whose keys differ, or minus one.
+
+    The counts say how many pairs came out of each key and this says the pairs
+    are the ones they claim to be. A walk that fanned out over the run next door
+    would keep every count right and get every pair wrong, and nothing built out
+    of row totals alone would notice.
+
+    Args:
+        pairs: What the join produced.
+        left: The probe side it ran over.
+        right: The built side it ran over.
+
+    Returns:
+        The first entry whose two keys disagree, or minus one.
+
+    Raises:
+        As reading a column does.
+    """
+    var lk = left.column("k").as_typed[DType.int64]()
+    var rk = right.column("k").as_typed[DType.int64]()
+    for r in range(len(pairs)):
+        if lk[pairs.left_at[r]] != rk[pairs.right_at[r]]:
+            return r
+    return -1
+
+
+def test_an_inner_join_on_two_sorted_keys_pairs_what_the_hash_route_pairs() raises:
+    """Runs one inner join sorted and the same one scrambled, and compares.
+
+    The same two fixtures the semi and anti tests read, which is what makes the
+    three of them say something together: one left column and one right column
+    split three ways by three kinds, all off the same walk. Here a surviving key
+    is four left rows against two right rows and so eight pairs rather than the
+    four rows a semi join keeps, which is the fan out the other two never see.
+    """
+    comptime SPAN = MERGE_LEFT_ROWS // 4 + 2
+    comptime RIGHT_ROWS = 6_000
+    var left = climbing_keys(MERGE_LEFT_ROWS, 4)
+    var right = stepping_keys(RIGHT_ROWS, 3, 2)
+    var want = inner_pairs(left, MERGE_LEFT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.INNER,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the walk paired wrong",
+    )
+    assert_equal(
+        first_unpaired(walked, left, right),
+        -1,
+        "the first entry pairing two different keys",
+    )
+
+    # An inner join names a real row on both sides, and the contract the rest of
+    # the join keeps is that one left row's entries arrive with their right rows
+    # increasing. `_by_left_row` goes out of its way to preserve that, so the
+    # walk has to produce it rather than merely produce the right rows.
+    var bad = -1
+    for r in range(1, len(walked)):
+        if walked.left_at[r] < walked.left_at[r - 1]:
+            bad = r
+            break
+        if (
+            walked.left_at[r] == walked.left_at[r - 1]
+            and walked.right_at[r] <= walked.right_at[r - 1]
+        ):
+            bad = r
+            break
+    assert_equal(bad, -1, "the first pair out of order")
+
+    var mixed_left = climbing_keys(MERGE_LEFT_ROWS, 4, 40_503)
+    var mixed_right = stepping_keys(RIGHT_ROWS, 3, 2, 3_571)
+    var hashed = join_indices(
+        mixed_left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        mixed_right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.INNER,
+    )
+    assert_equal(len(hashed), len(walked), "row count against the hash route")
+    assert_equal(
+        first_gap(kept_by_key(hashed, mixed_left, SPAN), want),
+        -1,
+        "the first key the two routes disagreed on",
+    )
+    assert_equal(
+        first_unpaired(hashed, mixed_left, mixed_right),
+        -1,
+        "the first entry the hash route paired across two keys",
+    )
+
+
+def test_an_inner_join_past_the_split_fans_out_from_every_morsel() raises:
+    """Runs the inner walk long enough that it splits, over runs of seven rows.
+
+    Seven does not divide the morsel length, so morsel boundaries land inside
+    runs of equal left keys, and here that costs more than it does for a semi
+    join. A worker whose cursor started in the wrong place does not merely
+    answer one question wrong, it fans out over the wrong run, so it writes a
+    different number of entries than the count pass reserved room for and every
+    morsel after it is written over the top of.
+
+    The right side holds each key three times, so every matched left row emits
+    three entries rather than one, which is what makes the count pass and the
+    emit pass two different calculations that have to agree.
+    """
+    comptime SPAN = MERGE_SPLIT_ROWS // 7 + 2
+    comptime RIGHT_ROWS = 5_000
+    var left = climbing_keys(MERGE_SPLIT_ROWS, 7)
+    var right = stepping_keys(RIGHT_ROWS, 4, 3)
+    var want = inner_pairs(left, MERGE_SPLIT_ROWS, right, RIGHT_ROWS, SPAN)
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_SPLIT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.INNER,
+    )
+    assert_equal(
+        first_gap(kept_by_key(walked, left, SPAN), want),
+        -1,
+        "the first key the split walk paired wrong",
+    )
+    assert_equal(
+        first_unpaired(walked, left, right),
+        -1,
+        "the first entry the split walk paired across two keys",
+    )
+
+
+def test_an_inner_join_on_one_repeated_key_pairs_every_row_against_every_row() raises:
+    """Walks a left column and a right column that are each a single key.
+
+    The degenerate fan out, where the answer is the whole cross product and the
+    walk's two cursors never move. It is here for two reasons. The output is
+    much taller than either input, which is the case a count pass sized off row
+    counts rather than off pair counts would get wrong. And the run of equal
+    right keys is found once for the whole column rather than once a left row,
+    which is what keeps this from being seventy thousand scans of the right
+    side, so a walk that looked the run up per row would still pass but would
+    take long enough to notice.
+    """
+    comptime RIGHT_ROWS = 8
+    var left = climbing_keys(MERGE_LEFT_ROWS, MERGE_LEFT_ROWS)
+    var flat = Array[DType.int64](RIGHT_ROWS)
+    for j in range(RIGHT_ROWS):
+        flat[j] = Int64(0)
+    var right = one_column(Series("k", flat^))
+
+    var walked = join_indices(
+        left.column_refs(),
+        keys(0),
+        MERGE_LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.INNER,
+    )
+    assert_equal(
+        len(walked),
+        MERGE_LEFT_ROWS * RIGHT_ROWS,
+        "pairs from a left and a right column that are each one key",
+    )
+    assert_equal(
+        first_unpaired(walked, left, right),
+        -1,
+        "the first entry pairing two different keys",
+    )
+    assert_equal(walked.left_at[0], 0, "the first entry's left row")
+    assert_equal(walked.right_at[0], 0, "the first entry's right row")
+    assert_equal(
+        walked.right_at[RIGHT_ROWS - 1],
+        RIGHT_ROWS - 1,
+        "the last right row paired against the first left row",
+    )
+    assert_equal(
+        walked.left_at[RIGHT_ROWS], 1, "the left row the second run names"
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
