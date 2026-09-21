@@ -247,6 +247,24 @@ The `str.contains` grammar bucket falls from 139 patterns to 6 on the corpus the
 
 Document 109 is the write up.
 
+### Added: the other spelling of a named group
+
+`Series.str.contains("(?<n>a)")` and the same pattern through `count`, `replace`, `match`, `fullmatch` and `extract` used to raise and now answer, which is the ninth and last slice of the patterns RE2 reads and this library did not.
+
+Python reads `(?<` and then looks at one character, and it knows only `=` and `!` there, so anything else is `unknown extension ?<` and that character. RE2 reads the same three characters and refuses `=` and `!`, because it has no lookbehind, and reads anything else as the name of a capturing group. The two grammars use the same opening for two constructs that have nothing in common and each one refuses the other's.
+
+Python has no reading here to lose, which is why the slice can be taken. It does not get as far as the name, so there is no Python tree for the pattern, RE2's reading is the only reading, and the tree holds it with Python's own sentence recorded beside it for a caller who reached Python's engine by passing a `flags` argument.
+
+Worth saying because it was measured rather than assumed: pandas hands these patterns to Arrow, so `Series.str.contains("(?<n>a)")` answers a column today rather than raising, and a library that refused it would be answering a question pandas does not ask.
+
+The name rule is document 107's category test, asked without Python's identifier test beside it, so `(?<1n>a)` reads and `(?<n.m>a)` is a pattern nobody reads. A named group is a numbered group once it is read, so `(?<n>a)` compiles to exactly the program `(?P<n>a)` compiles to and the compiler, the engines and the router were not touched.
+
+The RE2 grammar reader needed one line, which is the first thing any of the nine slices has asked of it that it did not already have. `(?<` with nothing after it was the one pattern in thirty thousand the reader and RE2 refused for different reasons, RE2 complaining about the bracket and the reader about a name it had gone looking for.
+
+The count of patterns RE2 reads and this library does not falls from 7 to 4 on a corpus widened to 30316, and the four that are left are one shape that is held out for another reason anyway. On this corpus every pattern RE2 reads is now a pattern this library reads. All seven comparisons stay at zero disagreements.
+
+Document 110 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

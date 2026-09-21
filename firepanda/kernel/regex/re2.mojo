@@ -785,6 +785,13 @@ def _group(mut c: _Cursor) -> Int:
         if after == UInt32(ord("=")) or after == UInt32(ord("!")):
             c.give_up(String("RE2 has no group written that way"))
             return 1
+        # RE2 decides what `(?<` is by the character after it, so with nothing
+        # there it has not got as far as a name and the complaint is about the
+        # bracket rather than about the name. `(?<n` with the name unfinished
+        # is the other complaint, which is the one below. Document 110.
+        if after == 0xFFFFFFFF:
+            c.give_up(String("RE2 has no group written that way"))
+            return 1
         return _named(c)
     if (
         _is_flag_point(next)
