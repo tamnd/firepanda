@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: TABLESAMPLE and USING SAMPLE read and print
+
+A sample takes a share of the rows instead of all of them, and DuckDB spells it two ways that mean the same thing. `TABLESAMPLE` is the spelling the standard uses and `USING SAMPLE` is the one DuckDB added, and the grammar takes either one in either place. It was the second largest thing firepanda still turned down at the parse, at 132 statements of the corpus, 106 of them written after a table and 26 written on the block.
+
+The grammar hangs a sample off six rules and only three of them are reachable, since two are the `Nearest` spellings the error recovery uses and one is the table alias form that is refused before a sample can be looked at. Of the three, the one on a `SELECT` block goes in a clause slot the way every other clause of a block does, and the two on a table reference go in a field those reference kinds were not using, so nothing grew to hold it.
+
+Three things about how a sample was written are kept rather than normalized, because the grammar takes all of them in both places and none of them changes what the sample means. Which keyword introduced it, whether the count carries `%`, `PERCENT`, `ROWS` or nothing at all, and whether the method name stands in front of the parentheses or inside them next to the seed. `TABLESAMPLE reservoir(10%) REPEATABLE (377)` and `USING SAMPLE 10% (reservoir, 377)` are the same sample said two ways and each prints back the way it came in.
+
+None of it lowers. Taking a share of the rows is a row source of its own and the plan has no node for one, so the two refusals moved out of the transformer and into lowering and say the sentence they always said, reworded to name that the sample now reads and prints first.
+
 ### Added: USING KEY on a WITH entry reads and prints
 
 `USING KEY` is how DuckDB says that a `WITH` entry keeps one row per key and replaces that row as the query runs, rather than keeping every row it ever produced. It was the largest single thing left that firepanda turned down at the parse, and it is the last of the `WITH` modifiers to read.

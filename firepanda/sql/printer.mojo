@@ -81,6 +81,7 @@ from .ast import (
     CLAUSE_PROJECTION,
     CLAUSE_QUALIFY,
     CLAUSE_WHERE,
+    CLAUSE_SAMPLE,
     CLAUSE_WINDOW,
     cte_keys,
     cte_materialize,
@@ -120,6 +121,12 @@ from .ast import (
     REF_PARENS,
     REF_SUBQUERY,
     REF_TABLE,
+    SAMPLE_UNIT_PERCENT_SIGN,
+    SAMPLE_UNIT_PERCENT_WORD,
+    SAMPLE_UNIT_ROWS,
+    sample_method_first,
+    sample_tablesample,
+    sample_unit,
     SELECT_ALL,
     SELECT_DISTINCT,
     SORT_ASCENDING,
@@ -132,6 +139,7 @@ from .ast import (
     STMT_PIVOT,
     STMT_PIVOT_ON,
     STMT_QUERY,
+    STMT_SAMPLE,
     STMT_SELECT,
     STMT_SET_OPERATION,
     STMT_TABLE,
@@ -1545,6 +1553,90 @@ def _write_query(
         out += " QUALIFY "
         _write(ast, qualify, grammar, out)
 
+    var sample = ast.slot(clauses, CLAUSE_SAMPLE)
+    if sample != NO_NODE:
+        out += " "
+        _write_sample(ast, sample, grammar, out)
+
+
+def _write_sample(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends a `TABLESAMPLE` or a `USING SAMPLE`.
+
+    Args:
+        ast: The AST.
+        node: The index in the statement arena.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not a sample, or could not be printed.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null statement")
+    ref item = ast.stmts[Int(node)]
+    if item.kind != STMT_SAMPLE:
+        raise Error(String("a sample holding statement kind ", item.kind))
+    out += "TABLESAMPLE " if sample_tablesample(item.b) else "USING SAMPLE "
+    var method = ast.text(item.payload)
+    var seeds = ast.length(item.children)
+    if seeds > 1:
+        raise Error(String("a sample with ", seeds, " seeds on it"))
+
+    if sample_method_first(item.b):
+        # `reservoir(10%) REPEATABLE (377)`, where the method may be left out
+        # and the parentheses may not.
+        if method.byte_length() > 0:
+            out += quote_name(method, grammar)
+        out += "("
+        _write_sample_count(ast, node, grammar, out)
+        out += ")"
+        if seeds == 1:
+            out += " REPEATABLE ("
+            _write(ast, ast.at(item.children, 0), grammar, out)
+            out += ")"
+        return
+
+    # `10% (reservoir, 377)`, where the parentheses hold the method and the
+    # seed, and the seed cannot be written without the method in front of it.
+    _write_sample_count(ast, node, grammar, out)
+    if method.byte_length() == 0:
+        if seeds == 1:
+            raise Error("a sample with a seed and no method to write it after")
+        return
+    out += " ("
+    out += quote_name(method, grammar)
+    if seeds == 1:
+        out += ", "
+        _write(ast, ast.at(item.children, 0), grammar, out)
+    out += ")"
+
+
+def _write_sample_count(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends how much of the table a sample takes, and in what.
+
+    Args:
+        ast: The AST.
+        node: The `STMT_SAMPLE` node.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the count could not be printed.
+    """
+    ref item = ast.stmts[Int(node)]
+    _write(ast, item.a, grammar, out)
+    var unit = sample_unit(item.b)
+    if unit == SAMPLE_UNIT_PERCENT_SIGN:
+        out += "%"
+    elif unit == SAMPLE_UNIT_PERCENT_WORD:
+        out += " PERCENT"
+    elif unit == SAMPLE_UNIT_ROWS:
+        out += " ROWS"
+
 
 def _write_window_definition(
     ast: Ast, node: UInt32, grammar: Grammar, mut out: String
@@ -1785,6 +1877,9 @@ def _write_ref(
             raise Error("a table reference with no name parts in it")
         out += _names(ast, item.children, grammar)
         _write_alias(ast, item.payload, grammar, out)
+        if item.a != NO_NODE:
+            out += " "
+            _write_sample(ast, item.a, grammar, out)
         return
 
     if kind == REF_SUBQUERY:
@@ -1813,6 +1908,9 @@ def _write_ref(
         _write_ref(ast, item.a, grammar, out)
         out += ")"
         _write_alias(ast, item.payload, grammar, out)
+        if item.b != NO_NODE:
+            out += " "
+            _write_sample(ast, item.b, grammar, out)
         return
 
     if kind == REF_JOIN:

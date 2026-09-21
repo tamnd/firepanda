@@ -663,8 +663,9 @@ comptime REF_TABLE: UInt8 = 1
 """A named table, `t` or `s.t`.
 
 `children` is a run of interned name parts, outermost first. `payload` is the
-alias run. Whether the name is a table, a view or a file that reads as one is
-the catalog's business and not this stage's.
+alias run and `a` is a `STMT_SAMPLE` node, or 0 when no sample was written.
+Whether the name is a table, a view or a file that reads as one is the
+catalog's business and not this stage's.
 """
 
 comptime REF_SUBQUERY: UInt8 = 2
@@ -704,10 +705,11 @@ happen.
 comptime REF_PARENS: UInt8 = 6
 """A table reference the query wrote in parentheses.
 
-`a` is the reference inside and `payload` is the alias run. It is kept rather
-than dropped because the parentheses are the only thing that can put a join on
-the right of another join, and a printer that guessed where to put them back
-would be a second implementation of the same rule.
+`a` is the reference inside, `payload` is the alias run and `b` is a
+`STMT_SAMPLE` node, or 0 when no sample was written. It is kept rather than
+dropped because the parentheses are the only thing that can put a join on the
+right of another join, and a printer that guessed where to put them back would
+be a second implementation of the same rule.
 """
 
 
@@ -868,7 +870,102 @@ window frame.
 """
 
 
-comptime CLAUSE_SLOTS: Int = 7
+comptime STMT_SAMPLE: UInt8 = 15
+"""A sample, which is `TABLESAMPLE` or `USING SAMPLE` and what follows it.
+
+`a` is the count, which is a number or a parameter and so is an expression
+rather than a value read here. `payload` is the interned method name as the
+query wrote it, or 0 when none was written. `children` is a run of one holding
+the `REPEATABLE` seed, and is empty when there is none. `b` holds the spelling
+tags, which `sample_tags` packs and `sample_unit`, `sample_keyword` and
+`sample_form` read back.
+
+Three things about how it was written are kept rather than normalized, because
+the grammar takes all of them in both positions and none of them changes what
+the sample means. Which keyword introduced it, whether the count is a plain
+number or carries `%`, `PERCENT` or `ROWS`, and whether the method stands in
+front of the parentheses or inside them.
+"""
+
+
+comptime SAMPLE_UNIT_NONE: UInt32 = 0
+"""A count with no unit after it, `USING SAMPLE 10`."""
+
+comptime SAMPLE_UNIT_PERCENT_SIGN: UInt32 = 1
+"""A count written with `%`, `USING SAMPLE 10%`."""
+
+comptime SAMPLE_UNIT_PERCENT_WORD: UInt32 = 2
+"""A count written with `PERCENT`, `USING SAMPLE 10 PERCENT`."""
+
+comptime SAMPLE_UNIT_ROWS: UInt32 = 3
+"""A count written with `ROWS`, `USING SAMPLE 10 ROWS`."""
+
+comptime _SAMPLE_UNIT_FIELD: UInt32 = 3
+"""The two low bits of a sample's `b`, which hold the unit."""
+
+comptime _SAMPLE_KEYWORD_BIT: UInt32 = 4
+"""Set when the query wrote `TABLESAMPLE` rather than `USING SAMPLE`."""
+
+comptime _SAMPLE_FORM_BIT: UInt32 = 8
+"""Set when the method stands in front of the count's parentheses."""
+
+
+def sample_tags(unit: UInt32, tablesample: Bool, method_first: Bool) -> UInt32:
+    """Packs the three things a sample keeps about how it was written.
+
+    Args:
+        unit: One of the `SAMPLE_UNIT_` constants.
+        tablesample: Whether the keyword was `TABLESAMPLE`.
+        method_first: Whether the method stands in front of the parentheses.
+
+    Returns:
+        The packed value, for a `STMT_SAMPLE` `b`.
+    """
+    var out = unit
+    if tablesample:
+        out |= _SAMPLE_KEYWORD_BIT
+    if method_first:
+        out |= _SAMPLE_FORM_BIT
+    return out
+
+
+def sample_unit(tags: UInt32) -> UInt32:
+    """Reads the unit out of a packed sample field.
+
+    Args:
+        tags: A `STMT_SAMPLE` `b`.
+
+    Returns:
+        One of the `SAMPLE_UNIT_` constants.
+    """
+    return tags & _SAMPLE_UNIT_FIELD
+
+
+def sample_tablesample(tags: UInt32) -> Bool:
+    """Whether the sample was written with `TABLESAMPLE`.
+
+    Args:
+        tags: A `STMT_SAMPLE` `b`.
+
+    Returns:
+        True for `TABLESAMPLE` and False for `USING SAMPLE`.
+    """
+    return tags & _SAMPLE_KEYWORD_BIT != 0
+
+
+def sample_method_first(tags: UInt32) -> Bool:
+    """Whether the method stands in front of the count's parentheses.
+
+    Args:
+        tags: A `STMT_SAMPLE` `b`.
+
+    Returns:
+        True for `reservoir(10)` and False for `10 (reservoir)`.
+    """
+    return tags & _SAMPLE_FORM_BIT != 0
+
+
+comptime CLAUSE_SLOTS: Int = 8
 """How many entries a query node's clause run always has."""
 
 comptime CLAUSE_PROJECTION: Int = 0
@@ -891,6 +988,9 @@ comptime CLAUSE_QUALIFY: Int = 5
 
 comptime CLAUSE_WINDOW: Int = 6
 """The `WINDOW`, a run of `STMT_WINDOW` nodes, empty when there is none."""
+
+comptime CLAUSE_SAMPLE: Int = 7
+"""The `USING SAMPLE`, a `STMT_SAMPLE` node, or 0 when there is none."""
 
 
 comptime SELECT_DISTINCT: UInt32 = 1
@@ -2091,6 +2191,7 @@ struct Ast(Movable):
         parts: List[String],
         name: StringSlice = "",
         columns: List[String] = List[String](),
+        sample: UInt32 = NO_NODE,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds a named table reference.
@@ -2099,6 +2200,7 @@ struct Ast(Movable):
             parts: The name parts, outermost first, at least one.
             name: The alias, empty for none.
             columns: The column aliases, in order.
+            sample: A `STMT_SAMPLE` node, or 0 for none.
             token: The token it starts at.
 
         Returns:
@@ -2108,6 +2210,7 @@ struct Ast(Movable):
             Ref(
                 kind=REF_TABLE,
                 token=token,
+                a=sample,
                 children=self.names(parts),
                 payload=self.alias(name, columns),
             )
@@ -2181,6 +2284,7 @@ struct Ast(Movable):
         inner: UInt32,
         name: StringSlice = "",
         columns: List[String] = List[String](),
+        sample: UInt32 = NO_NODE,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds a parenthesized table reference.
@@ -2189,6 +2293,7 @@ struct Ast(Movable):
             inner: The reference inside the parentheses.
             name: The alias, empty for none.
             columns: The column aliases, in order.
+            sample: A `STMT_SAMPLE` node, or 0 for none.
             token: The token the opening parenthesis is at.
 
         Returns:
@@ -2199,6 +2304,7 @@ struct Ast(Movable):
                 kind=REF_PARENS,
                 token=token,
                 a=inner,
+                b=sample,
                 payload=self.alias(name, columns),
             )
         )
@@ -2324,6 +2430,7 @@ struct Ast(Movable):
         flags: UInt32 = 0,
         distinct_on: List[UInt32] = List[UInt32](),
         windows: List[UInt32] = List[UInt32](),
+        sample: UInt32 = NO_NODE,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds one `SELECT ... FROM ... WHERE ...` block.
@@ -2338,6 +2445,7 @@ struct Ast(Movable):
             flags: A bit set of the `SELECT_` constants.
             distinct_on: The `DISTINCT ON` expressions, in order.
             windows: The `WINDOW` clause, a list of `STMT_WINDOW` nodes.
+            sample: The `USING SAMPLE`, a `STMT_SAMPLE` node, or 0.
             token: The token it starts at.
 
         Returns:
@@ -2351,6 +2459,7 @@ struct Ast(Movable):
         clauses[CLAUSE_HAVING] = having
         clauses[CLAUSE_QUALIFY] = qualify
         clauses[CLAUSE_WINDOW] = self.run(windows)
+        clauses[CLAUSE_SAMPLE] = sample
         return self.add_stmt(
             Stmt(
                 kind=STMT_QUERY,
@@ -2546,6 +2655,44 @@ struct Ast(Movable):
                 b=offset,
                 children=self.run(order),
                 payload=flags,
+            )
+        )
+
+    def sample(
+        mut self,
+        count: UInt32,
+        unit: UInt32 = SAMPLE_UNIT_NONE,
+        method: StringSlice = "",
+        seed: UInt32 = NO_NODE,
+        tablesample: Bool = False,
+        method_first: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds a `TABLESAMPLE` or a `USING SAMPLE`.
+
+        Args:
+            count: How much to take, a number or a parameter expression.
+            unit: One of the `SAMPLE_UNIT_` constants.
+            method: The method name as written, empty when none was.
+            seed: The `REPEATABLE` seed expression, or 0 for none.
+            tablesample: Whether the keyword was `TABLESAMPLE`.
+            method_first: Whether the method stands in front of the count.
+            token: The token the keyword is at.
+
+        Returns:
+            The statement node index.
+        """
+        var seeds = List[UInt32]()
+        if seed != NO_NODE:
+            seeds.append(seed)
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_SAMPLE,
+                token=token,
+                a=count,
+                b=sample_tags(unit, tablesample, method_first),
+                children=self.run(seeds),
+                payload=self.intern(method),
             )
         )
 

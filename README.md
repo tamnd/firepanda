@@ -149,8 +149,8 @@ See https://github.com/tamnd/firepanda/issues/13
 | `quoted-name` | anything but a plain name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `not-subquery` | NOT in front of a subquery | Write NOT EXISTS or NOT IN, which say which of the two this means. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `select-clause` | {} in a SELECT | The query node has a slot for each clause firepanda runs, and none for this one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
-| `select-sample` | a sample on a SELECT | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
-| `table-sample` | a sample on a table | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `select-sample` | a sample on a SELECT | The sample reads and prints, and lowering stops on it, since taking a share of the rows is a row source of its own and firepanda has no node for one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `table-sample` | a sample on a table | The sample reads and prints, and lowering stops on it, since taking a share of the rows is a row source of its own and firepanda has no node for one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `table-modifier` | {} on a table | A join, a PIVOT and an UNPIVOT are the three things that go here and all three are read, so this is a fourth one the grammar grew and the transformer has no case for. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `table-at` | AT on a table | It reads a table as of a version or a timestamp, and firepanda has no storage that keeps either one. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `alias-colon` | the name: table spelling | Write FROM t AS name, which is the same alias. | [#13](https://github.com/tamnd/firepanda/issues/13) |
