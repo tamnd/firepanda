@@ -20,6 +20,38 @@
 # `FIREPANDA_TEST_JOBS` overrides the width. Set it to 1 to get the old
 # behaviour when a failure is confusing enough to want a clean serial log.
 #
+# `FIREPANDA_TEST_SHARDS` and `FIREPANDA_TEST_SHARD` cut the list of files into
+# pieces so that several machines can each run one. One machine with four cores
+# was taking thirty nine minutes of the fifty one this step's job cost, and the
+# reason is that a test file spends most of its wall clock compiling the library
+# again rather than running assertions, so there is nothing to share between
+# files and the only way to go faster is more machines. `.github/workflows/ci.yml`
+# runs ten of them.
+#
+# The split is by measured time, out of `tools/test_costs.txt`, largest first
+# into whichever shard has least so far. That is the standard greedy schedule
+# and it needs real numbers: the first version of this balanced on file size
+# instead, on the reasoning that compile time tracks how much code there is, and
+# the ten shards came out between 249 and 662 seconds. Size is not the cost. The
+# cost is how much of the library a file's imports pull in and instantiate, and
+# two files of the same length disagree about that by a factor of three.
+#
+# The numbers also have to come off the machine that runs them, which was the
+# second thing this got wrong. They were measured on a sixteen core workstation
+# on the theory that only the ratios matter, the shards balanced to within half
+# a per cent there, and on a four core runner the same assignment came out
+# spanning 423 to 622 seconds. `tools/test_costs_from_ci.sh` reads the table
+# back out of a CI run's logs, which is where it should come from.
+#
+# `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
+# `pixi run test-costs` does, and is the fallback when there is no run to read.
+# It needs an unsharded run, because a table written from one shard lists a
+# tenth of the files. A file the table has not heard of is treated as an average
+# one until somebody regenerates it.
+#
+# Every file's time is printed next to its name in the report below, sharded or
+# not, which is what makes reading the table back out of a run's logs possible.
+#
 # The logs go under `build/` rather than under `TMPDIR`, which they used to. On
 # macOS `TMPDIR` is a per-session directory under `/var/folders` that the system
 # is free to reap, and it does: a run of this script reported twenty four of a
@@ -56,6 +88,71 @@ if [ ! -e "${files[0]}" ]; then
   exit 1
 fi
 
+shards=${FIREPANDA_TEST_SHARDS:-1}
+shard=${FIREPANDA_TEST_SHARD:-1}
+if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
+  echo "FIREPANDA_TEST_SHARD=$shard is not between 1 and $shards" >&2
+  exit 1
+fi
+
+costs=${FIREPANDA_TEST_COSTS:-tools/test_costs.txt}
+
+total=${#files[@]}
+if [ "$shards" -gt 1 ]; then
+  if [ ! -e "$costs" ]; then
+    echo "no cost table at $costs, so the shards cannot be balanced" >&2
+    exit 1
+  fi
+  # Every shard runs this over the whole list and keeps the files that fall to
+  # it, so they agree on the assignment without talking to each other.
+  #
+  # `read` in a loop rather than `mapfile`, because the macOS runner's bash is
+  # 3.2 and does not have it.
+  picked=()
+  while IFS= read -r file; do
+    picked[${#picked[@]}]=$file
+  done < <(
+    printf '%s\n' "${files[@]}" \
+      | awk -v costs="$costs" '
+          BEGIN {
+            while ((getline line < costs) > 0) {
+              if (line ~ /^#/) continue
+              if (split(line, f, " ") < 2) continue
+              cost[f[2]] = f[1] + 0
+              sum += f[1] + 0
+              seen++
+            }
+            # A file the table has never heard of is assumed to be an average
+            # one, which is the least wrong thing to assume about a file that
+            # was added after the table was written.
+            mean = (seen > 0) ? sum / seen : 0
+          }
+          {
+            printf "%d %s\n", (($0 in cost) ? cost[$0] : mean), $0
+          }' \
+      | sort -k1,1nr -k2,2 \
+      | awk -v n="$shards" -v mine="$shard" '
+          {
+            # Ties go to the shard holding fewest files, which makes this
+            # degrade to round robin rather than to "everything in shard one"
+            # if the table ever comes back all zeroes.
+            least = 1
+            for (s = 2; s <= n; s++) {
+              if (load[s] < load[least]) least = s
+              else if (load[s] == load[least] && count[s] < count[least]) least = s
+            }
+            load[least] += $1
+            count[least]++
+            if (least == mine) print $2
+          }'
+  )
+  if [ "${#picked[@]}" -eq 0 ]; then
+    echo "shard $shard of $shards has no files out of $total, which cannot be right" >&2
+    exit 1
+  fi
+  files=("${picked[@]}")
+fi
+
 # The process id is in the name because two runs of this in the same checkout at
 # once is a normal thing to want and they must not share a log directory.
 logs=build/testlogs.$$
@@ -63,14 +160,23 @@ rm -rf "$logs"
 mkdir -p "$logs"
 trap 'rm -rf "$logs"' EXIT
 
-echo "running ${#files[@]} test files, $jobs at a time"
+if [ "$shards" -gt 1 ]; then
+  echo "running ${#files[@]} of $total test files, shard $shard of $shards, $jobs at a time"
+else
+  echo "running ${#files[@]} test files, $jobs at a time"
+fi
 
 run_one() {
   local file=$1 logs=$2
   local base=${file##*/}
+  # `SECONDS` rather than anything finer because macOS `date` has no `%N`, and
+  # one second is plenty: the files run from one second to five minutes and this
+  # number is only ever used to decide which shard a file belongs in.
+  SECONDS=0
   if mojo run -I . "$file" > "$logs/$base.log" 2>&1; then
     : > "$logs/$base.ok"
   fi
+  echo "$SECONDS" > "$logs/$base.time"
 }
 export -f run_one
 
@@ -81,7 +187,11 @@ failed=0
 lost=0
 for file in "${files[@]}"; do
   base=${file##*/}
-  echo "=== $file"
+  if [ -e "$logs/$base.time" ]; then
+    echo "=== $file ($(cat "$logs/$base.time")s)"
+  else
+    echo "=== $file"
+  fi
   if [ -e "$logs/$base.log" ]; then
     cat "$logs/$base.log"
     [ -e "$logs/$base.ok" ] || failed=$((failed + 1))
@@ -90,6 +200,36 @@ for file in "${files[@]}"; do
     lost=$((lost + 1))
   fi
 done
+
+# The cost table the sharding above reads. Writing it is opt in and takes a
+# whole unsharded run, because a table written from one shard would list a tenth
+# of the files and the other nine tenths would fall to the mean on the next run
+# and undo the balance. `pixi run test-costs` is the way to do it.
+if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
+  if [ "$shards" -gt 1 ]; then
+    echo "refusing to write a cost table from shard $shard of $shards" >&2
+    exit 1
+  fi
+  # The header is written first and only the rows go through `sort`, because a
+  # header sorted along with the data lands in the middle of the file. The
+  # reader above skips a comment wherever it appears, so this is about the file
+  # being readable rather than about it working.
+  {
+    echo "# Seconds per test file, written by \`pixi run test-costs\` on $(uname -m),"
+    echo "# $jobs files at a time. The ten test shards in .github/workflows/ci.yml"
+    echo "# divide the list up on these numbers."
+    echo "#"
+    echo "# Prefer \`tools/test_costs_from_ci.sh\` when there is a CI run to read."
+    echo "# The ratios between files are not the same on sixteen cores as on four,"
+    echo "# so a table measured off the runner balances the runner badly."
+  } > "$FIREPANDA_TEST_WRITE_COSTS"
+  for file in "${files[@]}"; do
+    base=${file##*/}
+    [ -e "$logs/$base.time" ] || continue
+    printf '%s %s\n' "$(cat "$logs/$base.time")" "$file"
+  done | sort -k1,1nr -k2,2 >> "$FIREPANDA_TEST_WRITE_COSTS"
+  echo "wrote $FIREPANDA_TEST_WRITE_COSTS"
+fi
 
 echo
 if [ "$lost" -ne 0 ]; then
@@ -101,4 +241,8 @@ if [ "$failed" -ne 0 ]; then
   echo "$failed of ${#files[@]} test files failed"
   exit 1
 fi
-echo "${#files[@]} test files passed"
+if [ "$shards" -gt 1 ]; then
+  echo "${#files[@]} test files passed, shard $shard of $shards"
+else
+  echo "${#files[@]} test files passed"
+fi

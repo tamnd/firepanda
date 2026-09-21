@@ -27,6 +27,7 @@ jobs:
     outputs:
       has_mojo: ${{ steps.detect.outputs.has_mojo }}
       has_python: ${{ steps.detect.outputs.has_python }}
+      os_matrix: ${{ steps.matrix.outputs.os }}
     steps:
       - uses: actions/checkout@v7
       - id: detect
@@ -41,6 +42,27 @@ jobs:
             echo "has_python=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_python=false" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      # Which platforms the build and test jobs run on. A pull request gets
+      # Linux x86 and the merge gets all three.
+      #
+      # This is the same trade the mojo axis made below and it is made for the
+      # same reason. Three platforms is three times the machines and none of
+      # them is three times the information: in the history of this repository
+      # no macOS or arm64 failure has ever arrived without the x86 job failing
+      # alongside it, and the price was paid by whoever was waiting to merge.
+      # Paying it on the merge instead costs a revert in the case where they do
+      # diverge, and the case has not happened yet.
+      - id: matrix
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]' >> "$GITHUB_OUTPUT"
           fi
         shell: bash
 
@@ -191,7 +213,7 @@ jobs:
         run: uvx mypy
 
   build:
-    name: Build & test (${{ matrix.os }}, mojo ${{ matrix.mojo }})
+    name: Tests (${{ matrix.os }}, shard ${{ matrix.shard }} of 10)
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ${{ matrix.os }}
@@ -201,18 +223,37 @@ jobs:
     # when it breaks. Running the same build again on every pull request was the
     # slowest job in this workflow and told us nothing the canary had not already
     # told us that morning.
+    #
+    # The shards are ten machines running a tenth of the test files each.
+    # This step was thirty nine minutes of a fifty one minute job and it does not
+    # get faster on one machine: Mojo 1.0 has no `mojo test`, so each test file
+    # is its own program that compiles the library again, and almost all of that
+    # wall clock is the compiler rather than the assertions. There is nothing to
+    # cache between files either, because the generics are instantiated into
+    # whichever program uses them, which was measured rather than assumed:
+    # pointing a test run at the precompiled `build/firepanda.mojoc` instead of
+    # at the sources moved the largest file from 14.3 seconds to 13.8 and the
+    # next one from 21.6 to 21.8. So the only lever left is more machines.
+    #
+    # tools/run_tests.sh splits the list on the measured times in
+    # tools/test_costs.txt, largest first into whichever shard has least so far.
+    # Two earlier versions of that table got it wrong in instructive ways. The
+    # first balanced on file size, on the reasoning that compile time tracks how
+    # much code there is, and the shards came out between 249 and 662 seconds: a
+    # file's cost is how much of the library it imports and instantiates rather
+    # than how long it is. The second measured real times on a sixteen core
+    # workstation, which balanced that machine to within half a per cent and this
+    # one to 423 against 622 seconds. The table now comes off a runner, which is
+    # what tools/test_costs_from_ci.sh is for.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-        mojo: [pinned]
+        os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-pixi
-        with:
-          environment: ${{ matrix.mojo == 'nightly' && 'nightly' || 'default' }}
-          locked: ${{ matrix.mojo == 'nightly' && 'false' || 'true' }}
 
       - name: Toolchain versions
         run: pixi run mojo --version
@@ -221,7 +262,28 @@ jobs:
         run: pixi run build
 
       - name: Unit and docstring tests
+        env:
+          FIREPANDA_TEST_SHARDS: 10
+          FIREPANDA_TEST_SHARD: ${{ matrix.shard }}
         run: pixi run test
+
+  # The extension, once per platform rather than once per shard.
+  extension:
+    name: Extension (${{ matrix.os }})
+    needs: guard
+    if: needs.guard.outputs.has_mojo == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-pixi
+
+      - name: Build
+        run: pixi run build
 
       # The extension, and the claim that it carries everything it needs. The
       # claim was first measured by hand on one laptop, and the ways it stops
@@ -270,10 +332,28 @@ jobs:
           --with pyarrow --with polars --with duckdb python -m pytest
           python/tests -q
 
-      # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
-      # in sequence, so this shortens the step without shortening the fuzz.
-      - name: Differential fuzz (bounded)
-        run: pixi run fuzz -- --max-total-time=300
+
+  # The two remaining pieces of the old build job. They are a separate job from
+  # the extension rather than two more steps in it because they need nothing the
+  # extension produces, and running them after it made the job the longest one
+  # left in the pipeline for no reason but the order they happened to be written
+  # in.
+  budget:
+    name: Stress & compile budget (${{ matrix.os }})
+    needs: guard
+    if: needs.guard.outputs.has_mojo == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-pixi
+
+      - name: Build
+        run: pixi run build
 
       - name: Concurrency stress
         run: pixi run stress
@@ -285,7 +365,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: compile-budget-${{ matrix.os }}-${{ matrix.mojo }}
+          name: compile-budget-${{ matrix.os }}
           path: compile-budget.json
           if-no-files-found: warn
 
@@ -295,7 +375,14 @@ jobs:
   bench:
     name: Microbenchmarks
     needs: guard
-    if: needs.guard.outputs.has_mojo == 'true'
+    # Not on pull requests. The baseline step below already stood itself down
+    # there, so what was left was nine and a half minutes of measuring with
+    # nothing to compare the measurement against: the comparison step is
+    # conditional on the baseline step, so on a pull request this job ran the
+    # whole suite and uploaded an artifact that nobody opens. The gate that
+    # means something on a pull request is the reference machine run recorded in
+    # it by hand, which is written down three comments below and has not changed.
+    if: needs.guard.outputs.has_mojo == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -428,12 +515,18 @@ jobs:
         with:
           environment: differential
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
-      # This one builds every differential program before it runs the first, so it
-      # carries the compile time for all the steps below it.
+      # This one builds every differential program this job runs before it runs
+      # the first, so it carries the compile time for all the steps below it.
       # The ceiling is fifteen rather than eight because the number of programs
       # grows with the comparison and ten of them is already past what eight
       # minutes covered. tools/build_differential.sh builds four at a time, which
       # is what the runner has cores for, so the compile is about two rounds.
+      #
+      # Six programs rather than eleven. The five regular expression comparisons
+      # are run by hand out of documents 76 and 79 through 81 and no workflow has
+      # ever run one, so building them here was about half of this step and the
+      # longest single thing left in the pipeline. `pixi run differential-regex`
+      # and its three siblings build their own group when somebody asks for them.
       - run: pixi run differential
         timeout-minutes: 15
 
@@ -509,7 +602,7 @@ jobs:
   required:
     name: CI
     if: always()
-    needs: [spec, format, build, bench, grammar, differential]
+    needs: [spec, format, build, extension, budget, bench, grammar, differential]
     runs-on: ubuntu-latest
     steps:
       - name: Collect results
