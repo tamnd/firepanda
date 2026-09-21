@@ -1594,7 +1594,12 @@ def _atom(mut c: _Cursor) -> Int32:
     return c.add(OP_LITERAL, Int32(Int(point)), 0)
 
 
-def _name(mut c: _Cursor, closer: UInt32, define: Bool = False) -> String:
+def _name(
+    mut c: _Cursor,
+    closer: UInt32,
+    define: Bool = False,
+    re2_only: Bool = False,
+) -> String:
     """Reads a group name up to a closing character.
 
     Python reads every character up to the terminator and asks whether what it
@@ -1611,6 +1616,8 @@ def _name(mut c: _Cursor, closer: UInt32, define: Bool = False) -> String:
         c: The cursor, on the first character of the name.
         closer: What ends it, which is `>` for a definition and `)` for a use.
         define: Whether this is a group being named rather than a use of one.
+        re2_only: Whether the spelling this name is written in is one Python has
+            no reading for at all, which is `(?<name>a)`. Document 110.
 
     Returns:
         The name, and the empty string when the parse failed.
@@ -1626,7 +1633,14 @@ def _name(mut c: _Cursor, closer: UInt32, define: Bool = False) -> String:
         c.give_up(String("missing group name"))
         return String("")
     var takes = _re2_takes_name(points)
-    if not _is_identifier(points):
+    if re2_only:
+        # Python has no reading for this spelling at all, so its rule about what
+        # an identifier is never runs and RE2's answer about the name is the
+        # only answer there is. Document 110.
+        if not takes:
+            c.give_up(String("invalid named capture group"))
+            return String("")
+    elif not _is_identifier(points):
         if not define or not takes:
             c.give_up(String("bad character in group name"))
             return String("")
@@ -1753,11 +1767,29 @@ def _group(mut c: _Cursor) -> Int32:
         return _lookaround(c, 1, kind == 0x21)
 
     if kind == 0x3C:
-        var after = c.take()
+        if c.done():
+            c.give_up(String("unexpected end of pattern"))
+            return -1
+        var after = c.peek()
         if after == 0x3D or after == 0x21:
+            c.at += 1
             return _lookaround(c, -1, after == 0x21)
-        c.give_up(String("unknown extension ?<"))
-        return -1
+        # `(?<name>a)` is RE2's other spelling of a named group and Python has
+        # no reading for it at all, since it decides on the character after the
+        # `<` and has nothing to do with anything but `=` and `!`. That leaves
+        # RE2's reading as the only reading, so the tree takes it and Python's
+        # own sentence is recorded beside it. The sentence names the character
+        # Python stopped on rather than the name, because Python stops there.
+        # Document 110.
+        if not c.python_refuses:
+            c.python_refuses = True
+            var shown = List[UInt8]()
+            _put_point(shown, after)
+            c.python_problem = String(
+                "unknown extension ?<",
+                StringSlice(unsafe_from_utf8=Span(shown)),
+            )
+        return _define(c, True)
 
     if kind == 0x3E:
         var node = c.add(OP_ATOMIC_GROUP, 0, 0)
@@ -1833,6 +1865,45 @@ def _lookaround(mut c: _Cursor, direction: Int32, negative: Bool) -> Int32:
     return node
 
 
+def _define(mut c: _Cursor, re2_only: Bool) -> Int32:
+    """Reads a group being given a name, in either of the two spellings.
+
+    Both `(?P<name>a)` and `(?<name>a)` open a group and bind a name to its
+    number, and the only thing that differs is whether Python has a reading for
+    the spelling. Document 110.
+
+    Args:
+        c: The cursor, on the first character of the name.
+        re2_only: Whether the spelling is the one Python has no reading for.
+
+    Returns:
+        The node, or minus one.
+    """
+    var name = _name(c, 0x3E, True, re2_only)
+    if c.failed:
+        return -1
+    if _numbered(c, name) >= 0:
+        # Python will not let a name stand for two groups and RE2 has no rule
+        # about it at all, so `(?P<n>a)(?P<n>b)` is a pattern Arrow answers and
+        # this used to refuse. The first binding is kept, which is what a use of
+        # the name would have resolved to, and no use of it can be read anyway
+        # because RE2 has no `(?P=name)`. Document 107.
+        if not c.python_refuses:
+            c.python_refuses = True
+            c.python_problem = String("redefinition of group name")
+    c.groups += 1
+    var number = c.groups
+    c.names.append(name)
+    c.numbers.append(number)
+    c.open_groups.append(number)
+    var node = c.add(OP_SUBPATTERN, number, 0)
+    var made = _body(c, node)
+    _ = c.open_groups.pop()
+    if not made:
+        return -1
+    return node
+
+
 def _named(mut c: _Cursor) -> Int32:
     """Reads the three things that can follow `(?P`.
 
@@ -1844,29 +1915,7 @@ def _named(mut c: _Cursor) -> Int32:
     """
     var next = c.take()
     if next == 0x3C:
-        var name = _name(c, 0x3E, True)
-        if c.failed:
-            return -1
-        if _numbered(c, name) >= 0:
-            # Python will not let a name stand for two groups and RE2 has no
-            # rule about it at all, so `(?P<n>a)(?P<n>b)` is a pattern Arrow
-            # answers and this used to refuse. The first binding is kept, which
-            # is what a use of the name would have resolved to, and no use of it
-            # can be read anyway because RE2 has no `(?P=name)`. Document 107.
-            if not c.python_refuses:
-                c.python_refuses = True
-                c.python_problem = String("redefinition of group name")
-        c.groups += 1
-        var number = c.groups
-        c.names.append(name)
-        c.numbers.append(number)
-        c.open_groups.append(number)
-        var node = c.add(OP_SUBPATTERN, number, 0)
-        var made = _body(c, node)
-        _ = c.open_groups.pop()
-        if not made:
-            return -1
-        return node
+        return _define(c, False)
 
     if next == 0x3D:
         var name = _name(c, 0x29)

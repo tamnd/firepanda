@@ -241,9 +241,11 @@ def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
 
     `\\p{L}` was this row's pattern until the name table landed, `\\Qa+b\\E`
     was until the quoted run landed, `[\\d-a]` was until the dash after a set
-    landed and `{,3}` was until the braceless count landed, so the pattern is
-    the other spelling of a named group, which is a slice not taken yet."""
-    var program = program_for(METHOD_CONTAINS, "(?<n>a)")
+    landed, `{,3}` was until the braceless count landed and `(?<n>a)` was until
+    the other spelling of a named group landed. What is left is a braceless
+    count already read Python's way and then a count Python refuses, which is
+    four patterns in thirty thousand and the end of the list."""
+    var program = program_for(METHOD_CONTAINS, "{}{,2}{1,3}")
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")

@@ -687,12 +687,13 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
     refused them, and reaching them takes a slice of the second front end each.
 
-    The other spelling of a named group is one of the slices not taken yet,
-    and it is here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` or `{,3}`
-    because all four of those are taken, which is what the rows below and above
-    are about. `(?<n>a)` is a named group to RE2 and an unknown extension to
-    Python."""
-    var program = compile_program(parse_pattern("(?<n>a)"), ENGINE_RE2)
+    What is left of that list is four patterns in thirty thousand, and it is
+    here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` or `{,3}` or `(?<n>a)`
+    because all five of those are taken, which is what the rows below and above
+    are about. `{}{,2}{1,3}` is a braceless count read Python's way and then a
+    count Python will not put on it, so unwinding the first reading is what
+    reaching this one would take."""
+    var program = compile_program(parse_pattern("{}{,2}{1,3}"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
@@ -886,6 +887,22 @@ def test_a_count_with_no_lower_bound_is_a_refusal_on_pythons_engine() raises:
     assert_false(after.ok)
     assert_false(after.gap)
     assert_equal(after.problem, "multiple repeat")
+
+
+def test_the_other_spelling_of_a_named_group_runs_on_re2s_engine() raises:
+    """It is a group like any other once it is read, so the program is the one
+    the `(?P<n>` spelling builds. Document 110."""
+    assert_equal(built("(?<n>a)"), built("(?P<n>a)"))
+    assert_equal(built("(?<n>a)"), "0 char(a); 1 match")
+
+
+def test_the_other_spelling_of_a_named_group_is_a_refusal_on_python() raises:
+    """With the sentence Python stops on, which names the character after the
+    angle bracket rather than the name. Document 110."""
+    var program = compile_program(parse_pattern("(?<n>a)"), ENGINE_PYTHON)
+    assert_false(program.ok)
+    assert_false(program.gap)
+    assert_equal(program.problem, "unknown extension ?<n")
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:

@@ -208,6 +208,16 @@ def test_the_bracket_forms_re2_has() raises:
     _takes(String("(?i)"))
     _takes(String("(?i:a)"))
 
+    # The name rule is the same one whichever way the group is opened, so a
+    # digit at the front is taken and a full stop is not. Document 110.
+    _takes(String("(?<1n>a)"))
+    _refuses(String("(?<n.m>a)"), String("RE2 will not take that group name"))
+
+    # RE2 decides what `(?<` is by the character after it, so with nothing
+    # there the complaint is about the bracket rather than about a name.
+    _refuses(String("(?<"), String("RE2 has no group written that way"))
+    _refuses(String("(?<n"), String("RE2 will not take that group name"))
+
 
 def test_the_bracket_forms_re2_has_not() raises:
     """Every lookaround, every conditional, and the comment group."""

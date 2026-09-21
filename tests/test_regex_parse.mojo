@@ -509,6 +509,58 @@ def test_a_name_only_python_takes_is_a_pattern_re2_refuses() raises:
     assert_true(tree.re2_refuses)
 
 
+def test_the_other_spelling_of_a_named_group_is_read_re2s_way() raises:
+    """`(?<name>a)` is a named group to RE2 and nothing at all to Python, which
+    decides on the character after the angle bracket and knows only `=` and `!`
+    there.
+
+    Document 110.
+    """
+    assert_equal(shape("(?<n>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?<n>a)"), "unknown extension ?<n")
+    assert_equal(
+        shape("(?<n>a)(?<m>b)"),
+        "seq{group(1){seq{lit(a)}},group(2){seq{lit(b)}}}",
+    )
+    assert_equal(shape("(?<=a)b"), "seq{assert(-1){seq{lit(a)}},lit(b)}")
+    assert_equal(shape("(?<!a)b"), "seq{assertnot(-1){seq{lit(a)}},lit(b)}")
+
+
+def test_the_other_spelling_is_judged_by_re2s_rule_about_a_name() raises:
+    """Python's rule about what an identifier is never runs here because Python
+    stopped two characters earlier, so a name with a digit at the front reads
+    and a name with a full stop in it is a pattern nobody reads.
+
+    Document 110.
+    """
+    assert_equal(shape("(?<1n>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?<1n>a)"), "unknown extension ?<1")
+    assert_equal(shape("(?<n.m>a)"), "!invalid named capture group")
+    assert_equal(shape("(?<n >a)"), "!invalid named capture group")
+    assert_equal(shape("(?<>a)"), "!missing group name")
+    assert_equal(shape("(?<n"), "!missing >, unterminated name")
+    assert_equal(shape("(?<"), "!unexpected end of pattern")
+
+
+def test_the_two_spellings_of_a_name_share_one_set_of_names() raises:
+    """A group opened one way and a group opened the other are the same kind of
+    group, so the second binding of a name is a redefinition whichever way round
+    the two are written.
+
+    Document 110.
+    """
+    assert_equal(
+        shape("(?P<n>a)(?<n>b)"),
+        "seq{group(1){seq{lit(a)}},group(2){seq{lit(b)}}}",
+    )
+    assert_equal(reason("(?P<n>a)(?<n>b)"), "unknown extension ?<n")
+    assert_equal(
+        shape("(?<n>a)(?P<n>b)"),
+        "seq{group(1){seq{lit(a)}},group(2){seq{lit(b)}}}",
+    )
+    assert_equal(reason("(?<n>a)(?P<n>b)"), "unknown extension ?<n")
+
+
 def test_an_octal_escape_is_read_when_the_digits_allow_it() raises:
     """The rule that decides whether a backslash and some digits are a number or
     a reference.
