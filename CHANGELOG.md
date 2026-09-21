@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-09-19
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with three threads in it. Four changes came out of taking TPC-H q21 apart, the regex engine reads two more group forms, and SQL runs one more shape of call.
+
+The q21 thread is the substantial one and it is worth reading as a sequence rather than as four separate entries. The query was 0.118 seconds when the work started and it is about 0.041 now on a 13900K at sf1 in memory. Three of the four changes are the same idea applied in different places, which is that a column already in the order somebody is about to put it in should not be reordered. A group by on a key that arrives sorted walks it instead of building a hash table. A semi join whose two key columns are both sorted walks them with one cursor each instead of factorizing both and building a table between them. And a grouped distinct count over groups that a sorted key walk produced reads them where they lie instead of scattering them into a slab first. The fourth change is the short group distinct count, which asks of each value whether an earlier one in the same group held it rather than sorting the group, because TPC-H's orders have one to seven lines each and a sort of seven things is mostly the call.
+
+The anti join in here is the one entry with no number attached and that is deliberate. It extends the sorted key walk from semi joins to anti joins, which is a handful of lines because the two kinds ask the same question and keep opposite answers, but neither of TPC-H's two anti joins can reach it: q22 probes a sorted column against an unsorted one and q16 does the reverse, so both are turned away at the sortedness check. It is in because the two join kinds whose output is a subset of the left rows now share one route, and because the flat readings do say something, which is that asking the question costs nothing on the case that fails it.
+
+The regex entries are the atomic group, the possessive quantifier and the conditional group. The first two are the same mechanism, which is a match that will not give back what it has taken, and the third lets a pattern choose between two arms on whether an earlier group took part.
+
+The SQL entry is a call written with a dot, so that `x.f(y)` runs as `f(x, y)`. That completes the pair with the field access that went out in 0.8.16, which read the same syntax without running it.
+
 ### Fixed: a scan cuts a tall chunk into morsels only when there is something to spread them over
 
 A reader hands back a frame in one chunk however many rows it read, and a line of elementwise operators over such a frame used to run about 1.65 times slower than the same rows in chunks, because with one chunk there is nothing for the driver to hand out. The scan answered that by cutting any chunk taller than a morsel into morsels, and it did the cutting in its constructor, which is before a single operator has been added to the pipeline.
