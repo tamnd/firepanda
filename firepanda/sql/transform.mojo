@@ -132,7 +132,6 @@ from .unsupported import (
     DEFAULT_VALUE,
     DOTTED_NAME,
     GROUPING,
-    IN_BARE_VALUE,
     JOIN_FORM,
     LIKE_ESCAPE,
     MAP_LITERAL,
@@ -2499,15 +2498,25 @@ struct Transform(Movable):
             # `InExpression` has three forms. The subquery form is a kind of
             # its own because the right side lives in the statement arena, the
             # parenthesized list is an ordinary list, and the unparenthesized
-            # form refuses because `x IN y` over a list column is not
-            # `x IN (y)`.
+            # form is a containment rather than either of those.
             var right = self._only(tree, self._only(tree, which))
             if self._marked(tree, right, _MARK_IN_SELECT):
                 return ast.in_subquery(
                     left, work.value(self._only(tree, right)), negated, at
                 )
             if _first_byte(tree, sql, right) != _LEFT_PAREN:
-                raise _unsupported(tree, sql, right, IN_BARE_VALUE)
+                # `x IN y` over a value is not `x IN (y)`. It asks whether the
+                # value holds `x`, and DuckDB names it `contains(y, x)`, the
+                # same way it names a `LIKE ... ESCAPE`. The grammar rule is
+                # called `InContainsExpression`, so the reading is DuckDB's own
+                # and the call is what is built here rather than a list of one.
+                var inside = self._only(tree, right)
+                var held: List[UInt32] = [inside]
+                work.warm(held)
+                var call = ast.call(
+                    "contains", [work.value(inside), left], 0, at
+                )
+                return ast.unary("NOT", call, at) if negated else call
             var candidates = List[UInt32]()
             var items = self._items(tree, self._only(tree, right))
             work.warm(items)
