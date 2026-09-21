@@ -700,12 +700,13 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
     refused them, and reaching them takes a slice of the second front end each.
 
-    What is left of that list is four patterns in thirty thousand, and it is
-    here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` or `{,3}` or `(?<n>a)`
-    because all five of those are taken, which is what the rows below and above
-    are about. `{}{,2}{1,3}` is a braceless count read Python's way and then a
-    count Python will not put on it, so unwinding the first reading is what
-    reaching this one would take."""
+    This row is about the reading rather than about the method now. A caller
+    asking `str.contains` for `{}{,2}{1,3}` gets a column, because the router
+    above asks for RE2's reading of a pattern RE2 agreed to and gets one. What
+    is asserted here is the reading underneath that: Python's grammar is the
+    default one, Python's grammar cannot read this, and a compile of a tree
+    that was never built is a gap and not a refusal whatever the caller above
+    decides to do about it. Document 117."""
     var program = compile_program(parse_pattern("{}{,2}{1,3}"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)

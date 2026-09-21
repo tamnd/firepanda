@@ -809,6 +809,29 @@ def _measured() -> List[String]:
         "\\p{Han}{2}",
         "(?i)\\p{Latin}",
         "\\p{Hangul}|\\p{Hiragana}",
+        # A braceless count read Python's way and then a count Python will not
+        # put on it, which the generated half had produced four of in thirty
+        # thousand and which was the last row of the list of patterns RE2 reads
+        # and Python's grammar does not. Four was too few to see a shape in.
+        # Document 117.
+        "a{,2}{1,3}",
+        "a{,2}{,2}",
+        "a{,2}*",
+        "a{,2}+",
+        "\\.{,2}{,2}",
+        "\\d{,2}{1,3}",
+        "\\w{,2}{0,}",
+        "[ab]{,2}{2,}",
+        "(a){,2}{1,3}",
+        "(?P<n>a){,2}{2,}",
+        "a{,2}{1,3}b",
+        "a{,2}{1,3}{1,2}",
+        "a{,2}{1,3}?",
+        "^a{,2}{1,3}",
+        "a{,2}{1,3}$",
+        "(?i)a{,2}{1,3}",
+        "a{,2}{1,3}|b",
+        "(a{,2}{1,3})",
     ]
     return out^
 
