@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: IS UNKNOWN runs, as the IS NULL it is
+
+`x IS UNKNOWN` is the standard's way of writing `x IS NULL`, and firepanda used to turn it down and say to write the other one. It runs now, at 4 statements of the corpus.
+
+It folds in the transformer rather than becoming a node of its own. The standard reads it only over a boolean, where it means the third truth value, but DuckDB takes it over any type and answers exactly what `IS NULL` answers, down to naming the column `(1 IS NULL)` when the query wrote `1 IS UNKNOWN`. So there is one test with two spellings, the AST keeps the one it already had, and the printer writes `IS NULL` back. Lowering and execution were already there and needed nothing.
+
+That makes it the first of these to go all the way to an answer rather than as far as the printer. The last few read and print and stop at lowering, because the thing they mean has no node yet. This one means something firepanda already runs.
+
 ### Added: the colon spelling of a table alias is read as the alias it is
 
 `FROM x: t` is `FROM t AS x` with the name written first. DuckDB takes one spelling or the other and not both, `FROM x: t AS y` is a syntax error there, so the two can never arrive together and they mean the same reference. firepanda used to read the colon on a select item and turn it down on a table, which left 12 statements of the corpus refused for a spelling it already understood everywhere else.
@@ -49,6 +57,7 @@ There are five differential programs that compare firepanda's pattern handling a
 That gap has a cost on the record. A change three weeks ago taught the pattern parser to read a superset of Python's grammar without telling the file that decides which engine answers a call, and firepanda spent those weeks sending 3402 patterns of a 30070 pattern corpus to the engine pandas would not have used. Any of the five would have caught it on the commit that introduced it. It was found instead by an unrelated pull request going red.
 
 They run on the merge rather than on pull requests, which is the same gate the microbenchmarks and the other two platforms use. These compare against somebody else's release, so a failure is as likely to be a pandas or RE2 change as a change here, and that is not a thing to hold a merge on. A few minutes after the merge is soon enough to name the commit.
+
 ### Changed: a filter whose comparison keeps every row hands the chunk straight back
 
 A filter that does its own comparison already knows how many rows it kept by the time it has to choose between writing a selection and copying the survivors. When that number is the whole chunk there is nothing to choose, because both routes end up with the values already in front of them, and the copy route in particular writes every column out again to get them.

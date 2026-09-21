@@ -136,7 +136,6 @@ See https://github.com/tamnd/firepanda/issues/13
 | --- | --- | --- | --- |
 | `operator` | {} as an operator | firepanda holds an operator as the words it was written with and runs the ones it has a kernel for, and this is not one of them. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `custom-operator` | OPERATOR(...) as a prefix operator | An operator named this way is resolved against the catalog, and firepanda has no catalog of operators to resolve it against. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `is-unknown` | IS UNKNOWN | It means IS NULL over a boolean, which firepanda does have, so write that instead. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `in-bare-value` | IN over an unparenthesized value | firepanda reads the right side of an IN as a list or as a subquery. Put the value in parentheses. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `like-escape` | ESCAPE on an operator that has no escaping form | A LIKE and an ILIKE take one. SIMILAR TO does not, which DuckDB says too. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `field-access` | a field access | It reads and prints back. A field belongs to a struct and a firepanda column holds one scalar, so there is nothing here with a field in it to reach into. | [#304](https://github.com/tamnd/firepanda/issues/304) |

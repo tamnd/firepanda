@@ -133,7 +133,6 @@ from .unsupported import (
     DOTTED_NAME,
     GROUPING,
     IN_BARE_VALUE,
-    IS_UNKNOWN,
     JOIN_FORM,
     LIKE_ESCAPE,
     MAP_LITERAL,
@@ -2422,7 +2421,14 @@ struct Transform(Movable):
             var value = self._only(tree, test)
             var negated = Int(tree.nodes[Int(value)].token_start) - Int(at) > 1
             if _word(tree, sql, value) == "UNKNOWN":
-                raise _unsupported(tree, sql, test, IS_UNKNOWN)
+                # `IS UNKNOWN` is the standard's way of writing `IS NULL`, and
+                # DuckDB reads it as exactly that, over any type rather than
+                # only over a boolean. It names no value of its own, so it goes
+                # down the same path the operator spellings take.
+                operators.append("IS NOT" if negated else "IS")
+                values.append(NO_NODE)
+                wheres.append(at)
+                continue
             operators.append("IS NOT" if negated else "IS")
             values.append(value)
             wheres.append(at)

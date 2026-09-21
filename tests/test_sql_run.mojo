@@ -1997,6 +1997,24 @@ def test_an_is_not_null_keeps_the_others() raises:
     )
 
 
+def test_the_unknown_spellings_answer_what_the_null_ones_do() raises:
+    # `IS UNKNOWN` is the standard's name for the same test, and it runs the
+    # same two calls rather than stopping anywhere on the way down.
+    same(
+        gapped(
+            run("SELECT mark FROM gappy WHERE mark IS UNKNOWN", session()),
+            "mark",
+        ),
+        [-1, -1],
+        "mark",
+    )
+    same(
+        answer("SELECT mark FROM gappy WHERE mark IS NOT UNKNOWN", "mark"),
+        [4, 4, 9, 1],
+        "mark",
+    )
+
+
 def test_an_is_null_in_a_select_list_answers_yes_or_no_for_every_row() raises:
     # Never a null itself, whatever the column under it holds, which is what
     # tells this apart from `mark = NULL` and is the reason SQL has the words.

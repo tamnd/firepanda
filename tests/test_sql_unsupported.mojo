@@ -15,10 +15,10 @@ from firepanda.sql.ast import Ast
 from firepanda.sql.unsupported import (
     AGGREGATE_FILTER,
     CALL_MODIFIER,
-    IS_UNKNOWN,
     NO_CASE,
     NO_REFUSAL,
     OPERATOR,
+    QUOTED_NAME,
     SUBSCRIPT,
     Refusal,
     feature_of,
@@ -33,7 +33,6 @@ from firepanda.sql.unsupported import (
 
 def test_the_constants_line_up_with_the_table() raises:
     assert_equal(refusal(OPERATOR).feature, "operator")
-    assert_equal(refusal(IS_UNKNOWN).feature, "is-unknown")
     assert_equal(refusal(SUBSCRIPT).feature, "subscript")
     assert_equal(refusal(CALL_MODIFIER).feature, "call-modifier")
     assert_equal(refusal(NO_CASE).feature, "no-case")
@@ -126,13 +125,13 @@ def test_a_refusal_names_the_feature_the_position_and_the_way_out() raises:
 
 
 def test_a_refusal_with_no_position_still_carries_the_rest() raises:
-    var text = String(not_implemented(IS_UNKNOWN, "", ""))
+    var text = String(not_implemented(QUOTED_NAME, "", ""))
     assert_equal(
         text,
         String(
-            "Not Implemented Error: firepanda does not support IS UNKNOWN.\n"
-            "It means IS NULL over a boolean, which firepanda does have, so"
-            " write that instead. See"
+            "Not Implemented Error: firepanda does not support anything but a"
+            " plain name here.\n"
+            "Only a plain name fits in this position. See"
             " https://github.com/tamnd/firepanda/issues/13"
         ),
     )
@@ -201,10 +200,10 @@ def test_the_caret_points_at_the_thing_that_was_refused() raises:
     var ast = Ast()
     var text = String()
     try:
-        _ = rules.parse_statement("SELECT x IS UNKNOWN", g, ast)
+        _ = rules.parse_statement("SELECT MAP {'a': 1}", g, ast)
     except error:
         text = String(error)
-    assert_true("LINE 1: SELECT x IS UNKNOWN\n                 ^" in text, text)
+    assert_true("LINE 1: SELECT MAP {'a': 1}\n               ^" in text, text)
 
 
 def test_a_refusal_on_the_second_line_counts_lines() raises:
