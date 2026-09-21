@@ -49,6 +49,15 @@ There are five differential programs that compare firepanda's pattern handling a
 That gap has a cost on the record. A change three weeks ago taught the pattern parser to read a superset of Python's grammar without telling the file that decides which engine answers a call, and firepanda spent those weeks sending 3402 patterns of a 30070 pattern corpus to the engine pandas would not have used. Any of the five would have caught it on the commit that introduced it. It was found instead by an unrelated pull request going red.
 
 They run on the merge rather than on pull requests, which is the same gate the microbenchmarks and the other two platforms use. These compare against somebody else's release, so a failure is as likely to be a pandas or RE2 change as a change here, and that is not a thing to hold a merge on. A few minutes after the merge is soon enough to name the commit.
+### Changed: a filter whose comparison keeps every row hands the chunk straight back
+
+A filter that does its own comparison already knows how many rows it kept by the time it has to choose between writing a selection and copying the survivors. When that number is the whole chunk there is nothing to choose, because both routes end up with the values already in front of them, and the copy route in particular writes every column out again to get them.
+
+The case is more ordinary than it sounds. A conjunction lowers to one filter per conjunct and a conjunct that is true of everything in front of it is a normal thing to write: a date range drawn around a partition that lies inside it, a flag only ever set on rows some other condition has already dropped. Seven ClickBench statements ask for July 2013 over a partition that is all July 2013, so two of their six conditions kept every row, and each of those was rewriting every column the group by above them reads.
+
+Measured as a pair, two drivers built from the same source with nothing else different, run back to back at 1M through the SQL front end on a busy machine, so CPU time per run rather than wall clock, in milliseconds: q42 50.1 against 25.3, q38 147.9 against 77.7, q37 174.8 against 116.8, q40 34.8 against 25.6, q36 289.7 against 214.8, q39 579.5 against 467.5. q41 came out level in that pass and ahead in a separate one, which is what a query of thirty milliseconds looks like at a load average of eighty. Across all 43 statements the total is 5447.3 against 5079.1 and every answer is the same. The five group by queries that looked slower in that pass were remeasured over three more rounds and sit either side of where they started.
+
+The check is on the comparing route rather than on the one that reads a mask column, because the comparison has already counted and a mask has to be walked to be counted. Paying for that walk on every filter to find the ones that kept everything is the wrong trade. See #682 and #521.
 
 ### Added: WITH ORDINALITY reads and prints
 

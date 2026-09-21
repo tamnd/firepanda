@@ -347,6 +347,22 @@ struct Filter(Movable):
     is most of the operator: choosing between a selection and a copy, composing
     with the selection the chunk came in with, and writing only the columns
     somebody downstream still wants.
+
+    ## Keeping everything
+
+    A comparison that kept every row of the chunk hands the chunk straight back.
+    Neither route has anything to do, and the copy route in particular would
+    write every column out again to arrive at the values already in it.
+
+    That case is not the curiosity it sounds like, because a conjunction lowers
+    to one filter per conjunct and a conjunct true of everything in front of it
+    is ordinary. Seven of the ClickBench statements ask for a month of dates
+    over a partition that lies inside that month, so two of their six conditions
+    keep every row, and before this each of those rewrote every column the group
+    by above reads. The comparing route is where the check lives because the
+    comparison has already counted the rows it kept. A mask has to be walked to
+    be counted, and paying for that walk on every filter to find the ones that
+    kept everything is the wrong trade.
     """
 
     var on: Int
@@ -472,6 +488,71 @@ struct Filter(Movable):
                 return True
         return False
 
+    def _straight_through(self, var chunk: Chunk) raises -> Chunk:
+        """Returns the chunk as it stands, for a predicate every row passed.
+
+        A filter that kept every row has nothing to move and nothing to say
+        about which rows are left, so the cheapest thing it can do is hand back
+        what it was given, selection and all. A filter that narrows still drops
+        the columns nobody above it reads, and it drops them by not writing
+        them out, which moves no row either.
+
+        Worth a branch of its own because the route it skips is the copy, and
+        the copy is every column the filter keeps. A conjunction lowers to one
+        filter per conjunct and a conjunct that is true of everything in front
+        of it is an ordinary thing to write: a date range around a partition
+        that lies inside it, a flag only ever set on rows some other condition
+        has already dropped. Each one of those used to rewrite every column
+        anything downstream reads so that the next one could read the same
+        values back out. See #682 and #521.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk, projected to `keep` if this filter narrows.
+        """
+        if not self.narrows:
+            return chunk^
+
+        var width = chunk.width()
+        var count = len(self.keep)
+        var selected = chunk.selected()
+        var rows = chunk.rows
+        var picks = List[UInt32](copy=chunk.picks)
+        var dense = List[Bool](copy=chunk.dense)
+
+        # The last use of a position can give its array up and an earlier one
+        # cannot, which is the same rule the filtering routes below follow and
+        # the same one `Project` follows.
+        var held = List[Optional[AnyArray]](capacity=width)
+        var backwards = chunk^.into_raw_columns()
+        var flipped = List[AnyArray](capacity=width)
+        while len(backwards) > 0:
+            flipped.append(backwards.pop())
+        while len(flipped) > 0:
+            held.append(Optional[AnyArray](flipped.pop()))
+
+        var last = List[Bool](length=count, fill=True)
+        var seen = List[Bool](length=width, fill=False)
+        for i in range(count - 1, -1, -1):
+            last[i] = not seen[self.keep[i]]
+            seen[self.keep[i]] = True
+
+        var out = List[AnyArray](capacity=count)
+        var out_dense = List[Bool](capacity=count)
+        for i in range(count):
+            var at = self.keep[i]
+            if last[i]:
+                out.append(held[at].take())
+            else:
+                out.append(AnyArray(copy=held[at].value()))
+            if selected:
+                out_dense.append(dense[at])
+        if not selected:
+            return Chunk(out^, rows)
+        return Chunk(out^, picks^, out_dense^)
+
     def _positions(self, ref chunk: Chunk, spread: Bool) raises -> List[UInt32]:
         """Runs the comparison and returns the rows of the chunk it keeps.
 
@@ -570,6 +651,16 @@ struct Filter(Movable):
                 # comparison has already counted: the rows it kept are the
                 # answer and there is nothing to move.
                 return Chunk(List[AnyArray](), found)
+            if found == chunk.rows:
+                # Nothing was dropped, so neither route has anything to do and
+                # the copy route would have rewritten every column to arrive at
+                # the values already there. The count is free here because the
+                # comparison has already reported it, which is why this is on
+                # the comparing route and not on the one that reads a mask: a
+                # mask has to be walked to be counted, and this would be asking
+                # for that walk on every filter to save the ones that kept
+                # everything.
+                return self._straight_through(chunk^)
             if not composing and found > Int(
                 SELECTION_KEEP_LIMIT * Float64(chunk.rows)
             ):
