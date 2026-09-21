@@ -32,6 +32,7 @@ from firepanda.kernel.regex.tokens import (
     OP_AT,
     OP_ATOMIC_GROUP,
     OP_BRANCH,
+    OP_UNICODE,
     OP_CATEGORY,
     OP_FAILURE,
     OP_GROUPREF,
@@ -108,6 +109,8 @@ def drawn(nodes: List[Node], node: Int32) -> String:
         out = String("range(", shown(it.a), ",", shown(it.b), ")")
     elif it.op == OP_CATEGORY:
         out = String("cat(", it.a, ")")
+    elif it.op == OP_UNICODE:
+        out = String("uni(", it.a, ",", it.b, ")")
     elif it.op == OP_NEGATE:
         out = String("neg")
     elif it.op == OP_AT:
@@ -636,6 +639,52 @@ def test_group_names_come_back_in_the_order_they_were_opened() raises:
     assert_equal(len(tree.names), 2)
     assert_equal(tree.names[0], "first")
     assert_equal(tree.names[1], "second")
+
+
+def test_a_unicode_name_reads_and_the_two_negations_are_one_node() raises:
+    """`\\p` is not Python syntax at all, so the tree records that Python would
+    have refused it and carries the name as an index into the table.
+
+    `Greek` is 49 in the sorted table and `L` is 75, which is a fact about the
+    table rather than about the grammar and is asserted anyway because a table
+    that shifts under the parser is the failure worth catching.
+    """
+    assert_equal(shape("\\p{Greek}"), "seq{uni(49,0)}")
+    assert_equal(shape("\\P{Greek}"), "seq{uni(49,1)}")
+    assert_equal(shape("\\p{^Greek}"), "seq{uni(49,1)}")
+    assert_equal(shape("\\P{^Greek}"), "seq{uni(49,0)}")
+    assert_equal(reason("\\p{Greek}"), "bad escape \\p")
+
+
+def test_the_braceless_form_takes_exactly_one_character() raises:
+    """So `\\pLu` is the letter category and then a literal `u`, which is RE2's
+    reading and not the one the braced form beside it suggests."""
+    assert_equal(shape("\\pL"), "seq{uni(75,0)}")
+    assert_equal(shape("\\pLu"), "seq{uni(75,0),lit(u)}")
+    assert_equal(shape("\\PL"), "seq{uni(75,1)}")
+
+
+def test_a_unicode_name_inside_a_class_is_an_item_like_any_other() raises:
+    """Which is what lets `[\\p{L}\\p{N}]` and `[^\\p{L}a]` mean what they say.
+    """
+    assert_equal(shape("[\\p{L}a]"), "seq{in{uni(75,0),lit(a)}}")
+    assert_equal(shape("[^\\p{L}]"), "seq{in{neg,uni(75,0)}}")
+
+
+def test_a_name_re2_has_not_got_is_given_up_on() raises:
+    """This library does not invent a sentence for it. The parse fails the way
+    it did before the table existed, so the reader in `re2.mojo` is asked and
+    says RE2 refuses it too, which is how the caller gets the `ValueError`
+    pandas raises rather than a gap.
+
+    A name is case sensitive to RE2, so `latin` is not `Latin`, and `Cn` is a
+    real Unicode general category that RE2 simply does not carry.
+    """
+    assert_equal(shape("\\p{Cn}"), "!bad escape")
+    assert_equal(shape("\\p{latin}"), "!bad escape")
+    assert_equal(shape("\\p{IsGreek}"), "!bad escape")
+    assert_equal(shape("\\p{"), "!bad escape")
+    assert_equal(shape("\\p"), "!bad escape")
 
 
 def main() raises:

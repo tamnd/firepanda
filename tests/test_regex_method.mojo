@@ -236,11 +236,41 @@ def test_a_pattern_neither_grammar_reads_carries_re2s_reason() raises:
 
 
 def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
-    """Because there is nothing wrong with it and no engine here to run it."""
-    var program = program_for(METHOD_CONTAINS, "\\p{L}")
+    """Because there is nothing wrong with it and no engine here to run it.
+
+    `\\p{L}` was this row's pattern until the name table landed and is a real
+    answer now, so the pattern is `\\Q`, which is a slice not taken yet."""
+    var program = program_for(METHOD_CONTAINS, "\\Qa+b\\E")
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
+
+
+def test_a_unicode_name_is_answered_and_a_bad_one_is_refused() raises:
+    """`\\p` is a bad escape to Python's `re` in every version there has ever
+    been, so pandas hands every pattern holding one to Arrow and both halves of
+    the answer come from RE2.
+
+    A name RE2 has is a column. A name RE2 has not got is the `ValueError`
+    pandas raises and not a gap, which is the reader in document 101 answering
+    a question it used to decline. `Cn` is the one worth having, because it is
+    a real Unicode general category that RE2 simply does not carry.
+    """
+    var greek = program_for(METHOD_CONTAINS, "\\p{Greek}")
+    assert_true(greek.ok)
+    assert_true(matches_text(greek, "a\u03b1b"))
+    assert_false(matches_text(greek, "abc"))
+
+    var negated = program_for(METHOD_CONTAINS, "\\P{Greek}")
+    assert_true(negated.ok)
+    assert_true(matches_text(negated, "abc"))
+    assert_false(matches_text(negated, "\u03b1"))
+
+    for bad in [String("\\p{Cn}"), String("\\p{Foo}"), String("\\p{latin}")]:
+        var program = program_for(METHOD_CONTAINS, bad)
+        assert_false(program.ok)
+        assert_false(program.gap)
+        assert_equal(program.problem, "RE2 has no such character class")
 
 
 def test_the_rewrite_is_what_re2_is_asked_about() raises:

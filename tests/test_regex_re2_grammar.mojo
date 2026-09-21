@@ -421,29 +421,34 @@ def test_the_posix_classes() raises:
     _refuses(String("[[:foo:]]"), String("RE2 has no such character class"))
 
 
-def test_a_unicode_class_is_never_refused() raises:
-    """The one construct this reader will not judge, for want of a name table.
+def test_a_unicode_class_is_judged_like_everything_else() raises:
+    """This was the one construct the reader would not judge, for want of a
+    name table. The table is in `unicodedata.mojo` now, so a name RE2 has comes
+    back read and a name it has not comes back refused.
 
-    A name RE2 knows and a name it does not both come back as a pattern RE2
-    reads, which leaves the caller exactly where they were rather than turning
-    a column they could have had into an exception.
+    `pl` and `Latin` are the pair worth having, because a name is case
+    sensitive to RE2 and the lower case one is not a name at all.
     """
     _takes(String("\\pL"))
     _takes(String("\\p{Latin}"))
     _takes(String("\\p{^L}"))
     _takes(String("\\PL"))
     _takes(String("[\\p{L}]"))
-    _takes(String("\\p{Foo}"))
-    _takes(String("\\pl"))
-    _takes(String("\\p{"))
+    _takes(String("\\p{Any}"))
+    _refuses(String("\\p{Foo}"), String("RE2 has no such character class"))
+    _refuses(String("\\p{Cn}"), String("RE2 has no such character class"))
+    _refuses(String("\\pl"), String("RE2 has no such character class"))
+    _refuses(String("\\p{"), String("RE2 has no such character class"))
+    _refuses(String("\\p{latin}"), String("RE2 has no such character class"))
 
 
-def test_an_unsure_pattern_is_read_whatever_else_is_in_it() raises:
-    """Because a refusal beside something unjudged is a refusal this file
-    cannot stand behind."""
+def test_a_bad_name_is_refused_beside_something_else_re2_refuses() raises:
+    """There is no longer anything this file declines to judge, so a pattern
+    holding a bad name and a lookahead is two refusals rather than one refusal
+    and one shrug, and the first one is the one reported."""
     var read = re2_reads(String("\\p{Foo}(?=a)"))
-    assert_true(read.ok)
-    assert_equal(read.problem, String(""))
+    assert_false(read.ok)
+    assert_equal(read.problem, String("RE2 has no such character class"))
 
 
 def test_the_first_refusal_is_the_one_reported() raises:

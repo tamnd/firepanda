@@ -45,6 +45,7 @@ differential that reads the Python side is a different one.
 
 from std.collections.span import Span
 
+from firepanda.kernel.regex.unicodedata import unicode_ranges
 from firepanda.kernel.regex.classdata import (
     DIGIT_RANGES,
     SPACE_RANGES,
@@ -96,6 +97,7 @@ from firepanda.kernel.regex.tokens import (
     OP_FAILURE,
     OP_GROUPREF,
     OP_GROUPREF_EXISTS,
+    OP_UNICODE,
     OP_IN,
     OP_LITERAL,
     OP_MAX_REPEAT,
@@ -1233,6 +1235,14 @@ def _class_ranges(
                 pieces = _complemented(_sorted_merged(pieces^))
             for i in range(len(pieces)):
                 gathered.append(pieces[i])
+        elif it.op == OP_UNICODE:
+            var pieces = unicode_ranges(it.a)
+            if folding:
+                pieces = _folded(pieces^, b.python, b.narrow)
+            if it.b != 0:
+                pieces = _complemented(_sorted_merged(pieces^))
+            for i in range(len(pieces)):
+                gathered.append(pieces[i])
         else:
             b.give_up(String("unsupported item in a character class"))
             return List[Int32]()
@@ -1360,6 +1370,17 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         if folding:
             pieces = _folded(pieces^, b.python, b.narrow)
         b.add_set(_sorted_merged(pieces^), _category_is_negated(it.a))
+        return
+    if it.op == OP_UNICODE:
+        # Folded before the negation for the reason the category above gives,
+        # and it matters more here because none of these sets is closed under
+        # folding either. `(?i)\\p{Lu}` matches a small letter, which was
+        # measured against the RE2 inside pyarrow rather than assumed: the set
+        # goes from 1831 code points to 3212 once the flag is on.
+        var pieces = unicode_ranges(it.a)
+        if folding:
+            pieces = _folded(pieces^, b.python, b.narrow)
+        b.add_set(_sorted_merged(pieces^), it.b != 0)
         return
     if it.op == OP_IN:
         var negated = False
@@ -1683,6 +1704,7 @@ def _fixed_width(nodes: List[Node], node: Int32) -> Int:
         or it.op == OP_IN
         or it.op == OP_RANGE
         or it.op == OP_CATEGORY
+        or it.op == OP_UNICODE
     ):
         # One character, and the members of a set are not walked into, since a
         # set reads one character whatever is written inside it.

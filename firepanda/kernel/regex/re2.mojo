@@ -31,10 +31,16 @@ The cost of the two mistakes is not the same. Saying RE2 refuses a pattern it
 takes turns a column somebody could have had into an exception, which is a new
 wrong answer. Saying RE2 takes a pattern it refuses leaves the caller exactly
 where they already were, which is the `NotImplementedError` this file is here to
-reduce. So every rule below refuses only what it is sure of, and one construct,
-the Unicode class `\\p{...}`, is not refused at all even when it is plainly
-malformed, because telling a name RE2 knows from one it does not needs a table
-of script names that is not here yet.
+reduce. So every rule below refuses only what it is sure of.
+
+For a while that meant one construct was not judged at all. The Unicode class
+`\\p{...}` was read as something RE2 takes even when it was plainly malformed,
+because telling a name RE2 knows from one it does not needs a table of script
+and category names and there was none. That table is in `unicodedata.mojo` now,
+measured against the same RE2 this file is written against, so the construct is
+judged like everything else and there is no longer any way for this file to be
+unsure. The bias is still the rule every new rule is written under; it just has
+nothing left that it applies to.
 
 ### What RE2's grammar actually is, and how that was found out
 
@@ -68,7 +74,8 @@ other refusals in this component already use, rather than as a copy of RE2's
 wording. A caller reading the message is a caller of firepanda.
 """
 
-from firepanda.kernel.regex.parse import decoded
+from firepanda.kernel.regex.parse import _put_point, decoded
+from firepanda.kernel.regex.unicodedata import unicode_index
 
 
 comptime RE2_MAX_REPEAT: Int = 1000
@@ -98,27 +105,16 @@ struct Re2Read(Movable):
     """Whether RE2 would read a pattern, and why not when it would not."""
 
     var ok: Bool
-    """Whether RE2 takes it. True is also the answer when this file was not sure,
-    which is the bias the module docstring explains."""
+    """Whether RE2 takes it."""
 
     var problem: String
     """Why not, in this library's own words, and empty when it would."""
-
-    var unsure: Bool
-    """Whether the answer is a guess rather than a reading.
-
-    Only ever true beside `ok`, because being unsure is what makes the answer
-    yes. It is here so that a caller counting how much of the grammar is left
-    can tell a pattern this file read from one it declined to judge, which are
-    two different pieces of work and only one of them is a bug.
-    """
 
     def __init__(out self):
         """Starts at a pattern RE2 takes, which is what a caller gets for the
         empty pattern."""
         self.ok = True
         self.problem = String("")
-        self.unsure = False
 
 
 struct _Cursor(Movable):
@@ -143,16 +139,6 @@ struct _Cursor(Movable):
     var problem: String
     """The refusal, set once and never overwritten, so the message names the
     first thing RE2 would have stopped at rather than the last."""
-
-    var unsure: Bool
-    """Whether something was read that this file cannot judge.
-
-    One construct sets it, which is `\\p{...}` and its one letter form, because
-    whether RE2 takes the name inside it needs a table of Unicode script and
-    category names that this library has not got. A pattern that sets it is
-    answered as one RE2 takes whatever else was found in it, which keeps the
-    bias the module docstring sets out.
-    """
 
     var repeatable: Bool
     """Whether there is anything here for a repeat to repeat.
@@ -185,7 +171,6 @@ struct _Cursor(Movable):
         self.at = 0
         self.failed = False
         self.problem = String("")
-        self.unsure = False
         self.repeatable = False
         self.kind = _KIND_CHAR
         self.point = 0
@@ -480,8 +465,7 @@ def re2_reads(pattern: StringSlice) -> Re2Read:
         # and at nothing else.
         c.give_up(String("a bracket is closed that nothing opened"))
     var out = Re2Read()
-    out.unsure = c.unsure
-    if c.failed and not c.unsure:
+    if c.failed:
         out.ok = False
         out.problem = c.problem.copy()
     return out^
@@ -990,20 +974,41 @@ def _escape(mut c: _Cursor, in_class: Bool):
     c.point = 0
     if next == UInt32(ord("p")) or next == UInt32(ord("P")):
         _ = c.take()
-        # The one construct this file will not judge. The syntax is checked far
-        # enough to know where it ends and the name inside it is not checked at
-        # all, because the table of script and category names RE2 knows is not
-        # in this library yet, and a name guessed wrong would refuse a pattern
-        # pandas answers.
-        c.unsure = True
+        # This was the one construct this file would not judge, because the
+        # table of names RE2 knows was not in the library and a name guessed
+        # wrong would have refused a pattern pandas answers. The table is in
+        # `unicodedata.mojo` now, measured against the same RE2 this file is
+        # written against, so the question is answered rather than declined and
+        # nothing here is unsure any more.
         c.kind = _KIND_CLASS
-        if c.peek() == UInt32(ord("{")):
+        var start = c.at
+        var stop = c.at
+        if not c.done() and c.peek() == UInt32(ord("{")):
+            _ = c.take()
+            if not c.done() and c.peek() == UInt32(ord("^")):
+                _ = c.take()
+            start = c.at
             while not c.done() and c.peek() != UInt32(ord("}")):
                 _ = c.take()
-            if not c.done():
-                _ = c.take()
-        elif not c.done():
+            if c.done():
+                c.give_up(String("RE2 has no such character class"))
+                return
+            stop = c.at
             _ = c.take()
+        else:
+            # One character and not a name, so `\\pLu` is the letter category
+            # and then a literal `u`.
+            if c.done():
+                c.give_up(String("RE2 has no such character class"))
+                return
+            start = c.at
+            _ = c.take()
+            stop = c.at
+        var bytes = List[UInt8]()
+        for i in range(start, stop):
+            _put_point(bytes, c.points[i])
+        if unicode_index(StringSlice(unsafe_from_utf8=Span(bytes))) < 0:
+            c.give_up(String("RE2 has no such character class"))
         return
     if next == UInt32(ord("Q")):
         if in_class:

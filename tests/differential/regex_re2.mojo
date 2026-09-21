@@ -16,9 +16,9 @@ Whether RE2 reads it. Answering no to a pattern RE2 reads is a new wrong
 refusal, which is a column somebody could have had turned into an exception, and
 the ceiling for that is zero. Answering yes to a pattern RE2 refuses is the
 other direction and is not a failure: the reader is deliberately biased that way
-and says so, and a pattern it is unsure about leaves the caller exactly where
-they already were. Those are counted and printed and the number is expected to
-fall as later slices land, but they do not fail the run.
+and says so, and such a pattern leaves the caller exactly where they already
+were. Those are counted and printed and the number is expected to fall as later
+slices land, but they do not fail the run.
 
 Why it refuses it. RE2 has eleven ways of saying no and the reader has a
 sentence of its own for each, so the sentences are mapped back to RE2's kinds
@@ -27,10 +27,10 @@ wrong, but it is a refusal that tells somebody the wrong thing about their own
 pattern, and it is just as cheap to be right, so the ceiling for that is zero as
 well.
 
-The two Unicode class spellings are the one construct the reader will not judge,
-because telling a script name RE2 knows from one it does not needs a table this
-library has not got yet. Every pattern holding one comes back as a pattern RE2
-reads, which lands in the unsure bucket rather than in either ceiling.
+The two Unicode class spellings used to be the one construct the reader would
+not judge, for want of a table of script and category names, and every pattern
+holding one came back read whatever was wrong with it. The table exists now, so
+they are judged like everything else and the bucket that counted them is gone.
 
 Usage:
     pixi run differential-regex-re2
@@ -183,7 +183,6 @@ def main() raises:
 
     var wrongly_refused = List[String]()
     var wrong_reason = List[String]()
-    var unsure = 0
     var missed = 0
     var reads = 0
     var refuses = 0
@@ -202,17 +201,16 @@ def main() raises:
             reads += 1
             continue
         if read.ok:
-            # The safe direction, and it has two halves worth telling apart. A
-            # pattern the reader declined to judge is one construct away from
-            # being answerable and needs a name table. A pattern it read and RE2
-            # did not is a rule it has not been taught, which is a smaller and
-            # more embarrassing thing. Neither leaves the caller worse off than
-            # they were, so neither fails the run.
-            if read.unsure:
-                unsure += 1
-            else:
-                missed += 1
-                tally(misses, miss_counts, String(answer[byte=2:]))
+            # The safe direction. A pattern RE2 refuses and the reader reads is
+            # a rule the reader has not been taught, which leaves the caller
+            # exactly where they already were rather than turning a column into
+            # an exception, so it does not fail the run. There used to be a
+            # second half to this, a bucket for a pattern the reader declined to
+            # judge, and it is gone because there is no longer anything it
+            # declines: the Unicode name table settled the one construct that
+            # was in it.
+            missed += 1
+            tally(misses, miss_counts, String(answer[byte=2:]))
             continue
         if they_read:
             wrongly_refused.append(pattern)
@@ -227,7 +225,6 @@ def main() raises:
     print("RE2 refuses and the reader refuses", refuses)
     for at in range(len(kinds)):
         print("   ", counts[at], kinds[at])
-    print("RE2 refuses and the reader declined to judge", unsure)
     print("RE2 refuses and the reader read it", missed)
     for at in range(len(misses)):
         print("   ", miss_counts[at], misses[at])
