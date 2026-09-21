@@ -199,18 +199,22 @@ if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
     echo "refusing to write a cost table from shard $shard of $shards" >&2
     exit 1
   fi
+  # The header is written first and only the rows go through `sort`, because a
+  # header sorted along with the data lands in the middle of the file. The
+  # reader above skips a comment wherever it appears, so this is about the file
+  # being readable rather than about it working.
   {
     echo "# Seconds per test file, written by \`pixi run test-costs\`. The ten test"
     echo "# shards in .github/workflows/ci.yml divide the list up on these numbers."
     echo "# Measured on a 13900K running eight files at a time, so they are wall"
     echo "# clock under contention rather than anything absolute. Only the ratios"
     echo "# matter here and the ratios hold on a smaller machine."
-    for file in "${files[@]}"; do
-      base=${file##*/}
-      [ -e "$logs/$base.time" ] || continue
-      printf '%s %s\n' "$(cat "$logs/$base.time")" "$file"
-    done
-  } | sort -k1,1nr -k2,2 > "$FIREPANDA_TEST_WRITE_COSTS"
+  } > "$FIREPANDA_TEST_WRITE_COSTS"
+  for file in "${files[@]}"; do
+    base=${file##*/}
+    [ -e "$logs/$base.time" ] || continue
+    printf '%s %s\n' "$(cat "$logs/$base.time")" "$file"
+  done | sort -k1,1nr -k2,2 >> "$FIREPANDA_TEST_WRITE_COSTS"
   echo "wrote $FIREPANDA_TEST_WRITE_COSTS"
 fi
 

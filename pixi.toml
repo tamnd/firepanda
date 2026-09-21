@@ -79,8 +79,7 @@ differential = { features = ["dev", "differential"] }
 # checkout has no build/ because build/ is ignored.
 # `inputs` and `outputs` so that `pixi run test`, which depends on this, does not
 # precompile a second time immediately after the workflow's own build step has
-# just done it. That was thirty six seconds on every one of the eight test
-# shards.
+# just done it. That was thirty six seconds on every one of the ten test shards.
 build = { cmd = "mkdir -p build && mojo precompile firepanda -o build/firepanda.mojoc", inputs = [
   "firepanda/**",
 ], outputs = ["build/firepanda.mojoc"] }

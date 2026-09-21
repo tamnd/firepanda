@@ -235,9 +235,12 @@ jobs:
     # at the sources moved the largest file from 14.3 seconds to 13.8 and the
     # next one from 21.6 to 21.8. So the only lever left is more machines.
     #
-    # tools/run_tests.sh splits the list by file size, largest first into
-    # whichever shard has least so far, which lands the ten shards within one
-    # per cent of each other on total bytes.
+    # tools/run_tests.sh splits the list on the measured times in
+    # tools/test_costs.txt, largest first into whichever shard has least so far,
+    # which lands the ten shards within half a per cent of each other. The first
+    # version of this balanced on file size instead and the shards came out
+    # between 249 and 662 seconds, because a file's cost is how much of the
+    # library it imports and instantiates rather than how long it is.
     strategy:
       fail-fast: false
       matrix:
