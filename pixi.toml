@@ -184,6 +184,7 @@ differential-build-regex = { cmd = "bash tools/build_differential.sh regex", def
   "build/differential/regex-count",
   "build/differential/regex-replace",
   "build/differential/regex-python",
+  "build/differential/regex-re2",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -269,6 +270,19 @@ differential-regex-replace = { cmd = "./build/differential/regex-replace", defau
 # compares the refusals and the answers. It needs no corpus.
 # See docs/specs/81-the-same-letter-in-two-alphabets.md section 7.
 differential-regex-python = { cmd = "./build/differential/regex-python", default-environment = "differential", depends-on = ["differential-build-regex"] }
+
+# The question underneath all four of those, which is whether RE2 reads the
+# pattern at all. For most of the corpus it is the only question there is: two
+# patterns in three are ones Python's grammar cannot read, which is how they
+# reach Arrow in pandas, and nine in ten of those are ones RE2 will not read
+# either, so the whole of what a caller gets back is a refusal. This reads every
+# pattern with RE2's grammar and compares the verdict and the reason against the
+# RE2 Arrow is built with. Answering no to a pattern RE2 reads is a new wrong
+# refusal and the ceiling for it is zero; answering yes to one RE2 refuses is
+# the bias the reader is written with and is counted rather than failed. It
+# needs no corpus.
+# See docs/specs/101-a-second-grammar-that-only-says-no.md section 7.
+differential-regex-re2 = { cmd = "./build/differential/regex-re2", default-environment = "differential", depends-on = ["differential-build-regex"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a

@@ -54,6 +54,7 @@ about the binding.
 """
 
 from firepanda.kernel.regex.parse import parse_pattern
+from firepanda.kernel.regex.re2 import re2_reads
 from firepanda.kernel.regex.program import (
     PYTHON_NEWEST,
     Program,
@@ -204,7 +205,7 @@ def preprocessed(pattern: String) -> String:
     return String(pattern[byte = 0 : pattern.byte_length() - 2], "\\z")
 
 
-def anchored(method: UInt8, pattern: String) -> String:
+def anchored(method: UInt8, pattern: String, hoist: Bool = True) -> String:
     """Rewrites a pattern the way pandas rewrites it for `match` and `fullmatch`.
 
     `match` strips a leading `^`, wraps what is left in a group and puts the `^`
@@ -241,12 +242,22 @@ def anchored(method: UInt8, pattern: String) -> String:
     unconditionally, since a hoist that is only sound for six of the seven
     letters is a hoist somebody has to keep checking.
 
+    There is one caller that wants the hoist not to happen, and `hoist` is for
+    it. The RE2 reader is asked whether RE2 would take the pattern pandas hands
+    it, and the answer to that question has to be about the text pandas actually
+    writes rather than about this library's improvement on it. Nothing else
+    should turn it off, because everything else here goes on to parse the
+    result with Python's grammar and the hoist is what keeps the parse from
+    failing over a group the caller put first.
+
     The slicing is by byte, which is exact because every character being looked
     for is ASCII and a byte of a longer character cannot be mistaken for one.
 
     Args:
         method: Which of the five asked.
         pattern: The pattern as the caller wrote it, with `\\Z` already seen to.
+        hoist: Whether to move a leading global flag group out in front of the
+            anchors. On unless the caller wants pandas' own text.
 
     Returns:
         The pattern the engine is to be given.
@@ -258,7 +269,7 @@ def anchored(method: UInt8, pattern: String) -> String:
         or method == METHOD_EXTRACT
     ):
         return pattern.copy()
-    var cut = leading_flags(pattern)
+    var cut = leading_flags(pattern) if hoist else 0
     var head = String(pattern[byte=0:cut])
     var out = String(pattern[byte=cut:])
     var start = String("^") if cut == 0 else String("\\A")
@@ -514,7 +525,26 @@ def program_for(
         # reads the pattern as written when it picks an engine and never gets
         # past that, so answering here would be answering a question that was
         # already over.
-        return compile_program(tree, ENGINE_RE2, minor=minor)
+        var out = compile_program(tree, ENGINE_RE2, minor=minor)
+        # That settles the routing and leaves the answer, and for two patterns
+        # in three of the generated corpus the answer is a refusal rather than
+        # a column, because RE2 will not read the pattern either. Asking the
+        # RE2 reader turns those from a gap this library owns into the refusal
+        # pandas gives, which is a `ValueError` a caller can catch rather than
+        # a `NotImplementedError` they cannot do anything about.
+        #
+        # The question has to be asked about the text pandas hands Arrow rather
+        # than about the text the caller wrote, which for `match` and
+        # `fullmatch` are not the same thing and can disagree: `?` is a pattern
+        # RE2 refuses and `^(?)` is a flag group naming no flags, so `match`
+        # answers where `contains` raises. Hence the rewrite here, and hence
+        # the hoist being off, since the hoist is this library's and not
+        # pandas'. Document 101.
+        var read = re2_reads(anchored(method, preprocessed(pattern), False))
+        if not read.ok:
+            out.problem = read.problem.copy()
+            out.gap = False
+        return out^
     return compile_program(
         parse_pattern(anchored(method, preprocessed(pattern)), flags),
         ENGINE_RE2,
