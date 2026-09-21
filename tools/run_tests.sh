@@ -28,11 +28,18 @@
 # files and the only way to go faster is more machines. `.github/workflows/ci.yml`
 # runs ten of them.
 #
-# The split is by file size rather than round robin. Sizes span two orders of
-# magnitude here and compile time tracks them closely enough, so round robin
-# leaves one shard holding three of the big files and every other shard idle
-# while it finishes. Largest first into whichever shard has least so far is the
-# standard greedy schedule for that and it costs one pass of awk.
+# The split is by measured time, out of `tools/test_costs.txt`, largest first
+# into whichever shard has least so far. That is the standard greedy schedule
+# and it needs real numbers: the first version of this balanced on file size
+# instead, on the reasoning that compile time tracks how much code there is, and
+# the ten shards came out between 249 and 662 seconds. Size is not the cost. The
+# cost is how much of the library a file's imports pull in and instantiate, and
+# two files of the same length disagree about that by a factor of three.
+#
+# `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
+# `pixi run test-costs` does. It needs an unsharded run, because a table written
+# from one shard lists a tenth of the files. A file the table has not heard of
+# is treated as an average one until somebody regenerates it.
 #
 # The logs go under `build/` rather than under `TMPDIR`, which they used to. On
 # macOS `TMPDIR` is a per-session directory under `/var/folders` that the system
@@ -77,8 +84,14 @@ if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
   exit 1
 fi
 
+costs=${FIREPANDA_TEST_COSTS:-tools/test_costs.txt}
+
 total=${#files[@]}
 if [ "$shards" -gt 1 ]; then
+  if [ ! -e "$costs" ]; then
+    echo "no cost table at $costs, so the shards cannot be balanced" >&2
+    exit 1
+  fi
   # Every shard runs this over the whole list and keeps the files that fall to
   # it, so they agree on the assignment without talking to each other.
   #
@@ -88,9 +101,23 @@ if [ "$shards" -gt 1 ]; then
   while IFS= read -r file; do
     picked[${#picked[@]}]=$file
   done < <(
-    for file in "${files[@]}"; do
-      printf '%s %s\n' "$(wc -c < "$file")" "$file"
-    done \
+    printf '%s\n' "${files[@]}" \
+      | awk -v costs="$costs" '
+          BEGIN {
+            while ((getline line < costs) > 0) {
+              if (split(line, f, " ") < 2) continue
+              cost[f[2]] = f[1] + 0
+              sum += f[1] + 0
+              seen++
+            }
+            # A file the table has never heard of is assumed to be an average
+            # one, which is the least wrong thing to assume about a file that
+            # was added after the table was written.
+            mean = (seen > 0) ? sum / seen : 0
+          }
+          {
+            printf "%d %s\n", (($0 in cost) ? cost[$0] : mean), $0
+          }' \
       | sort -k1,1nr -k2,2 \
       | awk -v n="$shards" -v mine="$shard" '
           {
@@ -123,9 +150,14 @@ fi
 run_one() {
   local file=$1 logs=$2
   local base=${file##*/}
+  # `SECONDS` rather than anything finer because macOS `date` has no `%N`, and
+  # one second is plenty: the files run from three seconds to a minute and this
+  # number is only ever used to decide which shard a file belongs in.
+  SECONDS=0
   if mojo run -I . "$file" > "$logs/$base.log" 2>&1; then
     : > "$logs/$base.ok"
   fi
+  echo "$SECONDS" > "$logs/$base.time"
 }
 export -f run_one
 
@@ -136,7 +168,11 @@ failed=0
 lost=0
 for file in "${files[@]}"; do
   base=${file##*/}
-  echo "=== $file"
+  if [ -e "$logs/$base.time" ]; then
+    echo "=== $file ($(cat "$logs/$base.time")s)"
+  else
+    echo "=== $file"
+  fi
   if [ -e "$logs/$base.log" ]; then
     cat "$logs/$base.log"
     [ -e "$logs/$base.ok" ] || failed=$((failed + 1))
@@ -145,6 +181,25 @@ for file in "${files[@]}"; do
     lost=$((lost + 1))
   fi
 done
+
+# The cost table the sharding above reads. Writing it is opt in and takes a
+# whole unsharded run, because a table written from one shard would list a tenth
+# of the files and the other nine tenths would fall to the mean on the next run
+# and undo the balance. `pixi run test-costs` is the way to do it.
+if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
+  if [ "$shards" -gt 1 ]; then
+    echo "refusing to write a cost table from shard $shard of $shards" >&2
+    exit 1
+  fi
+  {
+    for file in "${files[@]}"; do
+      base=${file##*/}
+      [ -e "$logs/$base.time" ] || continue
+      printf '%s %s\n' "$(cat "$logs/$base.time")" "$file"
+    done
+  } | sort -k1,1nr -k2,2 > "$FIREPANDA_TEST_WRITE_COSTS"
+  echo "wrote $FIREPANDA_TEST_WRITE_COSTS"
+fi
 
 echo
 if [ "$lost" -ne 0 ]; then
