@@ -6376,7 +6376,8 @@ struct Reduce(Movable):
             return None
         var columns = chunk^.into_columns()
         var made = List[AnyArray](capacity=len(self._source) + len(self._kept))
-        for s in range(len(self._source)):
+        var s = 0
+        while s < len(self._source):
             if self._shift[s] < 0:
                 made.append(
                     reduce_any(
@@ -6385,6 +6386,7 @@ struct Reduce(Movable):
                         self._as_float[s],
                     )
                 )
+                s += 1
                 continue
             # Computed, reduced and dropped inside the one iteration, which is
             # the whole point of folding the operation in here. The `Compute`
@@ -6398,9 +6400,28 @@ struct Reduce(Movable):
                 it.op.value(),
                 it.value_on_left,
             )
-            made.append(
-                reduce_any(made_here, self._produce[s], self._as_float[s])
-            )
+            # Every slot that wants the same column under the same operation
+            # reads the one that was just built, because what the operation
+            # produces depends on nothing else. A slot never needs more than one
+            # of these and two of them often want the same one: a mean is a sum
+            # and a count, and so is a sum that has to answer null over a column
+            # that held nothing, and `bind` gives both halves the same source and
+            # the same operation. Computing it once per slot was a second pass
+            # down the column for every marked sum, which on ClickBench q29 is
+            # ninety of them. See #922.
+            var same = s
+            while (
+                same < len(self._source)
+                and self._source[same] == self._source[s]
+                and self._shift[same] == self._shift[s]
+            ):
+                made.append(
+                    reduce_any(
+                        made_here, self._produce[same], self._as_float[same]
+                    )
+                )
+                same += 1
+            s = same
         for k in range(len(self._kept)):
             if self._kept_shift[k] < 0:
                 made.append(AnyArray(copy=columns[self._kept[k]]))

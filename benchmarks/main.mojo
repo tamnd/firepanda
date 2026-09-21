@@ -5743,7 +5743,10 @@ def bench_pipeline(mut harness: Harness) raises:
     column in one pass, which is what the fusing has to pay for out of what it
     saves, and `pipeline_reduce_only_one_chunk` is the same reduction over the
     same rows in the one chunk a reader hands back, which is the row that says
-    whether the source has left that frame alone.
+    whether the source has left that frame alone. `reduce_ninety_marked` against
+    `reduce_ninety_fused` is the same ninety sums with and without the mark SQL
+    puts on them, and the gap is the count a marked sum needs beside it to know
+    whether it ever added a value.
 
     The last four rows are the same two questions asked of the join node.
     `pipeline_join_reduce` against `pipeline_join_two_steps` is a join followed
@@ -6183,6 +6186,42 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record(
         "exec/reduce_ninety_fused", "rows", rows, reduce_ninety_fused
+    )
+
+    # The same ninety sums as the row above with the mark SQL puts on them, so
+    # a sum that added nothing answers null rather than zero. That mark is not
+    # free and it is not supposed to be: a sum reads no validity, so the only
+    # thing that can say whether it ever added a value is a count beside it,
+    # which is the second slot a mean already carries. The row above is what
+    # pandas asks for and this one is what the SQL front end asks for, and
+    # ClickBench q29 is this one.
+    #
+    # What it is here to catch is the two slots being charged twice for the one
+    # column. They read the same column under the same constant, and while
+    # `partial` built that column once per slot rather than once per column this
+    # row was two passes down the million for every one of the ninety, at about
+    # twice the row above with nothing in either file moving. See #922.
+    def reduce_ninety_marked() raises {imm whole}:
+        keep(whole.rows)
+        var aggs = List[GroupAgg]()
+        for i in range(90):
+            aggs.append(
+                GroupAgg(
+                    1,
+                    AggKind.SUM,
+                    String("s", i),
+                    BinaryOp.ADD,
+                    Value(Int64(i)),
+                    empty_is_null=True,
+                )
+            )
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/reduce_ninety_marked", "rows", rows, reduce_ninety_marked
     )
 
     # Ninety live columns against one, which at ten million rows is seven

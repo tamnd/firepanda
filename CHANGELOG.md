@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a reduction builds a folded operation once per column rather than once per slot
+
+`Reduce.partial` applied an aggregate's folded operation inside the loop over state slots, so a reduction that owns two slots over one column under one operation built that column twice and walked it twice. Two reductions own two slots. A mean is a sum and a count, and since #882 so is a sum marked to answer null over a column that held nothing, which is what the SQL front end builds for every `SUM`. `bind` gives both halves the same source column and the same operation, so the second pass produced a column identical to the first one and threw it away.
+
+ClickBench q29 is ninety marked sums over one column under ninety constants, so it was paying ninety extra passes down a million rows. Paired, two drivers built from the same bench source and run back to back, thirteen rounds at loads between thirty and eighty: the fixed driver is faster in every round, and CPU time per run, which is the column that holds still while this machine's load swings, is 583 milliseconds against 380, a factor of 1.53. The two drivers answer q29 identically, ninety columns and one row, checked on the sum of every one of them.
+
+That is the rest of #922, which was the part of the q29 regression #921 did not explain. #921 does not cut this line at all, since a reduction is a breaker and there is no prefix over it, so the morsel fix could not have been the whole of it and this is the other half.
+
+The count itself is not what costs. It is a popcount over the validity bitmap and it stays. What is gone is building the column it counts a second time.
+
+`exec/reduce_ninety_marked` is the new row in `benchmarks/main.mojo`, the same ninety sums as `exec/reduce_ninety_fused` with the mark SQL puts on them. The gap between the two is what a marked sum costs, and while `partial` built the column once per slot the marked row was about twice the unmarked one with nothing in either file moving.
+
 ### Changed: a column's sortedness is read a block at a time instead of a row at a time
 
 Several places ask whether a column is already sorted, and the answer decides whether a whole pass of work can be skipped. A group by on a sorted key walks it instead of building a hash table. A semi or anti join whose two key columns are both sorted walks them instead of factorizing both sides. The chunked array, the series and the index each have a gate that asks the same question. All of them went through one function that read the column one row at a time, comparing each sort key against the previous one held in a variable, which is a loop the machine cannot run ahead in because the next comparison needs the value the last iteration wrote.
