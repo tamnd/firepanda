@@ -245,6 +245,29 @@ def test_a_class_can_hold_a_category() raises:
     assert_equal(shape("[\\da]"), "seq{in{cat(1),lit(a)}}")
 
 
+def test_a_dash_after_a_set_of_characters_is_a_literal_dash() raises:
+    """A range needs one character on the left of it, and a Perl class is not
+    one, so RE2 reads the dash as a member and `[\\d-a]` holds three things.
+    Python commits to a range before it looks and refuses, which is the whole
+    of the disagreement."""
+    assert_equal(shape("[\\d-a]"), "seq{in{cat(1),lit(-),lit(a)}}")
+    assert_equal(reason("[\\d-a]"), "bad character range")
+
+
+def test_a_dash_after_a_set_does_not_eat_the_range_behind_it() raises:
+    """The item after the literal dash is read as a fresh item rather than as
+    the top of a range, so the `a-z` in this one is still a range and the class
+    covers every letter rather than just the two ends of it."""
+    assert_equal(shape("[\\d-a-z]"), "seq{in{cat(1),lit(-),range(a,z)}}")
+
+
+def test_a_set_on_the_right_of_a_dash_is_an_error_to_both() raises:
+    """The hyphen has already opened a range by then and neither grammar has
+    anywhere to put a set of characters as the top of one, so this stays a
+    refusal rather than becoming a reading."""
+    assert_equal(shape("[a-\\d]"), "!bad character range")
+
+
 def test_a_non_capturing_group_leaves_a_sequence() raises:
     """Python inlines the group into the list around it and this keeps a
     sequence node, which the router steps through without counting. The two

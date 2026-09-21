@@ -205,6 +205,22 @@ The `str.contains` grammar bucket falls from 458 patterns to 279 on the corpus t
 
 Document 107 is the write up.
 
+### Added: a dash after a set
+
+`Series.str.contains(r"[\d-a]")` and the same class through `count`, `replace`, `match`, `fullmatch` and `extract` used to raise and now answer, which is the seventh slice of the patterns RE2 reads and this library did not and the largest family left after document 107.
+
+A range needs one character on the left of it, and the two grammars find that out at different times. Python commits to a range as soon as it sees a dash that is not the last thing in the class, and only afterwards looks at what the two ends are, so one branch refuses `[\d-a]`, `[a-\d]`, `[\d-\w]` and `[b-a]` with `bad character range`. RE2 asks first: a dash opens a range only when what was last read inside the class was one character, and otherwise the dash is a member. So `[\d-a]` is the digits, a dash and a letter.
+
+The item after the dash is read as a fresh item rather than as the top of a range, which is visible: `[\d-a-z]` is the digits, a dash and the range `a` to `z`, not the digits and a dash and two letters. On the other side RE2 is stricter rather than looser, and `[a-\d]` is `invalid escape sequence: \d` rather than a complaint about the range, so that shape stays refused by both.
+
+This is one direction and only one. No class in the family is one Python reads and RE2 does not, and a dash at the end of a class or after a completed range is a member to both grammars and always was.
+
+The RE2 grammar reader needed nothing, for the fourth time in seven slices. It has carried the rule since it was written and the corpus had been confirming it on every run, which is the opposite of the last slice and the argument for keeping the two statements of the grammar separate.
+
+The `str.contains` grammar bucket falls from 282 patterns to 139 on the corpus the last slice measured, with the `bad character range` line going to nothing rather than to a smaller number. The measured list in the corpus goes from 199 to 239, and on the widened corpus of 30236 all seven comparisons stay at zero disagreements.
+
+Document 108 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
