@@ -236,13 +236,18 @@ jobs:
     # This step was thirty nine minutes of a fifty one minute job and it does not
     # get faster on one machine: Mojo 1.0 has no `mojo test`, so each test file
     # is its own program that compiles the library again, and almost all of that
-    # wall clock is the compiler rather than the assertions. There is nothing to
-    # cache between files either, because the generics are instantiated into
-    # whichever program uses them, which was measured rather than assumed:
-    # on the workstation `mojo run -I build tests/test_sql_run.mojo`, against the
-    # precompiled package, takes 206 seconds where `mojo run -I .` against the
-    # sources takes 193. All 422 tests pass either way, so the package is right
-    # and simply does not save anything.
+    # wall clock is the compiler rather than the assertions. On the workstation
+    # `tests/test_sql_run.mojo` takes 195 seconds against a cold compiler cache
+    # and runs its 422 assertions in 22 of them.
+    #
+    # What does not help is handing the test files a precompiled package. The
+    # generics are instantiated into whichever program uses them, so
+    # `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds where
+    # `mojo run -I .` against the sources takes 193. All 422 tests pass either
+    # way, so the package is right and simply does not save anything.
+    #
+    # What does help is the compiler's own cache, which is a different thing and
+    # was confused with that one for a while. It is restored below.
     #
     # Eight rather than ten, because past a point more machines stop buying wall
     # clock. A shard cannot finish before its longest file does, and on a runner
@@ -278,7 +283,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # One compiler cache entry per shard, because a shard compiles its own
+      # eighth of the test files and sharing one entry between all eight would
+      # mean each of them carrying the other seven eighths around for nothing.
       - uses: ./.github/actions/setup-pixi
+        with:
+          cache-slot: shard${{ matrix.shard }}
 
       - name: Toolchain versions
         run: pixi run mojo --version
@@ -306,6 +316,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-pixi
+        with:
+          cache-slot: extension
 
       - name: Build
         run: pixi run build
@@ -376,6 +388,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-pixi
+        with:
+          cache-slot: budget
 
       - name: Build
         run: pixi run build
@@ -420,6 +434,8 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
       - uses: ./.github/actions/setup-pixi
+        with:
+          cache-slot: bench
 
       # Tighter settings than a developer would use, all three of them measured
       # rather than picked. `--max-time` is what the suite's runtime is actually
@@ -494,6 +510,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
+        with:
+          cache-slot: grammar
 
       # The vendored grammar is DuckDB's, byte for byte, and the moment a local
       # edit exists "compatible by construction" becomes "compatible except for
@@ -539,6 +557,7 @@ jobs:
       - uses: ./.github/actions/setup-pixi
         with:
           environment: differential
+          cache-slot: core
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
       # This one builds every differential program this job runs before it runs
       # the first, so it carries the compile time for all the steps below it.
@@ -659,6 +678,7 @@ jobs:
       - uses: ./.github/actions/setup-pixi
         with:
           environment: differential
+          cache-slot: regex
 
       # Builds all six programs at four at a time, so about two rounds, and the
       # five steps below then pay nothing. This is the compile that used to sit

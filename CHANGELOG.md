@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: CI keeps the compiler's cache between runs
+
+The compiler writes down what it has already built, under `$MODULAR_HOME`, which pixi puts inside `.pixi`. That directory was already being cached, but keyed on `pixi.lock`, and `actions/cache` only writes an entry when its key missed. The lockfile almost never changes, so the key almost always hit, and every run had been restoring whatever happened to be in there the last time the lockfile moved.
+
+It is now its own cache entry with a key that is different on every run and a prefix to restore the newest by. On the workstation `tests/test_sql_run.mojo` takes 195 seconds against a cold cache, 22 against a warm one, and 61 when the change under test reaches `run` itself, with all 422 tests passing in each.
+
+The middle number is not the cache answering from yesterday. Putting a `raise` at the top of `run` turned the warm run into 422 failures in 61 seconds, and taking it out again went back to 422 passes in 22. What the cache keys on is what a change actually reaches, not the file it was written in.
+
+Every job that compiles Mojo gets it, not just the tests, because with the tests down the next longest jobs in the pipeline are the two differential ones and the extension build. Each of them keeps its own entry rather than sharing one, and the test job keeps one per shard. One entry shared by all of them would be whichever job finished last, and every job would carry the other jobs' work around for nothing.
+
+Restored on every run and saved only on the merge. A pull request gets the cache the merge built and uploads nothing, which keeps a couple of hundred megabytes a shard out of the repository's cache budget and off the clock of whoever is waiting.
+
+### Fixed: two notes about test compile time that said the wrong thing
+
+`tools/run_tests.sh` said a split of `tests/test_sql_run.mojo` failed because each part still imports `firepanda.sql.run`. Importing that module and calling nothing costs 15 seconds of the 195. What each part still does is call `run`, and one call is the whole price: a generated file that calls it once costs 124 seconds, four times costs 123, and sixty four times costs 120. The first query instantiates the engine and every query after it is free.
+
+`.github/workflows/ci.yml` said there was nothing to cache between test files. That was true of handing them a precompiled package, which is still measured and still does not help, and not true of the compiler's cache, which is a different thing.
+
 ### Added: ARRAY over a subquery reads and prints
 
 `ARRAY(SELECT ...)` collects a whole column into one list value, and firepanda used to turn the query down at the parse. It reads and prints now, at 25 statements of the corpus, and lowering is where it stops.
