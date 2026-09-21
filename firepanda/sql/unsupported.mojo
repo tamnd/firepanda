@@ -141,70 +141,67 @@ comptime TABLE_MODIFIER: UInt16 = 17
 comptime TABLE_AT: UInt16 = 18
 """`AT` after a table, which reads it as of a version or a timestamp."""
 
-comptime ALIAS_COLON: UInt16 = 19
-"""The `name: table` spelling of a table alias."""
-
-comptime JOIN_FORM: UInt16 = 20
+comptime JOIN_FORM: UInt16 = 19
 """A join written in a form the reference arena has no kind for."""
 
-comptime WITH_ORDINALITY: UInt16 = 21
+comptime WITH_ORDINALITY: UInt16 = 20
 """`WITH ORDINALITY` after a table function."""
 
-comptime WITH_USING_KEY: UInt16 = 22
+comptime WITH_USING_KEY: UInt16 = 21
 """`USING KEY` on a `WITH` entry."""
 
-comptime STATEMENT_LATER: UInt16 = 23
+comptime STATEMENT_LATER: UInt16 = 22
 """A statement that maps onto something a dataframe already does."""
 
-comptime STATEMENT_NEVER: UInt16 = 24
+comptime STATEMENT_NEVER: UInt16 = 23
 """A statement that asks for something a dataframe library does not have."""
 
-comptime ROW_VALUE: UInt16 = 25
+comptime ROW_VALUE: UInt16 = 24
 """`(a, b)` or `ROW(a, b)`, several values written as one."""
 
-comptime INTERVAL: UInt16 = 26
+comptime INTERVAL: UInt16 = 25
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
-comptime SPECIAL_CALL: UInt16 = 27
+comptime SPECIAL_CALL: UInt16 = 26
 """`TRY` or `UNPACK`, which are written as calls and are not functions."""
 
-comptime LAMBDA: UInt16 = 28
+comptime LAMBDA: UInt16 = 27
 """`lambda x: x + 1`, a function written in the query."""
 
-comptime LIST_COMPREHENSION: UInt16 = 29
+comptime LIST_COMPREHENSION: UInt16 = 28
 """`[x + 1 FOR x IN l]`, a list built by running an expression."""
 
-comptime NAMED_ARGUMENT: UInt16 = 30
+comptime NAMED_ARGUMENT: UInt16 = 29
 """`f(a := 1)`, an argument passed by name."""
 
-comptime COLUMNS: UInt16 = 31
+comptime COLUMNS: UInt16 = 30
 """`COLUMNS(...)`, a set of columns written where one expression goes."""
 
-comptime MAP_LITERAL: UInt16 = 32
+comptime MAP_LITERAL: UInt16 = 31
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime GROUPING: UInt16 = 33
+comptime GROUPING: UInt16 = 32
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
-comptime POSITIONAL: UInt16 = 34
+comptime POSITIONAL: UInt16 = 33
 """`#1`, a column named by its place in the select list."""
 
-comptime DEFAULT_VALUE: UInt16 = 35
+comptime DEFAULT_VALUE: UInt16 = 34
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 36
+comptime UNPIVOT_NULLS: UInt16 = 35
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 37
+comptime UNPIVOT_GROUPS: UInt16 = 36
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 38
+comptime QUANTIFIED_VALUE: UInt16 = 37
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 39
+comptime NO_CASE: UInt16 = 38
 """A grammar rule the transformer has no case for at all."""
 
-comptime AGGREGATE_FILTER: UInt16 = 40
+comptime AGGREGATE_FILTER: UInt16 = 39
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
 
@@ -393,12 +390,6 @@ def sql_support() -> List[Refusal]:
                 "It reads a table as of a version or a timestamp, and firepanda"
                 " has no storage that keeps either one."
             ),
-            SQL_ISSUE,
-        ),
-        Refusal(
-            "alias-colon",
-            "the name: table spelling",
-            "Write FROM t AS name, which is the same alias.",
             SQL_ISSUE,
         ),
         Refusal(
