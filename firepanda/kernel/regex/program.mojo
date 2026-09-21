@@ -713,6 +713,14 @@ struct _Builder(Movable):
     engine, since RE2 has not got a version of Python.
     """
 
+    var byte_boundary: Bool
+    """Whether RE2's non boundary was emitted while this was being built.
+
+    A note rather than a refusal, because whether it is a refusal depends on a
+    fact nobody knows yet at the point it is emitted, which is whether the
+    finished program can start anywhere other than position zero. Document 113.
+    """
+
     def __init__(
         out self,
         flags: Int32,
@@ -738,6 +746,7 @@ struct _Builder(Movable):
         self.python = python
         self.narrow = python and (flags & FLAG_ASCII) != 0
         self.minor = minor
+        self.byte_boundary = False
 
     def give_up(mut self, problem: String, gap: Bool = False):
         """Records the first reason the pattern cannot be compiled.
@@ -1900,9 +1909,16 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
         # engine over bytes rather than code points is the fix and it is a
         # larger change than this one.
         #
+        # Noted rather than refused, because the extra positions RE2 has are
+        # all of them strictly inside a character and therefore all of them
+        # above zero, so a program that can only ever match at zero cannot
+        # reach one and has nothing to lose by being built. Whether it is such
+        # a program is not known until the whole thing is emitted, so the
+        # answer is given where that is known. Document 113.
+        #
         # Python asks it between characters, which is what this engine already
         # walks, so there is nothing to refuse on that side.
-        b.give_up(String("RE2 reads a non boundary between bytes"), True)
+        b.byte_boundary = True
         return
 
     var left = budget
@@ -2271,6 +2287,93 @@ def _refused_flags_python(flags: Int32) -> String:
     if (flags & FLAG_LOCALE) != 0:
         return String("a locale flag cannot be used on text")
     return String("")
+
+
+def _fails_inside_a_character(which: Int32) -> Bool:
+    """Whether a position test is known to fail at a byte inside a character.
+
+    Named one code at a time rather than as everything that is not the non
+    boundary, so that a position test added later is a refusal until somebody
+    has thought about it. Every one of these is a fact about what the bytes
+    around such a position look like: it is above zero and below the end, the
+    byte on either side of it is a lead byte or a continuation byte and so is
+    neither a newline nor a word byte.
+
+    Args:
+        which: The `AT_` value.
+
+    Returns:
+        True when no position inside a character satisfies it.
+    """
+    return (
+        which == Int32(Int(AT_BEGINNING))
+        or which == Int32(Int(AT_BEGINNING_LINE))
+        or which == Int32(Int(AT_BEGINNING_STRING))
+        or which == Int32(Int(AT_END))
+        or which == Int32(Int(AT_END_LINE))
+        or which == Int32(Int(AT_END_STRING))
+        or which == Int32(Int(AT_END_TEXT))
+        or which == Int32(Int(AT_BOUNDARY))
+    )
+
+
+def _empty_by_non_boundary(code: Span[Instruction, _]) -> Bool:
+    """Whether the program can match having read nothing but non boundaries.
+
+    The question behind it is what RE2 can do at a byte position inside a
+    character and this engine cannot. Nothing can be consumed there, because
+    every character instruction this compiler emits matches a whole character
+    and a continuation byte is the middle of one. No position test holds there
+    except the non boundary, since a continuation byte is not a word byte and
+    the position is neither end of the text nor beside a newline. So the only
+    match RE2 can have at one of those positions is the empty string found by a
+    path through non boundaries, and a program with no such path answers the
+    same thing on both readings.
+
+    The walk is a reachability question rather than a simulation. It steps
+    through the branching and the saves, follows a non boundary, and stops at
+    anything else, which is the conservative direction in the one place it
+    matters: an instruction this walk has not been taught is a reason to say
+    yes and refuse the pattern rather than a reason to answer it.
+
+    Args:
+        code: The instructions, which start at zero.
+
+    Returns:
+        True when the empty string can reach the match instruction that way.
+    """
+    var seen = List[Bool](length=len(code), fill=False)
+    var todo = List[Int]()
+    todo.append(0)
+    while len(todo) > 0:
+        var pc = todo.pop()
+        if pc < 0 or pc >= len(code) or seen[pc]:
+            continue
+        seen[pc] = True
+        var op = code[pc].op
+        if op == IN_MATCH:
+            return True
+        if op == IN_SPLIT:
+            todo.append(Int(code[pc].a))
+            todo.append(Int(code[pc].b))
+            continue
+        if op == IN_JUMP:
+            todo.append(Int(code[pc].a))
+            continue
+        if op == IN_SAVE:
+            todo.append(pc + 1)
+            continue
+        if op == IN_AT and code[pc].a == Int32(Int(AT_NON_BOUNDARY)):
+            todo.append(pc + 1)
+            continue
+        if op == IN_CHAR or op == IN_SET or op == IN_NOT_SET:
+            continue
+        if op == IN_ANY or op == IN_ANY_ALL:
+            continue
+        if op == IN_AT and _fails_inside_a_character(code[pc].a):
+            continue
+        return True
+    return False
 
 
 def _anchored(code: Span[Instruction, _]) -> Bool:
@@ -2975,6 +3078,38 @@ def compile_program(
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
     out.anchored = _anchored(Span(out.code))
+    if (
+        b.byte_boundary
+        and not out.anchored
+        and _empty_by_non_boundary(Span(out.code))
+    ):
+        # The positions RE2 has and this engine has not are the byte positions
+        # inside a character, and the only thing that can match at one of them
+        # is the empty string: a continuation byte is not a word byte, so `\b`
+        # never holds there, it is neither the start nor the end of the text
+        # nor beside a newline, so no other position test holds there either,
+        # and every character this compiler emits is a whole character, so
+        # nothing can be consumed from the middle of one. `\B` is the only
+        # thing left, which is why it is the only construct this refusal has
+        # ever been about.
+        #
+        # All of those positions are above zero, so an anchored program never
+        # attempts one and answers the same thing either way. That is the whole
+        # of `str.match` and `str.fullmatch`, which is why those two stopped
+        # being held out for this at all.
+        #
+        # The second test is the one that reaches the other four. A program
+        # that cannot match the empty string by a path through non boundaries
+        # has no match to find at one of those positions either, whatever it
+        # can do elsewhere, so a `\B` written beside something that has to be
+        # read is answered and a `\B` written on its own is not. Document 113.
+        out.ok = False
+        out.problem = String("RE2 reads a non boundary between bytes")
+        out.gap = True
+        out.refs = False
+        out.cuts = False
+        out.asks = False
+        return out^
     # After the range table has been copied, because the set is written onto the
     # end of it rather than into a second table. Nothing already in there moves,
     # so the offsets the instructions hold are the offsets they had.

@@ -319,6 +319,20 @@ Widening the texts six fold found zero disagreements on all six comparisons. Tha
 
 Document 112.
 
+### Fixed: a byte non boundary held out further than it had to be
+
+RE2 runs on bytes and asks the word boundary question between them, so `\B` matches at every byte position inside a character written with more than one byte and this engine, which walks characters, has no such position to stand on. Every pattern holding `\B` was refused for the RE2 engine on that basis, which was 124 corpus patterns held out of six comparisons.
+
+Every one of those extra positions is strictly inside a character, so nothing whole can be read there, no position test but the non boundary can hold there, and the only match RE2 can have there is the empty string. They are also all above zero, which means a program that can only match at position zero never attempts one. That is the whole of `str.match` and `str.fullmatch`, and both are now answered rather than held out.
+
+For the other four, a program with no path to a match through non boundaries alone has nothing to find at an interior position either, so `\Ba` is answered while `\B` on its own is not.
+
+The refusal moved from while the program is being emitted to after it is finished, which is where the compiler already works out whether a program is anchored.
+
+296 held out patterns are answered, with all seven comparisons still at zero disagreements. 106 remain and they want the engine walked over bytes, which is the change the original comment named and is not this one.
+
+Document 113.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

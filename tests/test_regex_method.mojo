@@ -696,5 +696,48 @@ def test_an_argued_call_reads_both_of_them_pythons_way() raises:
     assert_true(matches_text(counted, "aa"))
 
 
+def test_an_anchored_question_is_answered_over_a_byte_non_boundary() raises:
+    """RE2's `\\B` holds at a byte position inside a character and this engine
+    walks characters, so there are positions RE2 can match at and this one
+    cannot. Every one of them is above zero, which is why the two questions
+    that can only match at zero are answered rather than held out.
+
+    Document 113.
+    """
+    assert_true(program_for(METHOD_MATCH, "\\B").ok)
+    assert_true(program_for(METHOD_FULLMATCH, "\\B").ok)
+    assert_true(program_for(METHOD_MATCH, "\\B|\\s").ok)
+    assert_true(program_for(METHOD_FULLMATCH, "a\\B+").ok)
+
+
+def test_a_non_boundary_that_cannot_stand_alone_is_answered() raises:
+    """Nothing can be read at a byte position inside a character, so the only
+    match RE2 has there is the empty string. A pattern that cannot match the
+    empty string through non boundaries alone has no match there either and is
+    answered whichever question is being asked.
+
+    Document 113.
+    """
+    assert_true(program_for(METHOD_CONTAINS, "\\Ba").ok)
+    assert_true(program_for(METHOD_COUNT, "a\\Bb").ok)
+    assert_true(program_for(METHOD_REPLACE, "\\B\\d").ok)
+
+
+def test_a_non_boundary_on_its_own_is_still_held_out() raises:
+    """The other side of the same argument. `\\B` alone matches the empty string
+    at a position this engine never stands on, so an unanchored question about
+    it is a question this library cannot answer yet rather than one it gets
+    wrong quietly.
+
+    Document 113.
+    """
+    var one = program_for(METHOD_CONTAINS, "\\B")
+    assert_false(one.ok)
+    assert_true(one.gap)
+    assert_equal(one.problem, "RE2 reads a non boundary between bytes")
+    assert_false(program_for(METHOD_CONTAINS, "\\Ba|\\B").ok)
+    assert_false(program_for(METHOD_COUNT, "\\B*").ok)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
