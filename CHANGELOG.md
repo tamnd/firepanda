@@ -359,6 +359,20 @@ The refusal moved from while the program is being emitted to after it is finishe
 
 Document 113.
 
+### Fixed: a named character held out on an engine that has never had one
+
+`\N{NAME}` was the largest regular expression gap left, at 374 patterns held out of `str.contains` and much the same of three others, because resolving a name means carrying the Unicode name table.
+
+RE2 has no `\N` at all. It stops at the `N`, never looks at the brace, and says `invalid escape sequence` to every spelling of one, whether the name exists or not and whether or not it is inside a character class. So a caller who writes one and passes no flag argument has written a pattern pandas hands to Arrow and Arrow rejects, and no table would change that.
+
+The parser now records it on the `re2_refuses` flag it already carried for the comment group, the `\u` escape, the non trailing `\Z` and three others, which the compiler reads on the RE2 side only and answers as a refusal rather than a gap.
+
+The table is narrowed rather than cancelled. 54 patterns stay held out of `str.contains` and 319 out of `str.findall`, and those are the ones that route to Python's engine, where a named character is real syntax and a placeholder would be a column of wrong answers.
+
+1276 held out patterns are answered across four comparisons, with all seven still at zero disagreements.
+
+Document 114.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

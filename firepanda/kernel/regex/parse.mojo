@@ -1163,10 +1163,15 @@ def _named_character(mut c: _Cursor) -> Int32:
     name table for the sake of a pattern almost nobody writes, and the router
     does not need the answer: what it needs is whether the pattern parses, and
     what decides that is the braces rather than what is between them. A name
-    that does not exist is a Python error this reads as a valid pattern, which
-    means such a pattern routes to the Python side here and raises in pandas.
-    That is a real difference and it is written down in document 76 rather than
-    hidden, because the fix is a table and the table is not worth it yet.
+    that does not exist is a Python error this reads as a valid pattern, and
+    that difference is written down in document 76 rather than hidden, because
+    the fix is a table and the table is not worth it yet.
+
+    RE2 has no `\\N` at all and says `invalid escape sequence: \\N` to every
+    spelling of it, whether the name exists or not, which was measured rather
+    than assumed. So the table is only wanted by the engine that can use it,
+    and the other engine wants nothing but the refusal it already has a flag
+    for. Document 114.
 
     Args:
         c: The cursor, sitting on the character after the `N`.
@@ -1190,6 +1195,7 @@ def _named_character(mut c: _Cursor) -> Int32:
         c.give_up(String("missing character name"))
         return -1
     c.guessed = True
+    c.re2_refuses = True
     return c.add(OP_LITERAL, 0xFFFD, 0)
 
 
