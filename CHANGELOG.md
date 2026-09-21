@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a flag group only RE2 reads no longer looks like a pattern Python reads
+
+The parser reads both grammars now, so a parse that succeeds has stopped meaning that Python's parser would have succeeded. `reads_as_python` was still answering with the raw parse result and `holds_unsupported` was still walking a tree Python never accepted, so `a(?i)b` was reported as a pattern Python reads and `a(?i)(?=b)` was routed to Python's engine. pandas asks `re` to compile the pattern and `re` refuses both, so both belong to Arrow.
+
+Both questions now consult the refusal the parser already records for Python, which is the field added when the colon-less flag group was first read. The routing differential over the pattern corpus goes from 3081 disagreements with pandas to none across 29221 patterns.
+
 ### Added: USING KEY on a WITH entry reads and prints
 
 `USING KEY` is how DuckDB says that a `WITH` entry keeps one row per key and replaces that row as the query runs, rather than keeping every row it ever produced. It was the largest single thing left that firepanda turned down at the parse, and it is the last of the `WITH` modifiers to read.

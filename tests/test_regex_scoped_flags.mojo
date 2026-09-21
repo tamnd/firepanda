@@ -30,6 +30,7 @@ from firepanda.kernel.regex.route import (
     ENGINE_PYTHON,
     ENGINE_RE2,
     holds_unsupported,
+    reads_as_python,
 )
 from firepanda.kernel.regex.tokens import (
     FLAG_ASCII,
@@ -234,7 +235,14 @@ def test_the_router_walks_into_a_scope() raises:
 def test_the_letters_are_still_refused_where_python_refuses_them() raises:
     """Unchanged by any of this, and here because a scope that carried its
     letters could have been the moment somebody stopped checking them. All four
-    are parse errors upstream and the wording is Python's."""
+    are parse errors upstream and the wording is Python's.
+
+    The last of them is read by this parser now, because RE2 reads a flag group
+    with no colon in it and the parser reads RE2's grammar too, so Python's
+    sentence moved off `problem` and onto `python_problem` and the pattern goes
+    to RE2 rather than being refused outright. The sentence is the same one and
+    a caller who asked for Python's engine still sees it. Document 102.
+    """
     assert_equal(
         parse_pattern("(?-a:x)").problem,
         "bad inline flags: cannot turn off flags 'a', 'u' and 'L'",
@@ -247,7 +255,9 @@ def test_the_letters_are_still_refused_where_python_refuses_them() raises:
         parse_pattern("(?au:x)").problem,
         "bad inline flags: flags 'a', 'u' and 'L' are incompatible",
     )
-    assert_equal(parse_pattern("(?-i)x").problem, "missing :")
+    assert_equal(parse_pattern("(?-i)x").python_problem, "missing :")
+    assert_true(parse_pattern("(?-i)x").python_refuses)
+    assert_false(reads_as_python("(?-i)x"))
 
 
 def test_naming_one_alphabet_clears_the_other_two() raises:
