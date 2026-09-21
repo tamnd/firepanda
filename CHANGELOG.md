@@ -16,6 +16,14 @@ The grammar puts all three spellings under one rule. `[a, b]` and `ARRAY[a, b]` 
 
 Running it means a node that reads a column and hands back one value, which is the same thing the other subquery shapes are waiting on, so the refusal says what it always said and now says it from lowering.
 
+### Added: the regular expression comparisons run on the merge
+
+There are five differential programs that compare firepanda's pattern handling against pandas, Python's `re` and the RE2 that Arrow is built with, and until now nothing ran them. They were written alongside documents 76 and 79 through 81, every pull request paid to compile them because the build script built everything in one group, and then no workflow invoked one.
+
+That gap has a cost on the record. A change three weeks ago taught the pattern parser to read a superset of Python's grammar without telling the file that decides which engine answers a call, and firepanda spent those weeks sending 3402 patterns of a 30070 pattern corpus to the engine pandas would not have used. Any of the five would have caught it on the commit that introduced it. It was found instead by an unrelated pull request going red.
+
+They run on the merge rather than on pull requests, which is the same gate the microbenchmarks and the other two platforms use. These compare against somebody else's release, so a failure is as likely to be a pandas or RE2 change as a change here, and that is not a thing to hold a merge on. A few minutes after the merge is soon enough to name the commit.
+
 ### Added: WITH ORDINALITY reads and prints
 
 `WITH ORDINALITY` after a table function asks for an extra column holding the position of each row, and firepanda used to turn the query down at the parse. It reads and prints now, at 23 statements of the corpus, and lowering is where it stops.
