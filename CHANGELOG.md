@@ -8,6 +8,25 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Thirty seven commits, and they fall into three piles.
+
+The first is the SQL front end, which reads a good deal more of the DuckDB dialect than it did a release ago. `IS UNKNOWN`, the colon spelling of a table alias, `ARRAY(SELECT ...)`, `WITH ORDINALITY`, `E'...'` escapes, `OVERLAY`, `TRY`, `UNPACK`, `TABLESAMPLE`, `USING SAMPLE`, `USING KEY` and `COLUMNS()` all read and print where they used to be turned down at the parse. Most of them stop at lowering, which is the next thing, but a statement that reads is a statement the corpus can measure.
+
+The second is the regular expression engine and the comparisons that check it. A pattern is now read with whichever grammar is going to run it, which is the fix for a class of bug where Python's grammar refused a pattern Arrow would have been happy with. Named groups in both spellings, named character classes, flag groups that belong to a place, repeats on a position, counts with no lower bound, a backslash and a digit, four Unicode names the table had never heard of, and a byte non boundary held out only where it can actually be seen. The differentials against Python's `re` and against RE2 now run on the merge over a corpus of texts rather than over sixteen hand written ones, which is how the routing regression that sat on main for three weeks would have been caught the day it landed.
+
+The third is the execution engine and the pipeline around it. A filter reads its mask in blocks whatever the mask looks like, and a filter whose comparison keeps every row now hands the chunk straight back instead of copying it. The test shards went from ten to eight against a remeasured cost table, the regular expression comparisons moved onto the merge, and the compiler's own cache is now kept between runs, which takes a pull request from about fifty five minutes to about six on the shards that hit it.
+
+### Fixed: the three version strings agree again, and something checks that
+
+`firepanda/version.mojo` carries a note saying that the version lives in three files and that three copies which can drift will. It then drifted. 0.8.18 moved `pixi.toml` and left `pyproject.toml` and `firepanda/version.mojo` on 0.8.17, so `firepanda.version()` reported the release before the one it was built from and a wheel cut from that commit would have carried the same wrong number.
+
+All three read 0.8.19 now, and the spec job compares them on every run. Nothing in the build derives any of them from the tag, so a check is the only thing that would notice.
+
+
 ### Added: IS UNKNOWN runs, as the IS NULL it is
 
 `x IS UNKNOWN` is the standard's way of writing `x IS NULL`, and firepanda used to turn it down and say to write the other one. It runs now, at 4 statements of the corpus.

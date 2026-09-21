@@ -134,6 +134,23 @@ jobs:
             exit 1
           fi
 
+      # `firepanda/version.mojo` says itself that three copies of one string can
+      # drift, and then 0.8.18 drifted: the release moved `pixi.toml` and left the
+      # other two on 0.8.17, so `firepanda.version()` reported the release before
+      # the one it was built from and the wheel would have carried the same wrong
+      # number. Nothing in the build derives any of them from the tag, so this is
+      # what notices.
+      - name: The three version strings agree
+        run: |
+          pixi_v=$(grep -m1 '^version = ' pixi.toml | cut -d'"' -f2)
+          py_v=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          mojo_v=$(grep -m1 '^comptime VERSION = ' firepanda/version.mojo | cut -d'"' -f2)
+          echo "pixi.toml $pixi_v, pyproject.toml $py_v, version.mojo $mojo_v"
+          if [ "$pixi_v" != "$py_v" ] || [ "$pixi_v" != "$mojo_v" ]; then
+            echo "::error::version strings disagree: pixi.toml $pixi_v, pyproject.toml $py_v, firepanda/version.mojo $mojo_v"
+            exit 1
+          fi
+
       - name: Internal document cross-references resolve
         run: |
           rc=0
