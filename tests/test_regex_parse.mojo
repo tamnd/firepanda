@@ -333,11 +333,14 @@ def test_nothing_to_repeat_and_multiple_repeat_are_different_refusals() raises:
     assert_equal(shape("a**"), "!multiple repeat")
 
 
-def test_an_anchor_cannot_be_repeated() raises:
-    """`^*` and `\\b*` are refused, because a position is not a thing that can
-    happen twice."""
-    assert_equal(shape("^*"), "!nothing to repeat")
-    assert_equal(shape("\\b*"), "!nothing to repeat")
+def test_an_anchor_can_be_repeated_because_re2_repeats_one() raises:
+    """This row used to assert the opposite. Python refuses `^*` and `\\b*`
+    with `nothing to repeat` and RE2 reads both, and since Python's refusal is
+    what routes them to Arrow in the first place, reading them here is what
+    lets them be answered at all. The sentence is kept on the tree rather than
+    thrown, and the row below is the one that checks it."""
+    assert_equal(shape("^*"), "seq{max(0,inf){at(1)}}")
+    assert_equal(shape("\\b*"), "seq{max(0,inf){at(7)}}")
 
 
 def test_a_group_can_be_repeated() raises:
@@ -685,6 +688,38 @@ def test_a_name_re2_has_not_got_is_given_up_on() raises:
     assert_equal(shape("\\p{IsGreek}"), "!bad escape")
     assert_equal(shape("\\p{"), "!bad escape")
     assert_equal(shape("\\p"), "!bad escape")
+
+
+def test_a_quantifier_on_an_anchor_is_read_and_the_refusal_is_recorded() raises:
+    """RE2 repeats a position test and Python will not, so the tree holds the
+    repeat and carries Python's own sentence beside it.
+
+    The node is the ordinary repeat node rather than anything new, which is
+    what keeps the check under it working: `^**` is a repeat on a repeat to
+    RE2 as much as to Python, and collapsing the first star at parse time
+    would have turned that into a repeat on an anchor instead.
+    """
+    assert_equal(shape("^*"), "seq{max(0,inf){at(1)}}")
+    assert_equal(shape("^+"), "seq{max(1,inf){at(1)}}")
+    assert_equal(shape("$?"), "seq{max(0,1){at(4)}}")
+    assert_equal(reason("^*"), "nothing to repeat")
+    assert_equal(reason("$?"), "nothing to repeat")
+
+
+def test_a_quantifier_on_a_quantified_anchor_is_still_multiple_repeat() raises:
+    """Which is the pair the row above exists to protect. RE2 refuses `^**`
+    too, for the same reason, so the parse gives up and the reader agrees."""
+    assert_equal(shape("^**"), "!multiple repeat")
+    assert_equal(shape("^*{2}"), "!multiple repeat")
+
+
+def test_a_quantifier_with_nothing_at_all_in_front_is_unchanged() raises:
+    """The anchor is a thing on the stack and the empty sequence is not, which
+    is the distinction the sequence reader was already making and which this
+    slice narrows rather than removes."""
+    assert_equal(shape("*"), "!nothing to repeat")
+    assert_equal(shape("(*)"), "!nothing to repeat")
+    assert_equal(shape("a|*"), "!nothing to repeat")
 
 
 def main() raises:

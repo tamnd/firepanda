@@ -102,6 +102,22 @@ The corpus generated two `\p` patterns and now generates twenty, so this slice w
 
 Document 103 is the write up, and document 101 is amended where it recorded a bucket that no longer exists.
 
+### Added: a repeat on a position, which RE2 allows and Python does not
+
+`^*`, `$+`, `\b{0}`, `\A?` and every other quantifier written directly against a position test now read, compile and answer. Python has a rule that a quantifier must follow something a quantifier can be applied to and a position test is not one of those things, so `re.compile("^*")` is `nothing to repeat` and pandas routes the pattern to Arrow. RE2 has no such rule.
+
+What RE2 thinks it means was measured against the RE2 inside pyarrow over seven texts rather than reasoned about, because the last two slices both turned up a rule that reasoning got wrong. A position test asks a question about where the engine is standing, and asking it twice cannot fail if asking it once succeeded, so the whole quantifier collapses to one of two things: the test itself when the lower bound is at least one, and nothing at all when it is zero. `^+` is `^`, `\b{1000}` is `\b`, and `^*` and `^?` and `^{0}` and `\b*` are all empty. `\b*` and `\b+` differing is the pair that shows the lower bound decides it rather than which quantifier was written.
+
+Three neighbouring constructs are unchanged. `(^)*` and `(?:^)*` are patterns Python already reads, so the check added to the compiler asks the narrow question of whether the body is exactly one position test rather than the wide one of whether the body reads nothing, and both keep the path they had. `(?=a)*` is a quantifier on a lookahead and belongs to neither side of this. And `^**` and `^*+` and `^*{2}` stay refused, because RE2 refuses them for the second quantifier rather than the first: it reads `^*` and puts a repeat on its stack, and a repeat on a repeat is `bad repetition operator`. That is why the parser builds the repeat node and the compiler is what collapses it, since collapsing at parse time would leave the next quantifier looking at the wrong thing.
+
+Two edits and no new op. In `_seq` the branch that gave up now records `python_refuses` with Python's own sentence and falls through, which is the third use of that field after the flag group and the Unicode name. In `_emit_repeat` a repeat whose body is one `OP_AT` writes the body once or not at all instead of copying it a count of times, which is the one shape a program built by copying cannot express.
+
+The reader from document 101 needed no change, having been written from RE2's grammar rather than Python's, and its differential does not move: 8389 read and 21681 refused with matching reasons over 30070 patterns, with nothing wrong and nothing set aside.
+
+The corpus went from two patterns in this family to twenty four, so the slice was measured twice. On the same corpus as the last one the `str.contains` grammar bucket falls from 916 patterns to 841, of which 51 become compared answers and 24 move to a bucket that names their actual construct, 16 of those being the `\B` family landing in the byte boundary bucket where they belong. That leaves 75 as the honest count of this construct against the 202 the list started with, the other 127 being patterns with genuinely nothing in front of the quantifier, which RE2 refuses too and which were already right. On the widened corpus `str.contains` is 28479 compared and 1591 held out, `str.match` and `str.fullmatch` are both 28529 and 1541, `str.count` and `str.replace` are both 28465 and 1605, and the Python engine differential is 29596 and 474. All five stay at 10000 agreements in ten thousand with zero disagreements.
+
+Document 104 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

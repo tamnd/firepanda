@@ -899,7 +899,7 @@ def _unicode_name(mut c: _Cursor, negated: Bool) -> Int32:
 
     var flip = negated
     var start = c.at
-    var stop = c.at
+    var stop: Int
     if not c.done() and c.peek() == 0x7B:
         c.at += 1
         if not c.done() and c.peek() == 0x5E:
@@ -2082,11 +2082,11 @@ def _seq(mut c: _Cursor) -> Int32:
     even though something was read. Reading the quantifier next to the atom
     gets the first of those wrong and cannot express the second.
 
-    Two refusals come out of the same place. A quantifier on an anchor is
-    nothing to repeat, which is why `^*` is refused and `(?=a)*` is not, and
-    that pair is the whole reason the second one reaches RE2 and raises there. A
-    quantifier on a quantifier is multiple repeat, except for the `?` and the
-    `+` that make the one in front lazy or possessive.
+    Two of Python's refusals come out of the same place. A quantifier on an
+    anchor is nothing to repeat, which RE2 does not agree with, so that one is
+    read into the tree and recorded rather than given up on. A quantifier on a
+    quantifier is multiple repeat, except for the `?` and the `+` that make the
+    one in front lazy or possessive, and RE2 does agree with that one.
 
     Verbose mode lives here too, for the same reason and in Python's own place
     for it, which is the top of this loop and nowhere below it. Document 88 is
@@ -2179,8 +2179,19 @@ def _seq(mut c: _Cursor) -> Int32:
                 return -1
             var was = c.nodes[Int(last)].op
             if was == OP_AT:
-                c.give_up(String("nothing to repeat"))
-                return -1
+                # RE2 repeats a position test and Python refuses to. `^*` and
+                # `\b{0}` and `$+` are patterns RE2 reads, and `nothing to
+                # repeat` is what Python says about every one of them, so the
+                # tree carries the construct and Python's own sentence and the
+                # compiler decides which engine gets which. The repeat node is
+                # built exactly as it would be for anything else, because the
+                # check below it depends on one being there: RE2 refuses `^**`
+                # for repeating a repeat rather than for repeating an anchor,
+                # and collapsing the first star here would lose that. Document
+                # 104.
+                if not c.python_refuses:
+                    c.python_refuses = True
+                    c.python_problem = String("nothing to repeat")
             if (
                 was == OP_MAX_REPEAT
                 or was == OP_MIN_REPEAT
