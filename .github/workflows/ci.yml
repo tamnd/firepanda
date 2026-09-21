@@ -548,10 +548,10 @@ jobs:
       # is what the runner has cores for, so the compile is about two rounds.
       #
       # Six programs rather than eleven. The five regular expression comparisons
-      # are run by hand out of documents 76 and 79 through 81 and no workflow has
-      # ever run one, so building them here was about half of this step and the
-      # longest single thing left in the pipeline. `pixi run differential-regex`
-      # and its three siblings build their own group when somebody asks for them.
+      # have their own job further down, which runs on the merge rather than
+      # here, so building them here was about half of this step and bought this
+      # pipeline nothing. `pixi run differential-regex` and its siblings build
+      # their own group.
       - run: pixi run differential
         timeout-minutes: 15
 
@@ -624,10 +624,94 @@ jobs:
         run: pixi run tpch
         timeout-minutes: 10
 
+  # The five regular expression comparisons, which until now no workflow has
+  # ever run. They were written alongside documents 76 and 79 through 81, they
+  # were built on every pull request because the build script built everything,
+  # and then nothing invoked them. That is the worst of both: the pull request
+  # paid for the compile and nobody got the answer.
+  #
+  # It is not a hypothetical gap. #936 taught the pattern parser to read a
+  # superset of Python's grammar and did not tell `firepanda/kernel/regex/route.mojo`,
+  # so for three weeks firepanda sent 3402 patterns of a 30070 pattern corpus to
+  # the engine pandas would not have sent them to. Every one of these five would
+  # have caught it on the merge that introduced it. It reached main instead and
+  # was found by a test file going red on an unrelated pull request.
+  #
+  # On merge rather than on pull requests, the same gate the microbenchmarks and
+  # the other platforms use. These compare against pandas and RE2 rather than
+  # against a fixture, so what they fail on is a disagreement with somebody
+  # else's release as often as it is a change in this repository, and that is
+  # not a thing to hold a merge on. A few minutes after the merge is soon enough
+  # to catch a routing change on the commit that made it, which is the whole
+  # point, and it costs the pull request pipeline nothing.
+  differential-regex:
+    name: Differential vs Python's re & RE2
+    needs: guard
+    if: needs.guard.outputs.has_mojo == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # The same reasoning as the job above: a ceiling on the job says it hung and
+    # a ceiling on each step says which comparison did.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-pixi
+        with:
+          environment: differential
+
+      # Builds all six programs at four at a time, so about two rounds, and the
+      # five steps below then pay nothing. This is the compile that used to sit
+      # in the pull request pipeline.
+      - name: Build
+        run: pixi run differential-build-regex
+        timeout-minutes: 15
+
+      # Which engine answers. pandas parses every pattern with Python's parser
+      # and routes on what comes back, so a front end that reads one pattern
+      # differently sends it to the other engine and quietly answers a different
+      # question. Document 76 section 6.
+      - name: Routing, against pandas' own predicate
+        run: pixi run differential-regex
+        timeout-minutes: 10
+
+      # What the engine then answers, which routing agreement says nothing
+      # about. Document 77 section 7.
+      - name: Matching, against str.contains
+        run: pixi run differential-regex-match
+        timeout-minutes: 10
+
+      # Counting is a loop that belongs to Arrow rather than to either engine,
+      # and follows three rules a reader would not guess. Document 79 section 7.
+      - name: Counting, against str.count
+        run: pixi run differential-regex-count
+        timeout-minutes: 10
+
+      # Replacing is a third loop, and not the one that counts: characters
+      # rather than bytes, and it asks where each group matched. Document 80
+      # section 7.
+      - name: Replacing, against str.replace
+        run: pixi run differential-regex-replace
+        timeout-minutes: 10
+
+      # The other alphabet. Three of the accessor's methods never reach Arrow,
+      # so `\w` covers 63 characters for one half of it and 138558 for the
+      # other. Document 81 section 7.
+      - name: Extraction, against str.findall
+        run: pixi run differential-regex-python
+        timeout-minutes: 10
+
+      # The question underneath all five, which is whether RE2 reads the pattern
+      # at all. For two patterns in three the whole of what a caller gets back
+      # is a refusal, so agreeing about the refusal is most of the work.
+      - name: Refusals, against the RE2 Arrow is built with
+        run: pixi run differential-regex-re2
+        timeout-minutes: 10
+
   required:
     name: CI
     if: always()
-    needs: [spec, format, build, extension, budget, bench, grammar, differential]
+    needs: [spec, format, build, extension, budget, bench, grammar, differential, differential-regex]
     runs-on: ubuntu-latest
     steps:
       - name: Collect results

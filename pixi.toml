@@ -166,11 +166,11 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # because there are ten of them now and one after another took longer than the
 # job is allowed. The script says what it does with them.
 #
-# Two groups rather than one, because the workflow runs six of the eleven and
-# was compiling all eleven to do it. The five regular expression comparisons are
-# run by hand out of the four specification documents that introduce them, and
-# building them on every pull request was about half of the longest step left in
-# the pipeline.
+# Two groups rather than one, because the two jobs that run these want different
+# halves and each was compiling all eleven to get six. The core group is what the
+# pull request pipeline runs; the regex group is what the merge runs, out of the
+# four specification documents that introduce them. Building both on every pull
+# request was about half of the longest step left in that pipeline.
 differential-build = { cmd = "bash tools/build_differential.sh core", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
