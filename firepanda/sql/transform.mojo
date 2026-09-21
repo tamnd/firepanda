@@ -155,7 +155,6 @@ from .unsupported import (
     TABLE_MODIFIER,
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
-    WITH_ORDINALITY,
     not_implemented,
 )
 
@@ -5397,13 +5396,14 @@ struct Transform(Movable):
         var arguments = NO_NODE
         var named = NO_NODE
         var lateral = False
+        var ordinality = False
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_LATERAL):
                 lateral = True
             elif self._marked(tree, kid, _MARK_ORDINALITY):
-                raise _unsupported(tree, sql, kid, WITH_ORDINALITY)
+                ordinality = True
             elif name == NO_NODE:
                 name = kid
             else:
@@ -5422,6 +5422,7 @@ struct Transform(Movable):
             self._alias_name(tree, sql, named),
             self._alias_columns(tree, sql, named),
             lateral,
+            ordinality,
             tree.nodes[Int(node)].token_start,
         )
 

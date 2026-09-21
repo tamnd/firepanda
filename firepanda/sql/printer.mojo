@@ -1892,7 +1892,7 @@ def _write_ref(
         return
 
     if kind == REF_FUNCTION:
-        if item.b == 1:
+        if item.b & 1 != 0:
             out += "LATERAL "
         if ast.length(item.a) == 0:
             raise Error("a table function with no name on it")
@@ -1900,6 +1900,8 @@ def _write_ref(
         out += "("
         _write_list(ast, item.children, grammar, out)
         out += ")"
+        if item.b & 2 != 0:
+            out += " WITH ORDINALITY"
         _write_alias(ast, item.payload, grammar, out)
         return
 

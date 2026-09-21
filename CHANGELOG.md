@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: WITH ORDINALITY reads and prints
+
+`WITH ORDINALITY` after a table function asks for an extra column holding the position of each row, and firepanda used to turn the query down at the parse. It reads and prints now, at 23 statements of the corpus, and lowering is where it stops.
+
+It needed no new field. A table function reference already carried one field holding whether it was written `LATERAL`, and the two words are the same kind of thing, so that field is a pair of bits now and neither word costs anything beyond having been written.
+
+Running it means the table function and the column being built together, since the position is the position the function produced the row at and nothing downstream can work it out afterwards. That is the same shape the other table function gaps are waiting on, so the refusal says what it always said and now says it from lowering.
+
 ### Added: an E'...' string reads its backslash escapes
 
 A string written with an `E` in front of it takes backslash escapes the way C does, and firepanda used to turn the whole spelling down rather than decode half of it. It decodes all of it now, at 25 statements of the corpus.

@@ -399,6 +399,31 @@ def test_a_table_function_in_a_from() raises:
     )
 
 
+def test_ordinality_reaches_the_printer_and_keeps_its_place() raises:
+    # The two words go after the parentheses and before the alias, which is
+    # where the query writes them and the only place the grammar takes them.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT * FROM range(3) WITH ORDINALITY", g, rules),
+        "SELECT * FROM range(3) WITH ORDINALITY",
+    )
+    assert_equal(
+        _printed(
+            "SELECT * FROM range(3) WITH ORDINALITY AS t (a, b)", g, rules
+        ),
+        "SELECT * FROM range(3) WITH ORDINALITY AS t (a, b)",
+    )
+    # LATERAL and the two words sit in the same field and are not the same
+    # word, so a call that was written both ways prints both back.
+    assert_equal(
+        _printed(
+            "SELECT * FROM t, LATERAL range(t.a) WITH ORDINALITY", g, rules
+        ),
+        "SELECT * FROM t, LATERAL range(t.a) WITH ORDINALITY",
+    )
+
+
 def test_values_as_a_table() raises:
     var g = Grammar()
     var rules = Transform(g)

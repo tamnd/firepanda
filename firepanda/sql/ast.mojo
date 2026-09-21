@@ -679,7 +679,9 @@ comptime REF_FUNCTION: UInt8 = 3
 """A table function, `range(10) t`.
 
 `a` is a run of interned name parts, `children` is a run of argument
-expressions, `payload` is the alias run and `b` is 1 for `LATERAL`.
+expressions and `payload` is the alias run. `b` holds the two words that may
+stand around the call, bit 0 for `LATERAL` and bit 1 for `WITH ORDINALITY`,
+since neither one carries anything of its own beyond having been written.
 """
 
 comptime REF_JOIN: UInt8 = 4
@@ -2253,6 +2255,7 @@ struct Ast(Movable):
         name: StringSlice = "",
         columns: List[String] = List[String](),
         lateral: Bool = False,
+        ordinality: Bool = False,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds a table function reference.
@@ -2263,17 +2266,21 @@ struct Ast(Movable):
             name: The alias, empty for none.
             columns: The column aliases, in order.
             lateral: Whether it was written `LATERAL`.
+            ordinality: Whether it was written `WITH ORDINALITY`.
             token: The token it starts at.
 
         Returns:
             The reference node index.
         """
+        var words = UInt32(1) if lateral else UInt32(0)
+        if ordinality:
+            words |= 2
         return self.add_ref(
             Ref(
                 kind=REF_FUNCTION,
                 token=token,
                 a=self.names(parts),
-                b=UInt32(1) if lateral else UInt32(0),
+                b=words,
                 children=self.run(arguments),
                 payload=self.alias(name, columns),
             )
