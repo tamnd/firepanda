@@ -169,7 +169,7 @@ comptime INTERVAL: UInt16 = 27
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
 comptime SPECIAL_CALL: UInt16 = 28
-"""A function the grammar gives a rule of its own, such as `TRIM`."""
+"""`TRY` or `UNPACK`, which are written as calls and are not functions."""
 
 comptime LAMBDA: UInt16 = 29
 """`lambda x: x + 1`, a function written in the query."""
@@ -484,10 +484,11 @@ def sql_support() -> List[Refusal]:
             "special-call",
             "{} yet",
             (
-                "The grammar gives a handful of functions a rule of their own,"
-                " because SQL spells them with keywords inside the parentheses"
-                " where the commas would go. Each one needs a form the plain"
-                " call form cannot hold, and they are coming."
+                "TRY and UNPACK are written the way a call is written and read"
+                " as calls, and neither one is a function. TRY answers NULL"
+                " where the expression would have raised and UNPACK spreads a"
+                " list across the arguments of the call around it, so both are"
+                " shapes the plan would have to grow."
             ),
             STAGE_ISSUE,
         ),

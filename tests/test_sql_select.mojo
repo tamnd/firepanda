@@ -775,15 +775,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
         _ = _printed("SELECT #1 FROM t", g, rules)
 
 
-def test_a_call_spelled_with_keywords_refuses_under_its_own_name() raises:
-    # One table entry for the lot of them, and the message still says which one
-    # it was, which is what the `{}` slot is for.
-    var g = Grammar()
-    var rules = Transform(g)
-    with assert_raises(contains="OVERLAY yet"):
-        _ = _printed("SELECT OVERLAY(a PLACING b FROM 1)", g, rules)
-
-
 def test_the_keyword_calls_that_no_longer_refuse() raises:
     # SUBSTRING and EXTRACT were in the list above until the kernels behind them
     # were wired up. Each comes out of the transform as the call the planner
@@ -809,6 +800,35 @@ def test_the_keyword_calls_that_no_longer_refuse() raises:
     assert_equal(
         _printed("SELECT POSITION(a IN b) FROM t", g, rules),
         "SELECT instr(b, a) FROM t",
+    )
+
+
+def test_the_last_three_keyword_calls_read_as_the_calls_they_are() raises:
+    # These three were the whole of the special-call entry. OVERLAY is a call
+    # with two spellings the way SUBSTRING is, and DuckDB has no function of
+    # that name either, so the query stops on the name in both engines. TRY and
+    # UNPACK are one argument each and are turned down at lowering.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT OVERLAY(a PLACING b FROM 1 FOR 2) FROM t", g, rules),
+        "SELECT overlay(a, b, 1, 2) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT OVERLAY(a PLACING b FROM 1) FROM t", g, rules),
+        "SELECT overlay(a, b, 1) FROM t",
+    )
+    # The comma spelling is the same call and prints the same way.
+    assert_equal(
+        _printed("SELECT overlay(a, b, 1, 2) FROM t", g, rules),
+        "SELECT overlay(a, b, 1, 2) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT TRY(a) FROM t", g, rules), "SELECT try(a) FROM t"
+    )
+    assert_equal(
+        _printed("SELECT UNPACK(a) FROM t", g, rules),
+        "SELECT unpack(a) FROM t",
     )
 
 

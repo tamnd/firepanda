@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: OVERLAY, TRY and UNPACK read as the calls they are
+
+The grammar gives a handful of functions a rule of their own, because SQL spells them with keywords inside the parentheses where the commas would go. `COALESCE`, `NULLIF`, `SUBSTRING`, `EXTRACT`, `TRIM` and `POSITION` already read as the calls they are, and these were the last three, at 93 statements of the corpus between them.
+
+`OVERLAY(s PLACING t FROM 2 FOR 3)` and `overlay(s, t, 2, 3)` are the same call said the standard's way and the plain way, exactly as `SUBSTRING` is, and both become one. It needs no refusal of its own, because DuckDB has no `overlay` function either and stops on the name rather than on the syntax, which is what firepanda now says about it too.
+
+`TRY(x)` and `UNPACK(x)` are one argument each and are written the way a call is written, so they read as calls and stop at lowering. Neither one is a function. `TRY` answers NULL where the expression would have raised and `UNPACK` spreads a list across the arguments of the call around it, so both are shapes the plan would have to grow, and the refusal that used to cover all three now covers the two that are really about meaning rather than syntax.
+
 ### Added: TABLESAMPLE and USING SAMPLE read and print
 
 A sample takes a share of the rows instead of all of them, and DuckDB spells it two ways that mean the same thing. `TABLESAMPLE` is the spelling the standard uses and `USING SAMPLE` is the one DuckDB added, and the grammar takes either one in either place. It was the second largest thing firepanda still turned down at the parse, at 132 statements of the corpus, 106 of them written after a table and 26 written on the block.
