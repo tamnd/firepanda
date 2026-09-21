@@ -2438,6 +2438,58 @@ def test_a_reduction_carrying_an_operation_runs_it_a_chunk_at_a_time() raises:
     assert_equal(one_int(out, "low"), 4, "ten less the largest")
 
 
+def test_a_marked_sum_carrying_an_operation_shares_the_column_it_counts() raises:
+    """The sum and the count beside it are two slots over one column under one
+    operation, and `partial` builds that column once and hands it to both. The
+    answers are what says the two halves read the same thing. `n` holds a five
+    and three nulls, so the fold added one value and has a sum to report, and
+    `bare` holds four nulls, so it added none and has not. See #922."""
+    var aggs = List[GroupAgg]()
+    aggs.append(
+        GroupAgg(
+            0,
+            AggKind.SUM,
+            "shifted",
+            BinaryOp.ADD,
+            Value(Int64(10)),
+            empty_is_null=True,
+        )
+    )
+    aggs.append(
+        GroupAgg(
+            2,
+            AggKind.SUM,
+            "nothing",
+            BinaryOp.ADD,
+            Value(Int64(10)),
+            empty_is_null=True,
+        )
+    )
+    var pipeline = Pipeline(hollow_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(present(out, "shifted"), [True], "one value was there")
+    assert_equal(one_int(out, "shifted"), 15, "the five and its ten")
+    assert_equal(present(out, "nothing"), [False], "no value was there")
+
+
+def test_a_mean_carrying_an_operation_divides_by_what_it_counted() raises:
+    """The other pair of slots over one column, and the same check on it. One
+    through six with ten added to each is a mean of 13.5, and a count that had
+    been given a different column to read would divide by the wrong number."""
+    var aggs = List[GroupAgg]()
+    aggs.append(
+        GroupAgg(0, AggKind.MEAN, "middle", BinaryOp.ADD, Value(Int64(10)))
+    )
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("middle").as_typed[DType.float64]()[0]
+    assert_equal(got, Float64(13.5), "one through six and six tens")
+
+
 def test_a_group_by_refuses_a_reduction_carrying_an_operation() raises:
     """Only a reduction folds one in, because only a reduction reads the whole
     column. A group by scatters its rows and the operation would have to go with
