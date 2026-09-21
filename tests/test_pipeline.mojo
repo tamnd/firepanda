@@ -58,6 +58,7 @@ from firepanda.exec import (
     Truncate,
     Unique,
     Window,
+    mark_chained_filters,
     node_apply,
     node_computes_per_row,
     node_ends_early,
@@ -3686,6 +3687,66 @@ def test_a_filter_that_keeps_nearly_every_row_copies_instead() raises:
     assert_equal(values[0], 1, "the first row")
     assert_equal(values[2], 4, "the row after the one that was dropped")
     assert_equal(values[4], 6, "and the last")
+
+
+def test_a_filter_with_a_filter_above_it_selects_whatever_it_keeps() raises:
+    """Five rows of six is well over `SELECTION_KEEP_LIMIT`, so this filter on
+    its own copies. Told that another filter follows it, it writes a selection
+    instead, because the copy it would make is one the next filter makes again
+    over nearly the same rows. See #521."""
+    var node = Node(Filter(1))
+    node[Filter].chained = True
+    var out = node_apply(
+        node, masked_chunk([True, True, False, True, True, True])
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "selected rather than copied")
+    assert_equal(len(got), 5, "five rows")
+    assert_equal(len(got.columns[0]), 6, "over a column that still holds six")
+    var values = ints_of(got.column(0), 5)
+    assert_equal(values[0], 1, "the first row")
+    assert_equal(values[2], 4, "the row after the one that was dropped")
+    assert_equal(values[4], 6, "and the last")
+
+
+def test_marking_a_line_of_filters_leaves_the_last_one_alone() raises:
+    """The last filter of a run is read by something that is not a filter, and
+    the threshold is about that reader, so it goes on deciding the way it always
+    did. Everything before it composes."""
+    var line = List[Node]()
+    line.append(Node(Filter(1)))
+    line.append(Node(Filter(1)))
+    line.append(Node(Filter(1)))
+    line.append(Node(Project([0])))
+    mark_chained_filters(line)
+    assert_true(line[0][Filter].chained, "the first has one above it")
+    assert_true(line[1][Filter].chained, "so does the second")
+    assert_false(line[2][Filter].chained, "the third is read by a projection")
+
+
+def test_marking_a_lone_filter_changes_nothing() raises:
+    """A filter with a projection above it is the shape the threshold was
+    measured on, and it is left as it was."""
+    var line = List[Node]()
+    line.append(Node(Filter(1)))
+    line.append(Node(Project([0])))
+    mark_chained_filters(line)
+    assert_false(line[0][Filter].chained, "nothing to chain to")
+
+
+def test_a_line_of_filters_answers_what_one_at_a_time_would() raises:
+    """The whole point is that nothing above the pipeline can tell. Two
+    conditions over the same six rows keep the rows both of them are true on,
+    whichever route the first one took to say which rows it kept."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(0, Value(Int64(1)), BinaryOp.GT)))
+    pipeline.add(Node(Filter(0, Value(Int64(5)), BinaryOp.LT)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 3, "two, three and four")
+    assert_equal(got[0], 2, "the first")
+    assert_equal(got[2], 4, "and the last")
 
 
 def test_a_filter_over_a_selected_chunk_composes_the_two() raises:

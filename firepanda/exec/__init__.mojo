@@ -58,6 +58,7 @@ from .node import Reduce
 from .node import Search, Substitute
 from .node import Trim, Truncate
 from .node import Sort, Unique, Window
+from .node import mark_chained_filters
 from .node import node_apply, node_bind, node_computes_per_row
 from .node import node_ends_early, node_finish, node_is_breaker
 from .node import node_is_row_local, node_process, node_reads_selection

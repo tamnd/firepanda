@@ -15,6 +15,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 It folds in the transformer rather than becoming a node of its own. The standard reads it only over a boolean, where it means the third truth value, but DuckDB takes it over any type and answers exactly what `IS NULL` answers, down to naming the column `(1 IS NULL)` when the query wrote `1 IS UNKNOWN`. So there is one test with two spellings, the AST keeps the one it already had, and the printer writes `IS NULL` back. Lowering and execution were already there and needed nothing.
 
 That makes it the first of these to go all the way to an answer rather than as far as the printer. The last few read and print and stop at lowering, because the thing they mean has no node yet. This one means something firepanda already runs.
+### Changed: a filter with another filter above it writes a selection whatever it keeps
+
+A filter that keeps more than `SELECTION_KEEP_LIMIT` of a chunk copies the rows that survived instead of writing a selection, because past that share whatever reads the chunk pays more to gather through scattered positions than the copy costs here. That trade was measured with a projection above the filter, and it does not survive the thing above being another filter: the copy is one the next filter makes again over nearly the same rows, and the one above that makes it a third time.
+
+A conjunction lowers to one filter per conjunct, so this is the ordinary shape of a WHERE clause with several conditions in it. Seven of the ClickBench statements ask for a month of traffic from one counter and read `URL` above it, and `CounterID = 62` keeps 41.4 percent of the 1M partition, just past the threshold, so it copied every column the group by reads. Every condition after it then met a flat chunk and copied the same columns again.
+
+`mark_chained_filters` runs once when the pipeline has the whole line, which is the first point at which a node's successor is known, and it marks every filter that has another filter directly above it. The last of a run is left alone, because what reads that one is not a filter and the threshold is about the reader. So six filters in a line become five that compose, four bytes a surviving row and no column touched, and one that decides the way it always did.
+
+Measured over ClickBench at 1M on a quiet machine, CPU per run in milliseconds: q38 59.4 to 12.6, q41 21.6 to 6.3, q40 18.4 to 11.8, q42 27.2 to 20.1, q37 80.0 to 62.8, q36 149.1 to 121.9, q39 312.1 to 290.6, and 3083.0 to 2938.4 over all 43. Every query returns the rows, sums and hashes it returned before. Six queries read slower in that pass and none of them stayed slower when they were measured again three rounds at a time against the same two binaries, q31 the worst of them at 0.72x the first time and 1.08x the second.
 
 ### Added: the colon spelling of a table alias is read as the alias it is
 

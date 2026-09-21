@@ -62,7 +62,8 @@ from .chunk import Chunk
 from .morsel import MORSEL_ROWS, parallel_morsels
 from .node import Node, NodeStatus, Reduce, node_apply, node_bind
 from .node import node_computes_per_row, node_ends_early, node_finish
-from .node import node_is_breaker, node_is_row_local, node_process
+from .node import mark_chained_filters, node_is_breaker
+from .node import node_is_row_local, node_process
 from .node import node_status
 from .parallel import worker_count
 
@@ -516,6 +517,11 @@ struct Pipeline(Movable):
             If any operator raises.
         """
         var sink = Collect()
+        # A filter with another filter above it writes a selection whatever the
+        # share it keeps, because the copy it would make is one the next filter
+        # makes again. Here rather than at `add`, because a node is built before
+        # the one above it exists.
+        mark_chained_filters(self.operators)
         # The source is cut into morsels here rather than when it was built,
         # because a morsel is only worth having when there is a prefix to hand
         # out over it. This is the first point where both halves of that are

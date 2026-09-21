@@ -394,6 +394,24 @@ struct Filter(Movable):
     reasonably want.
     """
 
+    var chained: Bool
+    """Whether another filter follows this one directly.
+
+    Set by the pipeline once the line is complete, because it is a fact about
+    what is above this node and the node is built before that is known. A
+    filter built by hand and run through `node_apply` is never chained, which
+    is why it defaults to false rather than being an argument.
+
+    What it turns off is the copy. A filter past `SELECTION_KEEP_LIMIT` copies
+    because the selection it would write costs the operators above it more than
+    the copy costs here, and that reasoning does not survive the operator above
+    being another filter: the copy it makes is a copy the next filter makes
+    again, over nearly the same rows, and the last one in the line makes it a
+    third time. Writing the selection instead means every filter after the
+    first composes, four bytes a surviving row and no column touched, and
+    whatever is above the line gathers once. See #521.
+    """
+
     def __init__(out self, on: Int):
         """Constructs a filter that keeps every column of its input.
 
@@ -403,6 +421,7 @@ struct Filter(Movable):
         self.on = on
         self.keep = List[Int]()
         self.narrows = False
+        self.chained = False
         self.test = None
         self.op = BinaryOp.EQ
         self.value_on_left = False
@@ -418,6 +437,7 @@ struct Filter(Movable):
         self.on = on
         self.keep = keep^
         self.narrows = True
+        self.chained = False
         self.test = None
         self.op = BinaryOp.EQ
         self.value_on_left = False
@@ -440,6 +460,7 @@ struct Filter(Movable):
         self.on = on
         self.keep = List[Int]()
         self.narrows = False
+        self.chained = False
         self.test = Optional[Value](test^)
         self.op = op
         self.value_on_left = value_on_left
@@ -464,6 +485,7 @@ struct Filter(Movable):
         self.on = on
         self.keep = keep^
         self.narrows = True
+        self.chained = False
         self.test = Optional[Value](test^)
         self.op = op
         self.value_on_left = value_on_left
@@ -661,8 +683,10 @@ struct Filter(Movable):
                 # for that walk on every filter to save the ones that kept
                 # everything.
                 return self._straight_through(chunk^)
-            if not composing and found > Int(
-                SELECTION_KEEP_LIMIT * Float64(chunk.rows)
+            if (
+                not composing
+                and not self.chained
+                and found > Int(SELECTION_KEEP_LIMIT * Float64(chunk.rows))
             ):
                 # The same threshold the mask route uses, asked of the rows
                 # rather than of the mask, since the rows are what there is.
@@ -689,8 +713,10 @@ struct Filter(Movable):
                 if only == 0:
                     return None
                 return Chunk(List[AnyArray](), only)
-            if not composing and mask_keeps_more_than(
-                mask, SELECTION_KEEP_LIMIT
+            if (
+                not composing
+                and not self.chained
+                and mask_keeps_more_than(mask, SELECTION_KEEP_LIMIT)
             ):
                 # The copy is left to spread whatever this was told, which is
                 # what it did before there was anything else for a filter to do,
@@ -7437,6 +7463,36 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Choose]()
         or node.isa[Join]()
     )
+
+
+def mark_chained_filters(mut operators: List[Node]):
+    """Tells every filter with another filter directly above it to select.
+
+    Called once by the pipeline when the line is complete, which is the first
+    point at which a node's successor is known. A filter is built before the
+    one above it exists, so this cannot be an argument to the constructor.
+
+    Why it is worth telling them. A filter past `SELECTION_KEEP_LIMIT` copies
+    the rows it kept, because a selection is read by whatever is above and past
+    that share the reads cost more than the copy does. When what is above is
+    another filter, the copy is made again immediately, over nearly the same
+    rows, and again by the one above that. A conjunction lowers to one filter
+    per conjunct, so a six condition predicate over a chunk holding a text
+    column copied that column up to six times to answer with the rows one of
+    the six conditions kept.
+
+    Only a run of filters is marked, and the last of the run is not, because
+    something that is not a filter reads what it produces and the threshold is
+    about that reader. So a line of six becomes five that compose and one that
+    decides the way it always did.
+
+    Args:
+        operators: The line, in the order a chunk goes through it. Changed in
+            place.
+    """
+    for i in range(len(operators) - 1):
+        if operators[i].isa[Filter]() and operators[i + 1].isa[Filter]():
+            operators[i][Filter].chained = True
 
 
 def node_is_breaker(node: Node) -> Bool:
