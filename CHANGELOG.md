@@ -221,6 +221,24 @@ The `str.contains` grammar bucket falls from 282 patterns to 139 on the corpus t
 
 Document 108 is the write up.
 
+### Added: a count with no lower bound
+
+`Series.str.contains("{,3}")` and the same pattern through `count`, `replace`, `match`, `fullmatch` and `extract` used to raise and now answer, which is the eighth slice of the patterns RE2 reads and this library did not and the last one of any size.
+
+Python has read `{,n}` as `{0,n}` since 3.11 and RE2 has never read it as a count at all, because a count to RE2 opens with a digit and a brace that is not followed by one is an ordinary character. So `a{,3}` is a repeat to one grammar and the text `a{,3}` to the other, and `{,3}` with nothing in front of it is a count with nothing to repeat to Python and four characters to RE2.
+
+Those are two different questions. `a{,3}` has two readings and no refusal in it, and this library holds one tree rather than one per engine, so that pattern stays marked as one the two grammars do not agree about and stays held out. Everywhere else they part there is a refusal on Python's side, which leaves no Python column to lose, so the tree takes RE2's reading and records Python's own sentence beside it.
+
+The sentence depends on what is in front of the brace rather than on the brace. With nothing there at all, or with a position test such as `^` or `\b`, Python says there is nothing to repeat, and with a repeat there, as in `9*{,3}`, Python says it is a multiple repeat.
+
+The characters go in one node each, which is the shape the quoted run already built, and that buys the stack rule for free: `{,3}{2,}` is three characters and a repeat of the fourth, because what the second count finds in front of it is the closing brace.
+
+The RE2 grammar reader needed nothing, for the fifth time in eight slices.
+
+The `str.contains` grammar bucket falls from 139 patterns to 6 on the corpus the last slice measured, which leaves 3 patterns about the other spelling of a named group and 3 about a braceless count written after one that had already been read as Python's. The measured list in the corpus goes from 239 to 279, and on the widened corpus of 30276 all seven comparisons stay at zero disagreements.
+
+Document 109 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

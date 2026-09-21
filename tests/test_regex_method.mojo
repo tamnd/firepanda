@@ -240,10 +240,10 @@ def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
     """Because there is nothing wrong with it and no engine here to run it.
 
     `\\p{L}` was this row's pattern until the name table landed, `\\Qa+b\\E`
-    was until the quoted run landed and `[\\d-a]` was until the dash after a
-    set landed, so the pattern is a repeat with nothing in front of it, which
-    is a slice not taken yet."""
-    var program = program_for(METHOD_CONTAINS, "{,3}")
+    was until the quoted run landed, `[\\d-a]` was until the dash after a set
+    landed and `{,3}` was until the braceless count landed, so the pattern is
+    the other spelling of a named group, which is a slice not taken yet."""
+    var program = program_for(METHOD_CONTAINS, "(?<n>a)")
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")

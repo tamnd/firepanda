@@ -687,12 +687,12 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
     refused them, and reaching them takes a slice of the second front end each.
 
-    A repeat with nothing in front of it is one of the slices not taken yet,
-    and it is here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` because all
-    three of those are taken, which is what the rows below and above are about.
-    Python calls `{,3}` a repeat with nothing to repeat and RE2 reads it as
-    four literal characters."""
-    var program = compile_program(parse_pattern("{,3}"), ENGINE_RE2)
+    The other spelling of a named group is one of the slices not taken yet,
+    and it is here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` or `{,3}`
+    because all four of those are taken, which is what the rows below and above
+    are about. `(?<n>a)` is a named group to RE2 and an unknown extension to
+    Python."""
+    var program = compile_program(parse_pattern("(?<n>a)"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
@@ -852,6 +852,40 @@ def test_a_dash_after_a_set_is_a_refusal_on_pythons_engine() raises:
     assert_false(refused.ok)
     assert_false(refused.gap)
     assert_equal(refused.problem, "bad character range")
+
+
+def test_a_count_with_no_lower_bound_is_the_characters_it_is_made_of() raises:
+    """RE2 has never read `{,n}` as a count, so with nothing in front of it the
+    pattern is four characters and matches the text somebody wrote.
+
+    The second half is the stack rule. A count written after this one finds the
+    closing brace in front of it and repeats that one character, which is what
+    appending a node per character buys and is the only thing about this
+    construct a compiler could get wrong. Document 109.
+    """
+    var four = compile_program(parse_pattern("{,3}"), ENGINE_RE2)
+    assert_true(four.ok)
+    assert_true(matches_text(four, "a{,3}b"))
+    assert_false(matches_text(four, "aaa"))
+
+    var braces = compile_program(parse_pattern("{,3}{2,}"), ENGINE_RE2)
+    assert_true(braces.ok)
+    assert_true(matches_text(braces, "{,3}}"))
+    assert_false(matches_text(braces, "{,3}"))
+
+
+def test_a_count_with_no_lower_bound_is_a_refusal_on_pythons_engine() raises:
+    """With Python's own words, and the words depend on what is in front of the
+    brace rather than on the brace. Document 109."""
+    var bare = compile_program(parse_pattern("{,3}"), ENGINE_PYTHON)
+    assert_false(bare.ok)
+    assert_false(bare.gap)
+    assert_equal(bare.problem, "nothing to repeat")
+
+    var after = compile_program(parse_pattern("9*{,3}"), ENGINE_PYTHON)
+    assert_false(after.ok)
+    assert_false(after.gap)
+    assert_equal(after.problem, "multiple repeat")
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
