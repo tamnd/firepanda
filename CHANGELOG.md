@@ -16,6 +16,16 @@ All of them now read into the AST and print back out. None of them lowers. Which
 
 The expression holds what is in the parentheses as one ordinary node and a single bit saying whether the leading star was written. Which of the four forms it is decides nothing here, so nothing here tries to tell them apart, and the list, the lambda and the star each take the path they already took. That is also why the star inside keeps its `EXCLUDE`, `REPLACE` and `RENAME` lists without anything new reading them.
 
+### Changed: the three largest test files are cut into three each
+
+The ten test shards in CI were balanced to within eight seconds of each other on measured time and still came out spanning 268 to 712 seconds, and reading a run's own logs back says why. The shard that took 712 seconds held sixteen files, and fifteen of them finished in 237 seconds on three of its four cores while the sixteenth, `tests/test_sql_run.mojo`, ran for 611 seconds on the fourth. A shard cannot finish sooner than its longest file, so that file was the floor under the whole pipeline and no number of shards was going to move it.
+
+What a test file costs is mostly not its tests. Timed on a quiet machine the whole of `test_sql_run` takes 204 seconds, and the two halves of it take 148 and 168, which puts about 112 seconds of the 204 in compiling the slice of the library the file's imports reach and the rest in the tests themselves. That fixed part is paid again by every piece the file is cut into, so cutting is not free, but it is cheap: the smallest test file in the tree costs nine seconds end to end, and three pieces of `test_sql_run` should come to about 430 seconds each against the 611 the whole file costs.
+
+So `tests/test_sql_run.mojo`, `tests/test_pipeline.mojo` and `tests/test_plan_lower.mojo` are now three files each, with the frames and helpers they share moved to `tests/support/`. No test changed, none was added and none was removed: 422, 287 and 171 of them respectively, in the same order, under the same names. `tools/split_test_file.py` is what did it and is checked in, because a file growing past the point where it sets the floor is going to happen again.
+
+The nine new rows in `tools/test_costs.txt` are estimates until the next run on main, since the files did not exist when the table was measured.
+
 ### Changed: the pull request pipeline finishes in about six minutes instead of about fifty five
 
 A pull request waited fifty one minutes for the Linux build and test job and sixty one for the macOS one, and everything else in the workflow finished in seconds. Thirty nine of those fifty one minutes were one step, the unit tests, and the rest of the wait was three jobs doing the same work on three platforms and one job measuring a benchmark that nothing compared it against.

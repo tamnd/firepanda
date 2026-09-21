@@ -7,11 +7,23 @@
 # not transfer: the ratios between files are not the same on sixteen cores
 # as on four, and a table measured on one balanced the shards to within
 # half a per cent there and to 423 against 622 seconds here.
-522 tests/test_sql_run.mojo
-458 tests/test_pipeline.mojo
+#
+# The nine test_sql_run_*, test_pipeline_* and test_plan_lower_* rows are
+# estimates rather than measurements, because those files did not exist when
+# the run above happened. Each is the fixed part of the file it came out of,
+# which is a bit over half of what the whole file cost, plus its share of the
+# rest. Regenerate after the next run on main and they become real numbers.
+428 tests/test_sql_run_1.mojo
+428 tests/test_sql_run_2.mojo
+428 tests/test_sql_run_3.mojo
 402 tests/test_column_window.mojo
 359 tests/test_group_node.mojo
-348 tests/test_plan_lower.mojo
+358 tests/test_pipeline_1.mojo
+358 tests/test_pipeline_2.mojo
+358 tests/test_pipeline_3.mojo
+348 tests/test_plan_lower_1.mojo
+348 tests/test_plan_lower_2.mojo
+348 tests/test_plan_lower_3.mojo
 347 tests/test_group.mojo
 342 tests/test_group_broadcast.mojo
 308 tests/test_url.mojo
