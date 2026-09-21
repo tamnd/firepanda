@@ -201,6 +201,33 @@ struct Parsed(Movable):
     time the tree exists the comment has left nothing behind.
     """
 
+    var python_refuses: Bool
+    """Whether the pattern holds syntax Python's own grammar will not take.
+
+    The mirror of `re2_refuses`, and it is here for the mirror of that field's
+    reason. One thing sets it today, which is a flag group with no colon in it
+    written somewhere Python does not allow one: anywhere but the very front
+    for a letter turned on, and anywhere at all for a letter turned off. RE2
+    reads both, so pandas hands the pattern to Arrow and Arrow answers it, and
+    a caller who wrote one has written an RE2 pattern whether or not they knew.
+
+    The parser reads the construct rather than giving up on it, because a tree
+    is what the RE2 compile needs. Python's compile is what refuses, since it
+    is the only one of the two that has a problem, and it says `python_problem`
+    rather than a sentence of this library's own. Document 102.
+    """
+
+    var python_problem: String
+    """What Python says about it, and empty when there is nothing to say.
+
+    Two sentences rather than one, because Python does not give the same reason
+    for the two spellings. A letter turned on in the wrong place is `global
+    flags not at the start of the expression` and a letter turned off anywhere
+    is `missing :`, which is Python looking for the colon that would have made
+    it a group. Inventing one sentence for both would mean a caller who passed
+    a `flags` argument, and so landed on Python's engine, reading a message
+    Python never gives."""
+
     var re2_differs: Bool
     """Whether the pattern holds syntax RE2 reads differently rather than
     refuses.
@@ -279,6 +306,8 @@ struct Parsed(Movable):
         self.problem = String("")
         self.approximate = False
         self.re2_refuses = False
+        self.python_refuses = False
+        self.python_problem = String("")
         self.re2_differs = False
         self.zed = False
         self.flags = 0
@@ -372,6 +401,36 @@ struct _Cursor(Movable):
     octal escape in a class has been read. What `Parsed.re2_refuses` ends up
     holding."""
 
+    var python_refuses: Bool
+    """Whether a flag group has been read in a place Python will not take one.
+    What `Parsed.python_refuses` ends up holding."""
+
+    var positional_ready: Bool
+    """Whether the item just read was one of those flag groups.
+
+    A flag group produces no node, so `_seq` sees the same `NOTHING` it sees
+    for a comment and has no other way to tell the two apart. This says which
+    it was, and `_seq` clears it as it reads it."""
+
+    var positional_add: Int32
+    """The letters that group turned on."""
+
+    var positional_off: Int32
+    """The letters it turned off."""
+
+    var carried_add: Int32
+    """What the sequence just read leaves turned on for the alternatives after
+    it, since a flag crosses a bar. `_branch` reads it and clears it."""
+
+    var carried_off: Int32
+    """And what it leaves turned off."""
+
+    var python_problem: String
+    """What Python says about the first of those. What
+    `Parsed.python_problem` ends up holding, and the first one wins for the
+    same reason the first parse failure does, which is that it is the one
+    Python would have stopped at."""
+
     var re2_differs: Bool
     """Whether a count with no lower bound or a POSIX class has been read. What
     `Parsed.re2_differs` ends up holding."""
@@ -413,6 +472,13 @@ struct _Cursor(Movable):
         self.lookbehind = -1
         self.pending = []
         self.re2_refuses = False
+        self.python_refuses = False
+        self.python_problem = String("")
+        self.positional_ready = False
+        self.positional_add = 0
+        self.positional_off = 0
+        self.carried_add = 0
+        self.carried_off = 0
         self.re2_differs = False
         self.zed = False
         self.scoped = 0
@@ -1670,25 +1736,30 @@ def _flag_letters(mut c: _Cursor, mut add: Int32) -> UInt32:
             return 0xFFFFFFFF
 
 
-def _flags_off(mut c: _Cursor, mut off: Int32) -> Bool:
-    """Reads the flags being turned off, which must end at a colon.
+def _flags_off(mut c: _Cursor, mut off: Int32) -> UInt32:
+    """Reads the flags being turned off, which ends at a colon or a bracket.
+
+    Python only allows the colon, so the bracket is reported rather than read
+    and the caller decides. It is RE2's spelling of a flag turned off from here
+    to the end of the group, which Python has no form for at all. Document 102
+    section 2.
 
     Args:
         c: The cursor, just past the `-`.
         off: The flags so far, added to.
 
     Returns:
-        Whether it worked.
+        The character that ended it, or `0xFFFFFFFF` when it did not work.
     """
     if c.done():
         c.give_up(String("missing flag"))
-        return False
+        return 0xFFFFFFFF
     if _flag_bit(c.peek()) < 0:
         if _is_ascii_letter(c.peek()):
             c.give_up(String("unknown flag"))
         else:
             c.give_up(String("missing flag"))
-        return False
+        return 0xFFFFFFFF
     while True:
         var flag = _flag_bit(c.peek())
         if (flag & TYPE_FLAGS) != 0:
@@ -1697,22 +1768,76 @@ def _flags_off(mut c: _Cursor, mut off: Int32) -> Bool:
                     "bad inline flags: cannot turn off flags 'a', 'u' and 'L'"
                 )
             )
-            return False
+            return 0xFFFFFFFF
         off |= flag
         c.at += 1
         if c.done():
             c.give_up(String("missing :"))
-            return False
+            return 0xFFFFFFFF
         var next = c.peek()
-        if next == 0x3A:
+        if next == 0x3A or next == 0x29:
             c.at += 1
-            return True
+            return next
         if _flag_bit(next) < 0:
             if _is_ascii_letter(next):
                 c.give_up(String("unknown flag"))
             else:
                 c.give_up(String("missing :"))
-            return False
+            return 0xFFFFFFFF
+
+
+comptime RE2_FLAGS: Int32 = FLAG_IGNORECASE | FLAG_MULTILINE | FLAG_DOTALL
+"""The three letters RE2 has, measured one letter at a time over both forms.
+
+RE2 has a fourth, `U`, which swaps which quantifiers are greedy and which this
+parser has never read in either form. It is left out here for the reason
+document 102 section 8 gives: a letter read and not acted on is a column of
+booleans that looks right, and a letter left unread is a refusal somebody can
+see. The corpus writes it once in thirty thousand patterns."""
+
+
+def _positional(
+    mut c: _Cursor, add: Int32, off: Int32, problem: String
+) -> Int32:
+    """Records a flag group written where only RE2 takes one.
+
+    Python has two rules this breaks and gives a different sentence for each,
+    so the sentence comes in from the caller rather than being decided here.
+    The construct is read rather than refused, because RE2 reads it and so the
+    pattern is one pandas hands to Arrow, and a tree is what the RE2 compile
+    needs. `compile_program` is what refuses it on Python's engine, and says
+    this sentence when it does.
+
+    Nothing is done to `c.flagged`. That field is Python's whole pattern flag
+    set, which is exactly what this is not, and the three letters that get this
+    far are the three that change nothing about how the characters ahead are
+    read. `c.scoped` does get them, because that field is the question of which
+    letters were written anywhere in either scoped form, which is what the
+    compiler asks RE2 about, and the answer is the same either way.
+
+    Args:
+        c: The cursor, just past the closing bracket.
+        add: The letters turned on.
+        off: The letters turned off.
+        problem: What Python says about a group written here.
+
+    Returns:
+        `NOTHING`, because a flag group leaves no node, or minus one.
+    """
+    if ((add | off) & ~RE2_FLAGS) != 0:
+        # A letter RE2 has not got either, so both grammars refuse the pattern
+        # and the answer it already gives is the right one. Reading it here
+        # would move it off the refusal path for no gain.
+        c.give_up(problem)
+        return -1
+    if not c.python_refuses:
+        c.python_refuses = True
+        c.python_problem = problem.copy()
+    c.scoped |= add | off
+    c.positional_ready = True
+    c.positional_add = add
+    c.positional_off = off
+    return NOTHING
 
 
 def _flags(mut c: _Cursor) -> Int32:
@@ -1751,18 +1876,34 @@ def _flags(mut c: _Cursor) -> Int32:
 
     if closer == 0x29:
         if c.depth != 0 or c.produced:
-            c.give_up(String("global flags not at the start of the expression"))
-            return -1
+            # Python's rule since 3.11. RE2 has no such rule and reads it as a
+            # flag that runs from here to the end of the enclosing group, so
+            # the construct is recorded rather than refused. Document 102.
+            return _positional(
+                c,
+                add,
+                0,
+                String("global flags not at the start of the expression"),
+            )
         c.flagged |= add
         return NOTHING
 
     if closer == 0x2D:
-        if not _flags_off(c, off):
+        closer = _flags_off(c, off)
+        if closer == 0xFFFFFFFF:
             return -1
 
     if (add & off) != 0:
         c.give_up(String("bad inline flags: flag turned on and off"))
         return -1
+
+    if closer == 0x29:
+        # `(?-i)` and `(?i-s)`, which Python has no form for anywhere, since a
+        # letter can only be turned off in a group. What Python is doing when
+        # it stops here is looking for the colon that would have made one, so
+        # that is the sentence, and it is the same sentence wherever the group
+        # is written.
+        return _positional(c, add, off, String("missing :"))
     # The letters are still recorded on the parse as well as on the node, and
     # the two are for different readers. The node is what the compiler acts on.
     # The set is what says a letter was written anywhere in the pattern, which
@@ -1799,6 +1940,63 @@ def _flags(mut c: _Cursor) -> Int32:
     return node
 
 
+def _scoped_tails(
+    mut c: _Cursor,
+    node: Int32,
+    splits: List[Int32],
+    adds: List[Int32],
+    offs: List[Int32],
+) -> Int32:
+    """Wraps what followed each flag group in a scope, once the sequence ends.
+
+    The wrap happens here rather than as the group is read, and that is the
+    whole reason this function exists. Wrapping as it is read would mean the
+    items after it going into a new sequence, and a repeat written after a flag
+    group reaches back past it to whatever was in front, which a new sequence
+    cannot see. `xa(?i)*b` matches `xab` and not `xAb` and does match `xaB`,
+    so the `a` the star repeats is outside the scope and the `b` is inside it,
+    measured rather than reasoned about. Keeping one flat sequence until the
+    end is what lets the repeat rule stay exactly as it was.
+
+    The splits are applied last first. Each one wraps everything after its own
+    boundary, so the one before it then wraps a tail that already holds the one
+    after, which is the nesting `a(?i)b(?-s)c` wants: the `c` has both letters
+    on it and the `b` has one.
+
+    Args:
+        c: The cursor, for its arena.
+        node: The sequence.
+        splits: The node each group came after, or `NO_NODE` for a group with
+            nothing in front of it.
+        adds: What each group turned on.
+        offs: And what it turned off.
+
+    Returns:
+        The sequence, which is the same node.
+    """
+    for at in reversed(range(len(splits))):
+        var after = splits[at]
+        var tail = (
+            c.nodes[Int(node)].first if after
+            == NO_NODE else c.nodes[Int(after)].next
+        )
+        if tail == NO_NODE:
+            # Nothing was written after the group, so the scope would hold
+            # nothing. `a(?i)` is the shape and it matches what `a` matches.
+            continue
+        var inner = c.add(OP_SEQ, 0, 0)
+        c.nodes[Int(inner)].first = tail
+        c.nodes[Int(inner)].last = c.nodes[Int(node)].last
+        var scope = c.add(OP_SCOPE, adds[at], offs[at])
+        c.attach(scope, inner)
+        if after == NO_NODE:
+            c.nodes[Int(node)].first = scope
+        else:
+            c.nodes[Int(after)].next = scope
+        c.nodes[Int(node)].last = scope
+    return node
+
+
 def _seq(mut c: _Cursor) -> Int32:
     """Reads items until an alternation bar, a closing bracket or the end.
 
@@ -1827,11 +2025,19 @@ def _seq(mut c: _Cursor) -> Int32:
     """
     var node = c.add(OP_SEQ, 0, 0)
     var before_last = NO_NODE
+    # Where each flag group with no colon in it was written, and what it did.
+    # `_scoped_tails` turns these into scopes once the sequence has ended, for
+    # the reason its docstring gives.
+    var splits = List[Int32]()
+    var adds = List[Int32]()
+    var offs = List[Int32]()
+    c.carried_add = 0
+    c.carried_off = 0
     while True:
         if c.failed:
             return -1
         if c.done():
-            return node
+            return _scoped_tails(c, node, splits, adds, offs)
 
         if (c.flagged & FLAG_VERBOSE) != 0:
             # The whole of verbose mode, and it is here rather than anywhere
@@ -1863,7 +2069,7 @@ def _seq(mut c: _Cursor) -> Int32:
 
         var point = c.peek()
         if point == 0x7C or point == 0x29:
-            return node
+            return _scoped_tails(c, node, splits, adds, offs)
 
         var low: Int32 = 0
         var high: Int32 = 0
@@ -1922,10 +2128,30 @@ def _seq(mut c: _Cursor) -> Int32:
             else:
                 c.nodes[Int(before_last)].next = repeat
             c.nodes[Int(node)].last = repeat
+            # The repeat has taken the item off the chain and put itself where
+            # it was, so a split measured from that item has to move with it or
+            # the wrap would start in the wrong place and swallow the repeat.
+            # `xa(?i)*b` is the pattern that shows it.
+            for at in range(len(splits)):
+                if splits[at] == last:
+                    splits[at] = repeat
             continue
 
         var item = _atom(c)
         if item == NOTHING:
+            if c.positional_ready:
+                # A flag group and a comment both leave nothing, and this is
+                # the only thing that tells them apart.
+                c.positional_ready = False
+                splits.append(c.nodes[Int(node)].last)
+                adds.append(c.positional_add)
+                offs.append(c.positional_off)
+                c.carried_add = (
+                    c.carried_add | c.positional_add
+                ) & ~c.positional_off
+                c.carried_off = (
+                    c.carried_off | c.positional_off
+                ) & ~c.positional_add
             continue
         if item < 0:
             return -1
@@ -1952,6 +2178,13 @@ def _branch(mut c: _Cursor) -> Int32:
     var first = _seq(c)
     if first < 0:
         return -1
+    # What the alternative just read leaves on for the ones after it, since a
+    # flag crosses a bar and does not cross a bracket. `x(?i)x|c` matches `C`
+    # and `c|x(?i)x` does not, so it runs one way only. Document 102 section 3.
+    var carried_add = c.carried_add
+    var carried_off = c.carried_off
+    c.carried_add = 0
+    c.carried_off = 0
     if c.peek() != 0x7C:
         return first
     if c.depth == 0:
@@ -1965,6 +2198,19 @@ def _branch(mut c: _Cursor) -> Int32:
         var other = _seq(c)
         if other < 0:
             return -1
+        if (carried_add | carried_off) != 0:
+            # A scope of its own round each later alternative, rather than one
+            # scope round the alternation. `a(?i)b|c` is an alternation of `a`
+            # and a scope holding `b`, beside a scope holding `c`. Wrapping the
+            # alternation would change which alternatives there are, and not
+            # wrapping at all would leave the second one unflagged.
+            var wrap = c.add(OP_SCOPE, carried_add, carried_off)
+            c.attach(wrap, other)
+            other = wrap
+        carried_add = (carried_add | c.carried_add) & ~c.carried_off
+        carried_off = (carried_off | c.carried_off) & ~c.carried_add
+        c.carried_add = 0
+        c.carried_off = 0
         c.attach(node, other)
     return node
 
@@ -1990,6 +2236,8 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     var guessed = c.guessed
     var flagged = c.flagged
     var refuses = c.re2_refuses
+    var python_refuses = c.python_refuses
+    var python_problem = c.python_problem.copy()
     var differs = c.re2_differs
     var zed = c.zed
     var scoped = c.scoped
@@ -2011,6 +2259,8 @@ def _harvested(var c: _Cursor, root: Int32) -> Parsed:
     out.approximate = guessed
     out.flags = flagged
     out.re2_refuses = refuses
+    out.python_refuses = python_refuses
+    out.python_problem = python_problem^
     out.re2_differs = differs
     out.zed = zed
     out.scoped = scoped

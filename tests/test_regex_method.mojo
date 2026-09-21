@@ -466,5 +466,76 @@ def test_an_argued_call_is_refused_by_pythons_rules_and_not_by_re2s() raises:
     assert_false(locale.gap)
 
 
+def test_a_flag_group_in_a_place_is_answered_rather_than_held_out() raises:
+    """RE2 reads a flag group anywhere and scopes it to the end of the group it
+    is in, and Python reads one only at the front, so pandas hands all three of
+    these to Arrow and firepanda now answers them.
+
+    The texts are the ones measured against the RE2 inside pyarrow. `a(?i)b`
+    folds the `b` and not the `a`, `(?-i)a` turns a letter off which Python has
+    no form for at all, and `x(?i)x|c` folds the `c`, which is the half of the
+    rule that says a bar is not a boundary.
+    """
+    var scoped = program_for(METHOD_CONTAINS, "a(?i)b")
+    assert_true(scoped.ok)
+    assert_true(matches_text(scoped, "ab"))
+    assert_true(matches_text(scoped, "aB"))
+    assert_false(matches_text(scoped, "Ab"))
+
+    var off = program_for(METHOD_CONTAINS, "(?-i)a")
+    assert_true(off.ok)
+    assert_true(matches_text(off, "a"))
+    assert_false(matches_text(off, "A"))
+
+    var crossed = program_for(METHOD_CONTAINS, "x(?i)x|c")
+    assert_true(crossed.ok)
+    assert_true(matches_text(crossed, "C"))
+
+
+def test_a_repeat_after_a_flag_group_is_outside_the_scope() raises:
+    """`xa(?i)*b` matches `xab` and `xaB` and not `xAb`, measured against the
+    RE2 inside pyarrow, so the star repeats an `a` that is not folded and the
+    `b` beside it is."""
+    var program = program_for(METHOD_CONTAINS, "xa(?i)*b")
+    assert_true(program.ok)
+    assert_true(matches_text(program, "xab"))
+    assert_true(matches_text(program, "xaB"))
+    assert_false(matches_text(program, "xAb"))
+
+
+def test_an_argued_call_still_gets_pythons_refusal_for_the_same_group() raises:
+    """The construct is read so that RE2's engine can answer it, and a caller
+    who passed a `flags` argument is not on RE2's engine at all.
+
+    Two sentences rather than one, because Python does not give the same reason
+    for the two spellings, and a caller on this engine would have had Python's
+    own words out of pandas. Neither is a gap.
+    """
+    var placed = program_for(
+        METHOD_CONTAINS, "a(?i)b", FLAG_MULTILINE, argued=True
+    )
+    assert_false(placed.ok)
+    assert_false(placed.gap)
+    assert_equal(
+        placed.problem, "global flags not at the start of the expression"
+    )
+
+    var off = program_for(
+        METHOD_CONTAINS, "(?-i)a", FLAG_MULTILINE, argued=True
+    )
+    assert_false(off.ok)
+    assert_false(off.gap)
+    assert_equal(off.problem, "missing :")
+
+
+def test_a_flag_letter_re2_has_not_got_is_still_refused_where_it_was() raises:
+    """RE2 has `i`, `m` and `s` and no verbose mode at all, so `a(?x)b c` is a
+    pattern neither grammar reads and the answer is the refusal it always gave
+    rather than a reading this library invented."""
+    var program = program_for(METHOD_CONTAINS, "a(?x)b c")
+    assert_false(program.ok)
+    assert_false(program.gap)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
