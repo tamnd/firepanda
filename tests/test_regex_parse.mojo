@@ -171,6 +171,21 @@ def shape(pattern: StringSlice) -> String:
     return drawn(tree.nodes, tree.root)
 
 
+def reason(pattern: StringSlice) -> String:
+    """What Python says about a pattern this parser reads and Python does not.
+
+    Args:
+        pattern: The pattern.
+
+    Returns:
+        Python's sentence, or empty when Python reads it too.
+    """
+    var tree = parse_pattern(pattern)
+    if not tree.ok or not tree.python_refuses:
+        return String("")
+    return tree.python_problem.copy()
+
+
 def test_a_plain_pattern_is_a_sequence_of_literals() raises:
     """The simplest tree there is, which fixes the shape everything else is
     written against."""
@@ -448,17 +463,72 @@ def test_a_global_flag_group_produces_nothing_and_has_to_be_first() raises:
     """Python 3.11 made the position a rule, which turns a pattern that used to
     read into one that routes to Arrow.
 
-    The three cases are the whole rule: several in a row are fine, anything in
-    front of one is not, and an alternation counts as something in front even
-    when the part before the bar is empty.
+    At the front the group applies to the whole pattern and leaves no node at
+    all, which is Python's reading and RE2's too, since the enclosing group a
+    flag runs to the end of is the pattern itself. Several in a row are fine
+    and a comment does not count as something in front.
     """
     assert_equal(shape("(?i)a"), "seq{lit(a)}")
     assert_equal(shape("(?i)(?s)a"), "seq{lit(a)}")
+
+
+def test_a_flag_group_anywhere_else_scopes_the_rest_of_the_group() raises:
+    """Which is RE2's rule and not one Python has, so the tree is read and the
+    refusal moves to Python's compile.
+
+    An alternation counts as something in front even when the part before the
+    bar is empty, which is why `|(?i)a` is one of these and not a global one.
+    """
+    assert_equal(shape("a(?i)b"), "seq{lit(a),scope(1,0){seq{lit(b)}}}")
+    assert_equal(shape("|(?i)a"), "branch{seq,seq{scope(1,0){seq{lit(a)}}}}")
     assert_equal(
-        shape("a(?i)b"), "!global flags not at the start of the expression"
+        reason("a(?i)b"), "global flags not at the start of the expression"
+    )
+
+
+def test_a_flag_group_stops_at_the_bracket_and_crosses_the_bar() raises:
+    """Both halves measured against the RE2 inside pyarrow, since guessing at
+    either would have been wrong.
+
+    `((?i))c` does not fold the `c` and `x(?i)x|c` does fold it, so the scope
+    ends at the closing bracket of the group it is in and a bar is not a
+    boundary at all. A later alternative gets a scope of its own rather than
+    the alternation getting one, because wrapping the alternation would change
+    which alternatives there are.
+    """
+    assert_equal(shape("((?i))c"), "seq{group(1){seq},lit(c)}")
+    assert_equal(
+        shape("a(?i)b|c"),
+        "branch{seq{lit(a),scope(1,0){seq{lit(b)}}},scope(1,0){seq{lit(c)}}}",
     )
     assert_equal(
-        shape("|(?i)a"), "!global flags not at the start of the expression"
+        shape("c|x(?i)x"),
+        "branch{seq{lit(c)},seq{lit(x),scope(1,0){seq{lit(x)}}}}",
+    )
+
+
+def test_a_repeat_written_after_a_flag_group_reaches_back_past_it() raises:
+    """`xa(?i)*b` matches `xab` and `xaB` and not `xAb`, so the star repeats
+    the `a` and the `a` is outside the scope while the `b` is inside it.
+
+    That is why the scope is built once the sequence has ended rather than as
+    the group is read. Reading it as a split would put the `a` out of the
+    repeat's reach, and the repeat's rule is that it takes the last item the
+    sequence holds.
+    """
+    assert_equal(
+        shape("xa(?i)*b"),
+        "seq{lit(x),max(0,inf){lit(a)},scope(1,0){seq{lit(b)}}}",
+    )
+    assert_equal(shape("a(?i)"), "seq{lit(a)}")
+
+
+def test_two_flag_groups_in_one_sequence_nest() raises:
+    """The second one is inside the first, so what follows it carries both
+    letters, which is what a flag that accumulates from a place has to mean."""
+    assert_equal(
+        shape("a(?i)b(?-s)c"),
+        "seq{lit(a),scope(1,0){seq{lit(b),scope(0,8){seq{lit(c)}}}}}",
     )
 
 
@@ -469,8 +539,9 @@ def test_a_comment_does_not_count_as_something_in_front() raises:
 
 
 def test_flags_can_only_be_turned_off_in_the_scoped_form() raises:
-    """`(?-i)` is a parse error rather than a global flag group with a minus
-    sign, which is the kind of refusal a caller would never predict.
+    """`(?-i)` is not a global flag group with a minus sign, because Python has
+    no such thing, and it is RE2's flag turned off from here to the end of the
+    group, which is the kind of reading a caller would never predict.
 
     The scoped form keeps its letters on a node of its own, with the ones it
     turns on first and the ones it turns off second, and the two payloads are
@@ -478,8 +549,10 @@ def test_flags_can_only_be_turned_off_in_the_scoped_form() raises:
     assert_equal(shape("(?-i:a)"), "seq{scope(0,1){seq{lit(a)}}}")
     assert_equal(shape("(?i:a)"), "seq{scope(1,0){seq{lit(a)}}}")
     assert_equal(shape("(?i-s:a)"), "seq{scope(1,8){seq{lit(a)}}}")
-    assert_equal(shape("(?-i)a"), "!missing :")
-    assert_equal(shape("(?i-s)a"), "!missing :")
+    assert_equal(shape("(?-i)a"), "seq{scope(0,1){seq{lit(a)}}}")
+    assert_equal(shape("(?i-s)a"), "seq{scope(1,8){seq{lit(a)}}}")
+    assert_equal(reason("(?-i)a"), "missing :")
+    assert_equal(reason("(?i-s)a"), "missing :")
 
 
 def test_the_two_alphabets_cannot_both_be_turned_on() raises:

@@ -2760,6 +2760,17 @@ def compile_program(
         out.problem = String("RE2 reads this syntax differently")
         out.gap = True
         return out^
+    if tree.python_refuses and python:
+        # The mirror of the two branches above. A flag group written where only
+        # RE2 takes one, which the parser reads because RE2 reads it and this
+        # engine is not RE2. The sentence is Python's own, carried on the tree,
+        # because there are two of them and which one a caller sees depends on
+        # how they spelled the group. Not a gap: upstream refuses it too, and
+        # a caller on this engine is a caller who passed a `flags` argument and
+        # would have had `re.error` from pandas. Document 102.
+        out.ok = False
+        out.problem = tree.python_problem.copy()
+        return out^
     if tree.zed and python and minor < PYTHON_ZED_ESCAPE:
         # A spelling RE2 has always had and Python did not have until 3.14, so
         # this is the one refusal here that is neither about an engine nor
