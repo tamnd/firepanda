@@ -441,6 +441,12 @@ The table `\p{...}` is read against was measured once, against one release of py
 
 The second reading of a pattern with RE2's grammar has existed since document 111 and was wired into the path where Python's grammar succeeds, so the branch for a pattern Python's grammar could not read never asked it for one. It asks now, gated on the grammar reader saying RE2 would take the pattern, which is the same question the branch was already asking one line further down. Twenty two held out patterns answered across five comparisons, eighteen patterns added to the measured corpus, and all seven differentials still at zero disagreements. Document 117.
 
+### Fixed: a flag group naming no flags
+
+`Series.str.match("?")` raised a `NotImplementedError` where pandas answers a column of `True`. Nobody writes the construct at fault. `str.match` strips a caret the caller wrote and wraps what is left in a bracket, so `?` reaches Arrow as `^(?)`, and `(?)` is a flag group with no letters in it, which RE2 takes anywhere in a pattern and Python's grammar has no reading of at all.
+
+The RE2 reading of a pattern now reads it, as nothing at all, since a group that sets no flags opens no scope and leaves no item behind. Leaving no item behind is also what gets a repeat written after one right, so `a(?)*` is `a*` and `(?)*` is refused for having nothing to repeat, both the way RE2 has them. The grammar reader needed no change, having read the construct correctly since it was written. One hundred and thirty four held out patterns answered across `str.match` and `str.fullmatch`, twenty patterns added to the measured corpus, and no pattern in thirty thousand is now held out of any of the seven differentials for want of a reading. Document 118.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
