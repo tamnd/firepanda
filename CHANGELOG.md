@@ -118,6 +118,14 @@ The corpus went from two patterns in this family to twenty four, so the slice wa
 
 Document 104 is the write up.
 
+### Fixed: a pattern Python's grammar refuses now routes to Arrow again
+
+Documents 102, 103 and 104 each taught this library to read a construct Python's `re` has never read, and each one kept Python's own refusal on the tree rather than throwing it. The router was not told. It asked whether the parse succeeded, which used to mean the same thing and stopped meaning it three slices ago, so `(?P<n>\p{Lu})(?P=n)` and `a(?i)(?=b)` and `^*(?=x)` were sent to this library's copy of Python's engine while pandas hands every one of them to Arrow.
+
+A pattern only misrouted when it held both a construct Python refuses and a lookaround or a backreference the walk can see, which is why nothing smaller caught it: there is no such pattern in any test file and the two routing checks that would have found it are not run by any workflow. The generated corpus has 454 of them.
+
+`holds_unsupported` and `reads_as_python` now both ask whether Python's grammar read the pattern rather than whether this one did. The routing differential goes from 3402 disagreements to zero over 30070 patterns, and two tests that had been asserting the right thing against the wrong implementation pass again.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
