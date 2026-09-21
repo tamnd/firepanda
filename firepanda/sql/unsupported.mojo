@@ -89,116 +89,113 @@ comptime OPERATOR: UInt16 = 0
 comptime CUSTOM_OPERATOR: UInt16 = 1
 """`OPERATOR(...)` written in front of an operand."""
 
-comptime IN_BARE_VALUE: UInt16 = 2
-"""`x IN y` with no parentheses around the right side."""
-
-comptime LIKE_ESCAPE: UInt16 = 3
+comptime LIKE_ESCAPE: UInt16 = 2
 """`ESCAPE` after an operator with no escaping form, which is `SIMILAR TO` and
 the regular expression spellings. A `LIKE` and an `ILIKE` become a call."""
 
-comptime FIELD_ACCESS: UInt16 = 4
+comptime FIELD_ACCESS: UInt16 = 3
 """`.name` after something that is not a name."""
 
-comptime SUBSCRIPT: UInt16 = 5
+comptime SUBSCRIPT: UInt16 = 4
 """`x[1]` and `x[1:2]`."""
 
-comptime POSTFIX_OPERATOR: UInt16 = 6
+comptime POSTFIX_OPERATOR: UInt16 = 5
 """An operator written after its operand."""
 
-comptime CALL_MODIFIER: UInt16 = 7
+comptime CALL_MODIFIER: UInt16 = 6
 """`WITHIN GROUP` or `EXPORT_STATE` after a call."""
 
-comptime CALL_ARGUMENT: UInt16 = 8
+comptime CALL_ARGUMENT: UInt16 = 7
 """`ORDER BY` or a null treatment inside a call."""
 
-comptime ARRAY_SUBQUERY: UInt16 = 9
+comptime ARRAY_SUBQUERY: UInt16 = 8
 """`ARRAY(SELECT ...)`."""
 
-comptime DOTTED_NAME: UInt16 = 10
+comptime DOTTED_NAME: UInt16 = 9
 """A qualified name where only a plain one fits."""
 
-comptime QUOTED_NAME: UInt16 = 11
+comptime QUOTED_NAME: UInt16 = 10
 """Anything but a bare name where only a bare name fits."""
 
-comptime NOT_SUBQUERY: UInt16 = 12
+comptime NOT_SUBQUERY: UInt16 = 11
 """`NOT (SELECT ...)` where a subquery is the whole operand."""
 
-comptime SELECT_CLAUSE: UInt16 = 13
+comptime SELECT_CLAUSE: UInt16 = 12
 """A clause on a `SELECT` that the query node has no slot for."""
 
-comptime SELECT_SAMPLE: UInt16 = 14
+comptime SELECT_SAMPLE: UInt16 = 13
 """`USING SAMPLE` on a `SELECT`."""
 
-comptime TABLE_SAMPLE: UInt16 = 15
+comptime TABLE_SAMPLE: UInt16 = 14
 """`TABLESAMPLE` or `USING SAMPLE` on one table."""
 
-comptime TABLE_MODIFIER: UInt16 = 16
+comptime TABLE_MODIFIER: UInt16 = 15
 """Something after a table that is neither a join nor a pivot."""
 
-comptime TABLE_AT: UInt16 = 17
+comptime TABLE_AT: UInt16 = 16
 """`AT` after a table, which reads it as of a version or a timestamp."""
 
-comptime JOIN_FORM: UInt16 = 18
+comptime JOIN_FORM: UInt16 = 17
 """A join written in a form the reference arena has no kind for."""
 
-comptime WITH_ORDINALITY: UInt16 = 19
+comptime WITH_ORDINALITY: UInt16 = 18
 """`WITH ORDINALITY` after a table function."""
 
-comptime WITH_USING_KEY: UInt16 = 20
+comptime WITH_USING_KEY: UInt16 = 19
 """`USING KEY` on a `WITH` entry."""
 
-comptime STATEMENT_LATER: UInt16 = 21
+comptime STATEMENT_LATER: UInt16 = 20
 """A statement that maps onto something a dataframe already does."""
 
-comptime STATEMENT_NEVER: UInt16 = 22
+comptime STATEMENT_NEVER: UInt16 = 21
 """A statement that asks for something a dataframe library does not have."""
 
-comptime ROW_VALUE: UInt16 = 23
+comptime ROW_VALUE: UInt16 = 22
 """`(a, b)` or `ROW(a, b)`, several values written as one."""
 
-comptime INTERVAL: UInt16 = 24
+comptime INTERVAL: UInt16 = 23
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
-comptime SPECIAL_CALL: UInt16 = 25
+comptime SPECIAL_CALL: UInt16 = 24
 """`TRY` or `UNPACK`, which are written as calls and are not functions."""
 
-comptime LAMBDA: UInt16 = 26
+comptime LAMBDA: UInt16 = 25
 """`lambda x: x + 1`, a function written in the query."""
 
-comptime LIST_COMPREHENSION: UInt16 = 27
+comptime LIST_COMPREHENSION: UInt16 = 26
 """`[x + 1 FOR x IN l]`, a list built by running an expression."""
 
-comptime NAMED_ARGUMENT: UInt16 = 28
+comptime NAMED_ARGUMENT: UInt16 = 27
 """`f(a := 1)`, an argument passed by name."""
 
-comptime COLUMNS: UInt16 = 29
+comptime COLUMNS: UInt16 = 28
 """`COLUMNS(...)`, a set of columns written where one expression goes."""
 
-comptime MAP_LITERAL: UInt16 = 30
+comptime MAP_LITERAL: UInt16 = 29
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime GROUPING: UInt16 = 31
+comptime GROUPING: UInt16 = 30
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
-comptime POSITIONAL: UInt16 = 32
+comptime POSITIONAL: UInt16 = 31
 """`#1`, a column named by its place in the select list."""
 
-comptime DEFAULT_VALUE: UInt16 = 33
+comptime DEFAULT_VALUE: UInt16 = 32
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 34
+comptime UNPIVOT_NULLS: UInt16 = 33
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 35
+comptime UNPIVOT_GROUPS: UInt16 = 34
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 36
+comptime QUANTIFIED_VALUE: UInt16 = 35
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 37
+comptime NO_CASE: UInt16 = 36
 """A grammar rule the transformer has no case for at all."""
 
-comptime AGGREGATE_FILTER: UInt16 = 38
+comptime AGGREGATE_FILTER: UInt16 = 37
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
 
@@ -230,15 +227,6 @@ def sql_support() -> List[Refusal]:
                 "An operator named this way is resolved against the catalog,"
                 " and firepanda has no catalog of operators to resolve it"
                 " against."
-            ),
-            SQL_ISSUE,
-        ),
-        Refusal(
-            "in-bare-value",
-            "IN over an unparenthesized value",
-            (
-                "firepanda reads the right side of an IN as a list or as a"
-                " subquery. Put the value in parentheses."
             ),
             SQL_ISSUE,
         ),

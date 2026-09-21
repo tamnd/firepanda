@@ -341,6 +341,24 @@ def test_in_and_not_in_over_a_list() raises:
     assert_equal(_printed("a NOT IN (1, 2)", g, rules), "(a NOT IN (1, 2))")
 
 
+def test_in_over_a_bare_value_is_a_containment() raises:
+    # `a IN b` with no parentheses is not `a IN (b)`. It asks whether `b`
+    # holds `a`, which is what DuckDB calls the form in its own grammar and
+    # what it names the column: `contains(b, a)`. So the call is what is built
+    # and the printer writes the name DuckDB would have written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a IN b", g, rules), "contains(b, a)")
+    assert_equal(_printed("a NOT IN b", g, rules), "(NOT contains(b, a))")
+    assert_equal(
+        _printed("'k' IN map(['k'], ['v'])", g, rules),
+        "contains(map(['k'], ['v']), 'k')",
+    )
+    # One value in parentheses is the list form and stays a list of one, which
+    # is the whole reason the two cannot share a node.
+    assert_equal(_printed("a IN (b)", g, rules), "(a IN (b))")
+
+
 def test_like_and_not_like() raises:
     var g = Grammar()
     var rules = Transform(g)

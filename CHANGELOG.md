@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: IN over a bare value is read as the containment it is
+
+`x IN y` with no parentheses around the right side is not `x IN (y)`. It asks whether `y` holds `x`, and DuckDB names the result column `contains(y, x)`. Its grammar calls the rule `InContainsExpression`, so the reading is DuckDB's own and not an interpretation. firepanda used to turn the form down and say to put the value in parentheses, which was advice that changed the meaning: parentheses make it a list of one and the test becomes an equality.
+
+It reads now, at 12 statements of the corpus, and it builds the call rather than a node of its own. That is the same thing `LIKE ... ESCAPE` does, which becomes a `like_escape` call because DuckDB has a function by that name and means exactly that by the syntax. `x NOT IN y` is the call under a `NOT`, which is what DuckDB prints too.
+
+The right side is usually a list or a map, so what stops it now is that `contains` has no kernel yet rather than anything about how the query was spelled. That is the same sentence `SELECT contains(g, 'b')` already produced, which is the point: the form is a call by the time it reaches lowering and it fails where a call fails.
+
+Follow up: `contains` over two strings is a substring test, and `strpos` already lowers to an `instr` kernel, so the string half of this could run without any new kernel at all.
+
 ## [0.8.19] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -27,6 +37,7 @@ Nothing in the API breaks, and every query that had an answer before gives the s
 It folds in the transformer rather than becoming a node of its own. The standard reads it only over a boolean, where it means the third truth value, but DuckDB takes it over any type and answers exactly what `IS NULL` answers, down to naming the column `(1 IS NULL)` when the query wrote `1 IS UNKNOWN`. So there is one test with two spellings, the AST keeps the one it already had, and the printer writes `IS NULL` back. Lowering and execution were already there and needed nothing.
 
 That makes it the first of these to go all the way to an answer rather than as far as the printer. The last few read and print and stop at lowering, because the thing they mean has no node yet. This one means something firepanda already runs.
+
 ### Changed: a filter with another filter above it writes a selection whatever it keeps
 
 A filter that keeps more than `SELECTION_KEEP_LIMIT` of a chunk copies the rows that survived instead of writing a selection, because past that share whatever reads the chunk pays more to gather through scattered positions than the copy costs here. That trade was measured with a projection above the filter, and it does not survive the thing above being another filter: the copy is one the next filter makes again over nearly the same rows, and the one above that makes it a third time.

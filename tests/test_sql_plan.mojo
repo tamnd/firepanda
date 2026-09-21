@@ -3148,6 +3148,17 @@ def test_the_one_word_spellings_build_the_same_two_calls() raises:
     )
 
 
+def test_in_over_a_bare_value_is_a_call_by_the_time_it_lowers() raises:
+    # `a IN b` with no parentheses asks whether `b` holds `a`, which DuckDB
+    # names `contains(b, a)`. So what reaches lowering is an ordinary call, and
+    # what stops it is the ordinary thing that stops a call with no kernel
+    # behind it rather than anything about how it was spelled.
+    with assert_raises(contains="no kernel for the function contains"):
+        _ = _plan("SELECT 1 IN g FROM t")
+    with assert_raises(contains="no kernel for the function contains"):
+        _ = _plan("SELECT contains(g, 1) FROM t")
+
+
 def test_the_unknown_spellings_build_the_same_two_calls() raises:
     # `IS UNKNOWN` is the standard's name for the same test. DuckDB answers it
     # over any type rather than only over a boolean, so it reaches the plan as
