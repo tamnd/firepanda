@@ -14,7 +14,6 @@ from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import Ast
 from firepanda.sql.unsupported import (
     AGGREGATE_FILTER,
-    ALIAS_COLON,
     CALL_MODIFIER,
     IS_UNKNOWN,
     NO_CASE,
@@ -37,7 +36,6 @@ def test_the_constants_line_up_with_the_table() raises:
     assert_equal(refusal(IS_UNKNOWN).feature, "is-unknown")
     assert_equal(refusal(SUBSCRIPT).feature, "subscript")
     assert_equal(refusal(CALL_MODIFIER).feature, "call-modifier")
-    assert_equal(refusal(ALIAS_COLON).feature, "alias-colon")
     assert_equal(refusal(NO_CASE).feature, "no-case")
     assert_equal(refusal(AGGREGATE_FILTER).feature, "aggregate-filter")
 

@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the colon spelling of a table alias is read as the alias it is
+
+`FROM x: t` is `FROM t AS x` with the name written first. DuckDB takes one spelling or the other and not both, `FROM x: t AS y` is a syntax error there, so the two can never arrive together and they mean the same reference. firepanda used to read the colon on a select item and turn it down on a table, which left 12 statements of the corpus refused for a spelling it already understood everywhere else.
+
+The alias reader now takes both nodes and at most one of them is there, so every reference that takes an alias takes this one. That is six shapes and not just the table: a plain name, a qualified name, a table function, a subquery, a `VALUES` list and a parenthesised join. They all come out of the printer in the `AS` form, which is what the round trip needs, since there is one node for the alias and it is written the one way.
+
+The colon spelling carries no column names, so there is nothing to read beside it and nothing new in the AST. The refusal goes away rather than moving to lowering, because by the time lowering sees the reference there is no colon left in it.
+
 ### Changed: CI keeps the compiler's cache between runs
 
 The compiler writes down what it has already built, under `$MODULAR_HOME`, which pixi puts inside `.pixi`. That directory was already being cached, but keyed on `pixi.lock`, and `actions/cache` only writes an entry when its key missed. The lockfile almost never changes, so the key almost always hit, and every run had been restoring whatever happened to be in there the last time the lockfile moved.

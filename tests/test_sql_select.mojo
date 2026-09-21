@@ -699,20 +699,44 @@ def test_the_colon_alias_on_a_select_item_is_the_same_as_as() raises:
     )
 
 
-def test_the_colon_alias_on_a_table_refuses() raises:
-    # The same spelling in front of a table is a different rule, and the AST
-    # keeps a table's alias after the name rather than before it.
+def test_the_colon_alias_on_a_table_is_the_same_alias() raises:
+    # The same spelling in front of a table is a different rule, and DuckDB
+    # takes this one or the `AS` one and not both. They mean the same
+    # reference, the AST has one shape for it, and the printer writes the `AS`.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="the name: table spelling"):
-        _ = _printed("SELECT a FROM x: t", g, rules)
+    assert_equal(
+        _printed("SELECT a FROM x: t", g, rules), "SELECT a FROM t AS x"
+    )
+    assert_equal(
+        _printed("SELECT a FROM x: main.t", g, rules),
+        "SELECT a FROM main.t AS x",
+    )
+    # Every reference that takes an alias takes this one, which is four more
+    # shapes and not just the table.
+    assert_equal(
+        _printed("SELECT a FROM x: range(3)", g, rules),
+        "SELECT a FROM range(3) AS x",
+    )
+    assert_equal(
+        _printed("SELECT a FROM x: (SELECT 1)", g, rules),
+        "SELECT a FROM (SELECT 1) AS x",
+    )
+    assert_equal(
+        _printed("SELECT a FROM x: (VALUES (1))", g, rules),
+        "SELECT a FROM (VALUES (1)) AS x",
+    )
+    assert_equal(
+        _printed("SELECT a FROM x: (t JOIN u ON t.a = u.a)", g, rules),
+        "SELECT a FROM (t JOIN u ON (t.a = u.a)) AS x",
+    )
 
 
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="SELECT a FROM x: t"):
-        _ = _printed("SELECT a FROM x: t", g, rules)
+    with assert_raises(contains="SELECT a FROM t AT (VERSION => 1)"):
+        _ = _printed("SELECT a FROM t AT (VERSION => 1)", g, rules)
 
 
 def test_a_grouping_set_of_one_column_is_the_column() raises:

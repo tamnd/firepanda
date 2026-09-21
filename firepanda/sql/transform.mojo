@@ -126,7 +126,6 @@ from .token import (
 )
 from .unsupported import (
     AGGREGATE_FILTER,
-    ALIAS_COLON,
     CALL_ARGUMENT,
     CALL_MODIFIER,
     CUSTOM_OPERATOR,
@@ -840,6 +839,7 @@ struct Transform(Movable):
         self._set(names, "ParensTableRef", _PARENS_TABLE)
         self._set(names, "ValuesRef", _VALUES_REF)
         self._set(names, "TableFunctionLateralOpt", _TABLE_FUNCTION)
+        self._set(names, "TableFunctionAliasColon", _TABLE_FUNCTION)
         self._set(names, "GroupByList", _GROUP_LIST)
         self._set(names, "GroupByAll", _GROUP_ALL)
         self._set(names, "GroupByBaseExpression", _GROUP_ITEM)
@@ -975,7 +975,6 @@ struct Transform(Movable):
         self._refuse(names, "GroupingExpression", GROUPING)
         self._refuse(names, "PositionalExpression", POSITIONAL)
         self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
-        self._refuse(names, "TableFunctionAliasColon", ALIAS_COLON)
 
         # The last three the grammar gives a rule of their own. All three read
         # here as the calls their syntax is, and two of the three are turned
@@ -5206,6 +5205,7 @@ struct Transform(Movable):
         var name = NO_NODE
         var named = NO_NODE
         var sampled = NO_NODE
+        var colon = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
@@ -5214,14 +5214,14 @@ struct Transform(Movable):
             elif self._marked(tree, kid, _MARK_SAMPLE):
                 sampled = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, ALIAS_COLON)
+                colon = kid
             else:
                 name = kid
         if name == NO_NODE:
             raise _malformed(tree, sql, node, "a table with no name")
         return ast.table(
             self._name_parts(tree, sql, name),
-            self._alias_name(tree, sql, named),
+            self._alias_name(tree, sql, named, colon),
             self._alias_columns(tree, sql, named),
             sample=(
                 NO_NODE if sampled
@@ -5256,20 +5256,21 @@ struct Transform(Movable):
         var reference = NO_NODE
         var named = NO_NODE
         var lateral = False
+        var colon = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_LATERAL):
                 lateral = True
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, ALIAS_COLON)
+                colon = kid
             else:
                 reference = kid
         if reference == NO_NODE:
             raise _malformed(tree, sql, node, "a subquery with no statement")
         return ast.subquery_ref(
             work.value(reference),
-            self._alias_name(tree, sql, named),
+            self._alias_name(tree, sql, named, colon),
             self._alias_columns(tree, sql, named),
             lateral,
             tree.nodes[Int(node)].token_start,
@@ -5305,20 +5306,21 @@ struct Transform(Movable):
         var inner = NO_NODE
         var named = NO_NODE
         var sampled = NO_NODE
+        var colon = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_SAMPLE):
                 sampled = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, ALIAS_COLON)
+                colon = kid
             else:
                 inner = kid
         if inner == NO_NODE:
             raise _malformed(tree, sql, node, "empty parentheses in a FROM")
         return ast.parens_ref(
             work.value(inner),
-            self._alias_name(tree, sql, named),
+            self._alias_name(tree, sql, named, colon),
             self._alias_columns(tree, sql, named),
             sample=(
                 NO_NODE if sampled
@@ -5355,18 +5357,19 @@ struct Transform(Movable):
         """
         var rows = NO_NODE
         var named = NO_NODE
+        var colon = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, ALIAS_COLON)
+                colon = kid
             else:
                 rows = kid
         if rows == NO_NODE:
             raise _malformed(tree, sql, node, "a VALUES with no rows")
         return ast.subquery_ref(
             work.value(rows),
-            self._alias_name(tree, sql, named),
+            self._alias_name(tree, sql, named, colon),
             self._alias_columns(tree, sql, named),
             False,
             tree.nodes[Int(node)].token_start,
@@ -5385,7 +5388,9 @@ struct Transform(Movable):
         Args:
             tree: The parse.
             sql: The query.
-            node: The `TableFunctionLateralOpt` node.
+            node: The `TableFunctionLateralOpt` node, or the
+                `TableFunctionAliasColon` one, which is the same call with the
+                alias written in front of it.
             ast: Where to put the nodes.
             work: The walk, for the arguments.
 
@@ -5398,11 +5403,14 @@ struct Transform(Movable):
         var name = NO_NODE
         var arguments = NO_NODE
         var named = NO_NODE
+        var colon = NO_NODE
         var lateral = False
         var ordinality = False
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
+            elif self._marked(tree, kid, _MARK_ALIAS_COLON):
+                colon = kid
             elif self._marked(tree, kid, _MARK_LATERAL):
                 lateral = True
             elif self._marked(tree, kid, _MARK_ORDINALITY):
@@ -5422,7 +5430,7 @@ struct Transform(Movable):
         return ast.function_ref(
             self._parts(tree, sql, name),
             values,
-            self._alias_name(tree, sql, named),
+            self._alias_name(tree, sql, named, colon),
             self._alias_columns(tree, sql, named),
             lateral,
             ordinality,
@@ -6387,14 +6395,25 @@ struct Transform(Movable):
         return self._parts(tree, sql, holder)
 
     def _alias_name(
-        self, tree: Parse, sql: StringSlice, node: UInt32
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        colon: UInt32 = NO_NODE,
     ) raises -> String:
-        """Reads the name off a `TableAlias`.
+        """Reads the name off a `TableAlias` or a `TableAliasColon`.
+
+        `FROM x: t` is `FROM t AS x` with the name written first, and DuckDB
+        takes one spelling or the other and not both, so the two arrive here
+        together and at most one of them is there. The colon spelling carries
+        no column names, which is the other reason it is read here rather than
+        beside `_alias_columns`.
 
         Args:
             tree: The parse.
             sql: The query.
             node: The `TableAlias` node, or 0 for none.
+            colon: The `TableAliasColon` node, or 0 for none.
 
         Returns:
             The name, empty for none.
@@ -6402,6 +6421,8 @@ struct Transform(Movable):
         Raises:
             Error: If the alias is not one name.
         """
+        if colon != NO_NODE:
+            return self._plain(tree, sql, self._only(tree, colon))
         if node == NO_NODE:
             return String()
         return self._plain(tree, sql, tree.children(self._only(tree, node))[0])
