@@ -857,6 +857,53 @@ def test_a_quantifier_with_nothing_at_all_in_front_is_unchanged() raises:
     assert_equal(shape("a|*"), "!nothing to repeat")
 
 
+def test_a_count_with_no_lower_bound_is_characters_when_python_refuses() raises:
+    """RE2 has never read `{,n}` as a count, so it is four characters, and with
+    nothing in front of it Python has nowhere to put its count and says so.
+    That leaves one reading rather than two, and the characters go in as
+    characters. Document 109."""
+    assert_equal(shape("{,3}"), "seq{lit({),lit(,),lit(3),lit(})}")
+    assert_equal(reason("{,3}"), "nothing to repeat")
+    assert_equal(shape("{,}"), "seq{lit({),lit(,),lit(})}")
+
+
+def test_a_count_with_no_lower_bound_is_still_a_count_to_python() raises:
+    """When there is something in front of it both grammars have a reading and
+    neither can be thrown away, so the tree keeps Python's and the pattern is
+    marked as one the two do not agree about. That is the row this slice does
+    not take."""
+    assert_equal(shape("a{,3}"), "seq{max(0,3){lit(a)}}")
+    assert_equal(reason("a{,3}"), "")
+
+
+def test_a_count_with_no_lower_bound_after_a_position_is_characters() raises:
+    """`^` is something on the stack and not something Python will repeat, so
+    the refusal is Python's and the reading is RE2's, the same way it is with
+    nothing there at all. Document 109."""
+    assert_equal(shape("^{,3}"), "seq{at(1),lit({),lit(,),lit(3),lit(})}")
+    assert_equal(reason("^{,3}"), "nothing to repeat")
+
+
+def test_a_count_with_no_lower_bound_after_a_repeat_is_characters() raises:
+    """Python calls a count on a count a multiple repeat, and RE2 has no count
+    there to object to. The sentence recorded is Python's own, which is a
+    different one from the rows above. Document 109."""
+    assert_equal(
+        shape("9*{,3}"), "seq{max(0,inf){lit(9)},lit({),lit(,),lit(3),lit(})}"
+    )
+    assert_equal(reason("9*{,3}"), "multiple repeat")
+
+
+def test_a_count_written_after_a_braceless_one_repeats_the_brace() raises:
+    """The stack rule again. The characters went in one node each, so what the
+    second count finds in front of it is the closing brace and nothing
+    else."""
+    assert_equal(
+        shape("{,3}{2,}"),
+        "seq{lit({),lit(,),lit(3),max(2,inf){lit(})}}",
+    )
+
+
 def test_a_quoted_run_is_one_literal_per_character() raises:
     """`\\Q` and `\\E` are RE2 syntax and not Python's, so the tree holds the
     characters and carries Python's sentence beside them.

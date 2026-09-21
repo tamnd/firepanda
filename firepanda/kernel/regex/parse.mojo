@@ -1550,14 +1550,15 @@ def _counted(mut c: _Cursor) -> List[Int32]:
         c.at = mark
         return List[Int32]()
     c.at += 1
-    if not saw_low:
-        # Python has read `{,n}` as `{0,n}` since 3.11 and RE2 reads it as the
-        # characters it is made of, so `a{,2}` matches everything upstream of
-        # here and matches the text `a{,2}` downstream of it.
-        c.re2_differs = True
     var out = List[Int32]()
     out.append(low)
     out.append(high)
+    # Python has read `{,n}` as `{0,n}` since 3.11 and RE2 has never read it as
+    # a count at all, so the caller needs to know which of the two forms this
+    # was. What it does about it depends on whether there is anything in front
+    # of the brace for Python's reading to repeat, which is a fact this reader
+    # does not have. Document 109.
+    out.append(Int32(1) if saw_low else Int32(0))
     return out^
 
 
@@ -2377,11 +2378,14 @@ def _seq(mut c: _Cursor) -> Int32:
             c.at += 1
             high = 1
             repeating = True
-        elif point == 0x7B:
+        var brace = c.at
+        var braceless = False
+        if point == 0x7B:
             var bounds = _counted(c)
             if len(bounds) != 0:
                 low = bounds[0]
                 high = bounds[1]
+                braceless = bounds[2] == 0
                 repeating = True
                 if low > high:
                     c.give_up(String("min repeat greater than max repeat"))
@@ -2389,10 +2393,47 @@ def _seq(mut c: _Cursor) -> Int32:
 
         if repeating:
             var last = c.nodes[Int(node)].last
+            var was = OP_SEQ
+            if last != NO_NODE:
+                was = c.nodes[Int(last)].op
+            var refuses = last == NO_NODE or was == OP_AT
+            var again = (
+                was == OP_MAX_REPEAT
+                or was == OP_MIN_REPEAT
+                or was == OP_POSSESSIVE_REPEAT
+            )
+            if braceless and (refuses or again):
+                # `{,n}` is four characters to RE2 and a count to Python, and
+                # here Python has nothing to put the count on and refuses. That
+                # leaves one reading rather than two, so the characters go in
+                # as characters and Python's own sentence is recorded. A count
+                # written after this one repeats the closing brace, which is
+                # the stack rule again and falls out of appending one node per
+                # character. Document 109.
+                if not c.python_refuses:
+                    c.python_refuses = True
+                    if again:
+                        c.python_problem = String("multiple repeat")
+                    else:
+                        c.python_problem = String("nothing to repeat")
+                var stop = c.at
+                c.at = brace
+                while c.at < stop:
+                    var one = c.add(OP_LITERAL, Int32(Int(c.peek())), 0)
+                    c.at += 1
+                    before_last = c.nodes[Int(node)].last
+                    c.attach(node, one)
+                if c.depth == 0:
+                    c.produced = True
+                continue
+            if braceless:
+                # Python counts and RE2 spells, and both readings are there, so
+                # neither can be thrown away and the pattern is marked as one
+                # the two grammars do not agree about. Document 109.
+                c.re2_differs = True
             if last == NO_NODE:
                 c.give_up(String("nothing to repeat"))
                 return -1
-            var was = c.nodes[Int(last)].op
             if was == OP_AT:
                 # RE2 repeats a position test and Python refuses to. `^*` and
                 # `\b{0}` and `$+` are patterns RE2 reads, and `nothing to
@@ -2407,11 +2448,7 @@ def _seq(mut c: _Cursor) -> Int32:
                 if not c.python_refuses:
                     c.python_refuses = True
                     c.python_problem = String("nothing to repeat")
-            if (
-                was == OP_MAX_REPEAT
-                or was == OP_MIN_REPEAT
-                or was == OP_POSSESSIVE_REPEAT
-            ):
+            if again:
                 c.give_up(String("multiple repeat"))
                 return -1
             var kind = OP_MAX_REPEAT
