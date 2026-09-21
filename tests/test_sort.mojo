@@ -18,6 +18,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.kernel.sort import (
+    SORTED_PARALLEL_ROWS,
     argsort,
     argsort_into,
     argsort_multi,
@@ -443,6 +444,171 @@ def test_argsort_multi_rejects_an_empty_key_list() raises:
     except:
         raised = True
     assert_true(raised, "no key columns should raise")
+
+
+def climbing(rows: Int) -> Array[DType.int64]:
+    """A column with no nulls that climbs by one a row.
+
+    Long enough to be split, which is what the short fixtures above cannot
+    reach. Climbing by one rather than repeating means a single value changed
+    anywhere breaks the order at that row and nowhere else, so a test can say
+    which pair it expects to be the one found.
+    """
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col[i] = Int64(i)
+    return col^
+
+
+def test_is_sorted_reads_a_column_long_enough_to_split() raises:
+    """The plain answers on a column past the width the scan is split at.
+
+    Everything else in this file is a few dozen rows, which is below both the
+    block scan's width and the height the scan is handed out at, so none of it
+    says anything about either. This is the case a real join asks about: a key
+    column of millions of rows that is in fact in order, where the scan has to
+    read all of it before it can say so.
+    """
+    comptime ROWS = SORTED_PARALLEL_ROWS * 3 + 7
+    var up = climbing(ROWS)
+    assert_true(is_sorted(up), "a column that climbs a row at a time")
+    assert_false(
+        is_sorted(up, descending=True), "the same column read backwards"
+    )
+
+    var down = Array[DType.int64](ROWS)
+    for i in range(ROWS):
+        down[i] = Int64(ROWS - i)
+    assert_true(is_sorted(down, descending=True), "a column that falls")
+    assert_false(is_sorted(down), "the falling column read forwards")
+
+
+def test_is_sorted_finds_a_break_wherever_it_is_put() raises:
+    """Breaks the order at one row at a time and checks each break is found.
+
+    The positions are chosen to land in the places a block scan and a split
+    scan have seams. Inside the first block, on a block boundary, in the tail
+    that is shorter than a block, on the boundary between two of the ranges the
+    scan is handed out in, and on the very last pair, which is the one a loop
+    that stops a row early never looks at.
+
+    The break is a single value made smaller than its neighbour, so the column
+    is in order everywhere except at one pair, and an answer of true means the
+    scan walked past that pair rather than that it read the column loosely.
+    """
+    comptime ROWS = SORTED_PARALLEL_ROWS * 3 + 7
+    var at = List[Int]()
+    at.append(1)
+    at.append(7)
+    at.append(8)
+    at.append(63)
+    at.append(64)
+    at.append(SORTED_PARALLEL_ROWS // 8)
+    at.append(SORTED_PARALLEL_ROWS // 8 + 1)
+    at.append(SORTED_PARALLEL_ROWS)
+    at.append(SORTED_PARALLEL_ROWS * 2)
+    at.append(ROWS - 8)
+    at.append(ROWS - 2)
+    at.append(ROWS - 1)
+
+    for k in range(len(at)):
+        var spot = at[k]
+        var col = climbing(ROWS)
+        col[spot] = Int64(-1)
+        assert_false(
+            is_sorted(col), "a break at row " + String(spot) + " went unseen"
+        )
+
+
+def test_is_sorted_agrees_with_a_row_at_a_time_reading() raises:
+    """Checks the block scan against the obvious loop on random columns.
+
+    The block scan compares a stretch against itself shifted by a row, which is
+    a different shape of calculation than walking and remembering the previous
+    key, and the two are only worth having together if they cannot disagree.
+    Small values and many repeats, because a column of distinct random numbers
+    is out of order at its first pair and never reaches anything interesting.
+    """
+    var rng = Rng(0x507ED)
+    for trial in range(24):
+        var n = 200 + rng.next_below(900)
+        var col = Array[DType.int64](n)
+        var last = Int64(0)
+        for i in range(n):
+            # Mostly climbing, so that a column stays in order long enough for
+            # the scan to have to read it, with the occasional step back.
+            if rng.next_below(100) < 3:
+                last -= Int64(1 + rng.next_below(3))
+            elif rng.next_below(2) == 0:
+                last += Int64(rng.next_below(2))
+            col[i] = last
+        var want = True
+        for i in range(n - 1):
+            if col[i] > col[i + 1]:
+                want = False
+                break
+        assert_equal(
+            is_sorted(col), want, "trial " + String(trial) + " read forwards"
+        )
+        var want_down = True
+        for i in range(n - 1):
+            if col[i] < col[i + 1]:
+                want_down = False
+                break
+        assert_equal(
+            is_sorted(col, descending=True),
+            want_down,
+            "trial " + String(trial) + " read backwards",
+        )
+
+
+def test_is_sorted_reads_a_float_column_the_way_the_sort_key_does() raises:
+    """The block scan on floats, where the order is not the bit pattern's.
+
+    `sort_key` is what makes a negative float sort below a positive one, and
+    the block scan applies it a lane at a time rather than a row at a time. A
+    column that crosses zero is where a scan that compared raw bits instead
+    would give the wrong answer, and it would give it on the sorted case rather
+    than the unsorted one.
+    """
+    comptime ROWS = SORTED_PARALLEL_ROWS + 129
+    var col = Array[DType.float64](ROWS)
+    for i in range(ROWS):
+        col[i] = Float64(i - ROWS // 2) / 4.0
+    assert_true(is_sorted(col), "floats climbing through zero")
+    assert_false(is_sorted(col, descending=True), "the same read backwards")
+
+    col[ROWS // 2 + 3] = Float64(-1000.0)
+    assert_false(is_sorted(col), "a float stepped back below zero")
+
+
+def test_is_sorted_reads_the_last_pair_at_every_alignment() raises:
+    """Breaks the final pair of a column, over a run of consecutive heights.
+
+    The block scan reads a fixed number of pairs at a time and whatever is left
+    over is read a pair at a time underneath, so which of the two loops sees the
+    last pair depends on the height modulo the block width. Pinning one height
+    pins one of those two answers and says nothing about the other. Stepping the
+    height through a full block's worth of consecutive values covers both, and
+    covers the changeover between them, without the test needing to know what
+    the width is.
+
+    Heights below the split, so this is the plain scan rather than the handed
+    out one, which keeps the case small and the failure easy to place.
+    """
+    comptime BASE = 1024
+    for extra in range(24):
+        var rows = BASE + extra
+        var col = climbing(rows)
+        col[rows - 1] = Int64(-1)
+        assert_false(
+            is_sorted(col),
+            "a break at the last pair of " + String(rows) + " rows",
+        )
+        var same = climbing(rows)
+        assert_true(
+            is_sorted(same), String(rows) + " rows left alone read as sorted"
+        )
 
 
 def main() raises:
