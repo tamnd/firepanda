@@ -445,6 +445,16 @@ struct _Cursor(Movable):
     """Which flags a scoped group mentioned, on or off. What `Parsed.scoped`
     ends up holding."""
 
+    var for_re2: Bool
+    """Whether this parse is reading the pattern with RE2's grammar.
+
+    The two grammars part in two places where both of them have a reading and
+    neither of them has a complaint, which is the POSIX class and the count
+    with no lower bound. One tree cannot hold both readings, so the parse is
+    told which of the two it is for, and the caller that knows is the one that
+    has already picked an engine. Document 111.
+    """
+
     var flagged: Int32
     """Which global flags the pattern turned on, as a bit per letter.
 
@@ -485,6 +495,7 @@ struct _Cursor(Movable):
         self.zed = False
         self.scoped = 0
         self.flagged = 0
+        self.for_re2 = False
         self.guessed = False
 
     def done(self) -> Bool:
@@ -1450,7 +1461,10 @@ def _class(mut c: _Cursor) -> Int32:
             # A POSIX class to RE2 and a bracket, a colon and some letters to
             # Python, which warns about it and reads it anyway. The two readings
             # have nothing in common, and neither of them is an error.
-            c.re2_differs = True
+            if _posix(c, node):
+                continue
+            if c.failed:
+                return -1
 
         var left = _class_item(c)
         if left < 0:
@@ -1490,6 +1504,146 @@ def _class(mut c: _Cursor) -> Int32:
             c.attach(node, span)
         else:
             c.attach(node, left)
+
+
+def _posix_ranges(name: String) -> List[Int32]:
+    """The code points one POSIX class name stands for, as pairs.
+
+    Measured against the RE2 inside pyarrow 24.0.0 over every code point in
+    ASCII and a spread above it rather than read off a description, which is
+    how the two surprises here were found: every one of the fourteen is ASCII
+    only, so `[[:digit:]]` is not the Arabic Indic digits and `[[:alpha:]]` is
+    not a Greek letter, and `[[:space:]]` is six characters rather than the
+    seven Python's `\\s` holds, because RE2 leaves out the non breaking space.
+
+    Args:
+        name: The name between the colons, without any leading caret.
+
+    Returns:
+        Low and high in turn, and an empty list when RE2 has no class of that
+        name.
+    """
+    if name == "alnum":
+        return [Int32(0x30), 0x39, 0x41, 0x5A, 0x61, 0x7A]
+    if name == "alpha":
+        return [Int32(0x41), 0x5A, 0x61, 0x7A]
+    if name == "ascii":
+        return [Int32(0x00), 0x7F]
+    if name == "blank":
+        return [Int32(0x09), 0x09, 0x20, 0x20]
+    if name == "cntrl":
+        return [Int32(0x00), 0x1F, 0x7F, 0x7F]
+    if name == "digit":
+        return [Int32(0x30), 0x39]
+    if name == "graph":
+        return [Int32(0x21), 0x7E]
+    if name == "lower":
+        return [Int32(0x61), 0x7A]
+    if name == "print":
+        return [Int32(0x20), 0x7E]
+    if name == "punct":
+        return [Int32(0x21), 0x2F, 0x3A, 0x40, 0x5B, 0x60, 0x7B, 0x7E]
+    if name == "space":
+        return [Int32(0x09), 0x0D, 0x20, 0x20]
+    if name == "upper":
+        return [Int32(0x41), 0x5A]
+    if name == "word":
+        return [Int32(0x30), 0x39, 0x41, 0x5A, 0x5F, 0x5F, 0x61, 0x7A]
+    if name == "xdigit":
+        return [Int32(0x30), 0x39, 0x41, 0x46, 0x61, 0x66]
+    return List[Int32]()
+
+
+def _posix_complement(bounds: List[Int32]) -> List[Int32]:
+    """The other side of a POSIX class, as pairs.
+
+    `[[:^digit:]]` is every code point there is except the ten, rather than
+    every ASCII one except the ten, which was measured and is what makes the
+    complement worth computing here instead of writing a negate node the class
+    would then have to reconcile with whatever else is in it.
+
+    Args:
+        bounds: The class, as low and high in turn, in order.
+
+    Returns:
+        The gaps, as low and high in turn.
+    """
+    var out = List[Int32]()
+    var next: Int32 = 0
+    for i in range(0, len(bounds), 2):
+        if bounds[i] > next:
+            out.append(next)
+            out.append(bounds[i] - 1)
+        next = bounds[i + 1] + 1
+    if next <= 0x10FFFF:
+        out.append(next)
+        out.append(0x10FFFF)
+    return out^
+
+
+def _posix(mut c: _Cursor, node: Int32) -> Bool:
+    """Reads a POSIX class out of a character class, or says it is not one.
+
+    RE2 looks for the closing `:]` anywhere after the opening `[:`, without
+    caring what is in between and without stopping at the bracket that would
+    have closed the character class. That is why `[[:a]b:]]` is an error rather
+    than a class holding a bracket: RE2 found a `:]`, took `a]b` as the name and
+    had never heard of it. When there is no `:]` at all the opening bracket is
+    an ordinary member, which is what makes `[[:alpha]]` the same class to both
+    grammars. Document 111.
+
+    Args:
+        c: The cursor, sitting on the `[` with a `:` after it.
+        node: The class the members hang under.
+
+    Returns:
+        Whether a POSIX class was read and attached, which only a parse reading
+        RE2's grammar ever does.
+    """
+    var shut = -1
+    var at = c.at + 2
+    while at + 1 < len(c.points):
+        if c.points[at] == 0x3A and c.points[at + 1] == 0x5D:
+            shut = at
+            break
+        at += 1
+    if shut < 0:
+        # No close anywhere, so neither grammar has a POSIX class here and the
+        # bracket is a member to both.
+        return False
+
+    var negated = c.points[c.at + 2] == 0x5E
+    var starts = c.at + 3 if negated else c.at + 2
+    var letters = List[UInt8]()
+    for i in range(starts, shut):
+        _put_point(letters, c.points[i])
+    var name = String(StringSlice(unsafe_from_utf8=Span(letters)))
+    var bounds = _posix_ranges(name)
+
+    if len(bounds) == 0:
+        # A name RE2 has not got. Python reads the characters and RE2 refuses
+        # the pattern, so this is the same kind of fact as a comment group
+        # rather than the kind this document is about, and it is recorded the
+        # same way.
+        if c.for_re2:
+            c.give_up(String("invalid character class range"))
+            return False
+        c.re2_refuses = True
+        return False
+
+    if not c.for_re2:
+        # Python reads the bracket, the colons and the letters as members and
+        # RE2 reads a class, and both readings are whole. The tree being built
+        # is Python's, so the fact that there is another one is recorded and
+        # the caller that wants it asks for it.
+        c.re2_differs = True
+        return False
+
+    c.at = shut + 2
+    var members = _posix_complement(bounds) if negated else bounds.copy()
+    for i in range(0, len(members), 2):
+        c.attach(node, c.add(OP_RANGE, members[i], members[i + 1]))
+    return True
 
 
 def _class_item(mut c: _Cursor) -> Int32:
@@ -2451,7 +2605,7 @@ def _seq(mut c: _Cursor) -> Int32:
                 or was == OP_MIN_REPEAT
                 or was == OP_POSSESSIVE_REPEAT
             )
-            if braceless and (refuses or again):
+            if braceless and (c.for_re2 or refuses or again):
                 # `{,n}` is four characters to RE2 and a count to Python, and
                 # here Python has nothing to put the count on and refuses. That
                 # leaves one reading rather than two, so the characters go in
@@ -2459,7 +2613,14 @@ def _seq(mut c: _Cursor) -> Int32:
                 # written after this one repeats the closing brace, which is
                 # the stack rule again and falls out of appending one node per
                 # character. Document 109.
-                if not c.python_refuses:
+                #
+                # A parse reading RE2's grammar takes this branch whatever is
+                # in front of the brace, which is the other half of the slice
+                # document 109 could not take: there Python's reading was the
+                # only one left, and here it is the one being set aside on
+                # purpose. Nothing of Python's is recorded in that case, since
+                # Python has no complaint to record. Document 111.
+                if not c.for_re2 and not c.python_refuses:
                     c.python_refuses = True
                     if again:
                         c.python_problem = String("multiple repeat")
@@ -2718,8 +2879,10 @@ def _settle(mut c: _Cursor):
         c.give_up(String("ASCII and UNICODE flags are incompatible"))
 
 
-def parse_pattern(pattern: StringSlice, flags: Int32 = 0) -> Parsed:
-    """Reads a pattern with Python's grammar.
+def parse_pattern(
+    pattern: StringSlice, flags: Int32 = 0, for_re2: Bool = False
+) -> Parsed:
+    """Reads a pattern with one of the two grammars.
 
     The flags are seeded rather than merged afterwards, so that a letter passed
     as an argument and the same letter written `(?i)` at the front of the
@@ -2736,6 +2899,10 @@ def parse_pattern(pattern: StringSlice, flags: Int32 = 0) -> Parsed:
         pattern: The pattern as the caller wrote it.
         flags: Flags the caller passed beside the pattern rather than inside it,
             as `FLAG_` bits. Zero is the ordinary call.
+        for_re2: Whether to read the two constructs both grammars read, and
+            read differently, the way RE2 reads them rather than the way Python
+            does. False is the ordinary call and is Python's reading, which is
+            what the router walks. Document 111.
 
     Returns:
         The tree, or the reason there is not one. A failure is a value here
@@ -2744,6 +2911,7 @@ def parse_pattern(pattern: StringSlice, flags: Int32 = 0) -> Parsed:
     """
     var c = _Cursor(decoded(pattern))
     c.flagged = flags
+    c.for_re2 = for_re2
     var root = _branch(c)
     _settle(c)
     return _harvested(c^, root)

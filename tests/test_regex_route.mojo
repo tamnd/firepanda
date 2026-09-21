@@ -249,5 +249,23 @@ def test_a_pattern_python_refuses_goes_to_arrow_however_it_was_read() raises:
     assert_false(python_answers("(?P<n>\\p{Lu})(?P=n)"))
 
 
+def test_a_pattern_the_two_grammars_read_differently_goes_to_arrow() raises:
+    """The POSIX class and the count with no lower bound are the two places
+    both grammars have a whole reading, so unlike everything above they are
+    patterns pandas reads and still hands to Arrow.
+
+    Routing is the reason the second reading is asked for by the caller that
+    has already picked an engine rather than by the parse itself. The router
+    walks Python's tree because that is the tree pandas had, and the pattern
+    goes to Arrow because there is nothing in Python's tree that Arrow cannot
+    run. Put a lookaround beside it and the same pattern goes to Python, where
+    Python's reading is the right one. Document 111.
+    """
+    for one in [String("[[:digit:]]"), String("a{,2}")]:
+        assert_false(python_answers(one))
+        assert_false(holds_unsupported(parse_pattern(one)))
+        assert_true(python_answers(one + "(?=x)"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

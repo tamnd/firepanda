@@ -265,6 +265,24 @@ The count of patterns RE2 reads and this library does not falls from 7 to 4 on a
 
 Document 110 is the write up.
 
+### Added: a pattern read with whichever grammar is going to run it
+
+`[[:alpha:]]` is a set of letters to RE2 and a set of brackets and colons and letters to Python, and `a{,2}` is the five characters `a{,2}` to RE2 and a count to Python. Both are patterns pandas hands straight to Arrow, so the answer a caller gets is RE2's, and both were held out here because the tree this library built was Python's.
+
+They are the only two constructs of their kind. Every slice from document 102 to document 110 rested on Python having no reading at all, so RE2's was the only one and a tree holding it threw nothing away. These two have a whole reading on each side, one tree cannot hold both, and the way out is a second parse rather than a cleverer tree.
+
+`parse_pattern` takes a `for_re2` argument now, defaulting to Python's grammar so that no existing caller changes. The router is one of those callers and stays where it was, because the tree pandas had is Python's and a lookaround written beside a POSIX class still sends the pattern to Python, where Python's reading of the class is the right one. The second reading is asked for by the one caller that has already picked an engine, which is the RE2 compile in `method.mojo`.
+
+RE2's rule for finding a POSIX class is a scan forward for the next `:]` anywhere, without stopping at the `]` that would close the set, so `[[:a]b:]]` is a class named `a]b` and a refusal while `[x[:y]]` and `[[:]]` are ordinary members. The fourteen names went in as the ranges they stand for, measured against pyarrow, and a name opening with `^` is complemented over every code point rather than over ASCII.
+
+There is a refusal shape here that could not happen before, which is a pattern Python reads and RE2 does not. `[[:bogus:]]` is one, and it comes back as the `ValueError` pandas raises with the sentence the grammar reader gives rather than as a gap this library does not have.
+
+The reader needed the same correction the parser needed, which is the second time in eleven slices the corpus has caught it out. It read a POSIX name as letters and wanted the `:]` straight after them, which is right for all fourteen names and wrong for a name with a bracket in it.
+
+`RE2 reads this syntax differently` was a held out reason on six of the seven comparisons and is on none of them now. The corpus is widened to 30397 and all seven stay at zero disagreements.
+
+Document 111 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
