@@ -247,7 +247,14 @@ def test_the_letters_are_still_refused_where_python_refuses_them() raises:
         parse_pattern("(?au:x)").problem,
         "bad inline flags: flags 'a', 'u' and 'L' are incompatible",
     )
-    assert_equal(parse_pattern("(?-i)x").problem, "missing :")
+    # The fourth is read here rather than refused, because `(?-i)` is RE2's
+    # flag turned off from that point to the end of the group and document 102
+    # is about reading it. Python's sentence is kept beside the tree instead of
+    # thrown, which is what routes the pattern to Arrow.
+    var off = parse_pattern("(?-i)x")
+    assert_equal(off.problem, "")
+    assert_true(off.python_refuses)
+    assert_equal(off.python_problem, "missing :")
 
 
 def test_naming_one_alphabet_clears_the_other_two() raises:

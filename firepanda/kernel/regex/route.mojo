@@ -95,12 +95,15 @@ def holds_unsupported(tree: Parsed) -> Bool:
     Args:
         tree: The pattern as this library read it. A pattern that did not parse
             answers False, because pandas catches the parse error and lets Arrow
-            have the pattern.
+            have the pattern. So does a pattern this parser reads and Python's
+            does not, for the same reason from the other side: the parse pandas
+            runs is Python's, and a tree this library built out of RE2's grammar
+            is not one pandas ever had.
 
     Returns:
         True when the walk finds a lookaround or a backreference.
     """
-    if not tree.ok:
+    if not tree.ok or tree.python_refuses:
         return False
     var op = tree.nodes[Int(tree.root)].op
     if op == OP_ASSERT or op == OP_ASSERT_NOT or op == OP_GROUPREF:
@@ -135,10 +138,17 @@ def reads_as_python(pattern: StringSlice) -> Bool:
     a pattern can reach RE2 either by holding nothing interesting or by being
     unreadable, and those are not the same situation to report.
 
+    The question is about Python's grammar rather than about this parser, which
+    stopped being the same question once this parser started reading patterns
+    Python refuses. A tree that parsed and carries Python's refusal beside it
+    answers False here, because the answer a caller wants is what pandas got
+    back from `re` and not what this library managed to build.
+
     Args:
         pattern: The pattern.
 
     Returns:
-        True when it parses.
+        True when Python's grammar reads it.
     """
-    return parse_pattern(pattern).ok
+    var tree = parse_pattern(pattern)
+    return tree.ok and not tree.python_refuses

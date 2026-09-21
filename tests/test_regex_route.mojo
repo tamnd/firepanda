@@ -219,5 +219,24 @@ def test_the_walk_can_be_asked_about_a_tree_that_is_already_parsed() raises:
     assert_false(holds_unsupported(parse_pattern("(a")))
 
 
+def test_a_pattern_python_refuses_goes_to_arrow_however_it_was_read() raises:
+    """The four constructs this library reads out of RE2's grammar all route
+    the way a pattern Python cannot read routes, which is to Arrow.
+
+    A tree that exists is not a tree pandas had. Documents 102 and 103 and 104
+    each added a construct that parses here and does not parse there, and each
+    one of them can be written beside a lookaround, which is the pairing that
+    makes this a routing question rather than a bookkeeping one.
+    `(?P<n>\\p{Lu})(?P=n)` holds a backreference the walk can see and is a
+    pattern pandas hands to Arrow without ever reaching the walk.
+    """
+    for one in [String("a(?i)b"), String("\\p{Lu}"), String("^*")]:
+        assert_false(reads_as_python(one))
+        assert_false(python_answers(one))
+        assert_false(python_answers(one + "(?=x)"))
+        assert_false(holds_unsupported(parse_pattern(one + "(?=x)")))
+    assert_false(python_answers("(?P<n>\\p{Lu})(?P=n)"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
