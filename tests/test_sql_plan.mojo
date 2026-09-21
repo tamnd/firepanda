@@ -1267,6 +1267,22 @@ def test_columns_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT *COLUMNS('^a') FROM t")
 
 
+def test_using_key_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and it is the entry that stops rather than the
+    # statement, so a WITH that writes one on any of its entries stops even
+    # when the rest of the query is plain.
+    with assert_raises(contains="USING KEY"):
+        _ = _plan("WITH c USING KEY (k) AS (SELECT a AS k FROM t) SELECT 1")
+    with assert_raises(contains="USING KEY"):
+        _ = _plan(
+            "WITH c AS (SELECT 1), d USING KEY (k) AS (SELECT 2 AS k)"
+            " SELECT * FROM c"
+        )
+    # A plain entry next to it still lowers, so the refusal is the key list and
+    # not the WITH.
+    _ = _plan("WITH c AS (SELECT a FROM t) SELECT * FROM c")
+
+
 def test_a_comprehension_is_refused_here_not_in_the_transformer() raises:
     # It reads and prints, and what it means is a lambda run over every element
     # of a list, so it stops for the same reason a lambda does and stops where

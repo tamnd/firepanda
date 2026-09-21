@@ -18,6 +18,7 @@ from std.testing import (
 from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import (
     Ast,
+    cte_keys,
     MATERIALIZE_DEFAULT,
     MATERIALIZE_NO,
     MATERIALIZE_YES,
@@ -229,6 +230,34 @@ def test_the_materialize_hint_is_recorded_and_not_acted_on() raises:
     assert_equal(clause.entries[0].materialize, MATERIALIZE_YES)
     assert_equal(clause.entries[1].materialize, MATERIALIZE_NO)
     assert_equal(clause.entries[2].materialize, MATERIALIZE_DEFAULT)
+
+
+def test_using_key_shares_a_field_with_the_materialize_hint() raises:
+    # The two live in the same word, the tag in the low bits and the key list
+    # above it, so an entry that writes both has to give both back.
+    var g = Grammar()
+    var rules = Transform(g)
+    var ast = Ast()
+    var node = rules.parse_statement(
+        (
+            "WITH a USING KEY (k) AS NOT MATERIALIZED (SELECT 1), b AS"
+            " MATERIALIZED (SELECT 2), c USING KEY (j, m) AS (SELECT 3)"
+            " SELECT 4"
+        ),
+        g,
+        ast,
+    )
+    var clause = read_ctes(ast, node)
+    assert_equal(clause.entries[0].materialize, MATERIALIZE_NO)
+    assert_equal(
+        ast.length(cte_keys(ast.stmts[Int(clause.entries[0].node)].b)), 1
+    )
+    assert_equal(clause.entries[1].materialize, MATERIALIZE_YES)
+    assert_equal(cte_keys(ast.stmts[Int(clause.entries[1].node)].b), 0)
+    assert_equal(clause.entries[2].materialize, MATERIALIZE_DEFAULT)
+    assert_equal(
+        ast.length(cte_keys(ast.stmts[Int(clause.entries[2].node)].b)), 2
+    )
 
 
 def test_the_column_alias_list_is_read_in_order() raises:

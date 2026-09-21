@@ -82,6 +82,8 @@ from .ast import (
     CLAUSE_QUALIFY,
     CLAUSE_WHERE,
     CLAUSE_WINDOW,
+    cte_keys,
+    cte_materialize,
     EXCLUDE_CURRENT_ROW,
     EXCLUDE_GROUP,
     EXCLUDE_NONE,
@@ -1622,10 +1624,22 @@ def _write_cte(
                 out += ", "
             out += quote_name(ast.text(ast.at(item.children, i)), grammar)
         out += ")"
+    var keys = cte_keys(item.b)
+    if keys != 0:
+        # `USING KEY` takes the same list a `SELECT` takes, so an entry may be
+        # any expression and may carry an alias, and it goes between the column
+        # aliases and the `AS` the way the query wrote it.
+        out += " USING KEY ("
+        for i in range(ast.length(keys)):
+            if i > 0:
+                out += ", "
+            _write_item(ast, ast.at(keys, i), grammar, out)
+        out += ")"
     out += " AS "
-    if item.b == MATERIALIZE_YES:
+    var materialize = cte_materialize(item.b)
+    if materialize == MATERIALIZE_YES:
         out += "MATERIALIZED "
-    elif item.b == MATERIALIZE_NO:
+    elif materialize == MATERIALIZE_NO:
         out += "NOT MATERIALIZED "
     out += "("
     _write_stmt(ast, item.a, grammar, out)

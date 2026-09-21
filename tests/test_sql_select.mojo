@@ -489,6 +489,24 @@ def test_both_materialized_spellings() raises:
     )
 
 
+def test_using_key_reaches_the_printer() raises:
+    # It was turned down at the parse until the transformer learned to build
+    # one. The list takes whatever a SELECT list takes, so an entry may be a
+    # call and may carry an alias, and it sits between the column aliases and
+    # the AS.
+    var g = Grammar()
+    var rules = Transform(g)
+    var sql = "WITH c USING KEY (k) AS (SELECT 1 AS k) SELECT * FROM c"
+    assert_equal(_printed(sql, g, rules), sql)
+    sql = (
+        "WITH c (p, q) USING KEY (k, min(v)) AS NOT MATERIALIZED (SELECT 1, 2)"
+        " SELECT * FROM c"
+    )
+    assert_equal(_printed(sql, g, rules), sql)
+    sql = "WITH c USING KEY (k AS j) AS MATERIALIZED (SELECT 1) SELECT 1"
+    assert_equal(_printed(sql, g, rules), sql)
+
+
 def test_two_entries_in_one_with() raises:
     var g = Grammar()
     var rules = Transform(g)

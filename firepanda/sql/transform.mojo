@@ -155,7 +155,6 @@ from .unsupported import (
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
     WITH_ORDINALITY,
-    WITH_USING_KEY,
     not_implemented,
 )
 
@@ -6118,6 +6117,7 @@ struct Transform(Movable):
         var kids = tree.children(node)
         var columns = List[String]()
         var materialize = MATERIALIZE_DEFAULT
+        var listing = NO_NODE
         var body = NO_NODE
         for i in range(1, len(kids)):
             if self._marked(tree, kids[i], _MARK_CTE_COLUMNS):
@@ -6127,7 +6127,11 @@ struct Transform(Movable):
                 for name in self._items(tree, listed):
                     columns.append(self._plain(tree, sql, name))
             elif self._marked(tree, kids[i], _MARK_USING_KEY):
-                raise _unsupported(tree, sql, kids[i], WITH_USING_KEY)
+                # `UsingKey <- 'USING' 'KEY' Parens(TargetList)`, and the
+                # parentheses descend to the same rule a select list uses, so
+                # what comes back is a run of `STMT_ITEM` and an entry may
+                # carry an alias the way a select item may.
+                listing = self._only(tree, kids[i])
             elif self._marked(tree, kids[i], _MARK_MATERIALIZED):
                 # `Materialized <- 'NOT'? 'MATERIALIZED'`.
                 materialize = (
@@ -6138,12 +6142,15 @@ struct Transform(Movable):
                 body = kids[i]
         if body == NO_NODE:
             raise _malformed(tree, sql, node, "a WITH entry with no statement")
+        var wanted: List[UInt32] = [body, listing]
+        work.warm(wanted)
         return ast.cte(
             self._plain(tree, sql, kids[0]),
             work.value(body),
             columns,
             materialize,
-            tree.nodes[Int(node)].token_start,
+            keys=0 if listing == NO_NODE else work.value(listing),
+            token=tree.nodes[Int(node)].token_start,
         )
 
     def _name_parts(

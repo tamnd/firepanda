@@ -156,7 +156,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `alias-colon` | the name: table spelling | Write FROM t AS name, which is the same alias. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `join-form` | this kind of join | firepanda runs the joins that name a condition or take none. POSITIONAL, NEAREST and JOIN BY are not among them. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `with-ordinality` | WITH ORDINALITY | It adds a row number column to a table function, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `with-using-key` | USING KEY on a WITH | It changes how a recursive query deduplicates, and firepanda runs the UNION and UNION ALL forms only. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `with-using-key` | USING KEY on a WITH | It says to keep one row per key and replace that row as the query runs, which is a way of running a WITH that firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `escape-string` | an E'...' string | Reading one means implementing every backslash escape, and half of that is worse than none of it. A plain '...' doubles a quote to hold one. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `statement-later` | the {} statement yet | It maps onto something a dataframe already does and it is coming. firepanda runs SELECT today. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `statement-never` | the {} statement | It asks for a catalog, a transaction or an extension, and firepanda is a dataframe library rather than a database. Read the data with SELECT and do the rest in Mojo. | [#13](https://github.com/tamnd/firepanda/issues/13) |

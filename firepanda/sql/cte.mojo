@@ -49,6 +49,7 @@ from .ast import (
     CLAUSE_QUALIFY,
     CLAUSE_WHERE,
     CLAUSE_WINDOW,
+    cte_materialize,
     EXPR_WINDOW,
     MATERIALIZE_DEFAULT,
     NO_NODE,
@@ -240,7 +241,7 @@ def read_ctes(ast: Ast, statement: UInt32) raises -> Ctes:
                 node,
                 item.a,
                 names^,
-                materialize=item.b,
+                materialize=cte_materialize(item.b),
             )
         )
 

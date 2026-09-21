@@ -62,7 +62,7 @@ Not at 1.0, per document 02, because the interface would be a public API before 
 
 ## 9. `WITH RECURSIVE ... USING KEY`. By S5
 
-DuckDB's keyed recursion variant. It is in the grammar, so it parses. Whether it executes at 1.0 depends on corpus coverage and on whether the fixed point operator needs a different shape to support it. The default is to refuse by name and file the issue.
+DuckDB's keyed recursion variant. It reads and prints as of the transformer work in S0, which puts the key list on the `WITH` entry beside the materialize tag, and lowering refuses it by name. Whether it executes at 1.0 depends on whether the fixed point operator needs a different shape to support it, and the entry that wants it first is the recursive `WITH` itself, which does not run either. Note that DuckDB takes `USING KEY` on a plain `WITH` too, not only a recursive one.
 
 ## 10. Do we vendor the conformance corpus, or fetch it? Settled in S1: fetch
 
