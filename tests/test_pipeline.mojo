@@ -4312,6 +4312,77 @@ def test_a_comparing_filter_writes_only_the_columns_it_is_asked_for() raises:
     assert_equal(kept[0], 3, "the row beside the first value over twenty")
 
 
+def test_a_comparing_filter_that_keeps_every_row_hands_the_chunk_back() raises:
+    """Nothing was dropped, so there is nothing to copy and nothing to select.
+    Six rows went in and the same two arrays come back out, which is what says
+    the copy route did not run: it would have written two new columns of six to
+    arrive at the six values already there. See #682."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(0)), BinaryOp.GT)), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "nothing was selected, because nothing went")
+    assert_equal(got.width(), 2, "both columns")
+    assert_equal(len(got), 6, "every row is over zero")
+    var kept = ints_of(got.column(0), 6)
+    assert_equal(kept[0], 1, "the first row, where it was")
+    assert_equal(kept[5], 6, "and the last")
+
+
+def test_a_comparing_filter_that_keeps_every_row_keeps_the_selection() raises:
+    """The same thing over a chunk that arrived under a selection. The three
+    rows the selection points at all pass, so the selection it came in with is
+    the selection it goes out with and no column is gathered down to it."""
+    var out = node_apply(
+        Node(Filter(1, Value(Int64(0)), BinaryOp.GT)), two_under_a_selection()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "still under the selection it arrived under")
+    assert_equal(len(got), 3, "all three rows are over zero")
+    assert_equal(len(got.columns[0]), 6, "the first column was left alone")
+    assert_equal(len(got.columns[1]), 6, "and so was the one it compared")
+    var kept = ints_of(got.column(1), 3)
+    assert_equal(kept[0], 20, "the value at position 1")
+    assert_equal(kept[2], 60, "and the one at position 5")
+
+
+def test_a_comparing_filter_that_keeps_every_row_still_narrows() raises:
+    """Keeping every row does not mean keeping every column. A filter that was
+    told what to write still writes that and nothing else, and it does it by
+    leaving the rest behind rather than by moving the ones it wants."""
+    var out = node_apply(
+        Node(Filter(1, Value(Int64(0)), BinaryOp.GT, [0])), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(got.width(), 1, "the compared column was not asked for")
+    assert_equal(len(got), 6, "every row is over zero")
+    var kept = ints_of(got.column(0), 6)
+    assert_equal(kept[0], 1, "the first row")
+    assert_equal(kept[5], 6, "and the last")
+
+
+def test_a_filter_that_kept_every_row_may_reorder_and_repeat() raises:
+    """The projection half of a filter that kept everything is the same
+    projection it would have been otherwise, so a position may be asked for
+    twice and the order asked for is the order written."""
+    var out = node_apply(
+        Node(Filter(0, Value(Int64(0)), BinaryOp.GT, [1, 0, 1])), six_rows()
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(got.width(), 3, "three columns out of two")
+    assert_equal(len(got), 6, "every row")
+    var first = ints_of(got.column(0), 6)
+    assert_equal(first[0], 10, "the second column came first")
+    var second = ints_of(got.column(1), 6)
+    assert_equal(second[0], 1, "then the first")
+    var third = ints_of(got.column(2), 6)
+    assert_equal(third[5], 60, "and the second again, whole")
+
+
 def test_a_comparing_filter_falls_back_for_a_pair_it_has_no_loop_for() raises:
     """Text, category and temporal columns compare perfectly well the ordinary
     way, and none of them is the shape the fused loops were written for. The
