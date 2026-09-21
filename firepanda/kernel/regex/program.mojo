@@ -2108,6 +2108,32 @@ def run_bodies(code: Span[Instruction, _]) -> List[Int32]:
     return runs^
 
 
+def _only_a_position_test(nodes: List[Node], node: Int32) -> Bool:
+    """Whether a node's whole body is one position test and nothing else.
+
+    Asked by `_emit_repeat` about the thing it is being told to copy. It is
+    deliberately the narrow question rather than the wide one: a body that
+    reads no characters is not the same as a body that is a single `OP_AT`,
+    and `(^)*` and `(?:){2}` are bodies of the first kind that Python reads
+    and that go down the ordinary path they have always gone down. What is new
+    here is only the construct Python turns down, which is a quantifier
+    written directly against an anchor.
+
+    Args:
+        nodes: The arena.
+        node: The repeat.
+
+    Returns:
+        Whether the body is exactly one position test.
+    """
+    var child = nodes[Int(node)].first
+    if child < 0:
+        return False
+    if nodes[Int(child)].next >= 0:
+        return False
+    return nodes[Int(child)].op == OP_AT
+
+
 def _emit_repeat(mut b: _Builder, nodes: List[Node], node: Int32, greedy: Bool):
     """Writes a quantifier, by copying its body as many times as it says.
 
@@ -2129,6 +2155,18 @@ def _emit_repeat(mut b: _Builder, nodes: List[Node], node: Int32, greedy: Bool):
     var most = it.b
     if least > most:
         b.give_up(String("min repeat greater than max repeat"))
+        return
+    if _only_a_position_test(nodes, node):
+        # A repeat on `^` or `$` or `\b`, which RE2 reads and Python refuses.
+        # Copying the body would be a loop over something that reads nothing,
+        # and there is no reason to: a position test answers the same question
+        # however many times it is asked, so the whole quantifier is worth one
+        # copy of the body when it asks for at least one and nothing at all
+        # when it will settle for none. `^+` is `^`, `^*` and `^?` and `^{0}`
+        # are empty, and `\b{1000}` is `\b`. All four were measured against
+        # the RE2 inside pyarrow rather than argued for. Document 104.
+        if least >= 1:
+            _emit_children(b, nodes, node)
         return
     for _ in range(Int(least)):
         _emit_children(b, nodes, node)

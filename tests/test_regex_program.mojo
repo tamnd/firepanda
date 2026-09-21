@@ -720,6 +720,43 @@ def test_a_unicode_name_under_the_ignore_case_flag_is_widened() raises:
     assert_false(matches_text(program, "1"))
 
 
+def test_a_repeat_on_an_anchor_collapses_the_way_re2_collapses_it() raises:
+    """A position test answers the same question however many times it is
+    asked, so a quantifier on one is worth one copy of it when the count starts
+    at one and nothing at all when the count starts at zero.
+
+    Every line here was measured against the RE2 inside pyarrow first. `\\b+`
+    is `\\b` and `\\b*` is empty, which is the pair that shows the collapse is
+    about the lower bound rather than about the quantifier.
+    """
+    var star = compile_program(parse_pattern("\\b*"), ENGINE_RE2)
+    assert_true(star.ok)
+    assert_true(matches_text(star, ""))
+
+    var plus = compile_program(parse_pattern("\\b+"), ENGINE_RE2)
+    assert_true(plus.ok)
+    assert_false(matches_text(plus, ""))
+    assert_true(matches_text(plus, "a"))
+
+    var counted = compile_program(parse_pattern("\\b{1000}"), ENGINE_RE2)
+    assert_true(counted.ok)
+    assert_false(matches_text(counted, ""))
+    assert_true(matches_text(counted, "a"))
+
+    var none = compile_program(parse_pattern("\\b{0}"), ENGINE_RE2)
+    assert_true(none.ok)
+    assert_true(matches_text(none, ""))
+
+
+def test_a_repeat_on_an_anchor_is_a_refusal_on_pythons_engine() raises:
+    """With Python's own words, because a caller who reached this engine passed
+    a `flags` argument and would have had `re.error` from pandas."""
+    var refused = compile_program(parse_pattern("^*"), ENGINE_PYTHON)
+    assert_false(refused.ok)
+    assert_false(refused.gap)
+    assert_equal(refused.problem, "nothing to repeat")
+
+
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
     """A repeat counted higher than either compiler will unroll is refused on
     both sides, but the flag says something different on each: for RE2 the

@@ -981,8 +981,8 @@ def _escape(mut c: _Cursor, in_class: Bool):
         # written against, so the question is answered rather than declined and
         # nothing here is unsure any more.
         c.kind = _KIND_CLASS
-        var start = c.at
-        var stop = c.at
+        var start: Int
+        var stop: Int
         if not c.done() and c.peek() == UInt32(ord("{")):
             _ = c.take()
             if not c.done() and c.peek() == UInt32(ord("^")):
