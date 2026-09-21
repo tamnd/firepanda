@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. The entry that matters is the version number itself, and one more statement of the DuckDB dialect reads at the parse.
+
+### Fixed: the three version strings agree again, and something checks that
+
+`firepanda/version.mojo` carries a note saying that the version lives in three files and that three copies which can drift will. It then drifted twice running. 0.8.18 moved `pixi.toml` and left `pyproject.toml` and `firepanda/version.mojo` on 0.8.17, and 0.8.19 moved `pixi.toml` again and left them there, so `firepanda.version()` reported two releases behind the one it was built from and a wheel cut from either commit would have carried the same wrong number.
+
+All three read 0.8.20 now, and the spec job compares them on every run. Nothing in the build derives any of them from the tag, so a check is the only thing that would notice, and the note in `version.mojo` had already predicted what happens without one.
+
+
+
 ### Added: IN over a bare value is read as the containment it is
 
 `x IN y` with no parentheses around the right side is not `x IN (y)`. It asks whether `y` holds `x`, and DuckDB names the result column `contains(y, x)`. Its grammar calls the rule `InContainsExpression`, so the reading is DuckDB's own and not an interpretation. firepanda used to turn the form down and say to put the value in parentheses, which was advice that changed the meaning: parentheses make it a list of one and the test becomes an equality.
