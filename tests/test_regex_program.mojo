@@ -687,11 +687,12 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
     refused them, and reaching them takes a slice of the second front end each.
 
-    A range in a class is one of the slices not taken yet, and it is here
-    rather than `\\p{L}` or `\\Qa+b\\E` because both of those are taken, which
-    is what the rows below and above are about. Python calls `[\\d-a]` a bad
-    character range and RE2 reads it as three members."""
-    var program = compile_program(parse_pattern("[\\d-a]"), ENGINE_RE2)
+    A repeat with nothing in front of it is one of the slices not taken yet,
+    and it is here rather than `\\p{L}` or `\\Qa+b\\E` or `[\\d-a]` because all
+    three of those are taken, which is what the rows below and above are about.
+    Python calls `{,3}` a repeat with nothing to repeat and RE2 reads it as
+    four literal characters."""
+    var program = compile_program(parse_pattern("{,3}"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
@@ -817,6 +818,40 @@ def test_a_quoted_run_is_a_refusal_on_pythons_engine() raises:
     assert_false(refused.ok)
     assert_false(refused.gap)
     assert_equal(refused.problem, "bad escape \\Q")
+
+
+def test_a_dash_after_a_set_is_three_members_and_not_a_range() raises:
+    """The dash is a member, so the class holds the digits and a dash and a
+    letter and nothing between them.
+
+    The second half is the part a compiler could get wrong without the
+    differential noticing, because the item after the dash is read as a fresh
+    item and so the `a-z` in `[\\d-a-z]` is still a range. A class that covered
+    the two ends of it and nothing in the middle would agree with RE2 on every
+    text made of digits and dashes. Document 108.
+    """
+    var three = compile_program(parse_pattern("[\\d-a]"), ENGINE_RE2)
+    assert_true(three.ok)
+    assert_true(matches_text(three, "5"))
+    assert_true(matches_text(three, "-"))
+    assert_true(matches_text(three, "a"))
+    assert_false(matches_text(three, "b"))
+
+    var span = compile_program(parse_pattern("[\\d-a-z]"), ENGINE_RE2)
+    assert_true(span.ok)
+    assert_true(matches_text(span, "b"))
+    assert_true(matches_text(span, "-"))
+    assert_false(matches_text(span, "A"))
+
+
+def test_a_dash_after_a_set_is_a_refusal_on_pythons_engine() raises:
+    """With Python's own words, for the same reason the quoted run above gives
+    them: the caller who reached this engine passed a `flags` argument and
+    Python is the grammar they are owed. Document 108."""
+    var refused = compile_program(parse_pattern("[\\d-a]"), ENGINE_PYTHON)
+    assert_false(refused.ok)
+    assert_false(refused.gap)
+    assert_equal(refused.problem, "bad character range")
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:

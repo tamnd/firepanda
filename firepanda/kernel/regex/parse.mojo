@@ -1416,10 +1416,12 @@ def _class(mut c: _Cursor) -> Int32:
     place where nothing terminates except the closing bracket, so a `[` inside
     one is an ordinary character and does not open anything.
 
-    The fourth rule is a refusal rather than a permission: a range whose end is
-    a Perl class, as in `[\\d-z]`, is an error and not a hyphen, because Python
-    has already decided a range is being written by the time it finds out what
-    is on the other side of it.
+    The fourth rule is where the two grammars part. A hyphen after a set of
+    characters rather than after one of them, as in `[\\d-a]`, is an error to
+    Python and a hyphen to RE2, because Python has already decided a range is
+    being written by the time it finds out what is on the left of it and RE2
+    asks first. A hyphen with a set on the right of it, as in `[a-\\d]`, is an
+    error to both. Document 108.
 
     Args:
         c: The cursor, just past the `[`.
@@ -1455,6 +1457,20 @@ def _class(mut c: _Cursor) -> Int32:
             return -1
 
         if c.peek() == 0x2D and c.ahead(1) != 0x5D and c.ahead(1) != 0xFFFFFFFF:
+            if c.nodes[Int(left)].op != OP_LITERAL:
+                # A range needs one character on the left of it, and what is
+                # there is a set of them, so RE2 reads the hyphen as a hyphen
+                # and carries on. Python has already committed to a range and
+                # refuses. The item after the hyphen is read by the next turn
+                # of this loop rather than here, which is what makes the `a-z`
+                # in `[\d-a-z]` a range to RE2 and not two more literals.
+                if not c.python_refuses:
+                    c.python_refuses = True
+                    c.python_problem = String("bad character range")
+                c.attach(node, left)
+                c.at += 1
+                c.attach(node, c.add(OP_LITERAL, 0x2D, 0))
+                continue
             c.at += 1
             var right = _class_item(c)
             if right < 0:

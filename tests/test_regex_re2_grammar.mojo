@@ -433,9 +433,15 @@ def test_ranges_in_a_class() raises:
 
 
 def test_a_set_is_not_one_end_of_a_range() raises:
-    """So the hyphen after one is a hyphen, and the one before it is not."""
+    """So the hyphen after one is a hyphen, and the one before it is not. This
+    is the half of document 108 the reader was already right about, and the
+    last line is the shape both grammars refuse."""
     _takes(String("[\\d-a]"))
     _takes(String("[\\d-\\w]"))
+    _takes(String("[\\s-a]"))
+    _takes(String("[\\D-a]"))
+    _takes(String("[^\\d-a]"))
+    _takes(String("[\\d-a-z]"))
     _refuses(String("[a-\\d]"), String("RE2 has no such escape"))
 
 
