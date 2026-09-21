@@ -2223,6 +2223,39 @@ def _seq(mut c: _Cursor) -> Int32:
                     splits[at] = repeat
             continue
 
+        if point == 0x5C and c.ahead(1) == 0x51:
+            # `\Q` opens a run of literal characters, and the run is walked
+            # here rather than in the escape reader because it is not one item.
+            # `\Qab\E*` is `ab*`, so a quantifier written after the run takes
+            # the last character of it exactly as it would have done had the
+            # characters been typed out, and an empty run leaves nothing behind
+            # at all, which is what turns `x\Q\E*` into `x*` and `\Q\E*`
+            # into a refusal. That is the same stack rule document 101 measured
+            # for the flag group, and it falls out of appending one node per
+            # character rather than being a rule written anywhere. Document
+            # 105.
+            if not c.python_refuses:
+                c.python_refuses = True
+                c.python_problem = String("bad escape \\Q")
+            c.at += 2
+            var wrote = False
+            while not c.done():
+                if c.peek() == 0x5C and c.ahead(1) == 0x45:
+                    # The two characters are looked for literally, because
+                    # nothing inside the run is an escape. `\Qa\\E` is the
+                    # letter `a` and a backslash, since the closer is found at
+                    # the second backslash rather than at the first.
+                    c.at += 2
+                    break
+                var one = c.add(OP_LITERAL, Int32(Int(c.peek())), 0)
+                c.at += 1
+                before_last = c.nodes[Int(node)].last
+                c.attach(node, one)
+                wrote = True
+            if wrote and c.depth == 0:
+                c.produced = True
+            continue
+
         var item = _atom(c)
         if item == NOTHING:
             if c.positional_ready:

@@ -151,7 +151,18 @@ struct _Cursor(Movable):
     surprise: rather than making a repeat after it illegal it makes the repeat
     reach past it, so `(?i)*` is a refusal at the front of a pattern and
     `a(?i)*` repeats the `a`. An assertion does leave something, so `^*` and
-    `\\b*` are ordinary repeats that Python calls nothing to repeat.
+    `\\b*` are ordinary repeats that Python calls nothing to repeat. An empty
+    `\\Q\\E` leaves nothing, for the same reason a flag group does and with the
+    same consequence.
+    """
+
+    var quoted_empty: Bool
+    """Whether the escape just read was a `\\Q\\E` run with nothing in it.
+
+    A run with characters in it leaves its last character behind like any other
+    literal, and a run with none leaves whatever was already there, so the atom
+    reader has to put the flag above back rather than trust the value it set
+    before reading the escape. This says which of the two happened.
     """
 
     var kind: Int
@@ -172,6 +183,7 @@ struct _Cursor(Movable):
         self.failed = False
         self.problem = String("")
         self.repeatable = False
+        self.quoted_empty = False
         self.kind = _KIND_CHAR
         self.point = 0
 
@@ -689,12 +701,22 @@ def _atom(mut c: _Cursor) -> Int:
     var next = c.peek()
     if next == UInt32(ord("(")):
         return _group(c)
+    var was = c.repeatable
     c.repeatable = True
     if next == UInt32(ord("[")):
         _class(c)
         return 1
     if next == UInt32(ord("\\")):
         _escape(c, False)
+        if c.quoted_empty:
+            # `\\Q\\E` is the second thing in this file that leaves nothing on
+            # RE2's stack, after the flag group in `_flags`, and it has the same
+            # consequence: `\\Q\\E*` is a refusal at the front of a pattern and
+            # `x\\Q\\E*` repeats the `x`. Every other escape leaves one item
+            # behind, which is why the flag is set above rather than here.
+            # Document 105.
+            c.repeatable = was
+            c.quoted_empty = False
         return 1
     # A brace that opens no well formed count reaches here and is a literal,
     # because the caller only skips the atom when there is a real repeat in
@@ -1049,19 +1071,26 @@ def _quoted(mut c: _Cursor):
 
     Everything between the two is a literal, and a run that is never closed
     runs to the end of the pattern rather than being a refusal, so `\\Qa` is a
-    pattern RE2 reads. This is the construct behind two hundred and eight of the
-    corpus patterns RE2 takes and Python does not, which is the largest of them.
+    pattern RE2 reads. Nothing inside the run is an escape, which is why the
+    closer is looked for as two literal characters and why `\\Qa\\\\E` ends at
+    the second backslash rather than the first.
+
+    A run with nothing in it is recorded rather than read past, because it
+    leaves nothing on RE2's stack and the caller has to know that. Document 105.
 
     Args:
         c: The cursor.
     """
     _ = c.take()
+    var wrote = False
     while not c.done():
         if c.peek() == UInt32(ord("\\")) and c.ahead(1) == UInt32(ord("E")):
             _ = c.take()
             _ = c.take()
-            return
+            break
         _ = c.take()
+        wrote = True
+    c.quoted_empty = not wrote
 
 
 def _hex(mut c: _Cursor):

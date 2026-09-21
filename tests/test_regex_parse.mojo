@@ -722,5 +722,70 @@ def test_a_quantifier_with_nothing_at_all_in_front_is_unchanged() raises:
     assert_equal(shape("a|*"), "!nothing to repeat")
 
 
+def test_a_quoted_run_is_one_literal_per_character() raises:
+    """`\\Q` and `\\E` are RE2 syntax and not Python's, so the tree holds the
+    characters and carries Python's sentence beside them.
+
+    There is no node for the run. A run of three characters is three literals,
+    exactly what typing them out with a backslash in front of each would have
+    given, and that is what makes every rule below fall out rather than be
+    written. Document 105.
+    """
+    assert_equal(shape("\\Qa+b\\E"), "seq{lit(a),lit(+),lit(b)}")
+    assert_equal(shape("x\\Qa\\Ey"), "seq{lit(x),lit(a),lit(y)}")
+    assert_equal(reason("\\Qa\\E"), "bad escape \\Q")
+
+
+def test_a_quoted_run_ends_at_two_literal_characters_or_at_the_end() raises:
+    """Nothing inside the run is an escape, so the closer is found by looking
+    for a backslash and an `E` and not by reading escapes and noticing one.
+
+    `\\Qa\\\\E` is the letter and one backslash, because the close is the
+    second backslash and the `E` after it. A run nobody closed reaches the end
+    of the pattern, which is a pattern RE2 reads rather than a refusal.
+    """
+    assert_equal(shape("\\Qa\\\\E"), "seq{lit(a),lit(\\)}")
+    assert_equal(shape("\\Q\\\\\\E"), "seq{lit(\\),lit(\\)}")
+    assert_equal(shape("\\Q\\n\\E"), "seq{lit(\\),lit(n)}")
+    assert_equal(shape("\\Qa+b"), "seq{lit(a),lit(+),lit(b)}")
+
+
+def test_a_quoted_run_crosses_syntax_it_would_otherwise_end_at() raises:
+    """A bracket and a bar and a square bracket inside the run are characters,
+    so the run is read before the grammar rather than beside it."""
+    assert_equal(
+        shape("(\\Qa)b\\E)"), "seq{group(1){seq{lit(a),lit()),lit(b)}}}"
+    )
+    assert_equal(shape("\\Qa|b\\E"), "seq{lit(a),lit(|),lit(b)}")
+    assert_equal(shape("\\Qa[b\\E"), "seq{lit(a),lit([),lit(b)}")
+
+
+def test_a_repeat_after_a_quoted_run_takes_the_last_character() raises:
+    """Which is the whole of why the run is one node per character.
+
+    `\\Qab\\E*` is `ab*` and not `(?:ab)*`, and an empty run leaves nothing at
+    all, so `x\\Q\\E*` is `x*` and `\\Q\\E*` has nothing in front of it. That
+    is the stack rule document 101 measured for the flag group, reached here
+    without a rule being written.
+    """
+    assert_equal(shape("\\Qab\\E*"), "seq{lit(a),max(0,inf){lit(b)}}")
+    assert_equal(shape("\\Qa\\E{2}"), "seq{max(2,2){lit(a)}}")
+    assert_equal(shape("x\\Q\\E*"), "seq{max(0,inf){lit(x)}}")
+    assert_equal(shape("\\Q\\E*"), "!nothing to repeat")
+    assert_equal(shape("\\Q\\E"), "seq")
+
+
+def test_a_close_with_no_run_open_is_given_up_on() raises:
+    """RE2 refuses it too, so the parse fails the way it did before this slice
+    and the reader in `re2.mojo` is asked and agrees.
+
+    Both halves are refused inside a class, where RE2 has neither of them.
+    """
+    assert_equal(shape("\\E"), "!bad escape")
+    assert_equal(shape("a\\Eb"), "!bad escape")
+    assert_equal(shape("\\Qa\\E\\E"), "!bad escape")
+    assert_equal(shape("[\\Qa\\E]"), "!bad escape")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
