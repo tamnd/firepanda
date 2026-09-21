@@ -218,22 +218,24 @@ def test_inside_a_class_it_is_an_error_in_every_version(firepanda: ModuleType) -
     the unflagged route is an error here rather than an answer, and no version
     number moves either of them.
 
-    The unflagged route is the one place a class where every side is an error
-    still disagrees about which error. pandas hands the pattern to Arrow and an
-    `ArrowInvalid` comes back out of the accessor, this library reads the
-    pattern with Python's grammar before either engine sees it and calls a
-    pattern that grammar cannot read a gap, so a caller gets a
-    `NotImplementedError` where upstream gives something that is not an
-    `re.error` either. Document 78 has that shape written down and this slice
-    does not move it, which is why the row asserts what happens rather than what
-    ought to."""
+    The unflagged route used to be the one place a class where every side is an
+    error still disagreed about which error. pandas hands the pattern to Arrow
+    and an `ArrowInvalid` comes back out of the accessor, and this library read
+    the pattern with Python's grammar before either engine saw it and called a
+    pattern that grammar could not read a gap, so a caller got a
+    `NotImplementedError` where upstream gave something that is not an
+    `re.error` either. RE2's grammar is written down now, in
+    `firepanda/kernel/regex/re2.mojo`, and it turns `[\\z]` down as well, so a
+    pattern neither grammar reads is a bad pattern on both routes and both
+    sides are a `ValueError`. Document 78 has the shape and document 101 has
+    the grammar that closed it."""
     mine, them = made(firepanda), theirs()
     for pattern in ("[\\z]", "[a\\z]"):
         with pytest.raises(re.error):
             them.str.contains(pattern, flags=re.MULTILINE)
         with pytest.raises(ValueError):
             mine.str.contains(pattern, flags=re.MULTILINE)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError):
             mine.str.contains(pattern)
 
 
