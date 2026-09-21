@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: three Python tests that still expected the exception class the RE2 grammar replaced
+
+Reading RE2's grammar changed what a pattern neither grammar can read comes back as. It used to be a `NotImplementedError`, on the reasoning that this library had no way to tell a broken pattern from one merely beyond it, and the whole point of the grammar is that it now can, so it is a `ValueError` and matches what pandas gives for the same pattern. Three tests in the Python suite still named the old class and went red on main rather than on the pull request, because the extension job runs on one platform there and on three on the merge.
+
+The three are `(a)\2` and its siblings in `test_str_backreference.py`, `(?L:a)` in `test_str_scoped_flags.py`, and `[\z]` unflagged in `test_str_z_escape.py`. Each of them has a paragraph about which error came from where, so each of those paragraphs is rewritten rather than the assertion being quietly swapped.
+
 ### Added: COLUMNS() reads and prints
 
 `COLUMNS(...)` is how DuckDB writes a set of columns where one expression goes, and it was the biggest single thing the corpus asked for that firepanda turned down at the parse. Four things may stand in the parentheses. A string holding a regular expression, matched against every column name. A list of names. A lambda taking a name and answering whether to keep it. And a star, with the three modifier lists an ordinary star carries. There is a fifth spelling, `*COLUMNS(...)`, which hands the set over as several arguments rather than as one, and the star there stands outside the parentheses and is not the same star as the one that may stand inside them.

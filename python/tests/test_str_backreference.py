@@ -233,28 +233,28 @@ def test_a_lookaround_beside_one_is_still_a_gap(firepanda: ModuleType) -> None:
 def test_a_reference_to_a_group_that_is_not_there_is_refused_by_both(
     firepanda: ModuleType,
 ) -> None:
-    """Both libraries refuse all four, and neither of them says what is wrong.
+    """Both libraries refuse all four, and both call it a bad pattern.
 
     pandas decides which engine answers by whether `re` will compile the
     pattern, and none of these compiles, so all four are handed to Arrow and
     come back with Arrow's words about an escape sequence or a perl operator
     rather than with `re`'s words about a group reference that is not there.
 
-    This library refuses them in its parser, and a pattern its parser cannot
-    read is reported as a gap rather than as a bad pattern, because the parser
-    reads Python's grammar and pandas has a second engine with a grammar of its
-    own that this library has not written yet. So the class here is
-    `NotImplementedError` where upstream's is `ValueError`. That is the front
-    end that is still missing rather than anything this slice did, it is the
-    same answer these four got before a backreference compiled at all, and it
-    is written down here because a reference to a group that is not there is
-    the shape a reader of this file would go looking for it in.
+    This library refuses them in its parser too, and it used to report a
+    pattern its parser could not read as a gap, because the parser reads
+    Python's grammar and RE2's was not written down anywhere. It is now, in
+    `firepanda/kernel/regex/re2.mojo`, so the second question gets asked: RE2
+    will not read these either, and a pattern neither grammar takes is a broken
+    pattern rather than a missing feature. The class is a `ValueError` on both
+    sides, which is the whole point of reading RE2's grammar, and the reason
+    that comes back is RE2's rather than `re`'s because RE2 is the engine that
+    would have had to run it.
     """
     mine, them = made(firepanda), theirs()
     for pattern in [r"(a)\2", r"\1", r"(?P=nope)", r"(?P<x>a)(?P=y)"]:
         with pytest.raises(ValueError):
             them.str.contains(pattern)
-        with pytest.raises(NotImplementedError) as caught:
+        with pytest.raises(ValueError) as caught:
             mine.str.contains(pattern)
         assert pattern in str(caught.value), pattern
 

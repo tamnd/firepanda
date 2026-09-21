@@ -331,9 +331,13 @@ def test_the_locale_letter_is_still_turned_down_inside_a_bracket(
     """The one letter neither engine takes. Python turns it down on a pattern
     made of text wherever it is written and Arrow has never heard of it, so both
     libraries refuse both routes, and a scoped group that carried its letters
-    could have been the moment somebody stopped checking."""
+    could have been the moment somebody stopped checking.
+
+    A `ValueError` on the unflagged route as well as the flagged one since the
+    RE2 grammar landed. Neither grammar reads `(?L:a)`, and a pattern neither
+    grammar reads is a broken pattern rather than a gap in this library."""
     mine, them = made(firepanda), theirs()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         mine.str.contains("(?L:a)")
     with pytest.raises(ValueError):
         them.str.contains("(?L:a)")
