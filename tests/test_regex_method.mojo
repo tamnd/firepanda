@@ -236,19 +236,38 @@ def test_a_pattern_neither_grammar_reads_carries_re2s_reason() raises:
         assert_equal(program.problem, "a bracket is closed that nothing opened")
 
 
-def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
-    """Because there is nothing wrong with it and no engine here to run it.
+def test_a_pattern_re2_reads_and_the_grammar_does_not_takes_re2s_reading() raises:
+    """This row used to say the pattern was a gap, and it has been shrinking
+    for nine slices.
 
-    `\\p{L}` was this row's pattern until the name table landed, `\\Qa+b\\E`
-    was until the quoted run landed, `[\\d-a]` was until the dash after a set
-    landed, `{,3}` was until the braceless count landed and `(?<n>a)` was until
-    the other spelling of a named group landed. What is left is a braceless
-    count already read Python's way and then a count Python refuses, which is
-    four patterns in thirty thousand and the end of the list."""
-    var program = program_for(METHOD_CONTAINS, "{}{,2}{1,3}")
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(program.problem, "Python's grammar cannot read this pattern")
+    `\\p{L}` was its pattern until the name table landed, `\\Qa+b\\E` was until
+    the quoted run landed, `[\\d-a]` was until the dash after a set landed,
+    `{,3}` was until the braceless count landed and `(?<n>a)` was until the
+    other spelling of a named group landed. What was left was a braceless count
+    read Python's way and then a count Python will not put on it, and what
+    reaches it is asking the second reading rather than unwinding the first.
+    Document 117."""
+    # RE2 spells the first brace out and then repeats the closing one, so this
+    # matches an `a`, the four characters of the count, and one to three more
+    # closing braces. Python counts the first brace and then has a count on a
+    # count, which is the refusal this row used to carry.
+    var one = program_for(METHOD_CONTAINS, "a{,2}{1,3}")
+    assert_true(one.ok)
+    assert_true(matches_text(one, "a{,2}"))
+    assert_true(matches_text(one, "a{,2}}}"))
+    assert_false(matches_text(one, "aa"))
+
+    var two = program_for(METHOD_CONTAINS, "{}{,2}{1,3}")
+    assert_true(two.ok)
+    assert_true(matches_text(two, "{}{,2}"))
+    assert_false(matches_text(two, "a{,2}"))
+
+    # Two braceless counts and nothing to repeat either of them, so RE2 reads
+    # ten characters and no operator at all.
+    var none = program_for(METHOD_CONTAINS, "\\.{,2}{,2}")
+    assert_true(none.ok)
+    assert_true(matches_text(none, "x.{,2}{,2}y"))
+    assert_false(matches_text(none, "a{,2}"))
 
 
 def test_a_quoted_run_is_answered_and_a_stray_close_is_refused() raises:

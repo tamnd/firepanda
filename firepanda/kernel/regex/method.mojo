@@ -567,7 +567,6 @@ def program_for(
         # reads the pattern as written when it picks an engine and never gets
         # past that, so answering here would be answering a question that was
         # already over.
-        var out = compile_program(tree, ENGINE_RE2, minor=minor)
         # That settles the routing and leaves the answer, and for two patterns
         # in three of the generated corpus the answer is a refusal rather than
         # a column, because RE2 will not read the pattern either. Asking the
@@ -583,6 +582,28 @@ def program_for(
         # the hoist being off, since the hoist is this library's and not
         # pandas'. Document 101.
         var read = re2_reads(anchored(method, preprocessed(pattern), False))
+        if read.ok:
+            # The other third, where RE2 reads what Python's grammar could not,
+            # used to end here as a gap on the grounds that there was nothing
+            # to run. The second reading is something to run. It is RE2's
+            # grammar, so a tree coming back out of it is RE2's reading of the
+            # pattern RE2 has just agreed to, and the refusal above it was
+            # Python's complaint about a reading RE2 never took. `a{,2}{1,3}`
+            # is the shape: Python counts the first brace and then has a count
+            # on a count, and RE2 spells the first brace and then repeats the
+            # closing one. Document 117.
+            var second = parse_pattern(
+                anchored(method, preprocessed(pattern)), flags, for_re2=True
+            )
+            if second.ok:
+                return compile_program(
+                    second,
+                    ENGINE_RE2,
+                    captures=method == METHOD_REPLACE,
+                    minor=minor,
+                    alphabet=table,
+                )
+        var out = compile_program(tree, ENGINE_RE2, minor=minor)
         if not read.ok:
             out.problem = read.problem.copy()
             out.gap = False

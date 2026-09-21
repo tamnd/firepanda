@@ -403,6 +403,12 @@ The table `\p{...}` is read against was measured once, against one release of py
 
 `pixi run differential-regex-property` asks RE2 about the four code points around each of the 5820 ranges, which is where a range table is wrong if it is wrong at all. 200 names, 18834 code points, half a second against a warm build, and zero disagreements against pyarrow 24.0.0. It was checked by moving one high by one and watching it name the character and exit. Document 116.
 
+### Fixed: a pattern RE2 reads and Python's grammar does not is answered
+
+`Series.str.contains(r"a{,2}{1,3}")` raised a `NotImplementedError` saying Python's grammar cannot read the pattern, which is true and was not the question. A braceless count is four ordinary characters to RE2 and a count to Python, so RE2 reads the pattern, pandas hands it to RE2, and pandas answers with a column.
+
+The second reading of a pattern with RE2's grammar has existed since document 111 and was wired into the path where Python's grammar succeeds, so the branch for a pattern Python's grammar could not read never asked it for one. It asks now, gated on the grammar reader saying RE2 would take the pattern, which is the same question the branch was already asking one line further down. Twenty two held out patterns answered across five comparisons, eighteen patterns added to the measured corpus, and all seven differentials still at zero disagreements. Document 117.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
