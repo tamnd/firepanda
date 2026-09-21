@@ -53,9 +53,34 @@ jobs:
           SECONDS_PER_FUZZER: ${{ inputs.seconds || '1800' }}
         run: pixi run fuzz -- --max-total-time="$SECONDS_PER_FUZZER"
 
+  links:
+    name: External link check
+    runs-on: ubuntu-latest
+    # Every external link in every markdown file, which is the half of the link
+    # check that `.github/workflows/ci.yml` stopped doing on a pull request. A
+    # page that has gone away is worth knowing about and is never worth blocking
+    # a merge on, because the change that broke it was made by somebody who has
+    # never heard of this repository.
+    #
+    # The retries and the accept list are the ones the pull request check used to
+    # carry. 429 is a host rate limiting us rather than a broken link, and 301
+    # and 308 are a host that moved a page and said where it went.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress --max-concurrency 4 --max-retries 3 --retry-wait-time 2
+            --accept 200,206,301,308,429 './**/*.md'
+          fail: true
+
   report:
     name: Open or update tracking issue
-    needs: fuzz
+    needs: [fuzz, links]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -68,11 +93,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          title="Soak fuzzing failing"
+          title="Soak run failing"
           existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --label "test" --search "$title in:title" --json number --jq '.[0].number // empty')
           body=$(printf '%s\n\n- run: %s\n' \
-            "A differential fuzzer found a disagreement, or failed to run." "$RUN")
+            "A nightly check failed. Either a differential fuzzer found a disagreement or could not run, or an external link in the documentation no longer resolves. The run says which." "$RUN")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
