@@ -75,7 +75,7 @@ wording. A caller reading the message is a caller of firepanda.
 """
 
 from firepanda.kernel.regex.parse import _put_point, decoded
-from firepanda.kernel.regex.unicodedata import unicode_index
+from firepanda.kernel.regex.unicodedata import unicode_holds, unicode_index
 
 
 comptime RE2_MAX_REPEAT: Int = 1000
@@ -286,25 +286,38 @@ def _is_hex(point: UInt32) -> Bool:
 def _is_name_point(point: UInt32) -> Bool:
     """Whether a code point may appear in an RE2 group name.
 
-    The ASCII word characters and everything outside ASCII, which is wider than
-    it used to be and was measured rather than remembered: `(?P<é>a)` is a group
-    RE2 names and `(?P<n n>a)` and `(?P<n->a)` are refusals.
+    A character whose general category is a letter, a non spacing or a spacing
+        mark, a decimal or a letter number, or connector punctuation, which is the
+        category the underscore is in. That is wider than the ASCII word characters
+        and narrower than everything outside ASCII,
+        which is what this said until document 107 measured it over every code point
+        below U+11000: `(?P<é>a)` and `(?P<x١>a)` are groups RE2 names, and
+        `(?P<n n>a)`, `(?P<n->a)`, `(?P<x½>a)` and `(?P<x€>a)` are refusals.
 
-    Args:
-        point: The code point.
+        The categories come out of the same table `\\p{Nd}` reads, so a code point
+        Unicode added after that table was generated is not in a name here and is
+        not in one in RE2 either, which is the version this library is matched to
+        rather than the version CPython carries.
 
-    Returns:
-        True when the character may be in a name.
+        Args:
+            point: The code point.
+
+        Returns:
+            True when the character may be in a name.
     """
-    if _is_digit(point):
-        return True
-    if point >= UInt32(ord("a")) and point <= UInt32(ord("z")):
-        return True
-    if point >= UInt32(ord("A")) and point <= UInt32(ord("Z")):
-        return True
     if point == UInt32(ord("_")):
         return True
-    return point >= 0x80 and point != 0xFFFFFFFF
+    if unicode_holds(unicode_index("L"), point):
+        return True
+    if unicode_holds(unicode_index("Nd"), point):
+        return True
+    if unicode_holds(unicode_index("Nl"), point):
+        return True
+    if unicode_holds(unicode_index("Mn"), point):
+        return True
+    if unicode_holds(unicode_index("Mc"), point):
+        return True
+    return unicode_holds(unicode_index("Pc"), point)
 
 
 def _is_flag_point(point: UInt32) -> Bool:
