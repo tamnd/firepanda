@@ -13,6 +13,15 @@ inputs:
     description: pixi version to install, or "latest"
     required: false
     default: latest
+  cache-slot:
+    description: >
+      Which compiler cache entry this job reads and writes. Jobs that compile
+      different things want different entries, because one entry shared by all
+      of them would be whichever job finished last and would carry the other
+      jobs' artefacts around for nothing. The test job passes its shard number,
+      so each shard keeps the cache for its own eighth of the files.
+    required: false
+    default: shared
   locked:
     description: >
       Install exactly what pixi.lock says. Set this to false for the nightly job,
@@ -76,6 +85,54 @@ runs:
           pixi update --environment "$ENVIRONMENT"
           pixi install --environment "$ENVIRONMENT"
         fi
+
+    # The compiler keeps its own record of what it has already built, under
+    # `$MODULAR_HOME`, which pixi puts at `.pixi/envs/<environment>/share/max`.
+    # Carrying it between runs is worth about nine times on a file the change
+    # does not touch and about three on the file it does, measured on the
+    # workstation against `tests/test_sql_run.mojo`:
+    #
+    #   cold cache                                        195 s
+    #   warm cache, nothing changed                        22 s
+    #   warm cache, after a real change to `run` itself     61 s
+    #
+    # All 422 tests pass in each of those, and the middle one is not the cache
+    # answering from yesterday: putting a `raise` at the top of `run` turned the
+    # warm run into 422 failures in 61 seconds, and reverting it went back to 422
+    # passes in 22. The cache invalidates on what a change reaches rather than on
+    # the file it was written in.
+    #
+    # `.pixi` is already cached by the step above, but keyed on `pixi.lock`, and
+    # `actions/cache` only writes when its key missed. The lockfile almost never
+    # moves, so that entry has been serving whatever was in this directory when
+    # it last did, which is a `pixi install` with no compiles behind it. Hence a
+    # separate entry, keyed so that it misses every time, restored by prefix.
+    #
+    # It sits here rather than in one job because every job that compiles Mojo
+    # wants it, and the ones that do not are the ones that never populate it.
+    #
+    # Two steps because the merge should write the cache and a pull request
+    # should not. `actions/cache` registers a save for the end of the job;
+    # `actions/cache/restore` does not. So a pull request reads what the merge
+    # left and uploads nothing, which keeps it off the clock of whoever is
+    # waiting and out of the repository's ten gigabyte cache budget.
+    - name: Compiler cache, read and write
+      if: github.event_name == 'push'
+      uses: actions/cache@v6
+      with:
+        path: .pixi/envs/${{ inputs.environment }}/share/max/cache/.mojo_cache
+        key: mojo-cache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ inputs.cache-slot }}-${{ github.sha }}
+        restore-keys: |
+          mojo-cache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ inputs.cache-slot }}-
+
+    - name: Compiler cache, read only
+      if: github.event_name != 'push'
+      uses: actions/cache/restore@v6
+      with:
+        path: .pixi/envs/${{ inputs.environment }}/share/max/cache/.mojo_cache
+        key: mojo-cache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ inputs.cache-slot }}-${{ github.sha }}
+        restore-keys: |
+          mojo-cache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ inputs.cache-slot }}-
 
     # The Mojo ABI is not stable, so which toolchain compiled a result is part of
     # the result. Record it where every job's log can be read for it.

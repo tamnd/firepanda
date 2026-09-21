@@ -77,10 +77,26 @@
 # actually sets the floor.
 #
 # Splitting that file is the other obvious way out and it was tried in #933.
-# Three parts cost 201, 175 and 185 seconds against 204 for the whole, because
-# every part still imports `firepanda.sql.run` and so still compiles the same
-# slice of the library. Splitting a test file only helps if the parts import
-# less, and every test in that one calls `run`.
+# Three parts cost 201, 175 and 185 seconds against 204 for the whole. The
+# reason is worth stating exactly, because the obvious reading of it is wrong.
+# It is not that each part still imports `firepanda.sql.run`: importing that
+# module and calling nothing costs 15 seconds on the workstation, where the file
+# costs 195. It is that each part still *calls* `run`, and one call is the whole
+# price. Measured by generating a file that imports `run` and calls it n times:
+#
+#   n = 0    15 s        n = 16   120 s
+#   n = 1   124 s        n = 64   120 s
+#   n = 4   123 s
+#
+# The first query costs 109 seconds and every query after it is free, because
+# what is being paid for is instantiating the engine at the point of use. So a
+# test file is a fixed price for touching a part of the library at all plus
+# almost nothing per test, which is why three parts cost three times one part,
+# and why a split can only win if a part calls nothing.
+#
+# The thing that does work is the compiler's own cache, which is restored in
+# `.github/workflows/ci.yml`. Warm, the same file takes 22 seconds rather than
+# 195, and 61 when the change under test reaches `run` itself.
 #
 # `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
 # `pixi run test-costs` does, and is the fallback when there is no run to read.
