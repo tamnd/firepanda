@@ -62,7 +62,7 @@ core=(
   "mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch"
 )
 
-# The five regex programs read a table from the directory they live in, so they
+# The six regex programs read a table from the directory they live in, so they
 # need that directory on the import path as well as the repository root.
 regex=(
   "mojo build -I . -I tests/differential tests/differential/regex.mojo -o build/differential/regex"
@@ -70,6 +70,7 @@ regex=(
   "mojo build -I . -I tests/differential tests/differential/regex_count.mojo -o build/differential/regex-count"
   "mojo build -I . -I tests/differential tests/differential/regex_replace.mojo -o build/differential/regex-replace"
   "mojo build -I . -I tests/differential tests/differential/regex_python.mojo -o build/differential/regex-python"
+  "mojo build -I . -I tests/differential tests/differential/regex_re2.mojo -o build/differential/regex-re2"
 )
 
 case "$group" in

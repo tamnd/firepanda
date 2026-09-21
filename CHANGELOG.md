@@ -140,6 +140,16 @@ Like every Python-only construct in this accessor it is reached by passing a `fl
 
 A group that matched nothing has still taken part, a group the pattern has not opened yet has not, and a group the pattern does not have at all is refused by both libraries, in two different classes, because `re.error` is not a subclass of `ValueError` and every refusal here is. 194 corpus patterns that used to be held out are compared now, at zero disagreements, and a lookaround beside a conditional is a refusal with a sentence of its own, which is the third such pairing. Document 100.
 
+### Added: a reader for RE2's grammar, so that a broken pattern is refused the way pandas refuses it
+
+Two patterns in three that reach the string accessor's regular expression methods are patterns nobody can run. Of the thirty thousand generated patterns in the corpus, 19615 are ones Python's grammar cannot read, which is what sends them to Arrow in pandas, and 17976 of those are ones RE2 will not read either. pandas raises `ArrowInvalid` for all of them and `ArrowInvalid` is a `ValueError`. firepanda raised `NotImplementedError`, because it had no way to tell a pattern that is broken from one that is merely beyond this library, so a caller writing `except ValueError` caught the one and not the other.
+
+There is a second grammar now, in `firepanda/kernel/regex/re2.mojo`. It compiles nothing and runs nothing. It answers one question, whether RE2 would read a pattern, and when the answer is no it says why in a sentence about the pattern rather than about RE2's internals. It is consulted on exactly one branch, the one where this library's own parse has already failed, and a pattern it turns down keeps RE2's reason and becomes a `ValueError`.
+
+The grammar was measured against a running Arrow rather than read out of anything, one pattern at a time, and several of its rules are ones nobody would have guessed. A brace that opens no well formed count is a literal. A repeat is checked in a fixed order, repeat-on-a-repeat before size and size before nothing-to-repeat, which decides the complaint a pattern with two problems gets. RE2 builds on a stack and a flag group pushes nothing, so `(?i)*` is a refusal but `a(?i)*` repeats the `a`. A nest of counts multiplies and shares one budget of 1000. Which text pandas hands Arrow was measured too, because it anchors before it routes, so `str.match("?")` answers where `str.contains("?")` raises.
+
+The reader is deliberately biased toward saying RE2 takes it, because a wrong refusal turns a working column into an exception while a wrong acceptance leaves the caller holding the error they already had. `\p{...}` is the one construct it declines to judge, since telling a script name RE2 knows from one it does not needs a table this library has not got. Its own differential reads the whole corpus and compares both the verdict and the reason: 8339 read, 21547 refused with reasons that match, 166 declined, and zero wrong in either direction. On `str.contains` the compared count goes from 9623 patterns to 27431 at zero disagreements, which is about 17800 patterns moving from the wrong exception class to the right one. Document 101.
+
 ## [0.8.16] - 2026-09-19
 
 Built against Mojo 1.0.0 (ed45d567).

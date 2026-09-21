@@ -220,6 +220,44 @@ def test_a_pattern_the_grammar_cannot_read_is_refused_as_written() raises:
         assert_false(program.ok)
 
 
+def test_a_pattern_neither_grammar_reads_carries_re2s_reason() raises:
+    """And stops being a gap, because a refusal is the whole answer.
+
+    pandas hands Arrow every pattern Python's grammar turns down, so for these
+    the caller gets an `ArrowInvalid`, which is a `ValueError`. Answering with a
+    `NotImplementedError` was wrong twice: wrong about whose refusal it is, and
+    wrong about the class of it. Document 101.
+    """
+    for method in [METHOD_CONTAINS, METHOD_MATCH, METHOD_FULLMATCH]:
+        var program = program_for(method, ")a")
+        assert_false(program.ok)
+        assert_false(program.gap)
+        assert_equal(program.problem, "a bracket is closed that nothing opened")
+
+
+def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
+    """Because there is nothing wrong with it and no engine here to run it."""
+    var program = program_for(METHOD_CONTAINS, "\\p{L}")
+    assert_false(program.ok)
+    assert_true(program.gap)
+    assert_equal(program.problem, "Python's grammar cannot read this pattern")
+
+
+def test_the_rewrite_is_what_re2_is_asked_about() raises:
+    """`?` is a repeat with nothing to repeat and `^(?)` is a flag group naming
+    no flags, so the same pattern is a refusal one way round and a column the
+    other."""
+    var asked = program_for(METHOD_CONTAINS, "?")
+    assert_false(asked.ok)
+    assert_false(asked.gap)
+    assert_equal(
+        asked.problem, "there is nothing here for that repeat to repeat"
+    )
+    var anchored_call = program_for(METHOD_MATCH, "?")
+    assert_false(anchored_call.ok)
+    assert_true(anchored_call.gap)
+
+
 def test_a_flag_passed_beside_the_pattern_folds_what_a_written_one_folds() raises:
     """The `case` argument and `(?i)` are one fact spelled two ways.
 
