@@ -391,6 +391,12 @@ The table is narrowed rather than cancelled. 54 patterns stay held out of `str.c
 
 Document 114.
 
+### Fixed: four names RE2 has that the table had never heard of
+
+`Series.str.contains(r"\p{Zs}")` raised `RE2 has no such character class` where pandas answers a column. `Zs` and `Zl` and `Zp` and the `Z` they make up are names RE2 takes, and the generated table that `\p{...}` is read against had none of them, because the generator asks RE2 about each name on a list and the list of general categories was written out by hand with the six anybody thinks of on it. The grammar reader that answers whether RE2 would read a pattern consults the same table and was wrong in the same way, and both were fixed by the four rows.
+
+The list is gone. The generator now asks RE2 about every name of one letter and every name of a letter followed by a lower case letter, and refuses to write anything if RE2 takes a name it was never told about. Thirty eight patterns naming a category or a script are added to the measured corpus, which is the pattern side of the script question document 103 asked for, and every differential tally is unchanged with all seven still at zero disagreements. Document 115.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).
