@@ -587,8 +587,25 @@ def program_for(
             out.problem = read.problem.copy()
             out.gap = False
         return out^
+    var built = parse_pattern(
+        anchored(method, preprocessed(pattern)), flags, for_re2=True
+    )
+    if not built.ok:
+        # The pattern reads to Python and does not read to RE2, which before
+        # the second reading existed could not happen here: the tree was
+        # Python's either way and a tree that got this far had already read.
+        # A POSIX class with a name RE2 has not got is the shape, and the
+        # refusal is worded by the reader for the reason the branch above
+        # gives, so that a caller gets the sentence pandas would have given
+        # them rather than a gap this library owns. Document 111.
+        var refused = compile_program(built, ENGINE_RE2, minor=minor)
+        var says = re2_reads(anchored(method, preprocessed(pattern), False))
+        if not says.ok:
+            refused.problem = says.problem.copy()
+            refused.gap = False
+        return refused^
     return compile_program(
-        parse_pattern(anchored(method, preprocessed(pattern)), flags),
+        built,
         ENGINE_RE2,
         captures=method == METHOD_REPLACE,
         minor=minor,

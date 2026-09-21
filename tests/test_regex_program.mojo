@@ -665,11 +665,24 @@ def test_a_scoped_flag_group_carries_its_letters_on_a_node() raises:
 def test_what_re2_reads_differently_is_refused_rather_than_answered() raises:
     """None of these three raises anywhere, which is what makes them dangerous:
     an answer out of this tree would be a column of booleans that looks exactly
-    like a right one."""
+    like a right one.
+
+    The tree is the point rather than the pattern. Two of the three are patterns
+    the parser can now read RE2's way as well, and a tree that was read that way
+    does not reach this branch at all, because the flag is set by the reading
+    that had to throw one of the two meanings away. So the refusal here is about
+    being handed Python's tree and asked for RE2's engine, which is a caller
+    mistake rather than a gap in the library, and `method.mojo` is the caller
+    that does not make it. Document 111.
+    """
     assert_equal(built("a{,2}"), "!RE2 reads this syntax differently")
     assert_equal(built("[[:alpha:]]"), "!RE2 reads this syntax differently")
     assert_equal(built("\\B"), "!RE2 reads a non boundary between bytes")
     assert_true(compile_program(parse_pattern("a{,2}"), ENGINE_RE2).gap)
+    assert_true(compile_program(parse_pattern("a{,2}", 0, True), ENGINE_RE2).ok)
+    assert_true(
+        compile_program(parse_pattern("[[:alpha:]]", 0, True), ENGINE_RE2).ok
+    )
 
 
 def test_the_syntax_re2_refuses_that_looks_like_nothing() raises:

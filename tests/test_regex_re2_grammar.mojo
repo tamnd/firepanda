@@ -464,7 +464,28 @@ def test_the_posix_classes() raises:
     _takes(String("[[:]]"))
     _takes(String("[[:alpha]]"))
     _takes(String("[:alpha:]"))
+    _takes(String("[x[:y]]"))
     _refuses(String("[[:foo:]]"), String("RE2 has no such character class"))
+
+
+def test_a_posix_name_runs_to_the_next_colon_and_bracket() raises:
+    """RE2 looks for the next `:]` anywhere after the `[:` and does not stop at
+    the `]` that would close the set it is inside, so the name can hold a
+    bracket and a space and anything else, and then is not a name.
+
+    `[[:]]` is the pair worth having beside these, because the `:]` there is
+    the one the scan starts on and the name comes out empty, which is a name
+    RE2 has not got rather than a scan that found nothing. Document 111.
+    """
+    var said = String("RE2 has no such character class")
+    _refuses(String("[[:a]b:]]"), said)
+    _refuses(String("[a[:b]c:]d]"), said)
+    _refuses(String("[[::]]"), said)
+    _refuses(String("[[:^:]]"), said)
+    _refuses(String("[[:al pha:]]"), said)
+    _refuses(String("[[:al-pha:]]"), said)
+    _refuses(String("[[:ALPHA:]]"), said)
+    _refuses(String("[[:alpha1:]]"), said)
 
 
 def test_a_unicode_class_is_judged_like_everything_else() raises:

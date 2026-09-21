@@ -623,5 +623,78 @@ def test_a_flag_letter_re2_has_not_got_is_still_refused_where_it_was() raises:
     assert_false(program.gap)
 
 
+def test_a_posix_class_is_answered_rather_than_held_out() raises:
+    """The set RE2 reads rather than the set Python reads, since a call that
+    reaches Arrow is a call RE2 answers and RE2 is the one with the class.
+
+    Every text here was measured against the RE2 inside pyarrow. `[[:digit:]]`
+    finds a digit and nothing else, and the letters and the brackets Python
+    would have put in the set are not in it.
+    """
+    var digits = program_for(METHOD_CONTAINS, "[[:digit:]]")
+    assert_true(digits.ok)
+    assert_true(matches_text(digits, "a1"))
+    assert_false(matches_text(digits, "abc"))
+    assert_false(matches_text(digits, "[:]"))
+
+    var letters = program_for(METHOD_CONTAINS, "[[:alpha:][:digit:]]")
+    assert_true(letters.ok)
+    assert_true(matches_text(letters, "q"))
+    assert_true(matches_text(letters, "7"))
+    assert_false(matches_text(letters, " "))
+
+
+def test_a_posix_class_with_a_caret_covers_every_other_code_point() raises:
+    """RE2 complements over the whole range rather than over ASCII, so a code
+    point far outside the name's own range is in the set."""
+    var program = program_for(METHOD_CONTAINS, "[[:^digit:]]")
+    assert_true(program.ok)
+    assert_true(matches_text(program, "a"))
+    assert_true(matches_text(program, "é"))
+    assert_false(matches_text(program, "1"))
+
+
+def test_a_posix_name_re2_has_not_got_is_refused_rather_than_held_out() raises:
+    """Arrow raises for this pattern and so does firepanda, with the reader's
+    sentence rather than a gap, because a caller can act on one and not on the
+    other."""
+    var program = program_for(METHOD_CONTAINS, "[[:bogus:]]")
+    assert_false(program.ok)
+    assert_false(program.gap)
+    assert_equal(program.problem, "RE2 has no such character class")
+
+
+def test_a_count_with_no_lower_bound_is_answered_rather_than_held_out() raises:
+    """RE2 spells the four characters out, so `a{,2}` finds the text `a{,2}`
+    and does not find `aa`, measured against the RE2 inside pyarrow."""
+    var program = program_for(METHOD_CONTAINS, "a{,2}")
+    assert_true(program.ok)
+    assert_true(matches_text(program, "a{,2}"))
+    assert_false(matches_text(program, "aa"))
+
+    var twice = program_for(METHOD_CONTAINS, "a{,2}b{,3}")
+    assert_true(twice.ok)
+    assert_true(matches_text(twice, "a{,2}b{,3}"))
+    assert_false(matches_text(twice, "aabbb"))
+
+
+def test_an_argued_call_reads_both_of_them_pythons_way() raises:
+    """The second reading belongs to the engine rather than to the pattern, so
+    a caller who passed a `flags` argument gets the set Python reads and the
+    count Python counts."""
+    var set = program_for(
+        METHOD_CONTAINS, "[[:digit:]]", FLAG_IGNORECASE, argued=True
+    )
+    assert_true(set.ok)
+    assert_true(matches_text(set, "[:]"))
+    assert_false(matches_text(set, "a1"))
+
+    var counted = program_for(
+        METHOD_CONTAINS, "a{,2}", FLAG_IGNORECASE, argued=True
+    )
+    assert_true(counted.ok)
+    assert_true(matches_text(counted, "aa"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

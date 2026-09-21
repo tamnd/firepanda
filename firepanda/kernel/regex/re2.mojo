@@ -976,17 +976,30 @@ def _posix(mut c: _Cursor) -> Bool:
         True when one was read or refused, and False when the `[:` turned out to
         be two ordinary characters.
     """
+    # RE2 looks for the next `:]` anywhere after the `[:` and does not stop at
+    # the `]` that would close the class it is inside, so the name can hold
+    # anything at all and `[[:a]b:]]` is a class named `a]b` rather than a
+    # bracket, a colon and some letters. Whatever is found is then looked up,
+    # which is how a name with a space or a bracket in it comes back as a class
+    # RE2 has not got rather than as ordinary characters. Document 111.
+    var shut = -1
     var at = c.at + 2
-    if at < len(c.points) and c.points[at] == UInt32(ord("^")):
+    while at + 1 < len(c.points):
+        if c.points[at] == UInt32(ord(":")) and c.points[at + 1] == UInt32(
+            ord("]")
+        ):
+            shut = at
+            break
         at += 1
+    if shut < 0:
+        return False
+    var starts = c.at + 2
+    if c.points[starts] == UInt32(ord("^")):
+        starts += 1
     var name = String("")
-    while at < len(c.points) and _is_letter(c.points[at]):
-        name += chr(Int(c.points[at]))
-        at += 1
-    if at + 1 >= len(c.points):
-        return False
-    if c.points[at] != UInt32(ord(":")) or c.points[at + 1] != UInt32(ord("]")):
-        return False
+    for i in range(starts, shut):
+        name += chr(Int(c.points[i]))
+    at = shut
     var known = False
     for spelling in _posix_names():
         if spelling == name:

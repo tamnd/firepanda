@@ -189,6 +189,21 @@ def reason(pattern: StringSlice) -> String:
     return tree.python_problem.copy()
 
 
+def re2_shape(pattern: StringSlice) -> String:
+    """A pattern's tree as RE2's grammar reads it, or why there is not one.
+
+    Args:
+        pattern: The pattern.
+
+    Returns:
+        The drawing, or an exclamation mark and the problem.
+    """
+    var tree = parse_pattern(pattern, 0, True)
+    if not tree.ok:
+        return String("!", tree.problem)
+    return drawn(tree.nodes, tree.root)
+
+
 def test_a_plain_pattern_is_a_sequence_of_literals() raises:
     """The simplest tree there is, which fixes the shape everything else is
     written against."""
@@ -1019,6 +1034,81 @@ def test_a_close_with_no_run_open_is_given_up_on() raises:
     assert_equal(shape("a\\Eb"), "!bad escape")
     assert_equal(shape("\\Qa\\E\\E"), "!bad escape")
     assert_equal(shape("[\\Qa\\E]"), "!bad escape")
+
+
+def test_a_posix_class_is_a_bracket_and_letters_to_pythons_grammar() raises:
+    """Python has never had a POSIX class, so the brackets and the colons and
+    the letters are all members of the set and the tree says so."""
+    assert_equal(
+        shape("[[:digit:]]"),
+        "seq{in{lit([),lit(:),lit(d),lit(i),lit(g),lit(i),lit(t),lit(:)},lit(])}",
+    )
+    assert_true(parse_pattern("[[:digit:]]").re2_differs)
+
+
+def test_a_posix_class_is_its_ranges_to_re2s_grammar() raises:
+    """The same pattern read the other way, where the name is looked up and the
+    set holds what the name stands for and nothing else."""
+    assert_equal(re2_shape("[[:digit:]]"), "seq{in{range(0,9)}}")
+    assert_equal(re2_shape("[[:alpha:]]"), "seq{in{range(A,Z),range(a,z)}}")
+    assert_equal(
+        re2_shape("[[:alpha:][:digit:]]"),
+        "seq{in{range(A,Z),range(a,z),range(0,9)}}",
+    )
+
+
+def test_a_posix_class_with_a_caret_is_the_complement_of_its_ranges() raises:
+    """RE2 complements over every code point there is rather than over the
+    ASCII range the name itself lives in."""
+    assert_equal(
+        re2_shape("[[:^digit:]]"),
+        "seq{in{range(#0,/),range(:,#1114111)}}",
+    )
+
+
+def test_a_posix_name_runs_to_the_next_colon_and_bracket_anywhere() raises:
+    """RE2 looks for the next `:]` without stopping at the `]` that would close
+    the set, so a name can hold a bracket and then not be a name at all."""
+    assert_equal(re2_shape("[[:a]b:]]"), "!invalid character class range")
+    assert_equal(re2_shape("[[:bogus:]]"), "!invalid character class range")
+    assert_equal(re2_shape("[[::]]"), "!invalid character class range")
+
+
+def test_a_bracket_and_a_colon_with_no_closer_is_a_member_either_way() raises:
+    """With no `:]` anywhere after it the `[` is an ordinary member, which is
+    the one shape here the two grammars agree about."""
+    assert_equal(re2_shape("[x[:y]]"), shape("[x[:y]]"))
+    assert_equal(re2_shape("[[:alpha]]"), shape("[[:alpha]]"))
+    assert_false(parse_pattern("[x[:y]]").re2_differs)
+
+
+def test_a_count_with_no_lower_bound_is_characters_to_re2s_grammar() raises:
+    """The other place the two grammars both have a whole reading, where RE2
+    spells the braces out however the pattern in front of them reads."""
+    assert_equal(
+        re2_shape("a{,2}"),
+        "seq{lit(a),lit({),lit(,),lit(2),lit(})}",
+    )
+    assert_equal(shape("a{,2}"), "seq{max(0,2){lit(a)}}")
+    assert_true(parse_pattern("a{,2}").re2_differs)
+
+
+def test_a_count_after_a_braceless_one_repeats_the_brace_either_way() raises:
+    """The stack rule, which falls out of one node per character and so reads
+    the same whichever of the two grammars put the characters there."""
+    assert_equal(
+        re2_shape("a{,2}{1,3}"),
+        "seq{lit(a),lit({),lit(,),lit(2),max(1,3){lit(})}}",
+    )
+
+
+def test_the_second_reading_is_asked_for_and_is_not_the_default() raises:
+    """A parse nobody told which grammar to use reads Python's, which is what
+    keeps every caller that has not heard of the second reading right."""
+    assert_true(shape("[[:digit:]]") != re2_shape("[[:digit:]]"))
+    assert_true(shape("a{,2}") != re2_shape("a{,2}"))
+    assert_equal(parse_pattern("a{,2}", 0, False).re2_differs, True)
+    assert_equal(parse_pattern("a{,2}", 0, True).re2_differs, False)
 
 
 def main() raises:
