@@ -14,7 +14,7 @@ of `str.contains`. Those refusals are not an implementation gap here, they are
 the specification, and a compiler that quietly ran a possessive quantifier would
 be answering where pandas raises. The refusal is compared as its own answer.
 
-What it matches. Sixteen pieces of text, chosen in `tools/regex_match_oracle.py`
+What it matches. The text corpus, which lives in `tools/regex_texts.py`
 so that every measured difference between the two engines has something to bite
 on: Arabic Indic digits for `\\d`, a vertical tab for `\\s`, a trailing newline
 for `$`.
@@ -98,7 +98,7 @@ def ask_pandas(patterns: List[String], method: String) raises -> List[String]:
     """What pandas answers for every pattern over every text.
 
     One call across the boundary for the whole batch. The work per pattern is a
-    parse, a routing decision and sixteen short matches, and the crossing costs
+    parse, a routing decision and one short match per text, and the crossing costs
     more than any of that.
 
     Args:
@@ -140,15 +140,16 @@ def ask_pandas(patterns: List[String], method: String) raises -> List[String]:
 def ask_texts() raises -> List[String]:
     """The text every pattern is run against.
 
-    Read from the oracle rather than written here, so that the two sides cannot
-    disagree about what they are comparing.
+    Read from `tools/regex_texts.py` rather than written here, so that the two
+    sides cannot disagree about what they are comparing. The oracle beside it
+    reads the same module, which is why a pattern and its answer line up.
 
     Returns:
         The texts, in the order the answers use.
     """
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
-    var helper = Python.import_module("regex_match_oracle")
+    var helper = Python.import_module("regex_texts")
     var out = List[String]()
     var given = helper.texts()
     for text in given:

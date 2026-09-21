@@ -40,7 +40,7 @@ import warnings
 
 import pandas as pd
 
-from regex_match_oracle import TEXTS
+from regex_texts import TEXTS
 
 REPLACEMENTS = ("#", "[\\0]", "\\1")
 """The three replacements every pattern is asked for, in the order the answers
@@ -51,15 +51,6 @@ sent across the boundary is a list the two sides can disagree about the meaning
 of, and these three are short enough that writing them twice is safer than
 agreeing about them once.
 """
-
-
-def texts() -> list[str]:
-    """The text the patterns are replaced in.
-
-    Returns:
-        The list, in the order the answers use.
-    """
-    return list(TEXTS)
 
 
 def replacements() -> list[str]:
@@ -79,7 +70,7 @@ def _sweep(pattern: str, repl: str) -> str:
         when the call raised, or a single `u` when it did not raise and the rows
         it wrote are not text. A refusal is a property of the pattern and the
         replacement together rather than of any one text, so it is one letter
-        rather than sixteen strings.
+        rather than one string per text.
 
         The third of those looks impossible and is not. RE2 reads a zero width
         assertion between bytes rather than between characters, so a pattern

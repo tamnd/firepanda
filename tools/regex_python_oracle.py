@@ -29,16 +29,7 @@ from __future__ import annotations
 import warnings
 
 import pandas as pd
-from regex_match_oracle import TEXTS
-
-
-def texts() -> list[str]:
-    """The text the patterns are run against.
-
-    Returns:
-        The list, in the order the answers use.
-    """
-    return list(TEXTS)
+from regex_texts import TEXTS
 
 
 def _row(pattern: str) -> str:
