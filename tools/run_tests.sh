@@ -36,10 +36,21 @@
 # cost is how much of the library a file's imports pull in and instantiate, and
 # two files of the same length disagree about that by a factor of three.
 #
+# The numbers also have to come off the machine that runs them, which was the
+# second thing this got wrong. They were measured on a sixteen core workstation
+# on the theory that only the ratios matter, the shards balanced to within half
+# a per cent there, and on a four core runner the same assignment came out
+# spanning 423 to 622 seconds. `tools/test_costs_from_ci.sh` reads the table
+# back out of a CI run's logs, which is where it should come from.
+#
 # `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
-# `pixi run test-costs` does. It needs an unsharded run, because a table written
-# from one shard lists a tenth of the files. A file the table has not heard of
-# is treated as an average one until somebody regenerates it.
+# `pixi run test-costs` does, and is the fallback when there is no run to read.
+# It needs an unsharded run, because a table written from one shard lists a
+# tenth of the files. A file the table has not heard of is treated as an average
+# one until somebody regenerates it.
+#
+# Every file's time is printed next to its name in the report below, sharded or
+# not, which is what makes reading the table back out of a run's logs possible.
 #
 # The logs go under `build/` rather than under `TMPDIR`, which they used to. On
 # macOS `TMPDIR` is a per-session directory under `/var/folders` that the system
@@ -204,11 +215,13 @@ if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
   # reader above skips a comment wherever it appears, so this is about the file
   # being readable rather than about it working.
   {
-    echo "# Seconds per test file, written by \`pixi run test-costs\`. The ten test"
-    echo "# shards in .github/workflows/ci.yml divide the list up on these numbers."
-    echo "# Measured on a 13900K running eight files at a time, so they are wall"
-    echo "# clock under contention rather than anything absolute. Only the ratios"
-    echo "# matter here and the ratios hold on a smaller machine."
+    echo "# Seconds per test file, written by \`pixi run test-costs\` on $(uname -m),"
+    echo "# $jobs files at a time. The ten test shards in .github/workflows/ci.yml"
+    echo "# divide the list up on these numbers."
+    echo "#"
+    echo "# Prefer \`tools/test_costs_from_ci.sh\` when there is a CI run to read."
+    echo "# The ratios between files are not the same on sixteen cores as on four,"
+    echo "# so a table measured off the runner balances the runner badly."
   } > "$FIREPANDA_TEST_WRITE_COSTS"
   for file in "${files[@]}"; do
     base=${file##*/}

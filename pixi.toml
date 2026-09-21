@@ -90,6 +90,12 @@ format = "mojo format firepanda tests benchmarks tools"
 # shards know how to divide the files up. Run it when the shards have drifted
 # apart, which is what adding or deleting a few test files eventually does. It
 # is a whole unsharded test run, so it costs what a whole test run costs.
+#
+# `tools/test_costs_from_ci.sh <run-id>` is the better way when there is a CI
+# run to read, and it is free. The ratios between files are not the same on a
+# workstation as on a four core runner, so a table measured here balances the
+# runner badly: one measured on sixteen cores put the shards within half a per
+# cent of each other there and at 423 against 622 seconds on the runner.
 test-costs = { cmd = "FIREPANDA_TEST_WRITE_COSTS=tools/test_costs.txt bash tools/run_tests.sh", depends-on = ["build"] }
 
 # The CPython extension, and everything it needs, in one directory that points at

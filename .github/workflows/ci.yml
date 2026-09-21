@@ -236,11 +236,15 @@ jobs:
     # next one from 21.6 to 21.8. So the only lever left is more machines.
     #
     # tools/run_tests.sh splits the list on the measured times in
-    # tools/test_costs.txt, largest first into whichever shard has least so far,
-    # which lands the ten shards within half a per cent of each other. The first
-    # version of this balanced on file size instead and the shards came out
-    # between 249 and 662 seconds, because a file's cost is how much of the
-    # library it imports and instantiates rather than how long it is.
+    # tools/test_costs.txt, largest first into whichever shard has least so far.
+    # Two earlier versions of that table got it wrong in instructive ways. The
+    # first balanced on file size, on the reasoning that compile time tracks how
+    # much code there is, and the shards came out between 249 and 662 seconds: a
+    # file's cost is how much of the library it imports and instantiates rather
+    # than how long it is. The second measured real times on a sixteen core
+    # workstation, which balanced that machine to within half a per cent and this
+    # one to 423 against 622 seconds. The table now comes off a runner, which is
+    # what tools/test_costs_from_ci.sh is for.
     strategy:
       fail-fast: false
       matrix:
