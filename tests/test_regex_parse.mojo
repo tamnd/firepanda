@@ -447,7 +447,25 @@ def test_an_octal_escape_is_read_when_the_digits_allow_it() raises:
     assert_equal(shape("\\101"), "seq{lit(A)}")
     assert_equal(shape("\\0"), "seq{lit(#0)}")
     assert_equal(shape("\\08"), "seq{lit(#0),lit(8)}")
-    assert_equal(shape("\\400"), "!octal escape value outside of range 0-0o377")
+    assert_equal(shape("\\123"), "seq{lit(S)}")
+
+
+def test_an_octal_escape_above_the_python_ceiling_is_a_character_to_re2() raises:
+    """Python's octal escape is a byte and RE2's is a character.
+
+    So the two grammars part company at `\\400`, which is the character with
+    code 256 to RE2 and a refusal to Python, and they part company nowhere else
+    in this branch. The pattern is read here and carries Python's refusal
+    beside it, which is what routes it to the engine that can run it.
+    Document 106.
+    """
+    assert_equal(shape("\\400"), "seq{lit(#256)}")
+    assert_equal(reason("\\400"), "octal escape value outside of range 0-0o377")
+    assert_equal(shape("\\777"), "seq{lit(#511)}")
+    assert_equal(shape("[\\400]"), "seq{in{lit(#256)}}")
+    assert_equal(
+        reason("[\\400]"), "octal escape value outside of range 0-0o377"
+    )
 
 
 def test_a_single_digit_escape_is_a_reference_when_a_group_exists() raises:
@@ -455,6 +473,49 @@ def test_a_single_digit_escape_is_a_reference_when_a_group_exists() raises:
     before."""
     assert_equal(shape("(a)\\1"), "seq{group(1){seq{lit(a)}},ref(1)}")
     assert_equal(shape("\\8"), "!invalid group reference")
+
+
+def test_a_reference_nobody_wrote_a_group_for_is_octal_to_re2() raises:
+    """The one place where which grammar reads a pattern depends on how many
+    groups the caller happened to write.
+
+    Python reads `\\12` as a reference to group twelve and refuses it when
+    there is no such group, and that refusal is what hands the pattern to
+    Arrow, where RE2 has no reference at all and reads the same two characters
+    as the octal number ten. One digit further along they agree again, because
+    `\\123` is three octal digits and Python reads those as a character too.
+    Document 106.
+    """
+    assert_equal(shape("\\12"), "seq{lit(#10)}")
+    assert_equal(reason("\\12"), "invalid group reference")
+    assert_equal(shape("\\77"), "seq{lit(?)}")
+    assert_equal(shape("\\12x"), "seq{lit(#10),lit(x)}")
+
+
+def test_a_reference_re2_would_not_read_either_is_still_refused() raises:
+    """RE2 tells an octal escape from the reference it will not read by looking
+    at the digit after the first one, so a single digit and a digit above seven
+    are both `invalid escape sequence` there and neither grammar has anything
+    to offer. Those patterns stay refused, which is the answer they already
+    gave. Document 106.
+    """
+    for one in [
+        String("\\1"),
+        String("\\9"),
+        String("\\18"),
+        String("\\78"),
+        String("\\99"),
+    ]:
+        assert_equal(shape(one), "!invalid group reference")
+
+
+def test_a_reference_a_group_exists_for_is_still_a_reference() raises:
+    """The digits are read RE2's way only where Python has given up on them, so
+    a pattern with twelve groups in it still holds a reference to the twelfth
+    and still goes to the engine that can run one. Document 106."""
+    var twelve = String("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)")
+    assert_true(shape(twelve + "\\12").endswith("ref(12)}"))
+    assert_equal(reason(twelve + "\\12"), "")
 
 
 def test_the_two_end_anchors_are_different_nodes() raises:

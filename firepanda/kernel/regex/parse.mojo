@@ -1093,6 +1093,37 @@ def _octal_escape(mut c: _Cursor, var value: Int32) -> Int32:
     return c.add(OP_LITERAL, value, 0)
 
 
+def _re2_octal(digits: List[UInt32]) -> Int32:
+    """What RE2 makes of the digits Python read as a group reference.
+
+    RE2 has no backreference and never has had one, so a backslash and a digit
+    is an octal escape there or it is nothing. The rule is one line of RE2's
+    parser: a leading zero is always octal, and a leading digit from one to
+    seven is octal only when an octal digit follows it, which is how RE2 tells
+    an octal escape from the backreference it refuses to read. So `\\1` is
+    `invalid escape sequence: \\1` and `\\12` is the character with code ten.
+
+    Only one and two digit runs reach here. Python takes a third digit only
+    when all three are octal, and it returns an octal literal when it does, so
+    a run that got as far as being called a group reference is a run RE2 stops
+    at after two. Document 106.
+
+    Args:
+        digits: The one or two digits Python read, the first of them not a
+            zero.
+
+    Returns:
+        The character RE2 reads, or minus one when RE2 refuses the escape.
+    """
+    if len(digits) != 2:
+        return -1
+    var high = _octal_value(digits[0])
+    var low = _octal_value(digits[1])
+    if high < 0 or low < 0:
+        return -1
+    return high * 8 + low
+
+
 def _digit_escape(mut c: _Cursor, first: UInt32, in_class: Bool) -> Int32:
     """Reads a backslash followed by a digit that is not zero.
 
@@ -1142,8 +1173,14 @@ def _digit_escape(mut c: _Cursor, first: UInt32, in_class: Bool) -> Int32:
             # about the value.
             c.re2_refuses = True
         if value > 0xFF:
-            c.give_up(String("octal escape value outside of range 0-0o377"))
-            return -1
+            # Python stops at 0o377 because its own escape is a byte, and RE2
+            # reads three octal digits as a character, so `[\\400]` is the
+            # character with code 256 there and a refusal here. Document 106.
+            if not c.python_refuses:
+                c.python_refuses = True
+                c.python_problem = String(
+                    "octal escape value outside of range 0-0o377"
+                )
         return c.add(OP_LITERAL, value, 0)
 
     var digits = List[UInt32]()
@@ -1160,22 +1197,50 @@ def _digit_escape(mut c: _Cursor, first: UInt32, in_class: Bool) -> Int32:
             for i in range(3):
                 value = value * 8 + _octal_value(digits[i])
             if value > 0xFF:
-                c.give_up(String("octal escape value outside of range 0-0o377"))
-                return -1
+                # The same ceiling as in a class and for the same reason, and
+                # the reason is worth stating once: Python's octal escape is a
+                # byte and RE2's is a character, so the two grammars disagree
+                # about `\\400` through `\\777` and about nothing else in this
+                # branch. Document 106.
+                if not c.python_refuses:
+                    c.python_refuses = True
+                    c.python_problem = String(
+                        "octal escape value outside of range 0-0o377"
+                    )
             return c.add(OP_LITERAL, value, 0)
 
     var number: Int32 = 0
     for i in range(len(digits)):
         number = number * 10 + Int32(Int(digits[i]) - 0x30)
+    var refused = String("")
     if number == 0 or number > c.groups:
-        c.give_up(String("invalid group reference"))
-        return -1
-    if _open(c, number):
-        c.give_up(String("cannot refer to an open group"))
+        refused = String("invalid group reference")
+    elif _open(c, number):
+        refused = String("cannot refer to an open group")
+    if refused.byte_length() != 0:
+        # Python has turned the reference down, so pandas hands the pattern to
+        # Arrow and the digits get read a second time by a grammar that has no
+        # reference in it at all. `\\12` is a reference to group twelve here and
+        # the character with code ten there, and which of the two a caller gets
+        # depends on how many groups they happened to write. Document 106.
+        var octal = _re2_octal(digits)
+        if octal >= 0:
+            if not c.python_refuses:
+                c.python_refuses = True
+                c.python_problem = refused.copy()
+            return c.add(OP_LITERAL, octal, 0)
+        c.give_up(refused^)
         return -1
     if not _behind_allows(c, number):
         return -1
-    return c.add(OP_GROUPREF, number, 0)
+    # The reference carries what RE2 would have made of the same digits, one
+    # higher so that zero means nothing. It is needed because a reference can
+    # reach RE2 even though a pattern holding one is supposed to route to
+    # Python: the router's walk does not enter a repeat, so `(x\\12)*` with
+    # twelve groups in front of it is handed to Arrow, where `\\12` is the
+    # character with code ten and pandas gets a column rather than an error.
+    # Document 106.
+    return c.add(OP_GROUPREF, number, _re2_octal(digits) + 1)
 
 
 def _open(c: _Cursor, number: Int32) -> Bool:

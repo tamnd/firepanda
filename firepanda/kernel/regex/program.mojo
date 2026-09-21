@@ -1473,6 +1473,13 @@ def _emit_node(mut b: _Builder, nodes: List[Node], node: Int32):
         b.add_set(List[Int32](), False)
         return
     if it.op == OP_GROUPREF:
+        if not b.python:
+            # The character RE2 reads out of the same digits, which the parser
+            # worked out and left on the node. No fold is asked for, and none
+            # could apply: two octal digits reach 0o77 at the most and the
+            # lowest character with a case is well above that. Document 106.
+            _ = b.emit(IN_CHAR, it.b - 1, 0)
+            return
         # The flags are read here rather than in the checking walk because they
         # are scoped, so `(?i:(a)\1)` folds and `(?i:(a))\1` does not, and only
         # the walk that emits knows which scope it is standing in.
@@ -1851,6 +1858,14 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
             return
     if it.op == OP_GROUPREF:
         if not b.python:
+            if it.b != 0:
+                # RE2 has no backreference at all and reads the digits that
+                # made this node as an octal character, so there is nothing
+                # here to refuse. Only a reference the router failed to see
+                # gets this far, since a pattern holding one is meant to be
+                # answered by the other engine. The parser put the character
+                # on the node. Document 106.
+                return
             _refuse_construct(b, String("backreference"))
             return
         # Nothing to refuse on this side any more. The one thing about a
