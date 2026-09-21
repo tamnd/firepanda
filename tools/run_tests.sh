@@ -13,8 +13,8 @@
 #
 # `--fast`, or `FIREPANDA_TEST_FAST`, leaves out the expensive files. The
 # distribution is lopsided enough that one number separates the suite cleanly:
-# fifty one of the hundred and sixty one files cost a minute or more and between
-# them they are seventy four per cent of the run, so leaving them out keeps two
+# fifty five of the hundred and sixty two files cost a minute or more and between
+# them they are seventy three per cent of the run, so leaving them out keeps two
 # files in three for a quarter of the time. It is for the loop somebody is in
 # while they are writing code, and it says so in its own output, because a run
 # that skipped a third of the suite is not the thing that decides whether a
@@ -35,7 +35,7 @@
 # reason is that a test file spends most of its wall clock compiling the library
 # again rather than running assertions, so there is nothing to share between
 # files and the only way to go faster is more machines. `.github/workflows/ci.yml`
-# runs ten of them.
+# runs eight of them.
 #
 # Unsharded, the files go out longest first for the same reason the shards are
 # packed that way. Alphabetical order puts `test_sql_run.mojo` near the end and
@@ -58,8 +58,11 @@
 #
 # What the shards cannot do anything about is that a shard does not finish until
 # its longest file does. On a runner that file is `tests/test_sql_run.mojo` at
-# around six hundred seconds, so ten shards and twenty shards have the same wall
-# clock and the whole job sits a little above a floor set by one compile.
+# 596 seconds of the 12086 the suite costs, so six shards and twenty shards have
+# the same wall clock and the whole job sits a little above a floor set by one
+# compile. The count in the workflow is eight, which is the smallest that keeps
+# the busiest unfloored shard well clear of that floor: eight puts it at 384
+# against 596, and runners differ from each other by about a third.
 #
 # The obvious way out is to compile the library once and point the test files at
 # the result, and it does not work. `mojo precompile firepanda -o
@@ -82,7 +85,7 @@
 # `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
 # `pixi run test-costs` does, and is the fallback when there is no run to read.
 # It needs an unsharded run, because a table written from one shard lists a
-# tenth of the files. A file the table has not heard of is treated as an average
+# eighth of the files. A file the table has not heard of is treated as an average
 # one until somebody regenerates it.
 #
 # Every file's time is printed next to its name in the report below, sharded or
@@ -114,8 +117,8 @@ done
 [ -n "${FIREPANDA_TEST_FAST:-}" ] && fast=1
 
 # What `--fast` calls expensive. The distribution is lopsided enough that one
-# number separates the suite cleanly: 51 of the 161 files are at or above a
-# minute and between them they are 74 per cent of the whole run, so leaving them
+# number separates the suite cleanly: 55 of the 162 files are at or above a
+# minute and between them they are 73 per cent of the whole run, so leaving them
 # out keeps two files in three and costs a quarter of the time.
 expensive=60
 

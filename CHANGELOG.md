@@ -16,6 +16,14 @@ It needed no new field. A table function reference already carried one field hol
 
 Running it means the table function and the column being built together, since the position is the position the function produced the row at and nothing downstream can work it out afterwards. That is the same shape the other table function gaps are waiting on, so the refusal says what it always said and now says it from lowering.
 
+### Changed: the test shards go from ten to eight and the cost table is remeasured
+
+A shard cannot finish before its longest file does, and on a runner `tests/test_sql_run.mojo` is 596 seconds of the 12086 the suite costs. Ten shards left seven of them finishing in around 310 seconds and then waiting on that one file, so the last two were buying no wall clock at all while still queueing behind every other job whenever several pull requests are open at once. Eight comes out at the same 596 seconds with a fifth fewer machines.
+
+Not six, which the arithmetic also puts at 596. Runners differ from each other by about a third, and eight leaves the busiest unfloored shard at 384 seconds against the 596 second floor where six leaves it at 542, so a slow machine would become the new wall clock.
+
+`tools/test_costs.txt` is regenerated from a green run and now covers all 162 test files. Two measurements that did not work out are written down beside it: the precompiled package makes the largest file slower rather than faster, 206 seconds against 193, and splitting that file into three costs 201, 175 and 185 against 204 for the whole, because every part still imports `firepanda.sql.run`.
+
 ### Added: an E'...' string reads its backslash escapes
 
 A string written with an `E` in front of it takes backslash escapes the way C does, and firepanda used to turn the whole spelling down rather than decode half of it. It decodes all of it now, at 25 statements of the corpus.

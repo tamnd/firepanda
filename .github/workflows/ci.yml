@@ -221,7 +221,7 @@ jobs:
         run: uvx mypy
 
   build:
-    name: Tests (${{ matrix.os }}, shard ${{ matrix.shard }} of 10)
+    name: Tests (${{ matrix.os }}, shard ${{ matrix.shard }} of 8)
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ${{ matrix.os }}
@@ -232,16 +232,33 @@ jobs:
     # slowest job in this workflow and told us nothing the canary had not already
     # told us that morning.
     #
-    # The shards are ten machines running a tenth of the test files each.
+    # The shards are eight machines running an eighth of the test files each.
     # This step was thirty nine minutes of a fifty one minute job and it does not
     # get faster on one machine: Mojo 1.0 has no `mojo test`, so each test file
     # is its own program that compiles the library again, and almost all of that
     # wall clock is the compiler rather than the assertions. There is nothing to
     # cache between files either, because the generics are instantiated into
     # whichever program uses them, which was measured rather than assumed:
-    # pointing a test run at the precompiled `build/firepanda.mojoc` instead of
-    # at the sources moved the largest file from 14.3 seconds to 13.8 and the
-    # next one from 21.6 to 21.8. So the only lever left is more machines.
+    # on the workstation `mojo run -I build tests/test_sql_run.mojo`, against the
+    # precompiled package, takes 206 seconds where `mojo run -I .` against the
+    # sources takes 193. All 422 tests pass either way, so the package is right
+    # and simply does not save anything.
+    #
+    # Eight rather than ten, because past a point more machines stop buying wall
+    # clock. A shard cannot finish before its longest file does, and on a runner
+    # tests/test_sql_run.mojo is 596 seconds of the 12086 the suite costs. Ten
+    # shards leave seven of them finishing in around 310 seconds and waiting on
+    # that one file; eight leave five at around 380. Both come out at 596, so the
+    # two extra machines were buying nothing and were still queueing behind every
+    # other job when several pull requests are open at once, which is where the
+    # real wall clock has been going lately.
+    #
+    # Not six, which the same arithmetic also says comes out at 596. Runners
+    # differ from each other by about a third: one run's shards were predicted at
+    # 1209 to 1217 seconds of work and measured at 784 to 1313. Eight leaves the
+    # busiest unfloored shard at 384 against a 596 second floor, which is room for
+    # a machine half again as slow as the model. Six leaves it at 542, which is
+    # room for ten per cent, and a slow runner there becomes the new wall clock.
     #
     # tools/run_tests.sh splits the list on the measured times in
     # tools/test_costs.txt, largest first into whichever shard has least so far.
@@ -257,7 +274,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7
 
@@ -271,7 +288,7 @@ jobs:
 
       - name: Unit and docstring tests
         env:
-          FIREPANDA_TEST_SHARDS: 10
+          FIREPANDA_TEST_SHARDS: 8
           FIREPANDA_TEST_SHARD: ${{ matrix.shard }}
         run: pixi run test
 
