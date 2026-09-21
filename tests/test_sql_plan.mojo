@@ -3148,15 +3148,34 @@ def test_the_one_word_spellings_build_the_same_two_calls() raises:
     )
 
 
-def test_in_over_a_bare_value_is_a_call_by_the_time_it_lowers() raises:
+def test_in_over_a_bare_value_is_a_search_by_the_time_it_lowers() raises:
     # `a IN b` with no parentheses asks whether `b` holds `a`, which DuckDB
-    # names `contains(b, a)`. So what reaches lowering is an ordinary call, and
-    # what stops it is the ordinary thing that stops a call with no kernel
-    # behind it rather than anything about how it was spelled.
-    with assert_raises(contains="no kernel for the function contains"):
-        _ = _plan("SELECT 1 IN g FROM t")
-    with assert_raises(contains="no kernel for the function contains"):
-        _ = _plan("SELECT contains(g, 1) FROM t")
+    # names `contains(b, a)`, and over text that search is `strpos(b, a) > 0`.
+    # So the spelling is gone by the time the plan is built and what is left is
+    # the comparison the call means.
+    assert_equal(
+        _plan("SELECT 'b' IN g AS held FROM t"),
+        "PROJECT [(instr(g, b)) > 0 as held]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT 'b' IN g AS held FROM t"),
+        _plan("SELECT contains(g, 'b') AS held FROM t"),
+    )
+
+
+def test_a_not_in_over_a_bare_value_is_that_search_negated() raises:
+    assert_equal(
+        _plan("SELECT 'b' NOT IN g AS gone FROM t"),
+        "PROJECT [not((instr(g, b)) > 0) as gone]\n  SCAN t []\n",
+    )
+
+
+def test_a_contains_takes_two_arguments_and_says_so_by_name() raises:
+    # The message names `contains` rather than the `instr` it becomes, because
+    # the count is wrong in the call the query wrote and not in the one
+    # lowering built out of it.
+    with assert_raises(contains="contains looks for one value in one other"):
+        _ = _plan("SELECT contains(g) FROM t")
 
 
 def test_the_unknown_spellings_build_the_same_two_calls() raises:

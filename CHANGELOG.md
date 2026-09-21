@@ -21,6 +21,15 @@ A patch release. The entry that matters is the version number itself, and one mo
 All three read 0.8.20 now, and the spec job compares them on every run. Nothing in the build derives any of them from the tag, so a check is the only thing that would notice, and the note in `version.mojo` had already predicted what happens without one.
 
 
+### Added: contains runs over text, and so does the IN that means it
+
+`contains(a, b)` asks whether `b` appears in `a`. Over text that is `strpos(a, b) > 0`, and it is that exactly: a null on either side makes the search null and the comparison null with it, which is what DuckDB answers. So lowering builds the search and the comparison rather than asking for a kernel by that name, and nothing new was needed in the engine.
+
+`a IN b` with no parentheses is the same call with the arguments the other way round, which is how DuckDB reads the spelling and what it names the column, so that form runs now too. `a NOT IN b` is the search negated.
+
+The other reading of `contains` is over a list or a map. Both of those bind as text here and are turned down as text, which is the right answer until there is a list type to answer about.
+
+A call with the wrong number of arguments says `contains`, because the count is wrong in the call the query wrote and not in the one lowering built out of it. A call with the wrong argument types still says `instr`, which is the same thing `strpos` and `POSITION` have always done.
 
 ### Added: IN over a bare value is read as the containment it is
 

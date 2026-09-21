@@ -1569,6 +1569,8 @@ def _lowers(name: String) -> Bool:
         return True
     if name == "instr" or name == "strpos" or name == "position":
         return True
+    if name == "contains":
+        return True
     if name == "is_null" or name == "is_not_null" or name == "like":
         return True
     if name == "like_escape":
@@ -2920,6 +2922,28 @@ def _lower_expr(
             # than the alias. `POSITION` only ever arrives here as a call
             # because the keyword spelling became one while the query was read.
             return plan.exprs.call("instr", lowered^, True)
+        if name == "contains":
+            # `contains(a, b)` asks whether `b` appears in `a`, and over text
+            # that is `strpos(a, b) > 0`, nulls included: a null on either side
+            # makes the search null and the comparison null with it, which is
+            # what DuckDB answers. Its other reading is over a list or a map,
+            # and both of those bind as text here and are turned down as text,
+            # which is the right answer until there is a list type.
+            if len(lowered) != 2:
+                raise Error(
+                    String(
+                        (
+                            "contains looks for one value in one other and was"
+                            " given "
+                        ),
+                        len(lowered),
+                        " arguments",
+                    )
+                )
+            var found = plan.exprs.call("instr", lowered^, True)
+            return plan.exprs.binary(
+                BinaryOp.GT, found, plan.exprs.literal(Value(Int64(0)))
+            )
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

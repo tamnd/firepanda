@@ -2459,6 +2459,26 @@ def test_a_search_folds_the_way_clickbench_folds_one() raises:
     same(got, [4], "c")
 
 
+def test_a_containment_answers_what_the_search_behind_it_answers() raises:
+    # `contains(a, b)` over text is `strpos(a, b) > 0`, and the previous test
+    # is the same question asked the long way. Four of the words hold the run.
+    var got = answer(
+        "SELECT count(*) AS c FROM words WHERE contains(word, 'ap')", "c"
+    )
+    same(got, [4], "c")
+
+
+def test_a_bare_in_answers_the_same_containment() raises:
+    # `'ap' IN word` is that call with the arguments the other way round, which
+    # is how DuckDB reads the spelling and what it names the column.
+    var got = answer("SELECT count(*) AS c FROM words WHERE 'ap' IN word", "c")
+    same(got, [4], "c")
+    var missed = answer(
+        "SELECT count(*) AS c FROM words WHERE 'ap' NOT IN word", "c"
+    )
+    same(missed, [2], "c")
+
+
 def test_a_trim_folds_the_way_a_character_count_folds() raises:
     # The shape that matters: a trim worked out per row and read back by the
     # length of what came off it.
