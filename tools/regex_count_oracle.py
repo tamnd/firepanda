@@ -29,16 +29,7 @@ import warnings
 
 import pandas as pd
 
-from regex_match_oracle import TEXTS
-
-
-def texts() -> list[str]:
-    """The text the patterns are counted in.
-
-    Returns:
-        The list, in the order the answers use.
-    """
-    return list(TEXTS)
+from regex_texts import TEXTS
 
 
 def _row(pattern: str) -> str:
@@ -47,7 +38,7 @@ def _row(pattern: str) -> str:
     Returns:
         One number per text separated by spaces, or a single `x` when the call
         raised. The refusal is a property of the pattern rather than of a text,
-        so it is one letter rather than sixteen numbers.
+        so it is one letter rather than one number per text.
     """
     column = pd.Series(TEXTS, dtype="str")
     try:

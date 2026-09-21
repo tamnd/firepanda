@@ -19,8 +19,9 @@ question with the pattern rewritten and anchored, which is a rewrite pandas does
 in Python and this library has to copy exactly. A pattern can be compiled
 correctly and anchored wrongly, and `match` is where that shows up.
 
-The texts are here rather than in the caller because they have to be the same
-texts on both sides and a list written down twice is a list that drifts.
+The texts are read from `regex_texts` rather than written here, because they
+have to be the same texts on both sides and in all four oracles, and a list
+written down twice is a list that drifts.
 
 Answers come back one line per pattern so that a batch crosses the boundary
 once.
@@ -32,44 +33,7 @@ import warnings
 
 import pandas as pd
 
-TEXTS = [
-    "",
-    "a",
-    "b",
-    "ab",
-    "ba",
-    "aab",
-    "abc",
-    "ABC",
-    "a\n",
-    "\na",
-    "a\nb",
-    "a1_ b2",
-    "007",
-    "٣٤",
-    "héllo ΑΒΓ",
-    "a\tb\x0bc\xa0d",
-]
-"""The text every pattern is run against.
-
-Chosen so that each of the measured differences between the two engines has
-something to bite on. The Arabic Indic digits are digits to Python's `\\d` and
-not to RE2's. The last line holds a tab, which both engines call whitespace, and
-a vertical tab and a non breaking space, which only Python does. The three with
-newlines in them are there for `$`, which matches before a final newline in
-Python and does not in RE2, and for the full stop, which excludes a newline in
-both. The rest are ordinary enough that an ordinary pattern has somewhere to
-match.
-"""
-
-
-def texts() -> list[str]:
-    """The text the patterns are run against.
-
-    Returns:
-        The list, in the order the answers use.
-    """
-    return list(TEXTS)
+from regex_texts import TEXTS
 
 
 def _row(pattern: str, method: str) -> str:
@@ -78,7 +42,7 @@ def _row(pattern: str, method: str) -> str:
     Returns:
         One character per text, `y` for a match and `n` for none, or a single
         `x` when the call raised. The refusal is a property of the pattern
-        rather than of a text, so it is one character rather than sixteen.
+        rather than of a text, so it is one character rather than one per text.
     """
     column = pd.Series(TEXTS, dtype="str")
     try:

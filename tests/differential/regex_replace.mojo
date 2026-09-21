@@ -141,15 +141,16 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
 def ask_texts() raises -> List[String]:
     """The text every pattern is replaced in.
 
-    Read from the oracle rather than written here, so that the two sides cannot
-    disagree about what they are comparing.
+    Read from `tools/regex_texts.py` rather than written here, so that the two
+    sides cannot disagree about what they are comparing. The oracle beside it
+    reads the same module, which is why a pattern and its answer line up.
 
     Returns:
         The texts, in the order the answers use.
     """
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
-    var helper = Python.import_module("regex_replace_oracle")
+    var helper = Python.import_module("regex_texts")
     var out = List[String]()
     var given = helper.texts()
     for text in given:

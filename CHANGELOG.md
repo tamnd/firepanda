@@ -307,6 +307,18 @@ The reader needed the same correction the parser needed, which is the second tim
 
 Document 111 is the write up.
 
+### Added: a corpus of texts for the regular expression differentials
+
+The six regular expression differentials compared thirty thousand patterns against sixteen pieces of text, and the sixteen were handpicked one at a time against differences somebody already knew about. That made them a regression test rather than a search, and it is why every disagreement the differentials have ever reported was found on the pattern side.
+
+There are ninety six texts now. The original sixteen are kept verbatim and kept first, so that every answer agreed on so far is still being asked in the same place, and eighty more are generated from forty five fragments. Nineteen of the fragments are outside ASCII, covering nine scripts, the byte lengths two, three and four, a combining mark and five folding corners, which is what a differential between an engine that runs on bytes and an engine that runs on code points needs and did not have.
+
+The list lives in `tools/regex_texts.py` rather than inside one of the four oracles, and the four Mojo differentials read that module directly rather than each reaching the list by its own path through a different oracle.
+
+Widening the texts six fold found zero disagreements on all six comparisons. That is the measurement rather than a disappointment: the agreement the differentials report can now be said to be agreement about the engines rather than agreement about sixteen strings. The held out tallies are unchanged, since a pattern is held out for what the pattern is.
+
+Document 112.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

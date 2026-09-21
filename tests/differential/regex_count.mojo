@@ -17,7 +17,7 @@ the three rules those come to and document 79 says where each was measured.
 Two things are compared for every pattern, the same two as next door. Whether it
 runs at all, since RE2 refuses constructs Python reads and pandas hands the
 pattern to RE2 anyway, so the refusal is the specification rather than a gap.
-And the sixteen numbers.
+And the numbers, one per text.
 
 `count` is asked once rather than three times because there is nothing to anchor.
 Upstream reads the pattern as the caller wrote it, with no rewrite and no
@@ -64,7 +64,7 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
 
     One call across the boundary for the whole batch, for the reason the other
     differential gives: the work per pattern is a parse, a routing decision and
-    sixteen short scans, and the crossing costs more than any of that.
+    one short scan per text, and the crossing costs more than any of that.
 
     Args:
         patterns: The corpus.
@@ -103,15 +103,16 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
 def ask_texts() raises -> List[String]:
     """The text every pattern is counted in.
 
-    Read from the oracle rather than written here, so that the two sides cannot
-    disagree about what they are comparing.
+    Read from `tools/regex_texts.py` rather than written here, so that the two
+    sides cannot disagree about what they are comparing. The oracle beside it
+    reads the same module, which is why a pattern and its answer line up.
 
     Returns:
         The texts, in the order the answers use.
     """
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
-    var helper = Python.import_module("regex_count_oracle")
+    var helper = Python.import_module("regex_texts")
     var out = List[String]()
     var given = helper.texts()
     for text in given:

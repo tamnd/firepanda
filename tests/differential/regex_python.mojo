@@ -62,7 +62,7 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
     """What pandas answers for every pattern over every text.
 
     One call across the boundary for the whole batch, because the work per
-    pattern is a parse and sixteen short matches and the crossing costs more
+    pattern is a parse and one short match per text and the crossing costs more
     than any of that.
 
     Args:
@@ -102,15 +102,16 @@ def ask_pandas(patterns: List[String]) raises -> List[String]:
 def ask_texts() raises -> List[String]:
     """The text every pattern is run against.
 
-    Read from the oracle rather than written here, so that the two sides cannot
-    disagree about what they are comparing.
+    Read from `tools/regex_texts.py` rather than written here, so that the two
+    sides cannot disagree about what they are comparing. The oracle beside it
+    reads the same module, which is why a pattern and its answer line up.
 
     Returns:
         The texts, in the order the answers use.
     """
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
-    var helper = Python.import_module("regex_python_oracle")
+    var helper = Python.import_module("regex_texts")
     var out = List[String]()
     var given = helper.texts()
     for text in given:
