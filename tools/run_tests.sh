@@ -11,6 +11,15 @@
 # in the compiler rather than in the assertions. Serially this step was the
 # largest single cost in the pull request pipeline.
 #
+# `--fast`, or `FIREPANDA_TEST_FAST`, leaves out the expensive files. The
+# distribution is lopsided enough that one number separates the suite cleanly:
+# fifty one of the hundred and sixty one files cost a minute or more and between
+# them they are seventy four per cent of the run, so leaving them out keeps two
+# files in three for a quarter of the time. It is for the loop somebody is in
+# while they are writing code, and it says so in its own output, because a run
+# that skipped a third of the suite is not the thing that decides whether a
+# branch is good.
+#
 # Output is collected per file and printed in filename order once that file
 # finishes, so the log reads the same as the serial one did rather than as four
 # test suites interleaved. Every file is run even after one fails, because a
@@ -27,6 +36,10 @@
 # again rather than running assertions, so there is nothing to share between
 # files and the only way to go faster is more machines. `.github/workflows/ci.yml`
 # runs ten of them.
+#
+# Unsharded, the files go out longest first for the same reason the shards are
+# packed that way. Alphabetical order puts `test_sql_run.mojo` near the end and
+# the last lane runs it alone while the other seven have nothing left to do.
 #
 # The split is by measured time, out of `tools/test_costs.txt`, largest first
 # into whichever shard has least so far. That is the standard greedy schedule
@@ -68,6 +81,21 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+fast=0
+for arg in "$@"; do
+  case $arg in
+    --fast) fast=1 ;;
+    *) echo "unknown argument $arg, expected --fast" >&2; exit 2 ;;
+  esac
+done
+[ -n "${FIREPANDA_TEST_FAST:-}" ] && fast=1
+
+# What `--fast` calls expensive. The distribution is lopsided enough that one
+# number separates the suite cleanly: 51 of the 161 files are at or above a
+# minute and between them they are 74 per cent of the whole run, so leaving them
+# out keeps two files in three and costs a quarter of the time.
+expensive=60
+
 if [ -n "${FIREPANDA_TEST_JOBS:-}" ]; then
   jobs=$FIREPANDA_TEST_JOBS
 elif command -v nproc > /dev/null 2>&1; then
@@ -80,6 +108,28 @@ fi
 # Each `mojo run` is itself parallel, so handing it every core twice over makes
 # the machine slower rather than faster.
 [ "$jobs" -gt 8 ] && jobs=8
+
+# And cores are not always the binding constraint. A `mojo run` of a test file
+# wants somewhere around three quarters of a gigabyte while it is compiling, and
+# eight of those on a machine that has already given its memory to something
+# else do not run eight times faster, they page. Measured on a laptop with three
+# other projects building on it: free memory at 60 megabytes, swap at 7
+# gigabytes of 8, forty three million page outs, and `tests/test_sql_run.mojo`
+# taking 76 minutes against the 522 seconds the cost table has for it. So the
+# width is capped by what there is to run in as well as by what there is to run
+# on. A CI runner, which is the case that matters, has its memory to itself and
+# never reaches this.
+if [ -z "${FIREPANDA_TEST_JOBS:-}" ] && command -v vm_stat > /dev/null 2>&1; then
+  spare=$(vm_stat | awk '
+    /page size of/ { for (i = 1; i <= NF; i++) if ($i == "of") size = $(i + 1) }
+    /Pages free/ || /Pages inactive/ || /Pages speculative/ { gsub(/\./, "", $NF); pages += $NF }
+    END { if (size > 0) print int(pages * size / 1048576) }')
+  if [ -n "${spare:-}" ] && [ "$spare" -gt 0 ] && [ $((spare / 768)) -lt "$jobs" ]; then
+    echo "only ${spare}MB of memory is going spare, so $((spare / 768)) at a time rather than $jobs"
+    jobs=$((spare / 768))
+  fi
+fi
+
 [ "$jobs" -lt 1 ] && jobs=1
 
 files=(tests/test_*.mojo)
@@ -153,6 +203,50 @@ if [ "$shards" -gt 1 ]; then
   files=("${picked[@]}")
 fi
 
+# `--fast` leaves out the files the cost table calls expensive, and it needs the
+# table for the same reason the sharding does: which files those are is a
+# measurement and not something worth guessing at. It is not the gate. It says
+# so on the way in and it says how many it skipped, because the expensive files
+# are the frame arithmetic, the chunk agreement sweep and the SQL planner, which
+# is where a mistake in a kernel actually shows up.
+left_out=0
+if [ "$fast" -eq 1 ]; then
+  if [ ! -e "$costs" ]; then
+    echo "no cost table at $costs, so --fast has nothing to go on" >&2
+    exit 1
+  fi
+  kept=()
+  while IFS= read -r file; do
+    kept[${#kept[@]}]=$file
+  done < <(printf '%s\n' "${files[@]}" | awk -v costs="$costs" -v limit="$expensive" '
+      BEGIN { while ((getline line < costs) > 0) { if (line ~ /^#/) continue
+                                                   if (split(line, f, " ") < 2) continue
+                                                   cost[f[2]] = f[1] + 0 } }
+      # A file the table has never heard of is kept. It is new, it is probably
+      # ordinary, and the failure worth avoiding is silently not running it.
+      { if (!($0 in cost) || cost[$0] < limit) print }')
+  left_out=$(( ${#files[@]} - ${#kept[@]} ))
+  files=("${kept[@]}")
+fi
+
+# Longest first. The sharding above already sorts, because it has to, but an
+# unsharded run went out alphabetically and the spread is wide enough to matter:
+# 522 seconds at the top against a median of 36, so a lane that picks the slow
+# one up last finishes long after every other lane has run out of work. A file
+# the table has not heard of goes last, which is the right guess about a file
+# that is more likely to be ordinary than to be one of the fifty one.
+if [ "$shards" -eq 1 ] && [ -e "$costs" ]; then
+  ordered=()
+  while IFS= read -r file; do
+    ordered[${#ordered[@]}]=$file
+  done < <(printf '%s\n' "${files[@]}" | awk -v costs="$costs" '
+      BEGIN { while ((getline line < costs) > 0) { if (line ~ /^#/) continue
+                                                   if (split(line, f, " ") < 2) continue
+                                                   cost[f[2]] = f[1] + 0 } }
+      { printf "%d %s\n", ($0 in cost) ? cost[$0] : 0, $0 }' | sort -k1,1nr -k2,2 | cut -d' ' -f2)
+  files=("${ordered[@]}")
+fi
+
 # The process id is in the name because two runs of this in the same checkout at
 # once is a normal thing to want and they must not share a log directory.
 logs=build/testlogs.$$
@@ -164,6 +258,9 @@ if [ "$shards" -gt 1 ]; then
   echo "running ${#files[@]} of $total test files, shard $shard of $shards, $jobs at a time"
 else
   echo "running ${#files[@]} test files, $jobs at a time"
+fi
+if [ "$left_out" -ne 0 ]; then
+  echo "--fast left out the $left_out files costing ${expensive}s or more, so this run is not the gate"
 fi
 
 run_one() {
@@ -183,9 +280,17 @@ export -f run_one
 printf '%s\0' "${files[@]}" \
   | xargs -0 -P "$jobs" -I {} bash -c 'run_one "$1" "$2"' _ {} "$logs"
 
+# Back into filename order to be read. The lanes were handed the files longest
+# first, which is a fact about the scheduling rather than something a person
+# reading the log wants it sorted by.
+reading=()
+while IFS= read -r file; do
+  reading[${#reading[@]}]=$file
+done < <(printf '%s\n' "${files[@]}" | sort)
+
 failed=0
 lost=0
-for file in "${files[@]}"; do
+for file in "${reading[@]}"; do
   base=${file##*/}
   if [ -e "$logs/$base.time" ]; then
     echo "=== $file ($(cat "$logs/$base.time")s)"
@@ -208,6 +313,13 @@ done
 if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
   if [ "$shards" -gt 1 ]; then
     echo "refusing to write a cost table from shard $shard of $shards" >&2
+    exit 1
+  fi
+  # Same reasoning as the shard refusal. A table written from a `--fast` run
+  # lists only the cheap files, and the expensive ones, which are the whole
+  # reason the sharding needs a table, would all fall to the mean.
+  if [ "$fast" -eq 1 ]; then
+    echo "refusing to write a cost table from a --fast run" >&2
     exit 1
   fi
   # The header is written first and only the rows go through `sort`, because a

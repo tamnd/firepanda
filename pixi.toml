@@ -84,6 +84,14 @@ build = { cmd = "mkdir -p build && mojo precompile firepanda -o build/firepanda.
   "firepanda/**",
 ], outputs = ["build/firepanda.mojoc"] }
 test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
+
+# The same suite without the fifty one files that cost a minute or more. Those
+# fifty one are seventy four per cent of the run, so this is two files in three
+# for a quarter of the time, and it is meant for the loop somebody is in while
+# they are writing code rather than for deciding whether a branch is good. The
+# runner says which files it left out, so a green one here is never mistaken for
+# a green `pixi run test`.
+test-fast = { cmd = "bash tools/run_tests.sh --fast", depends-on = ["build"] }
 format = "mojo format firepanda tests benchmarks tools"
 
 # Regenerates `tools/test_costs.txt`, which is how the workflow's ten test
