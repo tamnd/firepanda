@@ -151,7 +151,7 @@ comptime WITH_ORDINALITY: UInt16 = 21
 """`WITH ORDINALITY` after a table function."""
 
 comptime WITH_USING_KEY: UInt16 = 22
-"""`USING KEY` on a recursive `WITH` entry."""
+"""`USING KEY` on a `WITH` entry."""
 
 comptime ESCAPE_STRING: UInt16 = 23
 """An `E'...'` string, which reads backslash escapes."""
@@ -423,8 +423,9 @@ def sql_support() -> List[Refusal]:
             "with-using-key",
             "USING KEY on a WITH",
             (
-                "It changes how a recursive query deduplicates, and firepanda"
-                " runs the UNION and UNION ALL forms only."
+                "It says to keep one row per key and replace that row as the"
+                " query runs, which is a way of running a WITH that firepanda"
+                " has no node for."
             ),
             SQL_ISSUE,
         ),

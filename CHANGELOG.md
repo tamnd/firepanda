@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: USING KEY on a WITH entry reads and prints
+
+`USING KEY` is how DuckDB says that a `WITH` entry keeps one row per key and replaces that row as the query runs, rather than keeping every row it ever produced. It was the largest single thing left that firepanda turned down at the parse, and it is the last of the `WITH` modifiers to read.
+
+The list it takes is the list a `SELECT` takes, so an entry may be any expression and may carry an alias, and the corpus writes both. `USING KEY (k)` is the common shape and `USING KEY (k, min(v))` is the next one. All of it now reads into the AST and prints back out, between the column alias list and the `AS`, which is where the query wrote it. None of it lowers. Keeping one row per key is a node the plan does not have, and the query that asks for it first is the recursive `WITH`, which firepanda does not run either, so the refusal moved out of the transformer and into lowering and says the sentence it always said, reworded to name what the feature does rather than what it does to a `UNION`.
+
+A `WITH` entry has five things to keep and four fields to keep them in, so the key list rides above the materialize tag in the same word. The tag is one of three values and takes two bits. Packing it that way means no statement kind grows a field that every other kind would carry for nothing, and `cte_tags`, `cte_materialize` and `cte_keys` are the three functions that put it together and take it apart.
+
+Worth writing down while it is fresh: DuckDB takes `USING KEY` on a plain `WITH` as well as on a recursive one, so the refusal sits on the entry rather than on the `RECURSIVE` keyword.
+
 ### Fixed: three Python tests that still expected the exception class the RE2 grammar replaced
 
 Reading RE2's grammar changed what a pattern neither grammar can read comes back as. It used to be a `NotImplementedError`, on the reasoning that this library had no way to tell a broken pattern from one merely beyond it, and the whole point of the grammar is that it now can, so it is a `ValueError` and matches what pandas gives for the same pattern. Three tests in the Python suite still named the old class and went red on main rather than on the pull request, because the extension job runs on one platform there and on three on the merge.

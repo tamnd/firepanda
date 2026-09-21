@@ -500,6 +500,7 @@ from .ast import (
     CLAUSE_QUALIFY,
     CLAUSE_WHERE,
     CLAUSE_WINDOW,
+    cte_keys,
     EXPR_BETWEEN,
     EXPR_BINARY,
     EXPR_CASE,
@@ -579,6 +580,7 @@ from .unsupported import (
     NAMED_ARGUMENT,
     ROW_VALUE,
     SUBSCRIPT,
+    WITH_USING_KEY,
     not_implemented,
 )
 
@@ -4790,6 +4792,8 @@ def _statement(
     var clause = read_ctes(ast, statement)
     for i in range(len(clause)):
         ref entry = clause.entries[i]
+        if cte_keys(ast.stmts[Int(entry.node)].b) != 0:
+            raise not_implemented(WITH_USING_KEY, "", "")
         if entry.recursive:
             raise Error(
                 "firepanda does not lower a recursive CTE yet, because the"

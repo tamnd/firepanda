@@ -160,7 +160,7 @@ Each is either uncorrelated, meaning bind independently and plan as a separate s
 
 Non recursive CTEs bind in order, each visible to those after it. On materialization, DuckDB defaults to inlining, offers `MATERIALIZED` and `NOT MATERIALIZED` hints, and inlines by default unless the CTE is referenced more than once. We follow, and document 08 owns the cost decision.
 
-`WITH RECURSIVE` binds the anchor first, uses its schema as the recursive binding's schema, then binds the recursive term. It becomes a fixed point node in the plan. `USING KEY` is DuckDB's variant for keyed recursion, and document 13 keeps it open at 1.0.
+`WITH RECURSIVE` binds the anchor first, uses its schema as the recursive binding's schema, then binds the recursive term. It becomes a fixed point node in the plan. `USING KEY` is DuckDB's variant for keyed recursion. The AST carries its list on the entry, packed into the same field as the materialize tag, and lowering refuses it by name. Document 13 keeps whether it runs open at 1.0.
 
 ## 13. What the binder produces
 

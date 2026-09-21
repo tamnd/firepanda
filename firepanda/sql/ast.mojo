@@ -767,7 +767,9 @@ comptime STMT_CTE: UInt8 = 7
 """One entry of a `WITH`.
 
 `payload` is the interned name, `a` is the statement, `children` is a run of
-interned column aliases and `b` is one of the `MATERIALIZE_` tags.
+interned column aliases and `b` holds the `MATERIALIZE_` tag with the
+`USING KEY` run above it, which `cte_tags` packs and `cte_materialize` and
+`cte_keys` read back.
 """
 
 comptime STMT_ITEM: UInt8 = 8
@@ -955,6 +957,55 @@ comptime MATERIALIZE_YES: UInt32 = 1
 
 comptime MATERIALIZE_NO: UInt32 = 2
 """`AS NOT MATERIALIZED`."""
+
+comptime _CTE_MATERIALIZE_FIELD: UInt32 = 3
+"""The two low bits of a `WITH` entry's `b`, which hold the materialize tag."""
+
+comptime _CTE_KEYS_SHIFT: UInt32 = 2
+"""Where the `USING KEY` run starts, above the materialize tag."""
+
+
+def cte_tags(materialize: UInt32, keys: UInt32) -> UInt32:
+    """Packs a `WITH` entry's materialize tag and its `USING KEY` run together.
+
+    A `WITH` entry has four fields and five things to keep: the name, the
+    statement, the column aliases, the materialize tag and the key list. The
+    tag is one of three values and takes two bits, so the run goes above it
+    rather than the node growing a field that every other statement kind would
+    carry for nothing.
+
+    Args:
+        materialize: One of the `MATERIALIZE_` constants.
+        keys: The run of `STMT_ITEM` nodes `USING KEY` named, or 0 for none.
+
+    Returns:
+        The packed value, for a `STMT_CTE` `b`.
+    """
+    return materialize | (keys << _CTE_KEYS_SHIFT)
+
+
+def cte_materialize(tags: UInt32) -> UInt32:
+    """Reads the materialize tag out of a packed `WITH` entry field.
+
+    Args:
+        tags: A `STMT_CTE` `b`.
+
+    Returns:
+        One of the `MATERIALIZE_` constants.
+    """
+    return tags & _CTE_MATERIALIZE_FIELD
+
+
+def cte_keys(tags: UInt32) -> UInt32:
+    """Reads the `USING KEY` run out of a packed `WITH` entry field.
+
+    Args:
+        tags: A `STMT_CTE` `b`.
+
+    Returns:
+        The run of `STMT_ITEM` nodes, or 0 when the entry wrote no key list.
+    """
+    return tags >> _CTE_KEYS_SHIFT
 
 
 struct Ref(ImplicitlyCopyable, Movable):
@@ -2504,6 +2555,7 @@ struct Ast(Movable):
         statement: UInt32,
         columns: List[String] = List[String](),
         materialize: UInt32 = MATERIALIZE_DEFAULT,
+        keys: UInt32 = 0,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds one entry of a `WITH`.
@@ -2513,6 +2565,7 @@ struct Ast(Movable):
             statement: The statement it stands for.
             columns: The column aliases, in order.
             materialize: One of the `MATERIALIZE_` constants.
+            keys: The run of `STMT_ITEM` nodes `USING KEY` named, 0 for none.
             token: The token the name is at.
 
         Returns:
@@ -2523,7 +2576,7 @@ struct Ast(Movable):
                 kind=STMT_CTE,
                 token=token,
                 a=statement,
-                b=materialize,
+                b=cte_tags(materialize, keys),
                 children=self.names(columns),
                 payload=self.intern(name),
             )
