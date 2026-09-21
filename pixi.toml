@@ -193,6 +193,7 @@ differential-build-regex = { cmd = "bash tools/build_differential.sh regex", def
   "build/differential/regex-replace",
   "build/differential/regex-python",
   "build/differential/regex-re2",
+  "build/differential/regex-property",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -291,6 +292,18 @@ differential-regex-python = { cmd = "./build/differential/regex-python", default
 # needs no corpus.
 # See docs/specs/101-a-second-grammar-that-only-says-no.md section 7.
 differential-regex-re2 = { cmd = "./build/differential/regex-re2", default-environment = "differential", depends-on = ["differential-build-regex"] }
+
+# The one comparison of the seven that compares data rather than a decision. The
+# table that `\p{...}` is read against is 200 names and 5820 ranges, measured
+# once against one release of pyarrow and carried in the repository ever since,
+# and nothing checked it afterwards. A corpus pattern that names a category
+# proves the name is found and says nothing about whether the ranges are RE2's,
+# because a name is a set of a million code points and the corpus runs against a
+# hundred texts. This asks RE2 about the four code points around each range,
+# which is where a range table is wrong if it is wrong at all, so the check that
+# is otherwise a full regeneration takes seconds.
+# See docs/specs/116-the-edges-of-every-range.md section 2.
+differential-regex-property = { cmd = "./build/differential/regex-property", default-environment = "differential", depends-on = ["differential-build-regex"] }
 
 # The same comparison one size up. Everything above asks about an expression,
 # and an expression comparison cannot reach a join order, a group, a sort or a

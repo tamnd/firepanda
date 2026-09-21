@@ -397,6 +397,12 @@ Document 114.
 
 The list is gone. The generator now asks RE2 about every name of one letter and every name of a letter followed by a lower case letter, and refuses to write anything if RE2 takes a name it was never told about. Thirty eight patterns naming a category or a script are added to the measured corpus, which is the pattern side of the script question document 103 asked for, and every differential tally is unchanged with all seven still at zero disagreements. Document 115.
 
+### Added: a differential that checks the Unicode name table against RE2
+
+The table `\p{...}` is read against was measured once, against one release of pyarrow, and carried in the repository ever since with nothing checking it. Regenerating it is the honest check and it is minutes of compute, and the corpus cannot do the job, since a pattern that names a category proves the name is found and says nothing about whether its ranges are RE2's.
+
+`pixi run differential-regex-property` asks RE2 about the four code points around each of the 5820 ranges, which is where a range table is wrong if it is wrong at all. 200 names, 18834 code points, half a second against a warm build, and zero disagreements against pyarrow 24.0.0. It was checked by moving one high by one and watching it name the character and exit. Document 116.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

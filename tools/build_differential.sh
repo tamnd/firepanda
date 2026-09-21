@@ -13,15 +13,15 @@
 # `FIREPANDA_BUILD_JOBS` overrides the width, which is what to reach for on a
 # machine that is short of memory rather than short of cores.
 #
-# The first argument picks a group. There are eleven programs and CI runs six of
-# them: the five regular expression comparisons are run by hand, from the four
+# The first argument picks a group. There are twelve programs and CI runs six of
+# them: the six regular expression comparisons are run by hand, from the
 # specification documents that introduce them, and never from a workflow. They
 # were being compiled on every pull request all the same, which was about half
 # of a step that took six and a half minutes and was the longest pole left in
 # the pipeline after the test job was split up.
 #
 #   core    the six the workflow runs
-#   regex   the five it does not
+#   regex   the six it does not
 #   all     every one of them, which is the default and what a developer wants
 
 set -euo pipefail
@@ -62,8 +62,11 @@ core=(
   "mojo build -I . tests/differential/tpch.mojo -o build/differential/tpch"
 )
 
-# The six regex programs read a table from the directory they live in, so they
-# need that directory on the import path as well as the repository root.
+# Six of the seven regex programs read a table from the directory they live in,
+# so they need that directory on the import path as well as the repository root.
+# The seventh does not and is built the same way anyway, because a build line
+# that differs from its neighbours for a reason that is not visible in it is a
+# line somebody copies wrong.
 regex=(
   "mojo build -I . -I tests/differential tests/differential/regex.mojo -o build/differential/regex"
   "mojo build -I . -I tests/differential tests/differential/regex_match.mojo -o build/differential/regex-match"
@@ -71,6 +74,7 @@ regex=(
   "mojo build -I . -I tests/differential tests/differential/regex_replace.mojo -o build/differential/regex-replace"
   "mojo build -I . -I tests/differential tests/differential/regex_python.mojo -o build/differential/regex-python"
   "mojo build -I . -I tests/differential tests/differential/regex_re2.mojo -o build/differential/regex-re2"
+  "mojo build -I . -I tests/differential tests/differential/regex_property.mojo -o build/differential/regex-property"
 )
 
 case "$group" in
