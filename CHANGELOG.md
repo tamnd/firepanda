@@ -179,6 +179,22 @@ The `str.contains` grammar bucket falls from 703 patterns to 458 on the corpus t
 
 Document 106 is the write up.
 
+### Added: a name for a group
+
+Python asks whether a group name is an identifier and RE2 asks a wider question, and Python will not let two groups share a name while RE2 does not care. Those two together were the largest family of patterns RE2 reads and this library did not, at 189 of the generated corpus.
+
+Python reads every character up to the terminator and then asks `name.isidentifier()` of what it read, which is why `(?P<n\>>a)` is a complaint about the name rather than about the backslash, and why the answer for a name written outside ASCII is whatever the Unicode identifier tables say rather than anything about regular expressions. The test has a front and a back, so `(?P<n1>a)` is a name Python takes and `(?P<1n>a)` is not. RE2 asks one question of each character and nothing about the name as a whole: the general category has to be a letter, a non spacing or a spacing mark, a decimal or a letter number, or connector punctuation, which is the category the underscore is in. A digit may lead, and a name may be used twice.
+
+That rule was measured over every code point below U+11000 rather than read off a description, against the RE2 inside pyarrow 24.0.0 and against CPython. One direction runs the other way and is now recorded rather than answered: a middle dot is a character Unicode allows in an identifier and puts in a category RE2 does not look at, so `(?P<a·>x)` reads here and is marked as a pattern RE2 will not take.
+
+The RE2 reader needed a fix for the first time in three slices. It said a name character was an ASCII word character or anything at all outside ASCII, which was written down from the single observation that `(?P<é>a)` is a name RE2 takes, and it was too wide by every punctuation mark, symbol and space outside ASCII. The corpus had never written one, so the reader's own differential had never moved.
+
+The category table this reads is older than the one CPython carries, which is the right table for RE2's half and was confirmed to be over every code point below U+11000. On Python's half it costs 119 code points, which are characters CPython allows in an identifier and this refuses. A pattern that is only a named group is unaffected, because pandas sends it to RE2 and RE2 refuses the name for the same reason, so the cost only shows when the pattern also holds a lookaround or a backreference.
+
+The `str.contains` grammar bucket falls from 458 patterns to 279 on the corpus the last slice measured, 179 of the 189 leaving it and 10 holding a second construct the same bucket still names. The measured list in the corpus goes from 159 to 199, and on the widened corpus of 30196 all seven comparisons stay at 10000 agreements in ten thousand with zero disagreements.
+
+Document 107 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

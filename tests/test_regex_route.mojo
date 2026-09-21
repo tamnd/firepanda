@@ -223,7 +223,7 @@ def test_a_pattern_python_refuses_goes_to_arrow_however_it_was_read() raises:
     """The constructs this library reads out of RE2's grammar all route the way
     a pattern Python cannot read routes, which is to Arrow.
 
-    A tree that exists is not a tree pandas had. Documents 102 through 105 each
+    A tree that exists is not a tree pandas had. Documents 102 through 107 each
     added a construct that parses here and does not parse there, and each one of
     them can be written beside a lookaround, which is the pairing that makes
     this a routing question rather than a bookkeeping one.
@@ -235,6 +235,9 @@ def test_a_pattern_python_refuses_goes_to_arrow_however_it_was_read() raises:
         String("\\p{Lu}"),
         String("^*"),
         String("\\Qa+b\\E"),
+        String("\\12"),
+        String("(?P<1n>b)"),
+        String("(?P<n>a)(?P<n>b)"),
     ]:
         assert_false(reads_as_python(one))
         assert_false(python_answers(one))

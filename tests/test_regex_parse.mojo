@@ -425,14 +425,65 @@ def test_a_named_group_is_numbered_like_any_other() raises:
     the tree holds the number."""
     assert_equal(shape("(?P<n>a)(?P=n)"), "seq{group(1){seq{lit(a)}},ref(1)}")
     assert_equal(shape("(?P=n)"), "!unknown group name")
-    assert_equal(shape("(?P<n>a)(?P<n>b)"), "!redefinition of group name")
+    assert_equal(
+        shape("(?P<n>a)(?P<n>b)"),
+        "seq{group(1){seq{lit(a)}},group(2){seq{lit(b)}}}",
+    )
+    assert_equal(reason("(?P<n>a)(?P<n>b)"), "redefinition of group name")
 
 
 def test_a_name_has_to_look_like_an_identifier() raises:
-    """Python's rule and not a wider one, so a name with a dash in it is
-    refused rather than read as far as the dash."""
-    assert_equal(shape("(?P<1n>a)"), "!bad character in group name")
+    """Python asks whether a name is an identifier and RE2 asks a wider
+    question, so a name with a digit at the front is a pattern only one of the
+    two reads and a name with a dash in it is a pattern neither reads.
+
+    Document 107.
+    """
+    assert_equal(shape("(?P<1n>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?P<1n>a)"), "bad character in group name")
+    assert_equal(shape("(?P<n1>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?P<n1>a)"), "")
+    assert_equal(shape("(?P<a-b>a)"), "!bad character in group name")
+    assert_equal(shape("(?P<a b>a)"), "!bad character in group name")
     assert_equal(shape("(?P<>a)"), "!missing group name")
+
+
+def test_a_name_is_read_to_the_terminator_before_it_is_judged() raises:
+    """Which is Python's own order and matters for a name holding a backslash,
+    since the terminator is found before the character Python objects to.
+
+    Document 107.
+    """
+    assert_equal(shape("(?P<n\\>>a)"), "!bad character in group name")
+    assert_equal(shape("(?P<n"), "!missing >, unterminated name")
+
+
+def test_a_name_outside_ascii_goes_by_its_category() raises:
+    """Both grammars read a name by what Unicode calls the character rather
+    than by whether it is an ASCII letter, and they part on which categories
+    they will take.
+
+    Document 107.
+    """
+    assert_equal(shape("(?P<é>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?P<é>a)"), "")
+    assert_equal(shape("(?P<١>a)"), "seq{group(1){seq{lit(a)}}}")
+    assert_equal(reason("(?P<١>a)"), "bad character in group name")
+    assert_equal(shape("(?P<x½>a)"), "!bad character in group name")
+    assert_equal(shape("(?P<x€>a)"), "!bad character in group name")
+
+
+def test_a_name_only_python_takes_is_a_pattern_re2_refuses() raises:
+    """A middle dot is a character Unicode allows in an identifier and puts in
+    a category RE2 does not look at, so the name reads here and the pattern is
+    marked as one RE2 will not take.
+
+    Document 107.
+    """
+    var tree = parse_pattern("(?P<x·>a)")
+    assert_true(tree.ok)
+    assert_false(tree.python_refuses)
+    assert_true(tree.re2_refuses)
 
 
 def test_an_octal_escape_is_read_when_the_digits_allow_it() raises:

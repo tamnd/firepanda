@@ -60,7 +60,7 @@ accident is not available.
 from std.collections.span import Span
 from std.sys.info import simd_width_of
 
-from firepanda.kernel.regex.unicodedata import unicode_index
+from firepanda.kernel.regex.unicodedata import unicode_holds, unicode_index
 from firepanda.kernel.regex.tokens import (
     AT_BEGINNING,
     AT_BEGINNING_STRING,
@@ -710,28 +710,139 @@ def _is_verbose_space(point: UInt32) -> Bool:
     return point == 0x0B or point == 0x0C or point == 0x0D
 
 
-def _is_word(point: UInt32) -> Bool:
-    """Whether a code point can appear in a group name.
+def _name_point(point: UInt32) -> Bool:
+    """Whether a code point may appear in a group name at all.
 
-    Python requires a group name to be a valid identifier, which is a wider
-    question than this, and the difference only shows up for names nobody
-    writes. What this has to get right is where a name ends, which is at the
-    first character that is not a letter, a digit or an underscore.
+    This is RE2's rule rather than Python's, and it was measured over every
+        code point below U+11000 rather than read off a description: a character
+        whose general category is a letter, a non spacing or a spacing mark, a
+        decimal or a letter number, or connector punctuation, which is the category
+        the underscore is in. An enclosing mark is not one and neither is any other
+        kind of number, so `(?P<x1>a)` and `(?P<xe>a)` with an accent on the `e` are
+        names RE2 takes and `(?P<x2>a)` with a vulgar fraction and `(?P<x$>a)` are
+        not.
+
+        Args:
+            point: The code point.
+
+        Returns:
+            True when RE2 would take the character in a name.
+    """
+    if point == 0x5F:
+        return True
+    if unicode_holds(unicode_index("L"), point):
+        return True
+    if unicode_holds(unicode_index("Nd"), point):
+        return True
+    if unicode_holds(unicode_index("Nl"), point):
+        return True
+    if unicode_holds(unicode_index("Mn"), point):
+        return True
+    if unicode_holds(unicode_index("Mc"), point):
+        return True
+    return unicode_holds(unicode_index("Pc"), point)
+
+
+def _identifier_point(point: UInt32) -> Bool:
+    """Whether a code point may appear after the first in a Python identifier.
+
+    Python asks `name.isidentifier()` of a group name, so the rule here is
+    Python's identifier rule and not a regular expression rule at all. The
+    body of it is the same five categories RE2 takes plus the underscore, and
+    what is left is the two lists Unicode keeps for identifiers that would
+    otherwise be spelled two different ways, which are small enough to write
+    out and were measured over every code point rather than copied.
 
     Args:
         point: The code point.
 
     Returns:
-        True for an ASCII letter, an ASCII digit, an underscore, or anything
-        outside ASCII, which Python treats as a letter here.
+        True when the character may appear in an identifier after the first.
     """
-    if _is_digit(point) or point == 0x5F:
+    if point == 0x5F:
         return True
-    if point >= 0x41 and point <= 0x5A:
+    if point == 0xB7 or point == 0x387 or point == 0x19DA:
         return True
-    if point >= 0x61 and point <= 0x7A:
+    if point >= 0x1369 and point <= 0x1371:
         return True
-    return point >= 0x80
+    if point >= 0x200C and point <= 0x200D:
+        return True
+    if point == 0x2118 or point == 0x212E:
+        return True
+    if point == 0x30FB or point == 0xFF65:
+        return True
+    if point == 0x37A or point == 0x2E2F:
+        return False
+    if point >= 0xFC5E and point <= 0xFC63:
+        return False
+    if point >= 0xFDFA and point <= 0xFDFB:
+        return False
+    if point >= 0xFE70 and point <= 0xFE7E and point % 2 == 0:
+        return False
+    return _name_point(point)
+
+
+def _identifier_start(point: UInt32) -> Bool:
+    """Whether a code point may be the first character of a Python identifier.
+
+    The narrower of the two, and the only place the two grammars part for a
+    name written in ASCII: a digit may appear in an identifier but not at the
+    front of one, which is why `(?P<n1>a)` is a name Python takes and
+    `(?P<1n>a)` is not.
+
+    Args:
+        point: The code point.
+
+    Returns:
+        True when the character may start an identifier.
+    """
+    if not _identifier_point(point):
+        return False
+    if point == 0xE33 or point == 0xEB3:
+        return False
+    if point == 0xFF9E or point == 0xFF9F:
+        return False
+    if point == 0x5F:
+        return True
+    if point >= 0x1885 and point <= 0x1886:
+        return True
+    if point == 0x2118 or point == 0x212E:
+        return True
+    if unicode_holds(unicode_index("L"), point):
+        return True
+    return unicode_holds(unicode_index("Nl"), point)
+
+
+def _is_identifier(points: List[UInt32]) -> Bool:
+    """Whether a run of code points is what Python calls an identifier.
+
+    Args:
+        points: The name, which the caller has already checked is not empty.
+
+    Returns:
+        True when `str.isidentifier` would say so.
+    """
+    if not _identifier_start(points[0]):
+        return False
+    for i in range(1, len(points)):
+        if not _identifier_point(points[i]):
+            return False
+    return True
+
+
+def _re2_takes_name(points: List[UInt32]) -> Bool:
+    """Whether RE2 would take a run of code points as a group name.
+
+    Args:
+        points: The name, which the caller has already checked is not empty.
+
+    Returns:
+        True when every character is one RE2 allows in a name.
+    """
+    for i in range(len(points)):
+        if not _name_point(points[i]):
+            return False
+    return True
 
 
 def _hex_value(point: UInt32) -> Int32:
@@ -1466,23 +1577,30 @@ def _atom(mut c: _Cursor) -> Int32:
     return c.add(OP_LITERAL, Int32(Int(point)), 0)
 
 
-def _name(mut c: _Cursor, closer: UInt32) -> String:
+def _name(mut c: _Cursor, closer: UInt32, define: Bool = False) -> String:
     """Reads a group name up to a closing character.
+
+    Python reads every character up to the terminator and asks whether what it
+    read is an identifier afterwards, rather than checking as it goes, and this
+    does the same, because the two differ on a name like `n\\>` where the
+    terminator is found before the character Python would object to.
+
+    A name only reaches RE2 when it is being defined, since RE2 has neither
+    `(?P=name)` nor a conditional group and refuses both outright, so a name
+    Python will not take is a pattern that still reads when it is a definition
+    and a pattern nobody reads when it is a use. Document 107.
 
     Args:
         c: The cursor, on the first character of the name.
         closer: What ends it, which is `>` for a definition and `)` for a use.
+        define: Whether this is a group being named rather than a use of one.
 
     Returns:
         The name, and the empty string when the parse failed.
     """
     var points = List[UInt32]()
     while not c.done() and c.peek() != closer:
-        var point = c.take()
-        if not _is_word(point):
-            c.give_up(String("bad character in group name"))
-            return String("")
-        points.append(point)
+        points.append(c.take())
     if c.done():
         c.give_up(String("missing >, unterminated name"))
         return String("")
@@ -1490,9 +1608,19 @@ def _name(mut c: _Cursor, closer: UInt32) -> String:
     if len(points) == 0:
         c.give_up(String("missing group name"))
         return String("")
-    if _is_digit(points[0]):
-        c.give_up(String("bad character in group name"))
-        return String("")
+    var takes = _re2_takes_name(points)
+    if not _is_identifier(points):
+        if not define or not takes:
+            c.give_up(String("bad character in group name"))
+            return String("")
+        if not c.python_refuses:
+            c.python_refuses = True
+            c.python_problem = String("bad character in group name")
+    elif define and not takes:
+        # A name Python reads and RE2 will not, which is a name holding a
+        # character Unicode allows in an identifier and puts in a category RE2
+        # does not look at, such as the middle dot in `(?P<a\u00b7b>x)`.
+        c.re2_refuses = True
     var bytes = List[UInt8]()
     for i in range(len(points)):
         _put_point(bytes, points[i])
@@ -1699,12 +1827,18 @@ def _named(mut c: _Cursor) -> Int32:
     """
     var next = c.take()
     if next == 0x3C:
-        var name = _name(c, 0x3E)
+        var name = _name(c, 0x3E, True)
         if c.failed:
             return -1
         if _numbered(c, name) >= 0:
-            c.give_up(String("redefinition of group name"))
-            return -1
+            # Python will not let a name stand for two groups and RE2 has no
+            # rule about it at all, so `(?P<n>a)(?P<n>b)` is a pattern Arrow
+            # answers and this used to refuse. The first binding is kept, which
+            # is what a use of the name would have resolved to, and no use of it
+            # can be read anyway because RE2 has no `(?P=name)`. Document 107.
+            if not c.python_refuses:
+                c.python_refuses = True
+                c.python_problem = String("redefinition of group name")
         c.groups += 1
         var number = c.groups
         c.names.append(name)

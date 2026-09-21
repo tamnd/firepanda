@@ -268,13 +268,16 @@ def test_a_repeat_after_a_flag_group_reaches_past_it() raises:
 
 
 def test_group_names() raises:
-    """Wider than Python's, and a duplicate is allowed."""
+    """Wider than Python's in one direction and narrower in another, and a
+    duplicate is allowed."""
     _takes(String("(?P<n>a)"))
     _takes(String("(?P<1>a)"))
     _takes(String("(?P<1n>a)"))
     _takes(String("(?P<n_1>a)"))
     _takes(String("(?P<é>a)"))
     _takes(String("(?P<n>a)(?P<n>b)"))
+    _takes(String("(?P<x١>a)"))
+    _takes(String("(?P<x‿>a)"))
     var said = String("RE2 will not take that group name")
     _refuses(String("(?P<n n>a)"), said)
     _refuses(String("(?P<>a)"), said)
@@ -282,6 +285,13 @@ def test_group_names() raises:
     _refuses(String("(?<>a)"), said)
     _refuses(String("(?P<n"), said)
     _refuses(String("(?<n"), said)
+    # Not every character outside ASCII, which is what this file said until
+    # document 107 measured the rule one code point at a time. A vulgar
+    # fraction, a currency sign and a middle dot are all refused, and the first
+    # two of those are the categories `\p{No}` and `\p{Sc}` name.
+    _refuses(String("(?P<x½>a)"), said)
+    _refuses(String("(?P<x€>a)"), said)
+    _refuses(String("(?P<x·>a)"), said)
 
 
 def test_a_bracket_nothing_closes() raises:

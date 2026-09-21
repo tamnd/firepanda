@@ -12113,3 +12113,37 @@ def unicode_ranges(which: Int32) -> List[Int32]:
     for i in range(start, stop):
         out.append(table[i])
     return out^
+
+
+def unicode_holds(which: Int32, point: UInt32) -> Bool:
+    """Whether one name covers a code point.
+
+    A binary search straight over the table rather than a copy of the ranges,
+    because the caller asking this is checking one character at a time and the
+    largest name here covers more than a thousand ranges. `unicode_ranges` is
+    still the right answer for a caller that wants the whole set, which is what
+    a character class does.
+
+    Args:
+        which: The index `unicode_index` answered.
+        point: The code point.
+
+    Returns:
+        True when the point is inside one of the ranges.
+    """
+    if which < 0:
+        return False
+    var at = materialize[UNICODE_RANGE_AT]()
+    var table = materialize[UNICODE_RANGES]()
+    var low = Int(at[Int(which)]) // 2
+    var high = Int(at[Int(which) + 1]) // 2 - 1
+    var value = Int32(Int(point))
+    while low <= high:
+        var mid = (low + high) // 2
+        if table[mid * 2 + 1] < value:
+            low = mid + 1
+        elif table[mid * 2] > value:
+            high = mid - 1
+        else:
+            return True
+    return False
