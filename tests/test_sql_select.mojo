@@ -713,8 +713,6 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     # to print one.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="COLUMNS"):
-        _ = _printed("SELECT COLUMNS('a')", g, rules)
     with assert_raises(contains="a MAP literal"):
         _ = _printed("SELECT MAP {'a': 1}", g, rules)
     with assert_raises(contains="GROUPING"):
@@ -817,6 +815,27 @@ def test_a_subscript_reaches_the_printer_too() raises:
     assert_equal(
         _printed("SELECT a[1:2] FROM t", g, rules),
         "SELECT a[1:2] FROM t",
+    )
+
+
+def test_columns_reaches_the_printer_in_a_select_list() raises:
+    # It was in the list of transformer refusals above until the transformer
+    # learned to build one. What is missing is the bindings rather than the
+    # syntax, so the statement prints and the refusal waits for the stage that
+    # knows which columns there are to match against.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT COLUMNS('a') FROM t", g, rules),
+        "SELECT COLUMNS('a') FROM t",
+    )
+    assert_equal(
+        _printed("SELECT min(COLUMNS(*)) FROM t", g, rules),
+        "SELECT min(COLUMNS(*)) FROM t",
+    )
+    assert_equal(
+        _printed("SELECT *COLUMNS(['a', 'b']) FROM t", g, rules),
+        "SELECT *COLUMNS(['a', 'b']) FROM t",
     )
 
 

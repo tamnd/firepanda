@@ -346,6 +346,25 @@ every keyword, so `(a).type` needs no quotes even though `type` as a column
 would.
 """
 
+comptime EXPR_COLUMNS: UInt8 = 28
+"""`COLUMNS(...)`, a set of columns written as one thing.
+
+`a` is what stands in the parentheses and `b` is 1 when the query wrote the
+leading star and 0 when it did not.
+
+The five things that may stand there are a `*` with its modifiers, a string
+holding a regular expression, a list of names, a lambda taking a name and
+answering whether to keep it, and any expression that gives one of those. They
+are all ordinary expressions and they are all held here as one, because which of
+the five it is decides nothing until there are columns to match it against.
+
+The leading star is not the same star. `COLUMNS(*)` in a select list is already
+several columns, and `*COLUMNS(...)` is the unpacking spelling, which is what a
+call writes to hand the set over as several arguments rather than as one. Both
+spellings reach the same place and the flag is what tells the printer which was
+written.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1606,6 +1625,31 @@ struct Ast(Movable):
                 token=token,
                 a=operand,
                 payload=self.intern(name),
+            )
+        )
+
+    def columns(
+        mut self,
+        inside: UInt32,
+        unpacked: Bool = False,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `COLUMNS(...)`, a set of columns written as one thing.
+
+        Args:
+            inside: What stands in the parentheses.
+            unpacked: Whether the query wrote the leading star.
+            token: The token the expression starts at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_COLUMNS,
+                token=token,
+                a=inside,
+                b=UInt32(1) if unpacked else UInt32(0),
             )
         )
 

@@ -48,6 +48,7 @@ from .ast import (
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
+    EXPR_COLUMNS,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
     EXPR_FIELD,
@@ -189,6 +190,7 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         or kind == EXPR_NAMED_ARGUMENT
         or kind == EXPR_LAMBDA
         or kind == EXPR_FIELD
+        or kind == EXPR_COLUMNS
     ):
         out.append(item.a)
         return out^
@@ -738,6 +740,8 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(item.b, "/", ast.text(item.payload))
     if kind == EXPR_FIELD:
         return String(ast.text(item.payload))
+    if kind == EXPR_COLUMNS:
+        return String(item.b)
     if kind == EXPR_LAMBDA or kind == EXPR_COMPREHENSION:
         var out = String()
         for at in range(ast.length(item.payload)):

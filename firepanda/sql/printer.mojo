@@ -38,6 +38,7 @@ from .ast import (
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
+    EXPR_COLUMNS,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
     EXPR_FIELD,
@@ -876,6 +877,21 @@ def _write_step(
             stack.append(_Step(ast.at(item.children, 0), 0))
             return
         out += "]"
+        return
+
+    if kind == EXPR_COLUMNS:
+        # The leading star is a spelling and not part of what stands in the
+        # parentheses, so it goes back only when the query wrote it. Everything
+        # inside prints as the expression it is, including a star with its
+        # modifiers, which is why there is nothing here but the two ends.
+        if phase == 0:
+            if item.b == 1:
+                out += "*"
+            out += "COLUMNS("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        out += ")"
         return
 
     if kind == EXPR_ROW:

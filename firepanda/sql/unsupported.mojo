@@ -181,7 +181,7 @@ comptime NAMED_ARGUMENT: UInt16 = 31
 """`f(a := 1)`, an argument passed by name."""
 
 comptime COLUMNS: UInt16 = 32
-"""`COLUMNS('regex')`, a pattern standing for a set of columns."""
+"""`COLUMNS(...)`, a set of columns written where one expression goes."""
 
 comptime MAP_LITERAL: UInt16 = 33
 """`MAP {'a': 1}`, a map written out in the query."""
@@ -521,9 +521,9 @@ def sql_support() -> List[Refusal]:
             "columns",
             "COLUMNS",
             (
-                "It stands for however many columns the pattern matches, so the"
-                " shape of the result is not known until the table is, and"
-                " firepanda works out the shape first. Name the columns."
+                "It stands for however many columns it matches, so the shape of"
+                " the result is not known until the table is, and firepanda"
+                " works out the shape first. Name the columns."
             ),
             STAGE_ISSUE,
         ),
