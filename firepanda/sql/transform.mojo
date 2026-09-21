@@ -121,6 +121,7 @@ from .token import (
     TOKEN_STRING,
     Token,
     caret_at,
+    error_at,
     token_text,
 )
 from .unsupported import (
@@ -132,7 +133,6 @@ from .unsupported import (
     CUSTOM_OPERATOR,
     DEFAULT_VALUE,
     DOTTED_NAME,
-    ESCAPE_STRING,
     GROUPING,
     IN_BARE_VALUE,
     IS_UNKNOWN,
@@ -481,6 +481,9 @@ comptime _SINGLE_QUOTE = Byte(ord("'"))
 comptime _DOUBLE_QUOTE = Byte(ord('"'))
 comptime _DOLLAR = Byte(ord("$"))
 comptime _UNDERSCORE = Byte(ord("_"))
+comptime _BACKSLASH = Byte(ord("\\"))
+comptime _ZERO = Byte(ord("0"))
+comptime _SEVEN = Byte(ord("7"))
 
 comptime _PENDING = "the transformer is waiting for a child"
 """What a form raises when a value it asked for is not built yet.
@@ -6843,13 +6846,12 @@ def _number_value(sql: StringSlice, token: Token) -> String:
 def _string_value(sql: StringSlice, token: Token) raises -> String:
     """Decodes a string literal into the value it means.
 
-    Three of the four spellings are here. A plain `'...'` doubles a quote to
-    hold one. A `$tag$...$tag$` string has no escapes at all. Two literals with
-    only whitespace and a newline between them are one literal, which is how a
-    long string is written across lines, and the tokenizer already hands that
-    back as one token. An `E'...'` string is the fourth and it refuses, because
-    decoding it means implementing every backslash escape and half of that is
-    worse than none of it.
+    All four spellings are here. A plain `'...'` doubles a quote to hold one. A
+    `$tag$...$tag$` string has no escapes at all. Two literals with only
+    whitespace and a newline between them are one literal, which is how a long
+    string is written across lines, and the tokenizer already hands that back as
+    one token. An `E'...'` string is the fourth and it takes backslashes, which
+    is a pass of its own next door.
 
     Args:
         sql: The query.
@@ -6859,13 +6861,12 @@ def _string_value(sql: StringSlice, token: Token) raises -> String:
         The value, with no quotes and no escapes left in it.
 
     Raises:
-        Error: If it is an `E'...'` string.
+        Error: If the escapes in an `E'...'` string spell something that cannot
+            be a text value.
     """
     var text = token_text(sql, token)
     if token.flags & FLAG_ESCAPE != 0:
-        raise not_implemented(
-            ESCAPE_STRING, "", caret_at(sql.as_bytes(), Int(token.start))
-        )
+        return _escaped_value(sql, token)
 
     var bytes = text.as_bytes()
     if token.flags & FLAG_DOLLAR != 0:
@@ -6898,6 +6899,257 @@ def _string_value(sql: StringSlice, token: Token) raises -> String:
             out.append(c)
             i += 1
     return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def _escaped_value(sql: StringSlice, token: Token) raises -> String:
+    """Decodes an `E'...'` string, backslashes and all.
+
+    The escape set is Postgres's, which DuckDB inherits. `\\b`, `\\f`, `\\n`,
+    `\\r` and `\\t` are the five letters that mean a control character, `\\xHH`
+    is one or two hex digits, `\\NNN` is one to three octal digits taken modulo
+    256, and `\\uXXXX` and `\\UXXXXXXXX` are a code point written out. Anything
+    else after a backslash is that byte with the backslash dropped, so `\\z` is
+    `z` and `\\\\` is one backslash and `\\'` is one quote. A doubled quote
+    still means one quote, because the escape prefix adds a second way of
+    writing one rather than taking the first away.
+
+    `\\v` and `\\a` are not in it. Postgres documents them and DuckDB does not
+    take them, and this side follows DuckDB, so `E'\\v'` is the letter.
+
+    Two results are turned down rather than kept. A NUL byte cannot be held in
+    a text value, and bytes that are not UTF-8 are not text at all, and DuckDB
+    calls both a parser error. This does too, in the same words it would use
+    for a quote in the wrong place, because a literal that cannot be a value is
+    a fact about the query rather than a gap in firepanda.
+
+    Args:
+        sql: The query.
+        token: The token, prefix and quotes and all.
+
+    Returns:
+        The value, with the escapes decoded.
+
+    Raises:
+        Error: If the value would hold a NUL or would not be UTF-8.
+    """
+    var bytes = token_text(sql, token).as_bytes()
+    var out = List[Byte](capacity=len(bytes))
+    var i = 0
+    while i < len(bytes):
+        if bytes[i] != _SINGLE_QUOTE:
+            i += 1
+            continue
+        i += 1
+        while i < len(bytes):
+            var c = bytes[i]
+            if c == _SINGLE_QUOTE:
+                if i + 1 < len(bytes) and bytes[i + 1] == _SINGLE_QUOTE:
+                    out.append(c)
+                    i += 2
+                    continue
+                i += 1
+                break
+            if c != _BACKSLASH or i + 1 >= len(bytes):
+                out.append(c)
+                i += 1
+                continue
+            i = _escape(bytes, i + 1, out)
+
+    for byte in out:
+        if byte == 0:
+            raise error_at(
+                sql.as_bytes(),
+                Int(token.start),
+                "a string value cannot hold a NUL byte",
+            )
+    if not _is_utf8(Span(out)):
+        raise error_at(
+            sql.as_bytes(),
+            Int(token.start),
+            "the escapes in this string do not spell UTF-8",
+        )
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
+
+
+def _escape(bytes: Span[UInt8, _], at: Int, mut out: List[Byte]) -> Int:
+    """Appends what one backslash escape means and says where it ended.
+
+    Args:
+        bytes: The token text.
+        at: The byte after the backslash.
+        out: The value being built.
+
+    Returns:
+        The index of the first byte after the escape.
+    """
+    var c = bytes[at]
+    if c == Byte(ord("b")):
+        out.append(8)
+        return at + 1
+    if c == Byte(ord("f")):
+        out.append(12)
+        return at + 1
+    if c == Byte(ord("n")):
+        out.append(10)
+        return at + 1
+    if c == Byte(ord("r")):
+        out.append(13)
+        return at + 1
+    if c == Byte(ord("t")):
+        out.append(9)
+        return at + 1
+
+    if c == Byte(ord("x")):
+        # One or two hex digits, and a lone `\x` with nothing after it is the
+        # letter, which is what DuckDB does with it.
+        var value = 0
+        var digits = 0
+        var i = at + 1
+        while i < len(bytes) and digits < 2 and _hex_digit(bytes[i]) >= 0:
+            value = value * 16 + _hex_digit(bytes[i])
+            i += 1
+            digits += 1
+        if digits == 0:
+            out.append(c)
+            return at + 1
+        out.append(Byte(value))
+        return i
+
+    if c == Byte(ord("u")) or c == Byte(ord("U")):
+        # Four digits for the small spelling and eight for the large one, and
+        # all of them have to be there or the letter is what was meant.
+        var wanted = 4 if c == Byte(ord("u")) else 8
+        var value = 0
+        var i = at + 1
+        while i < len(bytes) and i - at <= wanted and _hex_digit(bytes[i]) >= 0:
+            value = value * 16 + _hex_digit(bytes[i])
+            i += 1
+        if i - at - 1 != wanted:
+            out.append(c)
+            return at + 1
+        _write_code_point(value, out)
+        return i
+
+    if c >= _ZERO and c <= _SEVEN:
+        # One to three octal digits, taken modulo 256 the way Postgres takes
+        # them, so `\400` is a NUL and is turned down further up.
+        var value = 0
+        var digits = 0
+        var i = at
+        while (
+            i < len(bytes)
+            and digits < 3
+            and bytes[i] >= _ZERO
+            and bytes[i] <= _SEVEN
+        ):
+            value = value * 8 + Int(bytes[i] - _ZERO)
+            i += 1
+            digits += 1
+        out.append(Byte(value & 0xFF))
+        return i
+
+    out.append(c)
+    return at + 1
+
+
+def _hex_digit(b: Byte) -> Int:
+    """The value of one hex digit, or -1 if it is not one.
+
+    Args:
+        b: The byte.
+
+    Returns:
+        0 to 15, or -1.
+    """
+    if b >= Byte(ord("0")) and b <= Byte(ord("9")):
+        return Int(b - Byte(ord("0")))
+    if b >= Byte(ord("a")) and b <= Byte(ord("f")):
+        return Int(b - Byte(ord("a"))) + 10
+    if b >= Byte(ord("A")) and b <= Byte(ord("F")):
+        return Int(b - Byte(ord("A"))) + 10
+    return -1
+
+
+def _write_code_point(value: Int, mut out: List[Byte]):
+    """Appends one code point as the one to four bytes UTF-8 spells it in.
+
+    A value above the last code point, and a surrogate half, are both written
+    out as the replacement character rather than as bytes that are not UTF-8,
+    since the check further up would turn those down and the query said a code
+    point rather than a byte.
+
+    Args:
+        value: The code point.
+        out: The value being built.
+    """
+    var point = value
+    if point > 0x10FFFF or (point >= 0xD800 and point <= 0xDFFF):
+        point = 0xFFFD
+    if point < 0x80:
+        out.append(Byte(point))
+        return
+    if point < 0x800:
+        out.append(Byte(0xC0 | (point >> 6)))
+        out.append(Byte(0x80 | (point & 0x3F)))
+        return
+    if point < 0x10000:
+        out.append(Byte(0xE0 | (point >> 12)))
+        out.append(Byte(0x80 | ((point >> 6) & 0x3F)))
+        out.append(Byte(0x80 | (point & 0x3F)))
+        return
+    out.append(Byte(0xF0 | (point >> 18)))
+    out.append(Byte(0x80 | ((point >> 12) & 0x3F)))
+    out.append(Byte(0x80 | ((point >> 6) & 0x3F)))
+    out.append(Byte(0x80 | (point & 0x3F)))
+
+
+def _is_utf8(bytes: Span[UInt8, _]) -> Bool:
+    """Whether a run of bytes is well formed UTF-8.
+
+    The shortest form rule and the surrogate range are both checked, because a
+    value that round trips through the printer has to read back as the same
+    bytes and an overlong encoding is one the next reader may normalize.
+
+    Args:
+        bytes: The bytes.
+
+    Returns:
+        Whether they spell text.
+    """
+    var i = 0
+    while i < len(bytes):
+        var first = Int(bytes[i])
+        var length: Int
+        var point: Int
+        if first < 0x80:
+            i += 1
+            continue
+        elif first >= 0xC2 and first <= 0xDF:
+            length = 2
+            point = first & 0x1F
+        elif first >= 0xE0 and first <= 0xEF:
+            length = 3
+            point = first & 0x0F
+        elif first >= 0xF0 and first <= 0xF4:
+            length = 4
+            point = first & 0x07
+        else:
+            return False
+        if i + length > len(bytes):
+            return False
+        for k in range(1, length):
+            var c = Int(bytes[i + k])
+            if c < 0x80 or c > 0xBF:
+                return False
+            point = (point << 6) | (c & 0x3F)
+        if length == 3 and (
+            point < 0x800 or (point >= 0xD800 and point <= 0xDFFF)
+        ):
+            return False
+        if length == 4 and (point < 0x10000 or point > 0x10FFFF):
+            return False
+        i += length
+    return True
 
 
 def _unwrapped(text: StringSlice, quote: Byte) -> String:
