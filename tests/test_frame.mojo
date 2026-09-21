@@ -299,8 +299,8 @@ def test_cast_and_take_agree_across_a_chunked_column() raises:
     var flat_text = flat.cast("key", LogicalType.STRING)
     var cut_text = cut.cast("key", LogicalType.STRING)
     assert_equal(cut_text.columns[0].num_chunks(), 3, "a cast keeps the pieces")
-    var cut_keys = cut_text.column("key")^.into_values().into_strings()
-    var flat_keys = flat_text.column("key")^.into_values().into_strings()
+    var cut_keys = cut_text.column("key").into_values().into_strings()
+    var flat_keys = flat_text.column("key").into_values().into_strings()
     for i in range(6):
         assert_equal(
             String(cut_keys[i]), String(flat_keys[i]), "row " + String(i)
