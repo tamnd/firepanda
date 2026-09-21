@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-09-21
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with two entries in it, both about reading a column once where it was being read twice. One is the last of the ClickBench q29 regression, a reduction that built a folded operation once per state slot instead of once per column, which on ninety marked sums over one column was ninety extra passes down a million rows. The other is sortedness, which was asked of a column a row at a time and is now asked a block at a time.
+
+Nothing in the API moves and no answer changes.
+
 ### Fixed: a reduction builds a folded operation once per column rather than once per slot
 
 `Reduce.partial` applied an aggregate's folded operation inside the loop over state slots, so a reduction that owns two slots over one column under one operation built that column twice and walked it twice. Two reductions own two slots. A mean is a sum and a count, and since #882 so is a sum marked to answer null over a column that held nothing, which is what the SQL front end builds for every `SUM`. `bind` gives both halves the same source column and the same operation, so the second pass produced a column identical to the first one and threw it away.
@@ -8538,7 +8546,9 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.16...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.18...HEAD
+[0.8.18]: https://github.com/tamnd/firepanda/releases/tag/v0.8.18
+[0.8.17]: https://github.com/tamnd/firepanda/releases/tag/v0.8.17
 [0.8.16]: https://github.com/tamnd/firepanda/releases/tag/v0.8.16
 [0.8.15]: https://github.com/tamnd/firepanda/releases/tag/v0.8.15
 [0.8.14]: https://github.com/tamnd/firepanda/releases/tag/v0.8.14
