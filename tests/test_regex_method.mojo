@@ -739,5 +739,23 @@ def test_a_non_boundary_on_its_own_is_still_held_out() raises:
     assert_false(program_for(METHOD_COUNT, "\\B*").ok)
 
 
+def test_a_named_character_is_refused_by_re2_rather_than_held_out() raises:
+    """RE2 has no `\\N` at all. It says `invalid escape sequence` to every
+    spelling of one, whether the name exists or not, so a caller who writes one
+    and gets no flag argument has written a pattern pandas hands to Arrow and
+    Arrow rejects. The Unicode name table is wanted by the engine that could
+    use the answer and by nothing else.
+
+    Document 114.
+    """
+    var one = program_for(METHOD_CONTAINS, "\\N{BULLET}")
+    assert_false(one.ok)
+    assert_false(one.gap)
+    assert_equal(one.problem, "RE2 has no such syntax")
+    assert_false(program_for(METHOD_MATCH, "a\\N{DIGIT ZERO}b").ok)
+    assert_false(program_for(METHOD_COUNT, "[\\N{BULLET}]").ok)
+    assert_false(program_for(METHOD_REPLACE, "\\N{NO SUCH NAME}").ok)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
