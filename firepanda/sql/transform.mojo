@@ -148,7 +148,6 @@ from .unsupported import (
     QUANTIFIED_VALUE,
     QUOTED_NAME,
     SELECT_CLAUSE,
-    SPECIAL_CALL,
     STATEMENT_LATER,
     STATEMENT_NEVER,
     SUBSCRIPT,
@@ -256,6 +255,15 @@ comptime _COMPREHENSION: UInt8 = 84
 
 comptime _COLUMNS: UInt8 = 85
 """`ColumnsExpression`, a set of columns written as one thing."""
+
+comptime _TRY: UInt8 = 86
+"""`TryExpression`, which answers NULL where the expression would have raised."""
+
+comptime _UNPACK: UInt8 = 87
+"""`UnpackExpression`, which spreads a list across the arguments around it."""
+
+comptime _OVERLAY: UInt8 = 88
+"""`OverlayExpression`, which is a call with two ways of spelling it."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -968,15 +976,12 @@ struct Transform(Movable):
         self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
         self._refuse(names, "TableFunctionAliasColon", ALIAS_COLON)
 
-        # The functions SQL spells with keywords inside the parentheses. The
-        # message fills in whichever one it was, so they share an entry.
-        var special: List[StaticString] = [
-            "OverlayExpression",
-            "TryExpression",
-            "UnpackExpression",
-        ]
-        for name in special:
-            self._refuse(names, name, SPECIAL_CALL)
+        # The last three the grammar gives a rule of their own. All three read
+        # here as the calls their syntax is, and two of the three are turned
+        # down further on, where what they mean is somebody's problem.
+        self._set(names, "OverlayExpression", _OVERLAY)
+        self._set(names, "TryExpression", _TRY)
+        self._set(names, "UnpackExpression", _UNPACK)
 
         # The markers, which build nothing and are only ever recognized.
         self._set(names, "TableAlias", _MARK_TABLE_ALIAS)
@@ -1829,6 +1834,26 @@ struct Transform(Movable):
 
         if action == _SUBSTRING:
             return self._substring(tree, sql, node, ast, work, at)
+
+        if action == _OVERLAY:
+            return self._overlay(tree, sql, node, ast, work, at)
+
+        if action == _TRY:
+            # `TRY Parens(Expression)`, and the one argument is the whole of
+            # it. What `TRY` does is answer NULL where the expression would
+            # have raised, which is not something a name can say, so the call
+            # is the shape and lowering is where it stops.
+            var tried: List[UInt32] = [self._only(tree, self._only(tree, node))]
+            return self._named_call(ast, work, tried, "try", at)
+
+        if action == _UNPACK:
+            # `UNPACK Parens(Expression)`, the same shape again. This one
+            # spreads a list across the arguments of the call around it, which
+            # DuckDB only takes next to a star or a `COLUMNS`.
+            var packed: List[UInt32] = [
+                self._only(tree, self._only(tree, node))
+            ]
+            return self._named_call(ast, work, packed, "unpack", at)
 
         if action == _EXTRACT:
             return self._extract(tree, sql, node, ast, work, at)
@@ -3174,6 +3199,59 @@ struct Transform(Movable):
         for i in range(1, len(items)):
             arguments.append(work.value(items[i]))
         return ast.call("substring", arguments, 0, at)
+
+    def _overlay(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        at: UInt32,
+    ) raises -> UInt32:
+        """Builds an `OVERLAY` out of either of the two ways it is written.
+
+        `OVERLAY(s PLACING t FROM 2 FOR 3)` and `overlay(s, t, 2, 3)` are the
+        same call said the standard's way and the plain way, and both become
+        one here, which is what DuckDB does with it as well. DuckDB has no
+        `overlay` function for the result to bind to, so the query stops on the
+        name rather than on the syntax, and firepanda stops in the same place
+        and says the same thing.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `OverlayExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the arguments.
+            at: The token the call starts at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If an argument is one this has no case for.
+        """
+        # Past the parentheses and past the rule that offers the two spellings,
+        # the same three steps `SUBSTRING` takes. The comma form is a
+        # `List(Expression)` and so has the one child every list sits under,
+        # and the keyword form has the string, the replacement and the one or
+        # two keyword clauses after them.
+        var inside = self._only(tree, self._only(tree, self._only(tree, node)))
+        var kids = tree.children(inside)
+        if len(kids) == 1:
+            return self._named_call(
+                ast, work, self._items(tree, inside), "overlay", at
+            )
+
+        # `Expression 'PLACING' Expression FromExpression ForExpression?`, and
+        # the two keyword clauses each hold their expression under themselves.
+        # The order the query writes them in is the order the call takes them
+        # in, so there is nothing to move.
+        var items: List[UInt32] = [kids[0], kids[1]]
+        for i in range(2, len(kids)):
+            items.append(self._only(tree, kids[i]))
+        return self._named_call(ast, work, items, "overlay", at)
 
     def _extract(
         self,

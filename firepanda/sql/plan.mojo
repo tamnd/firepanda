@@ -581,6 +581,7 @@ from .unsupported import (
     NAMED_ARGUMENT,
     ROW_VALUE,
     SELECT_SAMPLE,
+    SPECIAL_CALL,
     SUBSCRIPT,
     TABLE_SAMPLE,
     WITH_USING_KEY,
@@ -1643,6 +1644,16 @@ def _check_functions(ast: Ast) raises:
         # what turns the operator into one. It is the same gap `ILIKE` without
         # an escape has, so it says the same thing rather than naming a
         # function nobody wrote.
+        # `TRY(x)` and `UNPACK(x)` are written the way a call is written and
+        # read as calls, and neither one is a function. `TRY` answers NULL
+        # where the expression would have raised and `UNPACK` spreads a list
+        # across the arguments of the call around it, so both are shapes the
+        # plan would have to grow rather than kernels anybody is waiting on.
+        if name == "try":
+            raise not_implemented(SPECIAL_CALL, "TRY", "")
+        if name == "unpack":
+            raise not_implemented(SPECIAL_CALL, "UNPACK", "")
+
         if name == "ilike_escape":
             raise Error(
                 "firepanda matches a LIKE pattern byte for byte, and doing it"

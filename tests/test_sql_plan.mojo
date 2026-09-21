@@ -1267,6 +1267,19 @@ def test_columns_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT *COLUMNS('^a') FROM t")
 
 
+def test_try_and_unpack_are_refused_here_not_in_the_transformer() raises:
+    # Both read as the calls their syntax is, and the message still names which
+    # of the two it was, which is what the slot in the table entry is for.
+    with assert_raises(contains="TRY yet"):
+        _ = _plan("SELECT try(a) FROM t")
+    with assert_raises(contains="UNPACK yet"):
+        _ = _plan("SELECT unpack(a) FROM t")
+    # OVERLAY needs no entry of its own. There is no function of that name in
+    # DuckDB either, so both engines stop on the name.
+    with assert_raises(contains="there is no function named overlay"):
+        _ = _plan("SELECT OVERLAY(g PLACING g FROM 1) FROM t")
+
+
 def test_a_sample_is_refused_here_not_in_the_transformer() raises:
     # A sample reads and prints, and the two places it can be written stop in
     # two places here, since one rides on a table reference and the other is a
