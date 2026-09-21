@@ -60,6 +60,7 @@ accident is not available.
 from std.collections.span import Span
 from std.sys.info import simd_width_of
 
+from firepanda.kernel.regex.unicodedata import unicode_index
 from firepanda.kernel.regex.tokens import (
     AT_BEGINNING,
     AT_BEGINNING_STRING,
@@ -100,6 +101,7 @@ from firepanda.kernel.regex.tokens import (
     OP_RANGE,
     OP_SCOPE,
     OP_SEQ,
+    OP_UNICODE,
     OP_SUBPATTERN,
     Node,
 )
@@ -861,6 +863,76 @@ def _fixed_hex(mut c: _Cursor, width: Int, what: String) -> Int32:
     return value
 
 
+def _unicode_name(mut c: _Cursor, negated: Bool) -> Int32:
+    """Reads `\\p{Greek}` and `\\pL` and the two negated spellings of each.
+
+    This is the one escape in the file that is read for RE2's sake alone.
+    Python's `re` has never had `\\p` and calls it `bad escape \\p` in every
+    version, so a pattern holding one is a pattern pandas hands to Arrow
+    whatever else is in it, and the tree records that with `python_refuses` so
+    that a caller who passed a `flags` argument and therefore landed on
+    Python's engine gets Python's own sentence rather than an answer Python
+    would not have given.
+
+    There are two negations and they mean the same thing. A capital `P` negates
+    and so does a caret just inside the braces, and RE2 reads `\\P{L}` and
+    `\\p{^L}` as one construct, so both set the same bit on one node. Writing
+    both, as `\\P{^L}`, cancels, which was measured rather than assumed.
+
+    A name RE2 has not got is not this library's to refuse with a sentence of
+    its own. It gives up here exactly as it did before the table existed, the
+    compiler never sees a tree, and the reader in `re2.mojo` is asked instead,
+    which now holds the same table and says RE2 refuses it too. That is how
+    `\\p{Cn}` and `\\p{Nope}` come back as the `ValueError` pandas raises rather
+    than as a gap.
+
+    Args:
+        c: The cursor, just past the `p` or the `P`.
+        negated: Whether the letter was the capital.
+
+    Returns:
+        The node, or minus one when the parse failed.
+    """
+    if not c.python_refuses:
+        c.python_refuses = True
+        c.python_problem = String("bad escape \\p")
+
+    var flip = negated
+    var start = c.at
+    var stop = c.at
+    if not c.done() and c.peek() == 0x7B:
+        c.at += 1
+        if not c.done() and c.peek() == 0x5E:
+            c.at += 1
+            flip = not flip
+        start = c.at
+        while not c.done() and c.peek() != 0x7D:
+            c.at += 1
+        if c.done():
+            c.give_up(String("bad escape"))
+            return -1
+        stop = c.at
+        c.at += 1
+    else:
+        # The braceless form takes exactly one character, so `\\pLu` is the
+        # letter category and then a literal `u`, which is RE2's reading and
+        # not the one a person expects from the braced form beside it.
+        if c.done():
+            c.give_up(String("bad escape"))
+            return -1
+        c.at += 1
+        stop = c.at
+
+    var bytes = List[UInt8]()
+    for i in range(start, stop):
+        _put_point(bytes, c.points[i])
+    var which = unicode_index(StringSlice(unsafe_from_utf8=Span(bytes)))
+    if which < 0:
+        c.give_up(String("bad escape"))
+        return -1
+    return c.add(OP_UNICODE, which, Int32(1) if flip else Int32(0))
+
+
 def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
     """Reads what follows a backslash and builds the node it means.
 
@@ -886,6 +958,9 @@ def _escape(mut c: _Cursor, in_class: Bool) -> Int32:
     var category = _category_for(point)
     if category >= 0:
         return c.add(OP_CATEGORY, category, 0)
+
+    if point == 0x70 or point == 0x50:
+        return _unicode_name(c, point == 0x50)
 
     if not in_class:
         if point == 0x41:

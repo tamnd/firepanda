@@ -70,6 +70,22 @@ On the `str.contains` differential the grammar bucket falls from 1807 patterns t
 
 Document 102 is the write up, and document 101's reader needed no change: it already read all three spellings and refused `(?x)` and `(?-)` and `a(?i`, which was checked rather than assumed.
 
+### Added: a name for a set of characters, which RE2 has and Python has not
+
+`\p{Greek}`, `\P{L}`, `\p{^Nd}` and the braceless `\pL` now read, compile and answer. CPython's `re` calls every one of them `bad escape \p` and always has, so pandas sends them all to Arrow, and the RE2 inside Arrow is the only engine that will ever run one. They were 392 of the corpus patterns RE2 reads and this library did not, which is the largest item left on that list after the flag groups.
+
+The table under them was measured against that same RE2 rather than copied from CPython, by `tools/gen_regexunicode.py`, which asks `pyarrow.compute.match_substring_regex` one name at a time over a column holding all 1112064 code points that can appear in a row. That is not fussiness. RE2 and CPython are not built against the same Unicode release, and `\p{L}` and CPython's `unicodedata` disagree about 4302 code points, so a table copied from the wrong library would have been wrong about four thousand characters on the day it was written. What comes out is `firepanda/kernel/regex/unicodedata.mojo`, 196 names in 5803 ranges: 26 two letter general categories, the 6 one letter ones built as unions of their parts and then checked, 163 scripts, and `Any`.
+
+Two of the measured rules would have been got wrong by anybody writing them from what Unicode says. `\p{C}` does not hold the unassigned code points; it is exactly `Cc` and `Cf` and `Co` and `Cs`, and `\p{Cn}` is not a name RE2 has at all, which is a gap 819533 characters wide. And `\p{Cs}` is a real name with nothing in it, because a surrogate has no UTF-8 encoding and every row reaching the engine arrived as UTF-8. Three smaller rules are asserted in the generator so a later release cannot move them quietly: a name is case sensitive, the `Is` prefix other engines take is not one RE2 takes, and `Cn` stays refused.
+
+The tree gains one op, `OP_UNICODE`, carrying the name's index and whether it was negated, and records `python_refuses` with Python's own sentence, which is the field added one slice ago for exactly this shape. The compiler folds a name before negating it, the order `[\d\D]` and `[^\W]` already depend on, so `(?i)\p{Lu}` widens from 1831 code points to 3212 the way RE2 widens it. Inside a class a name is an item like any other.
+
+The reader from document 101 stops declining. It had one construct it would not judge, which was this one, and the table settles it, so `\p{Cn}` and `\p{Foo}` and `\p{latin}` are refused with the sentence RE2 answers them with rather than held out. That means the `unsure` field, the branch that read a pattern because of it and the differential bucket that counted it are all gone: a field nothing can set is worse than nothing, because a reader believes it. `regex_re2` now agrees with RE2 about every one of the 30052 corpus patterns, on whether it reads and on why not, at 8373 read and 21679 refused with matching reasons and nothing set aside, where it was 8339 and 21547 with 166 declined.
+
+The corpus generated two `\p` patterns and now generates twenty, so this slice was measured twice. Against the old corpus the `str.contains` grammar bucket falls from 1472 patterns to 1032, 430 of the 440 becoming compared answers and the other ten landing in a bucket that names their actual construct. Against the widened corpus `str.contains` is 28410 compared and 1642 held out, `str.match` 28489 and 1563, `str.fullmatch` 28490 and 1562, `str.count` and `str.replace` 28396 and 1656, and the Python engine differential 29578 and 474. All five stay at 10000 agreements in ten thousand with zero disagreements.
+
+Document 103 is the write up, and document 101 is amended where it recorded a bucket that no longer exists.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

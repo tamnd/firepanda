@@ -125,6 +125,8 @@ RE2 refuses and the reader read it 0
 agreement 10000 in ten thousand, 0 disagreements
 ```
 
+Those numbers are the ones this reader was born with and they have moved twice since. The line counting what the reader declined to judge is gone entirely, because document 103 built the table of Unicode names that was the only thing it ever counted, and a bucket that can only print zero is worse than no bucket. As of that document the run is 8373 read, 21679 refused with matching reasons and nothing set aside, still at zero in both ceilings.
+
 The zero on the second to last line is the one that was not expected. The reader was written to be allowed to miss, and over thirty thousand patterns it missed nothing it was willing to judge.
 
 The first run of this differential had 21 disagreements and both causes were rules rather than slips, which is the argument for having built the differential before wiring anything up. One was the flag group and the stack. The other was the repeat check order, which accounted for the other twenty and which no amount of reading the syntax would have produced.
@@ -156,7 +158,7 @@ Eleven kinds and twelve sentences, for the class range reason given above. They 
 
 The 1807 patterns still held out on `contains` are the other half of the job, which is the patterns Arrow takes and this library cannot read. They are a construct at a time and they are known: `\Q...\E` is 208 of them, `\p` and `\P` is 298, `{,n}` read as a literal is 166, `\z` is 23, `[[:...:]]` is 18, a leading `]` in a class is 11, and after those come a flag group anywhere in the pattern rather than only at the front, a repeat on an assertion, `[\d-a]`, the octal forms and a group name starting with a digit.
 
-The `\p` work is the one that pays twice, because a table of script and category names is also what would let the reader stop being unsure about the 166 patterns it declines to judge now.
+The `\p` work is the one that pays twice, because a table of script and category names is also what would let the reader stop being unsure about the 166 patterns it declines to judge now. That is document 103, and it did pay twice.
 
 Beyond those are the 218 patterns where RE2 reads the syntax differently rather than not at all, and the 111 where RE2 reads a non boundary between bytes. Those are not grammar questions and they do not belong to this reader.
 

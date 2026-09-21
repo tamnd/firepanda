@@ -112,6 +112,21 @@ compiler cares about rather than of what the caller wrote, and the tree is read
 by the router as well."""
 
 
+comptime OP_UNICODE: UInt8 = 22
+"""`\\p{L}` and every other Unicode name. `a` is the name's index in
+`unicodedata.mojo` and `b` is one when the name was negated.
+
+Python has no such node, because Python's parser has no such escape: `\\p` is a
+bad escape in every version of `re` there has ever been. So a pattern holding
+one reaches Arrow whatever else is in it, and this op only ever compiles onto
+RE2's engine.
+
+There are two ways to negate a name and they both land here. `\\P{L}` is the
+one people write and `\\p{^L}` is the other, and RE2 reads them as the same
+thing, so `b` is set by either and the two spellings build one node.
+"""
+
+
 comptime AT_BEGINNING: UInt8 = 1
 """`^` outside multiline mode, which is the start of the text."""
 

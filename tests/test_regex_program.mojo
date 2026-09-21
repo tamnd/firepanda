@@ -22,6 +22,7 @@ from std.collections.span import Span
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.kernel.regex.parse import parse_pattern
+from firepanda.kernel.regex.pike import matches_text
 from firepanda.kernel.regex.program import (
     IN_ANY,
     IN_ANY_ALL,
@@ -684,11 +685,39 @@ def test_the_syntax_re2_refuses_that_looks_like_nothing() raises:
 
 def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
-    refused them, and reaching them needs a second front end."""
-    var program = compile_program(parse_pattern("\\p{L}"), ENGINE_RE2)
+    refused them, and reaching them takes a slice of the second front end each.
+
+    `\\Q` is one of the slices not taken yet, and it is here rather than `\\p{L}`
+    because that one is taken, which is the row below."""
+    var program = compile_program(parse_pattern("\\Qa+b\\E"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
+
+
+def test_a_unicode_name_compiles_on_re2s_engine_and_not_on_pythons() raises:
+    """`\\p` is a bad escape to every version of Python's `re` there has ever
+    been, so a pattern holding one reaches Arrow whatever else is in it, and it
+    is a refusal rather than a gap on the engine that copies Python."""
+    var tree = parse_pattern("\\p{Greek}")
+    var program = compile_program(tree, ENGINE_RE2)
+    assert_true(program.ok)
+
+    var refused = compile_program(tree, ENGINE_PYTHON)
+    assert_false(refused.ok)
+    assert_false(refused.gap)
+    assert_equal(refused.problem, "bad escape \\p")
+
+
+def test_a_unicode_name_under_the_ignore_case_flag_is_widened() raises:
+    """None of these sets is closed under folding, so `(?i)\\p{Lu}` matches a
+    small letter. Measured against the RE2 inside pyarrow, where the set goes
+    from 1831 code points to 3212 once the flag is on."""
+    var program = compile_program(parse_pattern("(?i)\\p{Lu}"), ENGINE_RE2)
+    assert_true(program.ok)
+    assert_true(matches_text(program, "A"))
+    assert_true(matches_text(program, "a"))
+    assert_false(matches_text(program, "1"))
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
