@@ -34,6 +34,13 @@ Reading RE2's grammar changed what a pattern neither grammar can read comes back
 
 The three are `(a)\2` and its siblings in `test_str_backreference.py`, `(?L:a)` in `test_str_scoped_flags.py`, and `[\z]` unflagged in `test_str_z_escape.py`. Each of them has a paragraph about which error came from where, so each of those paragraphs is rewritten rather than the assertion being quietly swapped.
 
+### Changed: a filter reads its mask in blocks whatever the mask looks like
+
+Reading the mask a cache line at a time was switched on only for a mask selective enough to meet blocks that keep nothing, on the reasoning that the block read is waste otherwise. The reasoning was right and the conclusion was wrong. Reading in blocks is faster even on a mask with no empty block in it anywhere, where every block test comes back true and is therefore pure overhead, which means the gain is in the shape of the loop rather than in the skipping.
+
+The loop it replaces has its exit governed by the mask, and that is data the branch predictor cannot learn. The blocked one has an inner loop with a trip count of sixty four. On a sixty four million row int64 column on a 13900K, a mask that keeps every row goes from 21032 to 18924 microseconds, which is ten per cent for a filter that skips nothing at all. A contiguous band of fourteen per cent of the rows goes from 5108 to 4746 microseconds at the front of the column, 5301 to 5018 in the middle and 5425 to 5214 at the back. There is no shape measured where the blocked loop loses, so the threshold is gone rather than moved.
+
+
 ### Added: COLUMNS() reads and prints
 
 `COLUMNS(...)` is how DuckDB writes a set of columns where one expression goes, and it was the biggest single thing the corpus asked for that firepanda turned down at the parse. Four things may stand in the parentheses. A string holding a regular expression, matched against every column name. A list of names. A lambda taking a name and answering whether to keep it. And a star, with the three modifier lists an ordinary star carries. There is a fifth spelling, `*COLUMNS(...)`, which hands the set over as several arguments rather than as one, and the star there stands outside the parentheses and is not the same star as the one that may stand inside them.

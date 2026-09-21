@@ -192,21 +192,6 @@ falls back to the row at a time loop over sixty four rows rather than over the
 whole morsel, so the fallback costs the block test and nothing else.
 """
 
-comptime FILTER_SKIP_SHARE = 8
-"""How selective a mask has to be before the compaction loop reads it in blocks.
-
-The reciprocal of a share, so eight means an eighth. Under it the block read
-pays for itself and above it it is pure cost, and the reason is only
-arithmetic: if a mask keeps a fraction p of its rows at random then a block of
-sixty four keeps nothing with probability (1 - p) to the sixty fourth, which is
-0.04 at a half, 0.3 at an eighth and 0.9 at a hundredth. A filter that keeps
-half its rows almost never meets an empty block and still pays to look for one.
-
-Measured rather than derived, though, because real masks are not random. A
-shipdate range over a table clustered by date skips far more than the formula
-says and a mask over a column with no order skips rather less.
-"""
-
 comptime MASK_SAMPLE_BLOCK = 64
 """Rows `mask_keeps_more_than` reads at each place it looks.
 
@@ -1358,9 +1343,17 @@ def _filter_spread[
     # row is kept or not, because one mask byte is not enough to see that the
     # next cache line of rows is going to be dropped whole. A block read is,
     # and a block that keeps nothing costs a cursor advance and no stores at
-    # all. That only pays when empty blocks are common, so the count the
-    # offsets pass has already produced decides it rather than a guess.
-    var skipping = dense and not has_null and kept * FILTER_SKIP_SHARE < n
+    # all.
+    #
+    # This used to be switched on only for a mask selective enough to meet
+    # empty blocks, on the reasoning that the block read is waste otherwise.
+    # The reasoning was right and the conclusion was wrong: reading in blocks
+    # is faster even on a mask with no empty block in it anywhere, because the
+    # inner loop gets a trip count of sixty four and the loop it replaced had
+    # its exit governed by the mask, which is data the branch predictor cannot
+    # learn. So there is no threshold and the only question left is whether
+    # the mask can be read a byte at a time at all.
+    var skipping = dense and not has_null
 
     def compact(w: Int) raises {mut out, mut flags, imm}:
         var target = out.unsafe_mut_ptr()

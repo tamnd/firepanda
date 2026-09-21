@@ -1439,12 +1439,12 @@ def test_a_filter_past_the_split_finds_one_kept_row_in_an_empty_block() raises:
             assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
 
 
-def test_a_filter_past_the_split_agrees_across_the_density_gate() raises:
-    # Whether the compaction reads blocks at all turns on how much of the mask
-    # survives, so the answer has to be the same on both sides of that decision
-    # and at the density where it flips. This walks a spread that crosses it
-    # twice over, with an offset that moves the pattern against the block
-    # boundary and the morsel boundary at once.
+def test_a_filter_past_the_split_agrees_at_every_density() raises:
+    # How much of the mask survives decides how many blocks the compaction
+    # skips and how many it walks a row at a time, so the answer has to hold
+    # from a mask that keeps almost everything to one that keeps almost
+    # nothing. This walks that spread with an offset that moves the pattern
+    # against the block boundary and the morsel boundary at once.
     comptime ROWS = 70_009
     var col = build[DType.int64](ROWS, 0)
     var every: List[Int] = [2, 3, 7, 8, 9, 17, 64, 65, 1_000, 50_000]
