@@ -159,7 +159,7 @@ run_one() {
   local file=$1 logs=$2
   local base=${file##*/}
   # `SECONDS` rather than anything finer because macOS `date` has no `%N`, and
-  # one second is plenty: the files run from three seconds to a minute and this
+  # one second is plenty: the files run from one second to five minutes and this
   # number is only ever used to decide which shard a file belongs in.
   SECONDS=0
   if mojo run -I . "$file" > "$logs/$base.log" 2>&1; then
