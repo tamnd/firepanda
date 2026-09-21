@@ -150,6 +150,20 @@ The `str.contains` grammar bucket falls from 841 patterns to 703 on the corpus t
 
 Document 105 is the write up.
 
+### Added: a backslash and a digit
+
+Python has a backreference and RE2 does not, so `\12` is a reference to group twelve in one grammar and the character with code ten in the other, and which of the two a caller gets depends on how many groups they happened to write earlier in the pattern. That difference, together with the ceiling on an octal escape, was the largest family of patterns RE2 reads and this library did not, at 282 of the generated corpus counted across the two sentences Python refuses them with.
+
+Python reads one digit, reads a second if it is a digit, and reads a third only when all three are octal, in which case the three are a character with a ceiling of `0o377`. Anything else is a decimal group reference of the one or two digits, checked where it is written. That is why `\777` is an octal escape and out of range while `\778` is a reference to group 77. RE2 takes up to three octal digits with a ceiling of `0o777` and reads them as a character rather than a byte, so `\400` is U+0100, and it tells an escape from the reference it will not read by looking at the character after the first digit, so `\12` is a character and `\1` and `\18` are both `invalid escape sequence: \1`, quoting one character of the two that were written.
+
+Every line of that was measured against the RE2 inside pyarrow 24.0.0 and against CPython's `re`, one pattern at a time, before it was written down. The parser now records Python's sentence beside the literal RE2 reads instead of giving up, which is the fifth use of the field document 102 added, and the same change covers the ceiling inside a character class. The engines were not touched and neither was the router.
+
+The slice also turned up a case that is not about the grammar. The walk pandas does to pick an engine never enters a repeat, so a backreference hidden inside one is handed to Arrow, and with twelve groups in front of it the reference is `\12`, which RE2 reads as a newline. So `((twelve groups)\12)+` comes back with a column of booleans that has nothing to do with what the caller wrote, while the same pattern without the repeat is answered by Python and answers correctly. Both were measured against pandas, and the one upstream answers is now answered rather than refused.
+
+The `str.contains` grammar bucket falls from 703 patterns to 458 on the corpus the last slice measured, 234 of the 245 becoming compared answers and 11 moving to buckets that name their actual construct. The measured list in the corpus goes from 114 patterns to 159, and on the widened corpus of 30156 all six comparisons stay at 10000 agreements in ten thousand with zero disagreements.
+
+Document 106 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

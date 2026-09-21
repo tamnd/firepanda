@@ -722,6 +722,31 @@ def test_a_unicode_name_under_the_ignore_case_flag_is_widened() raises:
     assert_false(matches_text(program, "1"))
 
 
+def test_a_reference_the_router_missed_is_an_octal_character_on_re2() raises:
+    """The one way a backreference reaches the engine that has none.
+
+    The router's walk does not enter a repeat, so a pattern with twelve groups
+    and a reference to the twelfth inside a repeat is handed to Arrow, where
+    RE2 reads the same two characters as the octal number ten. pandas answers
+    that call with a column rather than an error, so refusing it here would be
+    a refusal upstream does not give. The parser leaves the character on the
+    node for exactly this. Document 106.
+    """
+    var twelve = String("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)")
+    var hidden = compile_program(
+        parse_pattern("(" + twelve + "\\12)+"), ENGINE_RE2
+    )
+    assert_true(hidden.ok)
+    assert_true(matches_text(hidden, "abcdefghijkl\n"))
+    assert_false(matches_text(hidden, "abcdefghijkll"))
+
+    # One digit and RE2 has no reading at all, so the refusal stands.
+    var single = compile_program(parse_pattern("((a)\\2)+"), ENGINE_RE2)
+    assert_false(single.ok)
+    assert_false(single.gap)
+    assert_equal(single.problem, "RE2 has no backreference")
+
+
 def test_a_repeat_on_an_anchor_collapses_the_way_re2_collapses_it() raises:
     """A position test answers the same question however many times it is
     asked, so a quantifier on one is worth one copy of it when the count starts
