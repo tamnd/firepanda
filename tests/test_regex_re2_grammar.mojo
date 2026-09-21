@@ -177,6 +177,26 @@ def test_quoting_a_run() raises:
     _refuses(String("\\E"), said)
     _refuses(String("a\\E"), said)
     _refuses(String("[\\Qa\\E]"), said)
+    # The closer is two literal characters and nothing in the run is an escape,
+    # so this one ends at the second backslash and the `E` after it is a letter
+    # in the run rather than a second close.
+    _takes(String("\\Qa\\\\E"))
+    _refuses(String("\\Qa\\E\\E"), said)
+
+
+def test_an_empty_quote_leaves_nothing_for_a_repeat() raises:
+    """The same stack rule the flag group above follows. Document 105."""
+    _takes(String("x\\Q\\E*"))
+    _takes(String("\\Qab\\E*"))
+    _takes(String("\\Qa\\E\\Q\\E*"))
+    var said = String("there is nothing here for that repeat to repeat")
+    _takes(String("\\Q*"))
+    _refuses(String("\\Q\\E*"), said)
+    _refuses(String("\\Q\\E?"), said)
+    _refuses(String("\\Q\\E{2}"), said)
+    _refuses(String("\\Q\\E\\Q\\E*"), said)
+    _refuses(String("a|\\Q\\E*"), said)
+    _refuses(String("(\\Q\\E*)"), said)
 
 
 def test_the_bracket_forms_re2_has() raises:

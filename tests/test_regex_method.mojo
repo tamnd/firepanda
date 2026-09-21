@@ -21,6 +21,7 @@ from firepanda.kernel.regex.method import (
     METHOD_EXTRACT,
     METHOD_FULLMATCH,
     METHOD_MATCH,
+    METHOD_REPLACE,
     anchored,
     leading_flags,
     preprocessed,
@@ -238,12 +239,64 @@ def test_a_pattern_neither_grammar_reads_carries_re2s_reason() raises:
 def test_a_pattern_re2_reads_and_the_grammar_does_not_is_still_a_gap() raises:
     """Because there is nothing wrong with it and no engine here to run it.
 
-    `\\p{L}` was this row's pattern until the name table landed and is a real
-    answer now, so the pattern is `\\Q`, which is a slice not taken yet."""
-    var program = program_for(METHOD_CONTAINS, "\\Qa+b\\E")
+    `\\p{L}` was this row's pattern until the name table landed and `\\Qa+b\\E`
+    was until the quoted run landed, so the pattern is a range in a class,
+    which is a slice not taken yet."""
+    var program = program_for(METHOD_CONTAINS, "[\\d-a]")
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
+
+
+def test_a_quoted_run_is_answered_and_a_stray_close_is_refused() raises:
+    """`\\Q` and `\\E` are a bad escape to Python's `re`, so pandas hands every
+    pattern holding either one to Arrow and both halves of the answer come from
+    RE2.
+
+    A run is a column. A close with no run open is the `ValueError` pandas
+    raises and not a gap, because RE2 refuses that one too. Document 105.
+    """
+    var quoted = program_for(METHOD_CONTAINS, "\\Qa+b\\E")
+    assert_true(quoted.ok)
+    assert_true(matches_text(quoted, "xa+by"))
+    assert_false(matches_text(quoted, "aab"))
+
+    var repeated = program_for(METHOD_CONTAINS, "\\Qab\\E*")
+    assert_true(repeated.ok)
+    assert_true(matches_text(repeated, "abbb"))
+    assert_true(matches_text(repeated, "xay"))
+
+    for bad in [String("\\E"), String("a\\Eb"), String("[\\Qa\\E]")]:
+        var program = program_for(METHOD_CONTAINS, bad)
+        assert_false(program.ok)
+        assert_false(program.gap)
+        assert_equal(program.problem, "RE2 has no such escape")
+
+
+def test_a_replace_is_asked_about_the_pattern_inside_a_bracket() raises:
+    """The one place where the pattern a caller wrote and the pattern Arrow
+    validates come apart for a method that does not rewrite anything.
+
+    Arrow compiles a replace twice, once with a capturing bracket round the
+    whole pattern to find the extent of a match and once as written so that the
+    group numbers in the replacement mean what the caller meant. A pattern
+    ending inside a `\\Q` run swallows the bracket, so the same pattern is a
+    column for `count` and a refusal for `replace`, and the refusal quotes a
+    bracket nobody wrote. Document 105.
+    """
+    for method in [METHOD_CONTAINS, METHOD_COUNT]:
+        var open = program_for(method, "\\Qa")
+        assert_true(open.ok)
+
+    var replacing = program_for(METHOD_REPLACE, "\\Qa")
+    assert_false(replacing.ok)
+    assert_false(replacing.gap)
+    assert_equal(replacing.problem, "a bracket is opened that nothing closes")
+
+    # A run that is closed leaves the bracket alone, so the only replaces this
+    # costs are the ones upstream refuses as well.
+    var closed = program_for(METHOD_REPLACE, "\\Qa+b\\E")
+    assert_true(closed.ok)
 
 
 def test_a_unicode_name_is_answered_and_a_bad_one_is_refused() raises:

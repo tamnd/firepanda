@@ -136,6 +136,20 @@ A pattern only misrouted when it held both a construct Python refuses and a look
 
 `holds_unsupported` and `reads_as_python` now both ask whether Python's grammar read the pattern rather than whether this one did. The routing differential goes from 3402 disagreements to zero over 30070 patterns, and two tests that had been asserting the right thing against the wrong implementation pass again.
 
+### Added: a run of characters taken literally
+
+`\Q` opens a run of characters RE2 takes literally and `\E` closes it, so `\Qa+b\E` matches three characters rather than a repeated `a` and a `b`. Python's `re` has neither escape and calls both `bad escape`, which is what sends every pattern holding one to Arrow, and they were the largest family of patterns RE2 reads and this library did not, at 181 of the generated corpus.
+
+Almost nothing a reader would assume about the run is true, and every rule was measured against the RE2 inside pyarrow before it was written down. An unterminated run is not a refusal and reaches the end of the pattern. An `\E` with no run open is a refusal, so the close is not a harmless no op. Nothing inside a run is an escape, so `\Qa\\E` is the letter `a` and one backslash, because the close is found at the second backslash rather than at the first, and there is no way to write a literal `\E` inside a run. The run is not a group either: a quantifier after it takes the last character, so `\Qab\E*` is `ab*`, and an empty run leaves nothing behind, so `\Q\E*` is refused and `x\Q\E*` is `x*`. And the run crosses syntax it would otherwise stop at, so `(\Qa)b\E)` is `(a\)b)`.
+
+The implementation is one block in the sequence reader that appends one literal node per character. Every rule above falls out of that rather than being a line anywhere, which is why the block is short. The compiler, the engines and the router were not touched. The RE2 reader needed one field, because an empty run is the second construct in it that leaves nothing on RE2's stack and it had been reading `\Q\E*` as a pattern where RE2 refuses one.
+
+One thing turned up that is not about `\Q` at all. Arrow's `replace_substring_regex` compiles the pattern twice, once with a capturing bracket round the whole of it to find the extent of a match and once as written so the group numbers in the replacement stay the caller's, and it validates the bracketed copy first. A pattern that ends inside a run swallows that bracket, so `str.replace("\Qa", "-")` raises `missing ): (\Qa)`, quoting a pattern nobody wrote, while `str.count("\Qa")` and `str.contains("\Qa")` both answer. A replace is now asked about the bracketed text before anything else, which reproduces both the refusal and its wording.
+
+The `str.contains` grammar bucket falls from 841 patterns to 703 on the corpus the last slice measured, 136 of the 138 becoming compared answers. The measured list in the corpus goes from 73 patterns to 114, and on the widened corpus of 30111 all six comparisons stay at 10000 agreements in ten thousand with zero disagreements.
+
+Document 105 is the write up.
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

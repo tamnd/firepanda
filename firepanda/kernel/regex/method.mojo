@@ -291,6 +291,33 @@ def anchored(method: UInt8, pattern: String, hoist: Bool = True) -> String:
     return String(head, start, "(", out, ")")
 
 
+def replace_extent(pattern: String) -> String:
+    """The first of the two patterns a replace hands RE2.
+
+    Arrow's `replace_substring_regex` compiles the pattern twice rather than
+    once. One copy has a capturing bracket round the whole of it and is what
+    finds the extent of a match, and the other is the pattern as written and is
+    what the group numbers in a replacement refer to, which is why a `\\1` in a
+    replacement names the caller's own first group rather than the bracket
+    Arrow added. Both are compiled, the bracketed one first, and a caller sees
+    a refusal from either.
+
+    The bracket is invisible to a caller for every pattern but one shape, and
+    the shape is a pattern that ends inside a `\\Q` run. The run swallows
+    whatever follows it, so the bracket Arrow wrote is never closed and the
+    call is refused for a missing bracket the caller did not leave out.
+    `str.count("\\Qa")` answers and `str.replace("\\Qa", "-")` raises with
+    `missing ): (\\Qa)`, which quotes a pattern nobody wrote. Document 105.
+
+    Args:
+        pattern: The pattern as the caller wrote it, with `\\Z` already seen to.
+
+    Returns:
+        The text Arrow validates before it validates the pattern itself.
+    """
+    return String("(", pattern, ")")
+
+
 def python_anchored(
     method: UInt8, pattern: String, verbose: Bool = False
 ) -> String:
@@ -517,6 +544,21 @@ def program_for(
             minor=minor,
             alphabet=table,
         )
+    if method == METHOD_REPLACE:
+        # A replace is the one method whose pattern reaches RE2 twice, and the
+        # bracketed copy is compiled first, so it is asked about first here as
+        # well. Both orders refuse the same set and only the wording differs,
+        # and the wording is what a caller reads: `)a` comes back as
+        # `unexpected ): ()a)`, with a bracket in the quoted pattern that the
+        # caller never wrote. `replace_extent` says why there is a bracket.
+        # Document 105.
+        var wrap = re2_reads(replace_extent(preprocessed(pattern)))
+        if not wrap.ok:
+            var refused = Program()
+            refused.ok = False
+            refused.problem = wrap.problem.copy()
+            refused.gap = False
+            return refused^
     if not tree.ok:
         # A pattern the grammar cannot read is refused over what the caller
         # wrote rather than over the rewrite, because the rewrite can make a

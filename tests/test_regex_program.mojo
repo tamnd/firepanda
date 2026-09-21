@@ -687,9 +687,11 @@ def test_a_pattern_python_cannot_read_is_a_gap_and_not_a_refusal() raises:
     """Those are the patterns pandas answers with RE2 precisely because Python
     refused them, and reaching them takes a slice of the second front end each.
 
-    `\\Q` is one of the slices not taken yet, and it is here rather than `\\p{L}`
-    because that one is taken, which is the row below."""
-    var program = compile_program(parse_pattern("\\Qa+b\\E"), ENGINE_RE2)
+    A range in a class is one of the slices not taken yet, and it is here
+    rather than `\\p{L}` or `\\Qa+b\\E` because both of those are taken, which
+    is what the rows below and above are about. Python calls `[\\d-a]` a bad
+    character range and RE2 reads it as three members."""
+    var program = compile_program(parse_pattern("[\\d-a]"), ENGINE_RE2)
     assert_false(program.ok)
     assert_true(program.gap)
     assert_equal(program.problem, "Python's grammar cannot read this pattern")
@@ -755,6 +757,41 @@ def test_a_repeat_on_an_anchor_is_a_refusal_on_pythons_engine() raises:
     assert_false(refused.ok)
     assert_false(refused.gap)
     assert_equal(refused.problem, "nothing to repeat")
+
+
+def test_a_quoted_run_compiles_as_the_characters_it_holds() raises:
+    """`\\Qab\\E*` is `ab*` rather than `(?:ab)*`, which is what the parser
+    building one literal per character buys and is the only thing about this
+    construct a compiler could get wrong.
+
+    The fold is not a special case either. A run goes through the same path a
+    typed out literal goes through, so `(?i)\\QAB\\E` folds. Document 105.
+    """
+    var run = compile_program(parse_pattern("\\Qab\\E*"), ENGINE_RE2)
+    assert_true(run.ok)
+    assert_true(matches_text(run, "a"))
+    assert_true(matches_text(run, "abb"))
+    assert_false(matches_text(run, "b"))
+
+    var folded = compile_program(parse_pattern("(?i)\\QAB\\E"), ENGINE_RE2)
+    assert_true(folded.ok)
+    assert_true(matches_text(folded, "ab"))
+    assert_true(matches_text(folded, "AB"))
+
+    var empty = compile_program(parse_pattern("x\\Q\\E*"), ENGINE_RE2)
+    assert_true(empty.ok)
+    assert_true(matches_text(empty, ""))
+    assert_true(matches_text(empty, "xx"))
+
+
+def test_a_quoted_run_is_a_refusal_on_pythons_engine() raises:
+    """With Python's own words, for the same reason the row above this file's
+    anchor pair gives them: the caller who reached this engine passed a `flags`
+    argument and Python is the grammar they are owed."""
+    var refused = compile_program(parse_pattern("\\Qa\\E"), ENGINE_PYTHON)
+    assert_false(refused.ok)
+    assert_false(refused.gap)
+    assert_equal(refused.problem, "bad escape \\Q")
 
 
 def test_the_two_engines_refuse_the_same_pattern_in_two_voices() raises:
