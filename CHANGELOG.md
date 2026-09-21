@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: ARRAY over a subquery reads and prints
+
+`ARRAY(SELECT ...)` collects a whole column into one list value, and firepanda used to turn the query down at the parse. It reads and prints now, at 25 statements of the corpus, and lowering is where it stops.
+
+The grammar puts all three spellings under one rule. `[a, b]` and `ARRAY[a, b]` write their elements out and are the same thing said two ways, so the printer picks the bracket. `ARRAY(SELECT ...)` names a query rather than writing elements, so it keeps the word the query wrote and it is a kind of its own. It is not `EXPR_LIST`, because the elements live in the statement arena rather than in the expression one and a kind holding an index that means one of two things is how a wrong arena read gets written. It is not `EXPR_SUBQUERY` either, for the other reason: a scalar subquery has to give back one row and this one takes however many there are.
+
+Running it means a node that reads a column and hands back one value, which is the same thing the other subquery shapes are waiting on, so the refusal says what it always said and now says it from lowering.
+
 ### Added: WITH ORDINALITY reads and prints
 
 `WITH ORDINALITY` after a table function asks for an extra column holding the position of each row, and firepanda used to turn the query down at the parse. It reads and prints now, at 23 statements of the corpus, and lowering is where it stops.

@@ -127,7 +127,6 @@ from .token import (
 from .unsupported import (
     AGGREGATE_FILTER,
     ALIAS_COLON,
-    ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
     CUSTOM_OPERATOR,
@@ -3785,18 +3784,22 @@ struct Transform(Movable):
             The expression node.
 
         Raises:
-            Error: If it is the `ARRAY(SELECT ...)` form, or an element has no
-                case.
+            Error: If an element has no case.
         """
+        # Two spellings under one rule. `[a, b]` and `ARRAY[a, b]` write their
+        # elements out, and `ARRAY(SELECT ...)` names a query whose column the
+        # list is, so the opening bracket is what tells them apart.
         var bounded = self._only(tree, self._only(tree, node))
+        var at = tree.nodes[Int(node)].token_start
         if _first_byte(tree, sql, bounded) != _LEFT_BRACKET:
-            raise _unsupported(tree, sql, bounded, ARRAY_SUBQUERY)
+            return ast.array_subquery(work.value(bounded), at)
+
         var elements = List[UInt32]()
         var items = self._items(tree, bounded)
         work.warm(items)
         for item in items:
             elements.append(work.value(item))
-        return ast.list_of(elements, tree.nodes[Int(node)].token_start)
+        return ast.list_of(elements, at)
 
     def _row(
         self,

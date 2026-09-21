@@ -35,6 +35,7 @@ from .ast import (
     EXPR_BETWEEN,
     EXPR_BINARY,
     EXPR_CASE,
+    EXPR_ARRAY,
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
@@ -974,6 +975,12 @@ def _write_step(
 
     if kind == EXPR_SUBQUERY:
         out += "("
+        _write_stmt(ast, item.a, grammar, out)
+        out += ")"
+        return
+
+    if kind == EXPR_ARRAY:
+        out += "ARRAY("
         _write_stmt(ast, item.a, grammar, out)
         out += ")"
         return

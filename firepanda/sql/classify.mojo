@@ -48,6 +48,7 @@ from .ast import (
     EXPR_CAST,
     EXPR_COLLATE,
     EXPR_COLUMN,
+    EXPR_ARRAY,
     EXPR_COLUMNS,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
@@ -180,7 +181,7 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
 
     if kind == EXPR_LITERAL or kind == EXPR_PARAMETER or kind == EXPR_COLUMN:
         return out^
-    if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS:
+    if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS or kind == EXPR_ARRAY:
         return out^
     if (
         kind == EXPR_UNARY
@@ -766,6 +767,7 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         kind == EXPR_SUBQUERY
         or kind == EXPR_EXISTS
         or kind == EXPR_QUANTIFIED
+        or kind == EXPR_ARRAY
         or kind == EXPR_STAR
     ):
         return String(node)

@@ -365,6 +365,18 @@ spellings reach the same place and the flag is what tells the printer which was
 written.
 """
 
+comptime EXPR_ARRAY: UInt8 = 29
+"""`ARRAY(SELECT ...)`, a whole column collected into one list value.
+
+`a` is a statement index.
+
+It is a different kind from `EXPR_LIST` because the elements live in the
+statement arena rather than in this one, and one kind holding an index that
+means one of two things is how a wrong arena read gets written. It is a
+different kind from `EXPR_SUBQUERY` for the other reason: a scalar subquery has
+to give back one row and this one takes however many there are.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -2016,6 +2028,20 @@ struct Ast(Movable):
                 children=self.run(parts),
             )
         )
+
+    def array_subquery(
+        mut self, statement: UInt32, token: UInt32 = 0
+    ) -> UInt32:
+        """Builds `ARRAY(SELECT ...)`.
+
+        Args:
+            statement: The statement, in the statement arena.
+            token: The token `ARRAY` is at.
+
+        Returns:
+            The expression node index.
+        """
+        return self.add(Expr(kind=EXPR_ARRAY, token=token, a=statement))
 
     def subquery(mut self, statement: UInt32, token: UInt32 = 0) -> UInt32:
         """Builds a scalar subquery.

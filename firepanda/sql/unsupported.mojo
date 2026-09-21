@@ -320,8 +320,9 @@ def sql_support() -> List[Refusal]:
             "array-subquery",
             "ARRAY over a subquery",
             (
-                "It collects a whole column into one list value, which"
-                " firepanda has no node for."
+                "It reads and prints, and lowering stops on it, since"
+                " collecting a whole column into one list value is a way of"
+                " running a subquery that firepanda has no node for."
             ),
             SQL_ISSUE,
         ),

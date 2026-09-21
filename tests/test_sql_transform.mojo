@@ -436,6 +436,33 @@ def test_a_list_constructor_and_the_array_spelling_agree() raises:
     assert_equal(_printed("ARRAY[1, 2]", g, rules), "[1, 2]")
 
 
+def test_array_over_a_subquery_is_not_the_bracket_spelling() raises:
+    # The same grammar rule takes all three, and the opening bracket is what
+    # tells them apart. This one names a query whose column the list is rather
+    # than writing the elements out, so it keeps the word the query wrote.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("ARRAY(SELECT a FROM t)", g, rules),
+        "ARRAY(SELECT a FROM t)",
+    )
+    assert_equal(
+        _printed("ARRAY(SELECT a FROM t ORDER BY a)", g, rules),
+        "ARRAY(SELECT a FROM t ORDER BY a)",
+    )
+    # Whatever stands in the parentheses is a whole statement, set operations
+    # and all, because it is read the way any other subquery is read.
+    assert_equal(
+        _printed("ARRAY(SELECT 1 UNION SELECT 2)", g, rules),
+        "ARRAY(SELECT 1 UNION SELECT 2)",
+    )
+    # It is a value like any other, so an operator takes it.
+    assert_equal(
+        _printed("ARRAY(SELECT a FROM t) = [1]", g, rules),
+        "(ARRAY(SELECT a FROM t) = [1])",
+    )
+
+
 def test_a_struct_constructor() raises:
     var g = Grammar()
     var rules = Transform(g)
