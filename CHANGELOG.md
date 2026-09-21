@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an E'...' string reads its backslash escapes
+
+A string written with an `E` in front of it takes backslash escapes the way C does, and firepanda used to turn the whole spelling down rather than decode half of it. It decodes all of it now, at 25 statements of the corpus.
+
+The set is Postgres's, which DuckDB inherits. `\b`, `\f`, `\n`, `\r` and `\t` are the five letters that mean a control character, `\xHH` is one or two hex digits, `\NNN` is one to three octal digits taken modulo 256, and `\uXXXX` and `\UXXXXXXXX` are a code point written out. A backslash in front of anything else is that byte with the backslash dropped, so `\\` is one backslash, `\'` is one quote and `\z` is the letter. A doubled quote still means one quote, because the prefix adds a second way of writing one rather than taking the first away.
+
+Two of Postgres's escapes are not in DuckDB, and this follows DuckDB rather than the documentation, so `E'\v'` and `E'\a'` are the letters. The two code point spellings go the other way: DuckDB 1.5.1 answers a parser error for both of them, which looks like a gap on its side rather than a decision, and no corpus statement holds one either way, so firepanda reads them.
+
+Two results are turned down rather than kept. A NUL byte cannot be held in a text value and bytes that are not UTF-8 are not text at all, and both are a fact about the query rather than a gap in firepanda, so both answer a parser error the way a quote in the wrong place does.
+
 ### Added: OVERLAY, TRY and UNPACK read as the calls they are
 
 The grammar gives a handful of functions a rule of their own, because SQL spells them with keywords inside the parentheses where the commas would go. `COALESCE`, `NULLIF`, `SUBSTRING`, `EXTRACT`, `TRIM` and `POSITION` already read as the calls they are, and these were the last three, at 93 statements of the corpus between them.

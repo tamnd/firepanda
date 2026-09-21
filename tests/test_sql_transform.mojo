@@ -729,11 +729,72 @@ def test_is_unknown_refuses_rather_than_becoming_is_null() raises:
         _ = _printed("a IS UNKNOWN", g, rules)
 
 
-def test_an_escaped_string_refuses_rather_than_decoding_half_of_it() raises:
+def test_the_five_letters_that_mean_a_control_character() raises:
+    # Postgres documents seven and DuckDB takes five of them, and this follows
+    # DuckDB, so the two that are missing come back as the letter.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="E'...' string"):
-        _ = _printed("E'a\\nb'", g, rules)
+    assert_equal(_printed("E'a\\nb'", g, rules), "'a\nb'")
+    assert_equal(_printed("E'a\\tb'", g, rules), "'a\tb'")
+    assert_equal(_printed("E'a\\rb'", g, rules), "'a\rb'")
+    assert_equal(_printed("E'a\\bb'", g, rules), "'a\bb'")
+    assert_equal(_printed("E'a\\fb'", g, rules), "'a\fb'")
+    assert_equal(_printed("E'a\\vb'", g, rules), "'avb'")
+    assert_equal(_printed("E'a\\ab'", g, rules), "'aab'")
+
+
+def test_a_backslash_in_front_of_anything_else_drops_itself() raises:
+    # Which is also how a quote and a backslash are held, and the doubled quote
+    # of a plain string still works, since the prefix adds a second way of
+    # writing one rather than taking the first away.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("E'a\\zb'", g, rules), "'azb'")
+    assert_equal(_printed("E'a\\\\b'", g, rules), "'a\\b'")
+    assert_equal(_printed("E'a\\'b'", g, rules), "'a''b'")
+    assert_equal(_printed("E'a''b'", g, rules), "'a''b'")
+
+
+def test_the_hex_and_octal_escapes_and_what_stops_them() raises:
+    # Hex takes one digit or two and octal takes up to three, and a run of
+    # digits longer than that is the escape and then the digits that are left.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("E'\\x41'", g, rules), "'A'")
+    assert_equal(_printed("E'\\x41BC'", g, rules), "'ABC'")
+    assert_equal(_printed("E'\\101'", g, rules), "'A'")
+    assert_equal(_printed("E'\\1018'", g, rules), "'A8'")
+    assert_equal(_printed("E'\\18'", g, rules), "'8'")
+    # An x with no hex digit after it is the letter, which is what DuckDB does
+    # with it rather than calling the query wrong.
+    assert_equal(_printed("E'\\xg'", g, rules), "'xg'")
+
+
+def test_a_code_point_written_out_in_four_digits_or_eight() raises:
+    # DuckDB 1.5.1 answers a parser error for both of these and Postgres reads
+    # them, and no corpus statement holds one either way, so reading them is
+    # the behaviour the documentation describes.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("E'\\u0041'", g, rules), "'A'")
+    assert_equal(_printed("E'\\u00e9'", g, rules), "'é'")
+    assert_equal(_printed("E'\\U0001F600'", g, rules), "'😀'")
+    # Too few digits is the letter, the same way a bare x is.
+    assert_equal(_printed("E'\\u041'", g, rules), "'u041'")
+
+
+def test_escapes_that_spell_something_that_cannot_be_a_value() raises:
+    # A NUL cannot be held in a text value and bytes that are not UTF-8 are not
+    # text at all, and both are a fact about the query rather than a gap here,
+    # so both are a parser error the way DuckDB calls them one.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="Parser Error: a string value cannot hold"):
+        _ = _printed("E'\\000'", g, rules)
+    with assert_raises(contains="Parser Error: a string value cannot hold"):
+        _ = _printed("E'\\400'", g, rules)
+    with assert_raises(contains="Parser Error: the escapes in this string"):
+        _ = _printed("E'\\xFF'", g, rules)
 
 
 def test_a_subscript_and_the_slices_around_it() raises:

@@ -153,61 +153,58 @@ comptime WITH_ORDINALITY: UInt16 = 21
 comptime WITH_USING_KEY: UInt16 = 22
 """`USING KEY` on a `WITH` entry."""
 
-comptime ESCAPE_STRING: UInt16 = 23
-"""An `E'...'` string, which reads backslash escapes."""
-
-comptime STATEMENT_LATER: UInt16 = 24
+comptime STATEMENT_LATER: UInt16 = 23
 """A statement that maps onto something a dataframe already does."""
 
-comptime STATEMENT_NEVER: UInt16 = 25
+comptime STATEMENT_NEVER: UInt16 = 24
 """A statement that asks for something a dataframe library does not have."""
 
-comptime ROW_VALUE: UInt16 = 26
+comptime ROW_VALUE: UInt16 = 25
 """`(a, b)` or `ROW(a, b)`, several values written as one."""
 
-comptime INTERVAL: UInt16 = 27
+comptime INTERVAL: UInt16 = 26
 """`INTERVAL '1 day'` and the other spellings of a duration."""
 
-comptime SPECIAL_CALL: UInt16 = 28
+comptime SPECIAL_CALL: UInt16 = 27
 """`TRY` or `UNPACK`, which are written as calls and are not functions."""
 
-comptime LAMBDA: UInt16 = 29
+comptime LAMBDA: UInt16 = 28
 """`lambda x: x + 1`, a function written in the query."""
 
-comptime LIST_COMPREHENSION: UInt16 = 30
+comptime LIST_COMPREHENSION: UInt16 = 29
 """`[x + 1 FOR x IN l]`, a list built by running an expression."""
 
-comptime NAMED_ARGUMENT: UInt16 = 31
+comptime NAMED_ARGUMENT: UInt16 = 30
 """`f(a := 1)`, an argument passed by name."""
 
-comptime COLUMNS: UInt16 = 32
+comptime COLUMNS: UInt16 = 31
 """`COLUMNS(...)`, a set of columns written where one expression goes."""
 
-comptime MAP_LITERAL: UInt16 = 33
+comptime MAP_LITERAL: UInt16 = 32
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime GROUPING: UInt16 = 34
+comptime GROUPING: UInt16 = 33
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
-comptime POSITIONAL: UInt16 = 35
+comptime POSITIONAL: UInt16 = 34
 """`#1`, a column named by its place in the select list."""
 
-comptime DEFAULT_VALUE: UInt16 = 36
+comptime DEFAULT_VALUE: UInt16 = 35
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 37
+comptime UNPIVOT_NULLS: UInt16 = 36
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 38
+comptime UNPIVOT_GROUPS: UInt16 = 37
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 39
+comptime QUANTIFIED_VALUE: UInt16 = 38
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 40
+comptime NO_CASE: UInt16 = 39
 """A grammar rule the transformer has no case for at all."""
 
-comptime AGGREGATE_FILTER: UInt16 = 41
+comptime AGGREGATE_FILTER: UInt16 = 40
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
 
@@ -430,16 +427,6 @@ def sql_support() -> List[Refusal]:
                 " has no node for."
             ),
             SQL_ISSUE,
-        ),
-        Refusal(
-            "escape-string",
-            "an E'...' string",
-            (
-                "Reading one means implementing every backslash escape, and"
-                " half of that is worse than none of it. A plain '...' doubles"
-                " a quote to hold one."
-            ),
-            STAGE_ISSUE,
         ),
         Refusal(
             "statement-later",
