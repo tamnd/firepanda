@@ -105,6 +105,7 @@ if [ "$shards" -gt 1 ]; then
       | awk -v costs="$costs" '
           BEGIN {
             while ((getline line < costs) > 0) {
+              if (line ~ /^#/) continue
               if (split(line, f, " ") < 2) continue
               cost[f[2]] = f[1] + 0
               sum += f[1] + 0
@@ -199,6 +200,11 @@ if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
     exit 1
   fi
   {
+    echo "# Seconds per test file, written by \`pixi run test-costs\`. The ten test"
+    echo "# shards in .github/workflows/ci.yml divide the list up on these numbers."
+    echo "# Measured on a 13900K running eight files at a time, so they are wall"
+    echo "# clock under contention rather than anything absolute. Only the ratios"
+    echo "# matter here and the ratios hold on a smaller machine."
     for file in "${files[@]}"; do
       base=${file##*/}
       [ -e "$logs/$base.time" ] || continue

@@ -1,3 +1,8 @@
+# Seconds per test file, written by `pixi run test-costs`. The ten test
+# shards in .github/workflows/ci.yml divide the list up on these numbers.
+# Measured on a 13900K running eight files at a time, so they are wall
+# clock under contention rather than anything absolute. Only the ratios
+# matter here and the ratios hold on a smaller machine.
 308 tests/test_sql_run.mojo
 295 tests/test_pipeline.mojo
 262 tests/test_plan_lower.mojo
