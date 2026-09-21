@@ -1292,11 +1292,25 @@ def _filter_spread[
     Passing an empty span here means count it, which is what a caller with one
     column to filter does.
 
-    The copy loop is the serial one unchanged, including the trick of writing
-    every row and advancing the cursor by the mask bit rather than branching on
-    it, and including the bound: a worker stops when it has written the number
-    of rows it counted, which is what keeps its last speculative write inside
-    its own run and out of the next worker's first slot.
+    The copy each worker runs reads the mask in blocks of `FILTER_SKIP_ROWS`
+    wherever the mask can be read a byte at a time, which is to say wherever it
+    is dense and holds no nulls. A block that keeps nothing costs a cursor
+    advance and no stores at all, and a block that keeps something falls back
+    to the row at a time loop over those sixty four rows. That fallback is the
+    serial loop unchanged, including the trick of writing every row and
+    advancing the cursor by the mask bit rather than branching on it, and it is
+    also the whole route for a mask the block read cannot be used on.
+
+    The block read is not there for the skipping alone, which is what it was
+    first written for and first switched on for. It is faster on a mask with no
+    empty block in it anywhere, because the inner loop gets a trip count of
+    sixty four where the loop it replaced had its exit governed by the mask, and
+    a mask is data the branch predictor cannot learn. So there is no threshold
+    on how selective the mask has to be.
+
+    The bound is the same on both routes: a worker stops when it has written the
+    number of rows it counted, which is what keeps its last speculative write
+    inside its own run and out of the next worker's first slot.
 
     Nulls in the filtered column are the one thing that does not fall out for
     free, because sixty four output rows share a validity word and two morsels
