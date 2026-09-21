@@ -54,6 +54,13 @@ That is the rest of #922, which was the part of the q29 regression #921 did not 
 The count itself is not what costs. It is a popcount over the validity bitmap and it stays. What is gone is building the column it counts a second time.
 
 `exec/reduce_ninety_marked` is the new row in `benchmarks/main.mojo`, the same ninety sums as `exec/reduce_ninety_fused` with the mark SQL puts on them. The gap between the two is what a marked sum costs, and while `partial` built the column once per slot the marked row was about twice the unmarked one with nothing in either file moving.
+### Added: COLUMNS() reads and prints
+
+`COLUMNS(...)` is how DuckDB writes a set of columns where one expression goes, and it was the biggest single thing the corpus asked for that firepanda turned down at the parse. Four things may stand in the parentheses. A string holding a regular expression, matched against every column name. A list of names. A lambda taking a name and answering whether to keep it. And a star, with the three modifier lists an ordinary star carries. There is a fifth spelling, `*COLUMNS(...)`, which hands the set over as several arguments rather than as one, and the star there stands outside the parentheses and is not the same star as the one that may stand inside them.
+
+All of them now read into the AST and print back out. None of them lowers. Which columns a `COLUMNS()` stands for is a question about the bindings, and the bindings are not resolved until after lowering has started, so the refusal moved out of the transformer and into lowering and says the sentence it always said. What that buys is the round trip, which is the property the whole SQL front end is tested against: the statements go through parse, print and reparse and come back as the same text, and the shapes inside the parentheses were never what was in the way.
+
+The expression holds what is in the parentheses as one ordinary node and a single bit saying whether the leading star was written. Which of the four forms it is decides nothing here, so nothing here tries to tell them apart, and the list, the lambda and the star each take the path they already took. That is also why the star inside keeps its `EXCLUDE`, `REPLACE` and `RENAME` lists without anything new reading them.
 
 ### Changed: a column's sortedness is read a block at a time instead of a row at a time
 

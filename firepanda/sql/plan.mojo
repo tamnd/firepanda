@@ -505,6 +505,7 @@ from .ast import (
     EXPR_CASE,
     EXPR_CAST,
     EXPR_COLUMN,
+    EXPR_COLUMNS,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
     EXPR_FIELD,
@@ -570,6 +571,7 @@ from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 from .unsupported import (
     CALL_ARGUMENT,
     CALL_MODIFIER,
+    COLUMNS,
     FIELD_ACCESS,
     INTERVAL,
     LAMBDA,
@@ -3031,6 +3033,8 @@ def _lower_expr(
         raise not_implemented(LIST_COMPREHENSION, "", "")
     if node.kind == EXPR_FIELD:
         raise not_implemented(FIELD_ACCESS, "", "")
+    if node.kind == EXPR_COLUMNS:
+        raise not_implemented(COLUMNS, "", "")
     raise Error("an expression shape firepanda does not lower yet")
 
 

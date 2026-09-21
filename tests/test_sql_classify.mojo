@@ -428,5 +428,28 @@ def test_two_quantified_comparisons_are_two_expressions() raises:
     assert_false(same(ast, left, right))
 
 
+def test_the_star_in_front_of_columns_tells_two_of_them_apart() raises:
+    # The leading star is part of the spelling and not part of what stands in
+    # the parentheses, so two that differ only there are two expressions and
+    # not one, the same way `ROW(a)` and `(a,)` are.
+    var ast = Ast()
+    var plain = ast.columns(_column(ast, "a"))
+    var same_again = ast.columns(_column(ast, "a"))
+    var unpacked = ast.columns(_column(ast, "a"), unpacked=True)
+    assert_true(same(ast, plain, same_again))
+    assert_false(same(ast, plain, unpacked))
+
+
+def test_an_aggregate_over_columns_is_still_an_aggregate() raises:
+    # What is in the parentheses is walked the way any operand is, so an
+    # aggregate wrapping one is reported and a column inside one is a
+    # reference that the group key rule has something to say about.
+    var ast = Ast()
+    var node = _sum(ast, ast.columns(_column(ast, "a")))
+    var uses = inspect(ast, node)
+    assert_true(uses.aggregate)
+    assert_false(uses.window)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -29,10 +29,11 @@ A qualified star does not walk outward the way a qualified column does.
 `SELECT (SELECT o.* FROM u) FROM t o` is an error while `SELECT (SELECT o.a
 FROM u) FROM t o` is fine, so the qualifier is looked up at one level only.
 
-What is not here is `COLUMNS()`, which is refused by name in
-`unsupported.mojo`, and struct unpacking, where `s.*` over a struct column
-expands to its fields. That one needs the nested types the type set does not
-carry yet.
+What is not here is `COLUMNS()`, which reads and prints but is turned down at
+lowering, since expanding it wants the bindings and the star modifiers it can
+carry are read there rather than here. Nor is struct unpacking, where `s.*` over
+a struct column expands to its fields. That one needs the nested types the type
+set does not carry yet.
 """
 
 from .bind import Reference, Scopes

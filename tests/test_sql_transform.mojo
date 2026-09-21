@@ -536,6 +536,10 @@ def test_every_shape_here_round_trips() raises:
         "f(x).g(y).b",
         "f(x).b.g(y)",
         "[1, 2].list_sort()",
+        "COLUMNS('^l1_.*')",
+        "*COLUMNS(['id'])",
+        "COLUMNS(* EXCLUDE (v))",
+        "min(COLUMNS(*))",
         "string_agg(a, ',' ORDER BY b DESC NULLS LAST)",
         "mode() WITHIN GROUP (ORDER BY a)",
         "lag(a IGNORE NULLS) OVER ()",
@@ -954,6 +958,55 @@ def test_a_comprehension_is_not_a_list_of_one() raises:
     var rules = Transform(g)
     assert_equal(_printed("[x]", g, rules), "[x]")
     assert_equal(_printed("[x FOR x IN [l]]", g, rules), "[x FOR x IN [l]]")
+
+
+def test_columns_holds_whatever_was_written_in_its_parentheses() raises:
+    # The four things that may stand there are a pattern, a list of names, a
+    # lambda taking a name, and a star with its modifiers. All four are
+    # ordinary expressions and all four are held the same way, because which
+    # one it is decides nothing until there are columns to match it against.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("COLUMNS('^l1_.*')", g, rules), "COLUMNS('^l1_.*')")
+    assert_equal(
+        _printed("COLUMNS(['a', 'b'])", g, rules), "COLUMNS(['a', 'b'])"
+    )
+    assert_equal(
+        _printed("COLUMNS(lambda c: c = 'a')", g, rules),
+        "COLUMNS(lambda c: (c = 'a'))",
+    )
+    assert_equal(_printed("COLUMNS(*)", g, rules), "COLUMNS(*)")
+
+
+def test_a_star_inside_columns_keeps_its_modifiers() raises:
+    # The star in the parentheses is the ordinary star and carries the three
+    # lists the ordinary star carries, so nothing here reads them and the
+    # printer hands them back the way it hands back any other star.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("COLUMNS(* EXCLUDE (v))", g, rules), "COLUMNS(* EXCLUDE (v))"
+    )
+    assert_equal(
+        _printed("COLUMNS(t.* EXCLUDE (v))", g, rules),
+        "COLUMNS(t.* EXCLUDE (v))",
+    )
+    assert_equal(
+        _printed("COLUMNS(* REPLACE a AS a)", g, rules),
+        "COLUMNS(* REPLACE (a AS a))",
+    )
+
+
+def test_the_star_in_front_of_columns_is_not_the_star_inside_it() raises:
+    # `*COLUMNS(...)` is the unpacking spelling, which hands the set over as
+    # several arguments rather than as one, and it is written outside the
+    # parentheses. Both spellings reach the same node and the flag is what says
+    # which was written, so neither one can come back as the other.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("*COLUMNS('a')", g, rules), "*COLUMNS('a')")
+    assert_equal(_printed("COLUMNS('a')", g, rules), "COLUMNS('a')")
+    assert_equal(_printed("*COLUMNS(*)", g, rules), "*COLUMNS(*)")
 
 
 def test_a_refusal_says_where_it_was() raises:

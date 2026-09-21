@@ -125,7 +125,6 @@ from .unsupported import (
     ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
-    COLUMNS,
     CUSTOM_OPERATOR,
     DEFAULT_VALUE,
     DOTTED_NAME,
@@ -253,6 +252,9 @@ comptime _LAMBDA: UInt8 = 83
 
 comptime _COMPREHENSION: UInt8 = 84
 """`ListComprehensionExpression`, a list built out of another one."""
+
+comptime _COLUMNS: UInt8 = 85
+"""`ColumnsExpression`, a set of columns written as one thing."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -951,11 +953,11 @@ struct Transform(Movable):
         self._set(names, "NamedFunctionArgument", _NAMED_ARGUMENT)
         self._set(names, "LambdaExpression", _LAMBDA)
         self._set(names, "ListComprehensionExpression", _COMPREHENSION)
+        self._set(names, "ColumnsExpression", _COLUMNS)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "ColumnsExpression", COLUMNS)
         self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "GroupingExpression", GROUPING)
         self._refuse(names, "PositionalExpression", POSITIONAL)
@@ -1841,6 +1843,9 @@ struct Transform(Movable):
 
         if action == _COMPREHENSION:
             return self._comprehension(tree, sql, node, ast, work)
+
+        if action == _COLUMNS:
+            return self._columns(tree, node, ast, work)
 
         if action == _INTERVAL:
             return self._interval(tree, sql, node, ast, work, at)
@@ -3876,6 +3881,44 @@ struct Transform(Movable):
             parameters,
             work.value(kids[2]),
             condition,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _columns(
+        self,
+        tree: Parse,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds `COLUMNS(...)`, a set of columns written as one thing.
+
+        `ColumnsExpression <- StarSymbol? 'COLUMNS' Parens(Expression)`, so the
+        parentheses are the last child and the leading star is either the first
+        child or is not there at all.
+
+        What stands inside goes through as one ordinary expression, whether it
+        is a star with its modifiers, a string holding a pattern, a list of
+        names or a lambda taking one. Which of the four it is decides nothing
+        until there are columns to match it against, and there are none here.
+
+        Args:
+            tree: The parse.
+            node: The `ColumnsExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for what is in the parentheses.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If what is in the parentheses has no case.
+        """
+        var kids = tree.children(node)
+        var parens = kids[len(kids) - 1]
+        return ast.columns(
+            work.value(self._only(tree, parens)),
+            len(kids) == 2,
             tree.nodes[Int(node)].token_start,
         )
 

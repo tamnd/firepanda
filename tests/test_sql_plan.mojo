@@ -1253,6 +1253,20 @@ def test_a_field_access_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT upper(a).b FROM t")
 
 
+def test_columns_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and expanding it takes the bindings, which are not
+    # resolved until the stage after this one. The four spellings all stop in
+    # the same place, since none of them is further along than the others.
+    with assert_raises(contains="COLUMNS"):
+        _ = _plan("SELECT COLUMNS('^a') FROM t")
+    with assert_raises(contains="COLUMNS"):
+        _ = _plan("SELECT COLUMNS(['a', 'b']) FROM t")
+    with assert_raises(contains="COLUMNS"):
+        _ = _plan("SELECT min(COLUMNS(*)) FROM t")
+    with assert_raises(contains="COLUMNS"):
+        _ = _plan("SELECT *COLUMNS('^a') FROM t")
+
+
 def test_a_comprehension_is_refused_here_not_in_the_transformer() raises:
     # It reads and prints, and what it means is a lambda run over every element
     # of a list, so it stops for the same reason a lambda does and stops where
