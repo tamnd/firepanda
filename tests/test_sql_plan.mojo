@@ -1280,6 +1280,16 @@ def test_try_and_unpack_are_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT OVERLAY(g PLACING g FROM 1) FROM t")
 
 
+def test_array_over_a_subquery_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and this is where it stops. The refusal names the
+    # spelling rather than the word, because the bracket spelling under the
+    # same grammar rule is a different shape and stops somewhere else.
+    with assert_raises(contains="ARRAY over a subquery"):
+        _ = _plan("SELECT ARRAY(SELECT a FROM t) FROM u")
+    with assert_raises(contains="ARRAY over a subquery"):
+        _ = _plan("SELECT a FROM t WHERE a = ARRAY(SELECT b FROM t)")
+
+
 def test_a_sample_is_refused_here_not_in_the_transformer() raises:
     # A sample reads and prints, and the two places it can be written stop in
     # two places here, since one rides on a table reference and the other is a

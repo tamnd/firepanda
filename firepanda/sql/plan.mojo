@@ -507,6 +507,7 @@ from .ast import (
     EXPR_CASE,
     EXPR_CAST,
     EXPR_COLUMN,
+    EXPR_ARRAY,
     EXPR_COLUMNS,
     EXPR_COMPREHENSION,
     EXPR_EXISTS,
@@ -571,6 +572,7 @@ from .star import (
 from .table import Grammar
 from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 from .unsupported import (
+    ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
     COLUMNS,
@@ -3052,6 +3054,8 @@ def _lower_expr(
         raise not_implemented(FIELD_ACCESS, "", "")
     if node.kind == EXPR_COLUMNS:
         raise not_implemented(COLUMNS, "", "")
+    if node.kind == EXPR_ARRAY:
+        raise not_implemented(ARRAY_SUBQUERY, "", "")
     raise Error("an expression shape firepanda does not lower yet")
 
 
