@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with thirty six entries in it, most of them about what a pattern and a statement are allowed to say, and a few about what the pipeline does with a chunk. On the regular expression side nine spellings that used to be refused now read, a pattern is read with whichever grammar is going to run it, and the Unicode name table is checked against RE2 rather than against a list somebody wrote out by hand, which is what turned up four names it had never heard of. The SQL front end reads IS UNKNOWN, ARRAY over a subquery, WITH ORDINALITY, TABLESAMPLE, COLUMNS(), an E string with backslash escapes, USING KEY, OVERLAY and the colon spelling of an alias.
+
+In the pipeline the filter operator is the whole story. It reads its mask in blocks whatever the mask looks like, skips a block of rows it is going to drop whole, hands the chunk straight back when its comparison kept everything, and writes a selection rather than a copy when the thing that reads it is another filter. The last two are worth between 1.07x and 4.70x of CPU on the seven ClickBench date range queries, which lower to six filters in a row over a chunk holding `URL`.
+
+The rest is CI. A pull request finishes in about six minutes rather than about fifty five, the compiler's cache is kept between runs, and the regular expression comparisons run on the merge.
+
+Nothing in the API breaks, and every query that had an answer before gives the same answer now.
+
 ### Added: IS UNKNOWN runs, as the IS NULL it is
 
 `x IS UNKNOWN` is the standard's way of writing `x IS NULL`, and firepanda used to turn it down and say to write the other one. It runs now, at 4 statements of the corpus.
@@ -8961,6 +8973,7 @@ Install it and you get a library with no public API to speak of. The point of th
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
 [Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.18...HEAD
+[0.8.19]: https://github.com/tamnd/firepanda/releases/tag/v0.8.19
 [0.8.18]: https://github.com/tamnd/firepanda/releases/tag/v0.8.18
 [0.8.17]: https://github.com/tamnd/firepanda/releases/tag/v0.8.17
 [0.8.16]: https://github.com/tamnd/firepanda/releases/tag/v0.8.16
