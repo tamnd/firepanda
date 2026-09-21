@@ -270,6 +270,42 @@ def test_a_pattern_re2_reads_and_the_grammar_does_not_takes_re2s_reading() raise
     assert_false(matches_text(none, "a{,2}"))
 
 
+def test_a_flag_group_naming_no_flags_is_read_and_changes_nothing() raises:
+    """`(?)` is a flag group that turns nothing on and nothing off, which RE2
+    takes anywhere in a pattern and Python has no reading of at all.
+
+    Document 117 left this as the whole of what was still held out for a
+    grammar that could not read it, and the interesting part is that nobody
+    writes one. `str.match("?")` is the pattern that produces it, because
+    upstream strips the caret a caller wrote and wraps what is left in a
+    bracket, so `?` reaches Arrow as `^(?)`. Document 118."""
+    var empty = program_for(METHOD_CONTAINS, "(?)")
+    assert_true(empty.ok)
+    assert_true(matches_text(empty, ""))
+    assert_true(matches_text(empty, "a"))
+
+    # It leaves nothing behind, so `a(?)b` is `ab` and neither more nor less.
+    var between = program_for(METHOD_CONTAINS, "a(?)b")
+    assert_true(between.ok)
+    assert_true(matches_text(between, "xaby"))
+    assert_false(matches_text(between, "a b"))
+
+    # Leaving nothing behind is also what settles a repeat written after one.
+    # The count finds whatever was already there, so `a(?){2}` is `a{2}`, and
+    # with nothing in front of it there is nothing to count and RE2 says so.
+    var counted = program_for(METHOD_CONTAINS, "a(?){2}")
+    assert_true(counted.ok)
+    assert_true(matches_text(counted, "aa"))
+    assert_false(matches_text(counted, "ab"))
+
+    var alone = program_for(METHOD_CONTAINS, "(?)*")
+    assert_false(alone.ok)
+    assert_false(alone.gap)
+    assert_equal(
+        alone.problem, "there is nothing here for that repeat to repeat"
+    )
+
+
 def test_a_quoted_run_is_answered_and_a_stray_close_is_refused() raises:
     """`\\Q` and `\\E` are a bad escape to Python's `re`, so pandas hands every
     pattern holding either one to Arrow and both halves of the answer come from
@@ -358,9 +394,20 @@ def test_the_rewrite_is_what_re2_is_asked_about() raises:
     assert_equal(
         asked.problem, "there is nothing here for that repeat to repeat"
     )
-    var anchored_call = program_for(METHOD_MATCH, "?")
-    assert_false(anchored_call.ok)
-    assert_true(anchored_call.gap)
+    # Both spellings reach Arrow as `^(?)`, because the rewrite strips a caret
+    # the caller wrote before wrapping what is left. An empty flag group
+    # matches the empty string, which every row has at position zero.
+    for pattern in [String("?"), "^?"]:
+        var anchored_call = program_for(METHOD_MATCH, pattern)
+        assert_true(anchored_call.ok)
+        assert_true(matches_text(anchored_call, ""))
+        assert_true(matches_text(anchored_call, "abc"))
+
+    # `^((?)$)` wants the end straight after the start, so only an empty row.
+    var whole = program_for(METHOD_FULLMATCH, "?")
+    assert_true(whole.ok)
+    assert_true(matches_text(whole, ""))
+    assert_false(matches_text(whole, "a"))
 
 
 def test_a_flag_passed_beside_the_pattern_folds_what_a_written_one_folds() raises:

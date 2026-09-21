@@ -2355,6 +2355,11 @@ def _flags(mut c: _Cursor) -> Int32:
     it. That means a caller writing either of those has written an RE2 pattern
     without meaning to.
 
+    The fourth is a group with no letters in it at all, which RE2 takes and
+    Python has no reading of. It is only read here when the grammar being read
+    is RE2's, and it is the one flag group that cannot change anything, so it
+    goes in as nothing at all. Document 118.
+
     Args:
         c: The cursor, on the first flag letter or on the minus sign.
 
@@ -2364,6 +2369,17 @@ def _flags(mut c: _Cursor) -> Int32:
     var add: Int32 = 0
     var off: Int32 = 0
     var closer = c.peek()
+    if closer == 0x29 and c.for_re2:
+        # `(?)` turns nothing on and nothing off, so there is no scope to open
+        # and no rule about where it may be written: RE2 reads it at the front
+        # of a pattern, inside a group and after anything at all, and `a(?)b`
+        # is `ab`. Returning `NOTHING` is what also gets the repeat right,
+        # since a flag group leaves no item behind and a count written after
+        # one counts whatever was already there. RE2 agrees to `a(?)*` as `a*`
+        # and refuses `(?)*` for having nothing to repeat, and both of those
+        # fall out of this line rather than being written anywhere.
+        c.at += 1
+        return NOTHING
     if closer != 0x2D and _flag_bit(closer) < 0:
         c.give_up(String("unknown extension ?"))
         return -1

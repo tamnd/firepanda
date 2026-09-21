@@ -832,6 +832,31 @@ def _measured() -> List[String]:
         "(?i)a{,2}{1,3}",
         "a{,2}{1,3}|b",
         "(a{,2}{1,3})",
+        # A flag group naming no flags, which RE2 takes and Python has no
+        # reading of. The generated half writes one only by accident, because
+        # `str.match` wraps a bare `?` in a bracket and `^(?)` is one, so the
+        # construct was reaching two of the seven comparisons and none of the
+        # others. Document 118.
+        "(?)",
+        "(?)a",
+        "a(?)b",
+        "(?)*",
+        "(?)?",
+        "a(?)*",
+        "a(?)+",
+        "a(?)?",
+        "a(?){2}",
+        "((?))",
+        "(?)|b",
+        "(a(?))",
+        "(?)(?)",
+        "^(?)$",
+        "(?i)(?)a",
+        "(?)\\b",
+        "(?)\\d",
+        "[(?)]",
+        "(?-)",
+        "(?P<n>(?))",
     ]
     return out^
 
