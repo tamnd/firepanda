@@ -584,6 +584,7 @@ from .unsupported import (
     SPECIAL_CALL,
     SUBSCRIPT,
     TABLE_SAMPLE,
+    WITH_ORDINALITY,
     WITH_USING_KEY,
     not_implemented,
 )
@@ -4175,16 +4176,18 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
         The node and what it produces.
 
     Raises:
-        If the call is `LATERAL`, if it carries an alias, or if an argument is
-        an expression this does not lower.
+        If the call is `LATERAL` or `WITH ORDINALITY`, if it carries an alias,
+        or if an argument is an expression this does not lower.
     """
     var source = ast.refs[Int(at)]
-    if source.b == 1:
+    if source.b & 1 != 0:
         raise Error(
             "firepanda does not lower a LATERAL table function yet, which is"
             " called once for every row to the left of it rather than once for"
             " the query"
         )
+    if source.b & 2 != 0:
+        raise not_implemented(WITH_ORDINALITY, "", "")
     var name = _one_name(ast, source.a, "a table function")
     if ast.length(source.payload) != 0:
         raise Error(

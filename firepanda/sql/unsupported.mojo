@@ -413,8 +413,9 @@ def sql_support() -> List[Refusal]:
             "with-ordinality",
             "WITH ORDINALITY",
             (
-                "It adds a row number column to a table function, which"
-                " firepanda has no node for."
+                "It reads and prints, and lowering stops on it, since it adds"
+                " a column to what a table function produces and the two are"
+                " built together."
             ),
             SQL_ISSUE,
         ),

@@ -1675,6 +1675,16 @@ def test_a_lateral_table_function_is_refused_by_name() raises:
         _ = _plan("SELECT a FROM t, LATERAL range(t.a)")
 
 
+def test_ordinality_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and the two words sit in the same field as LATERAL,
+    # so the one that was written is the one that stops the query.
+    with assert_raises(contains="WITH ORDINALITY"):
+        _ = _plan("SELECT * FROM range(5) WITH ORDINALITY")
+    # The same call with nothing around it still lowers, so what stops is the
+    # two words and not the table function under them.
+    _ = _plan("SELECT * FROM range(5)")
+
+
 def test_a_subquery_in_a_from_is_the_plan_it_lowers_to() raises:
     # Nothing wraps it. A derived table is a statement whose output becomes a
     # source, so the node under the outer projection is the inner projection
