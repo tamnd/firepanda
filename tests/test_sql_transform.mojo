@@ -348,13 +348,19 @@ def test_like_and_not_like() raises:
     assert_equal(_printed("a NOT LIKE 'x%'", g, rules), "(NOT (a LIKE 'x%'))")
 
 
-def test_the_three_null_tests_become_one_node() raises:
+def test_the_five_null_tests_become_one_node() raises:
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(_printed("a IS NULL", g, rules), "(a IS NULL)")
     assert_equal(_printed("a ISNULL", g, rules), "(a IS NULL)")
     assert_equal(_printed("a NOTNULL", g, rules), "(a IS NOT NULL)")
     assert_equal(_printed("a IS NOT NULL", g, rules), "(a IS NOT NULL)")
+    # `IS UNKNOWN` is the standard's way of writing the same test, and DuckDB
+    # answers it over any type rather than only over a boolean, so it folds
+    # into the same node and the printer writes the one it kept.
+    assert_equal(_printed("a IS UNKNOWN", g, rules), "(a IS NULL)")
+    assert_equal(_printed("a IS NOT UNKNOWN", g, rules), "(a IS NOT NULL)")
+    assert_equal(_printed("1 IS UNKNOWN", g, rules), "(1 IS NULL)")
 
 
 def test_is_distinct_from_stays_one_operator() raises:
@@ -747,13 +753,6 @@ def test_two_order_by_clauses_on_one_call_refuse() raises:
         _ = _printed(
             "string_agg(a ORDER BY b) WITHIN GROUP (ORDER BY a)", g, rules
         )
-
-
-def test_is_unknown_refuses_rather_than_becoming_is_null() raises:
-    var g = Grammar()
-    var rules = Transform(g)
-    with assert_raises(contains="IS UNKNOWN"):
-        _ = _printed("a IS UNKNOWN", g, rules)
 
 
 def test_the_five_letters_that_mean_a_control_character() raises:

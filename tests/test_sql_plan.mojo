@@ -3148,6 +3148,20 @@ def test_the_one_word_spellings_build_the_same_two_calls() raises:
     )
 
 
+def test_the_unknown_spellings_build_the_same_two_calls() raises:
+    # `IS UNKNOWN` is the standard's name for the same test. DuckDB answers it
+    # over any type rather than only over a boolean, so it reaches the plan as
+    # the same call and there is nothing for lowering to turn down.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g IS UNKNOWN"),
+        _plan("SELECT a FROM t WHERE g IS NULL"),
+    )
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g IS NOT UNKNOWN"),
+        _plan("SELECT a FROM t WHERE g IS NOT NULL"),
+    )
+
+
 def test_an_is_true_asks_whether_the_value_is_there_and_holds() raises:
     # Two questions rather than one, because a null has to come out false here
     # and a comparison against it does not. The and is Kleene's, so a null on
