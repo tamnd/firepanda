@@ -56,6 +56,29 @@
 # spanning 423 to 622 seconds. `tools/test_costs_from_ci.sh` reads the table
 # back out of a CI run's logs, which is where it should come from.
 #
+# What the shards cannot do anything about is that a shard does not finish until
+# its longest file does. On a runner that file is `tests/test_sql_run.mojo` at
+# around six hundred seconds, so ten shards and twenty shards have the same wall
+# clock and the whole job sits a little above a floor set by one compile.
+#
+# The obvious way out is to compile the library once and point the test files at
+# the result, and it does not work. `mojo precompile firepanda -o
+# build/firepanda.mojoc` takes 37 seconds, and on the workstation
+# `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds against 193 for
+# `mojo run -I .` on the same commit and the same idle machine. All 422 tests
+# pass either way, so the package is correct and simply does not save anything:
+# what the file pays for is instantiating generics, and those are instantiated
+# into whichever program uses them whether or not the package was built first.
+# This was measured once before on files costing fourteen and twenty one seconds,
+# where there was nothing to see, so it is recorded here against the file that
+# actually sets the floor.
+#
+# Splitting that file is the other obvious way out and it was tried in #933.
+# Three parts cost 201, 175 and 185 seconds against 204 for the whole, because
+# every part still imports `firepanda.sql.run` and so still compiles the same
+# slice of the library. Splitting a test file only helps if the parts import
+# less, and every test in that one calls `run`.
+#
 # `FIREPANDA_TEST_WRITE_COSTS` names a file to write the table to, which is what
 # `pixi run test-costs` does, and is the fallback when there is no run to read.
 # It needs an unsharded run, because a table written from one shard lists a
