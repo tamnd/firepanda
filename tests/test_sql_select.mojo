@@ -604,16 +604,52 @@ def test_a_pivot_or_an_unpivot_after_a_table_is_read() raises:
     )
 
 
-def test_a_sample_refuses_and_names_itself() raises:
+def test_a_sample_reaches_the_printer_in_both_places() raises:
     var g = Grammar()
     var rules = Transform(g)
     # A sample written straight after the table belongs to the table, because
     # that is the first rule with a slot for one. It takes a clause in between
     # to reach the one on the statement.
-    with assert_raises(contains="a sample on a table"):
-        _ = _printed("SELECT a FROM t TABLESAMPLE 10%", g, rules)
-    with assert_raises(contains="a sample on a SELECT"):
-        _ = _printed("SELECT a FROM t WHERE x USING SAMPLE 10%", g, rules)
+    assert_equal(
+        _printed("SELECT a FROM t TABLESAMPLE 10%", g, rules),
+        "SELECT a FROM t TABLESAMPLE 10%",
+    )
+    assert_equal(
+        _printed("SELECT a FROM t WHERE x USING SAMPLE 10%", g, rules),
+        "SELECT a FROM t WHERE x USING SAMPLE 10%",
+    )
+    # A parenthesised reference takes one too, and it goes after the closing
+    # parenthesis rather than inside it.
+    assert_equal(
+        _printed(
+            "SELECT * FROM (t JOIN u ON t.a = u.a) USING SAMPLE 5", g, rules
+        ),
+        "SELECT * FROM (t JOIN u ON (t.a = u.a)) USING SAMPLE 5",
+    )
+
+
+def test_a_sample_is_printed_the_way_it_was_written() raises:
+    # The keyword, the unit and whether the method stands in front of the
+    # parentheses or inside them are all kept rather than normalized, since the
+    # grammar takes every one of them in both positions and none of them
+    # changes what the sample means.
+    var g = Grammar()
+    var rules = Transform(g)
+    var written: List[String] = [
+        "SELECT * FROM t USING SAMPLE 10",
+        "SELECT * FROM t USING SAMPLE 10%",
+        "SELECT * FROM t USING SAMPLE 10 PERCENT",
+        "SELECT * FROM t USING SAMPLE 10 ROWS",
+        "SELECT * FROM t USING SAMPLE 10 ROWS (system, 377)",
+        "SELECT * FROM t USING SAMPLE 10% (bernoulli)",
+        "SELECT * FROM t USING SAMPLE ?",
+        "SELECT * FROM t TABLESAMPLE 1.5%",
+        "SELECT * FROM t TABLESAMPLE reservoir(10)",
+        "SELECT * FROM t TABLESAMPLE reservoir(10%) REPEATABLE (377)",
+        "SELECT * FROM t TABLESAMPLE (10 ROWS) REPEATABLE (377)",
+    ]
+    for item in written:
+        assert_equal(_printed(item, g, rules), item)
 
 
 def test_a_window_clause_names_a_window_for_the_query_to_use() raises:
@@ -650,8 +686,8 @@ def test_the_colon_alias_on_a_table_refuses() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="TABLESAMPLE"):
-        _ = _printed("SELECT a FROM t TABLESAMPLE 10%", g, rules)
+    with assert_raises(contains="SELECT a FROM x: t"):
+        _ = _printed("SELECT a FROM x: t", g, rules)
 
 
 def test_a_grouping_set_of_one_column_is_the_column() raises:

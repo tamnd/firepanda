@@ -362,8 +362,9 @@ def sql_support() -> List[Refusal]:
             "select-sample",
             "a sample on a SELECT",
             (
-                "Sampling is a row source of its own and firepanda has no node"
-                " for it yet."
+                "The sample reads and prints, and lowering stops on it, since"
+                " taking a share of the rows is a row source of its own and"
+                " firepanda has no node for one yet."
             ),
             STAGE_ISSUE,
         ),
@@ -371,8 +372,9 @@ def sql_support() -> List[Refusal]:
             "table-sample",
             "a sample on a table",
             (
-                "Sampling is a row source of its own and firepanda has no node"
-                " for it yet."
+                "The sample reads and prints, and lowering stops on it, since"
+                " taking a share of the rows is a row source of its own and"
+                " firepanda has no node for one yet."
             ),
             STAGE_ISSUE,
         ),

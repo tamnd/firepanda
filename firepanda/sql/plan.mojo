@@ -498,6 +498,7 @@ from .ast import (
     CLAUSE_HAVING,
     CLAUSE_PROJECTION,
     CLAUSE_QUALIFY,
+    CLAUSE_SAMPLE,
     CLAUSE_WHERE,
     CLAUSE_WINDOW,
     cte_keys,
@@ -579,7 +580,9 @@ from .unsupported import (
     LIST_COMPREHENSION,
     NAMED_ARGUMENT,
     ROW_VALUE,
+    SELECT_SAMPLE,
     SUBSCRIPT,
+    TABLE_SAMPLE,
     WITH_USING_KEY,
     not_implemented,
 )
@@ -4634,6 +4637,13 @@ def _source(
         If the reference is a shape this does not lower yet.
     """
     var source = ast.refs[Int(at)]
+    # A sample rides on the reference it was written after, and the two kinds
+    # that take one keep it in a different field, so both are asked here rather
+    # than in the two places that go on to read the rest of the reference.
+    if (source.kind == REF_TABLE and source.a != NO_NODE) or (
+        source.kind == REF_PARENS and source.b != NO_NODE
+    ):
+        raise not_implemented(TABLE_SAMPLE, "", "")
     if source.kind == REF_TABLE:
         return _table(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_JOIN:
@@ -7048,6 +7058,8 @@ def _block(
             "firepanda does not lower a WINDOW clause yet, and the same window"
             " written out after the OVER of each call does lower"
         )
+    if ast.slot(clauses, CLAUSE_SAMPLE) != NO_NODE:
+        raise not_implemented(SELECT_SAMPLE, "", "")
 
     var from_clause = ast.slot(clauses, CLAUSE_FROM)
 

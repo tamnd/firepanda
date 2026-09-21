@@ -1267,6 +1267,21 @@ def test_columns_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT *COLUMNS('^a') FROM t")
 
 
+def test_a_sample_is_refused_here_not_in_the_transformer() raises:
+    # A sample reads and prints, and the two places it can be written stop in
+    # two places here, since one rides on a table reference and the other is a
+    # clause of the block.
+    with assert_raises(contains="a sample on a table"):
+        _ = _plan("SELECT a FROM t TABLESAMPLE 10%")
+    with assert_raises(contains="a sample on a table"):
+        _ = _plan("SELECT * FROM (t JOIN u ON t.a = u.a) USING SAMPLE 5")
+    with assert_raises(contains="a sample on a SELECT"):
+        _ = _plan("SELECT a FROM t WHERE a > 1 USING SAMPLE 10%")
+    # A block with no sample on it still lowers, so what stops is the sample
+    # and not the shape around it.
+    _ = _plan("SELECT a FROM t WHERE a > 1")
+
+
 def test_using_key_is_refused_here_not_in_the_transformer() raises:
     # It reads and prints, and it is the entry that stops rather than the
     # statement, so a WITH that writes one on any of its entries stops even

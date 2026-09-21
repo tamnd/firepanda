@@ -96,6 +96,10 @@ from .ast import (
     NULLS_DEFAULT,
     NULLS_FIRST,
     NULLS_LAST,
+    SAMPLE_UNIT_NONE,
+    SAMPLE_UNIT_PERCENT_SIGN,
+    SAMPLE_UNIT_PERCENT_WORD,
+    SAMPLE_UNIT_ROWS,
     SELECT_ALL,
     SELECT_DISTINCT,
     SORT_ASCENDING,
@@ -144,14 +148,12 @@ from .unsupported import (
     QUANTIFIED_VALUE,
     QUOTED_NAME,
     SELECT_CLAUSE,
-    SELECT_SAMPLE,
     SPECIAL_CALL,
     STATEMENT_LATER,
     STATEMENT_NEVER,
     SUBSCRIPT,
     TABLE_AT,
     TABLE_MODIFIER,
-    TABLE_SAMPLE,
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
     WITH_ORDINALITY,
@@ -437,6 +439,9 @@ comptime _MARK_PIVOT_ENUM: UInt8 = 218
 comptime _MARK_TABLE_UNPIVOT: UInt8 = 219
 comptime _MARK_UNPIVOT_NULLS: UInt8 = 220
 comptime _MARK_UNPIVOT_INTO: UInt8 = 221
+comptime _MARK_SAMPLE_FUNCTION: UInt8 = 222
+comptime _MARK_SAMPLE_METHOD: UInt8 = 223
+comptime _MARK_SAMPLE_REPEATABLE: UInt8 = 224
 
 # Where the parts of a statement sit in the small runs that carry them up. A
 # rule that has more than one thing to hand its parent puts them in a run of
@@ -978,6 +983,9 @@ struct Transform(Movable):
         self._set(names, "TableAliasColon", _MARK_ALIAS_COLON)
         self._set(names, "AtClause", _MARK_AT)
         self._set(names, "SampleClause", _MARK_SAMPLE)
+        self._set(names, "SampleEntryFunction", _MARK_SAMPLE_FUNCTION)
+        self._set(names, "SampleFunction", _MARK_SAMPLE_METHOD)
+        self._set(names, "RepeatableSample", _MARK_SAMPLE_REPEATABLE)
         self._set(names, "Lateral", _MARK_LATERAL)
         self._set(names, "WithOrdinality", _MARK_ORDINALITY)
         self._set(names, "Recursive", _MARK_RECURSIVE)
@@ -1352,7 +1360,6 @@ struct Transform(Movable):
             "RenameEntry",
             "RenameEntryList",
             "RenameList",
-            "RepeatableSample",
             "ReplaceEntries",
             "ReplaceEntry",
             "ReplaceEntryList",
@@ -1376,8 +1383,6 @@ struct Transform(Movable):
             "SampleCount",
             "SampleEntry",
             "SampleEntryCount",
-            "SampleEntryFunction",
-            "SampleFunction",
             "SamplePercentage",
             "SampleProperties",
             "SampleRows",
@@ -1921,7 +1926,7 @@ struct Transform(Movable):
             return self._table_ref(tree, sql, node, ast, work)
 
         if action == _BASE_TABLE:
-            return self._base_table(tree, sql, node, ast)
+            return self._base_table(tree, sql, node, ast, work)
 
         if action == _TABLE_SUBQUERY:
             return self._table_subquery(tree, sql, node, ast, work)
@@ -4376,9 +4381,12 @@ struct Transform(Movable):
         var having = NO_NODE
         var qualify = NO_NODE
         var windows = NO_NODE
+        var sampled = NO_NODE
         for i in range(1, len(kids)):
             var lead = _word(tree, sql, kids[i])
-            if lead == "WHERE":
+            if self._marked(tree, kids[i], _MARK_SAMPLE):
+                sampled = kids[i]
+            elif lead == "WHERE":
                 filter = kids[i]
             elif lead == "GROUP":
                 grouping = kids[i]
@@ -4388,8 +4396,6 @@ struct Transform(Movable):
                 qualify = kids[i]
             elif lead == "WINDOW":
                 windows = kids[i]
-            elif self._marked(tree, kids[i], _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kids[i], SELECT_SAMPLE)
             else:
                 raise _unsupported(tree, sql, kids[i], SELECT_CLAUSE, lead)
 
@@ -4433,7 +4439,11 @@ struct Transform(Movable):
             flags,
             distinct_on,
             named,
-            tree.nodes[Int(node)].token_start,
+            sample=(
+                NO_NODE if sampled
+                == NO_NODE else self._sample(tree, sql, sampled, ast, work)
+            ),
+            token=tree.nodes[Int(node)].token_start,
         )
 
     def _block(
@@ -4992,8 +5002,108 @@ struct Transform(Movable):
             out.append(self._plain(tree, sql, name))
         return out^
 
+    def _sample(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a `TABLESAMPLE` or a `USING SAMPLE`.
+
+        `SampleClause <- (TableSample / UsingSample) SampleEntry`, and the
+        entry is written one of two ways round. `10% (reservoir, 377)` puts the
+        count first and the method and seed in parentheses after it, and
+        `reservoir(10%) REPEATABLE (377)` puts the method first and the count
+        in the parentheses. Both say the same three things, so both come out of
+        here the same way, with one bit saying which was written so the printer
+        can put it back.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SampleClause` node.
+            ast: Where to put the nodes.
+            work: The walk, for the count and the seed.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If the clause is not built yet, or is a shape this has no
+                case for.
+        """
+        var kids = tree.children(node)
+        if len(kids) != 2:
+            raise _malformed(tree, sql, node, "a sample with no entry")
+        var tablesample = _word(tree, sql, kids[0]) == "TABLESAMPLE"
+        var entry = self._only(tree, kids[1])
+        var method_first = self._marked(tree, entry, _MARK_SAMPLE_FUNCTION)
+
+        var count = NO_NODE
+        var method = String()
+        var seed = NO_NODE
+        if method_first:
+            # `SampleEntryFunction <- SampleFunction? Parens(SampleCount)
+            # RepeatableSample?`.
+            for kid in tree.children(entry):
+                if self._marked(tree, kid, _MARK_SAMPLE_METHOD):
+                    method = self._plain(tree, sql, kid)
+                elif self._marked(tree, kid, _MARK_SAMPLE_REPEATABLE):
+                    # `RepeatableSample <- 'REPEATABLE' Parens(SampleSeed)`.
+                    seed = self._only(tree, self._only(tree, kid))
+                else:
+                    count = self._only(tree, kid)
+        else:
+            # `SampleEntryCount <- SampleCount Parens(SampleProperties)?` and
+            # `SampleProperties <- ColId (',' SampleSeed)?`.
+            var parts = tree.children(entry)
+            count = parts[0]
+            if len(parts) > 1:
+                var listed = tree.children(self._only(tree, parts[1]))
+                method = self._plain(tree, sql, listed[0])
+                if len(listed) > 1:
+                    seed = listed[1]
+
+        if count == NO_NODE:
+            raise _malformed(tree, sql, node, "a sample with no count")
+        # `SampleCount <- SampleValue SampleUnit?`, and the unit is the one
+        # thing here that is three spellings of two meanings, since `%` and
+        # `PERCENT` mean the same and only one of them is a word.
+        var counted = tree.children(count)
+        var unit = SAMPLE_UNIT_NONE
+        if len(counted) > 1:
+            var written = _word(tree, sql, counted[1])
+            if written == "ROWS":
+                unit = SAMPLE_UNIT_ROWS
+            elif written == "PERCENT":
+                unit = SAMPLE_UNIT_PERCENT_WORD
+            else:
+                unit = SAMPLE_UNIT_PERCENT_SIGN
+        var value = self._only(tree, counted[0])
+        # `SampleSeed <- NumberLiteral`, so the seed is one more literal and
+        # goes through the walk the way the count does.
+        var seeded = NO_NODE if seed == NO_NODE else self._only(tree, seed)
+        var wanted: List[UInt32] = [value, seeded]
+        work.warm(wanted)
+        return ast.sample(
+            work.value(value),
+            unit,
+            method,
+            NO_NODE if seeded == NO_NODE else work.value(seeded),
+            tablesample,
+            method_first,
+            tree.nodes[Int(node)].token_start,
+        )
+
     def _base_table(
-        self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
     ) raises -> UInt32:
         """Builds a named table reference.
 
@@ -5002,6 +5112,7 @@ struct Transform(Movable):
             sql: The query.
             node: The `BaseTableRef` node.
             ast: Where to put the nodes.
+            work: The walk, for what a sample holds.
 
         Returns:
             The table reference node.
@@ -5011,13 +5122,14 @@ struct Transform(Movable):
         """
         var name = NO_NODE
         var named = NO_NODE
+        var sampled = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_AT):
                 raise _unsupported(tree, sql, kid, TABLE_AT)
             elif self._marked(tree, kid, _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kid, TABLE_SAMPLE)
+                sampled = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
                 raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
@@ -5028,7 +5140,11 @@ struct Transform(Movable):
             self._name_parts(tree, sql, name),
             self._alias_name(tree, sql, named),
             self._alias_columns(tree, sql, named),
-            tree.nodes[Int(node)].token_start,
+            sample=(
+                NO_NODE if sampled
+                == NO_NODE else self._sample(tree, sql, sampled, ast, work)
+            ),
+            token=tree.nodes[Int(node)].token_start,
         )
 
     def _table_subquery(
@@ -5105,11 +5221,12 @@ struct Transform(Movable):
         """
         var inner = NO_NODE
         var named = NO_NODE
+        var sampled = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kid, TABLE_SAMPLE)
+                sampled = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
                 raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
@@ -5120,7 +5237,11 @@ struct Transform(Movable):
             work.value(inner),
             self._alias_name(tree, sql, named),
             self._alias_columns(tree, sql, named),
-            tree.nodes[Int(node)].token_start,
+            sample=(
+                NO_NODE if sampled
+                == NO_NODE else self._sample(tree, sql, sampled, ast, work)
+            ),
+            token=tree.nodes[Int(node)].token_start,
         )
 
     def _values_ref(
