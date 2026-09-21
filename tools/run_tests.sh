@@ -121,9 +121,16 @@ if [ "$shards" -gt 1 ]; then
       | sort -k1,1nr -k2,2 \
       | awk -v n="$shards" -v mine="$shard" '
           {
+            # Ties go to the shard holding fewest files, which makes this
+            # degrade to round robin rather than to "everything in shard one"
+            # if the table ever comes back all zeroes.
             least = 1
-            for (s = 2; s <= n; s++) if (load[s] < load[least]) least = s
+            for (s = 2; s <= n; s++) {
+              if (load[s] < load[least]) least = s
+              else if (load[s] == load[least] && count[s] < count[least]) least = s
+            }
             load[least] += $1
+            count[least]++
             if (least == mine) print $2
           }'
   )
