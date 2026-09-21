@@ -22,6 +22,19 @@ The microbenchmark job no longer runs on pull requests. Its baseline step alread
 
 Two smaller things in the same pass. The differential job was compiling eleven programs to run six of them, because the five regular expression comparisons are run by hand out of the documents that introduce them and no workflow has ever run one; they are a separate build group now and the six that CI runs are about half the compile. And `pixi run build` has gained `inputs` and `outputs`, so `pixi run test`, which depends on it, no longer precompiles the package a second time straight after the workflow's own build step has just done it.
 
+### Added: a selective filter skips a block of rows it is going to drop whole
+
+The compaction loop read one mask byte a row and wrote the row speculatively, advancing the output cursor by the mask bit rather than branching on it. That is the right shape for a mask that keeps most of its rows and the wrong one for a mask that keeps almost none, and one byte at a time is not enough to tell the two apart.
+
+A selective mask is now read sixty four bytes at a time, which is the cache line the loop was going to touch anyway, and a block that keeps nothing becomes a cursor advance with no work at all. A block with anything in it falls back to the row at a time loop over those sixty four rows, so the fallback costs the block test and nothing more.
+
+What this saves is the read of the source column rather than the write, because a speculative write has to load the row before it can decide not to keep it, and on a wide column the source is eight times the mask. That also says which masks benefit. A scattered mask keeps something in almost every block and gets nothing. A mask that keeps one contiguous range was already fast, because the loop stops once it has written the number of rows it counted and so never reads past the end of its own range. The win is on the shape in between, a mask with many separated clumps, which is what a range predicate looks like over a column that is clustered rather than sorted.
+
+Measured on a 13900K, eight million rows, int64, ABBA with two readings a side. A mask that keeps a hundred and three rows and then drops five thousand goes from between 1183 and 1664 microseconds to between 332 and 341, so somewhere between three and a half and five times, with the spread all on the old side. An all true mask, an alternating mask and a scattered mask are all above the threshold, take the old path, and measure identically to it.
+
+Whether to read the mask in blocks is decided from the kept row count that the offsets pass has already produced, so the decision is free. The threshold was swept at an eighth, a quarter, a half and always on. Always on was not worse anywhere and was faster on an all true mask by about ten percent, which is unexplained, so the constant sits at the conservative value where a mask above it runs the instructions it ran before.
+
+
 ## [0.8.18] - 2026-09-21
 
 Built against Mojo 1.0.0 (ed45d567).

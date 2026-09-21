@@ -1393,6 +1393,97 @@ def test_a_filter_past_the_split_that_keeps_everything() raises:
         assert_equal(kept[i], col[i], "a kept row is wrong")
 
 
+def test_a_filter_past_the_split_skips_long_empty_runs() raises:
+    # Selective enough for the compaction to read its mask in blocks, and made
+    # of stretches long enough that most blocks fall entirely inside one. The
+    # stretches are deliberately not a multiple of the block length, so the
+    # boundary between kept and dropped lands at a different place inside a
+    # block every time round and the partly full case is exercised too.
+    comptime ROWS = 200_003
+    var col = build[DType.int64](ROWS, 0)
+    var mask = Array[DType.bool](ROWS)
+    for i in range(ROWS):
+        mask[i] = (i % 1031) < 103
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_filter_past_the_split_finds_one_kept_row_in_an_empty_block() raises:
+    # A block the loop wrongly calls empty loses a row, and every row after it
+    # in the morsel shifts up by one. One kept row per block, walked through
+    # every position in the block, is what catches that whichever way the block
+    # test is written. Just past `PARALLEL_FILTER_ROWS` and no further, because
+    # what is being walked is sixty four positions rather than a column, and a
+    # taller column is sixty four times the cost for nothing.
+    comptime ROWS = 70_003
+    var col = build[DType.int64](ROWS, 0)
+    for spot in range(64):
+        var mask = Array[DType.bool](ROWS)
+        for i in range(ROWS):
+            mask[i] = i % 64 == spot
+
+        var kept = filter_rows(col, mask)
+        var kept_twin = filter_scalar(col, mask)
+        assert_equal(
+            len(kept),
+            len(kept_twin),
+            "kept row count with only row "
+            + String(spot)
+            + " of each block kept",
+        )
+        for i in range(len(kept)):
+            assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_filter_past_the_split_agrees_across_the_density_gate() raises:
+    # Whether the compaction reads blocks at all turns on how much of the mask
+    # survives, so the answer has to be the same on both sides of that decision
+    # and at the density where it flips. This walks a spread that crosses it
+    # twice over, with an offset that moves the pattern against the block
+    # boundary and the morsel boundary at once.
+    comptime ROWS = 70_009
+    var col = build[DType.int64](ROWS, 0)
+    var every: List[Int] = [2, 3, 7, 8, 9, 17, 64, 65, 1_000, 50_000]
+    for e in range(len(every)):
+        var step = every[e]
+        for shift in range(2):
+            var mask = Array[DType.bool](ROWS)
+            for i in range(ROWS):
+                mask[i] = (i + shift * 13) % step == 0
+
+            var kept = filter_rows(col, mask)
+            var kept_twin = filter_scalar(col, mask)
+            assert_equal(
+                len(kept),
+                len(kept_twin),
+                "kept row count at one in " + String(step),
+            )
+            for i in range(len(kept)):
+                assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_filter_past_the_split_of_a_narrow_dtype_skips_too() raises:
+    # The block read is over the mask, which is a byte a row whatever the
+    # column holds, but the fallback copy is as wide as the dtype and the
+    # bounds it keeps are in rows. An int8 column is where those two disagree
+    # most, so it gets a reading of its own.
+    comptime ROWS = 200_003
+    var col = build[DType.int8](ROWS, 0)
+    var mask = Array[DType.bool](ROWS)
+    for i in range(ROWS):
+        mask[i] = (i // 97) % 11 == 0
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
 def test_slice_copies_values_and_validity() raises:
     var col = build[DType.int64](200, 5)
     var piece = col.slice(64, 130)

@@ -178,6 +178,35 @@ as the morsel above, and the packing pass is over the output rather than the
 input.
 """
 
+comptime FILTER_SKIP_ROWS = 64
+"""Rows the compaction loop reads the mask for before deciding to skip them.
+
+Sixty four bytes of mask, which is one cache line, and the loop is reading that
+line anyway. The block is what lets a filter notice that the next stretch of
+rows is thrown away whole, which the row at a time loop cannot see because it
+only ever looks at one byte.
+
+Wider would find fewer empty blocks and narrower would spend more of the loop
+deciding. Sixty four is also small enough that a block with something in it
+falls back to the row at a time loop over sixty four rows rather than over the
+whole morsel, so the fallback costs the block test and nothing else.
+"""
+
+comptime FILTER_SKIP_SHARE = 8
+"""How selective a mask has to be before the compaction loop reads it in blocks.
+
+The reciprocal of a share, so eight means an eighth. Under it the block read
+pays for itself and above it it is pure cost, and the reason is only
+arithmetic: if a mask keeps a fraction p of its rows at random then a block of
+sixty four keeps nothing with probability (1 - p) to the sixty fourth, which is
+0.04 at a half, 0.3 at an eighth and 0.9 at a hundredth. A filter that keeps
+half its rows almost never meets an empty block and still pays to look for one.
+
+Measured rather than derived, though, because real masks are not random. A
+shipdate range over a table clustered by date skips far more than the formula
+says and a mask over a column with no order skips rather less.
+"""
+
 comptime MASK_SAMPLE_BLOCK = 64
 """Rows `mask_keeps_more_than` reads at each place it looks.
 
@@ -1324,12 +1353,48 @@ def _filter_spread[
     var out = Array[dt](overwritten=kept)
     var flags = Buffer(overwritten=kept if has_null else 0)
 
+    var mask_bytes = mask_values.unsafe_bitcast[UInt8]()
+    # The row at a time loop below pays a load and a store a row whether the
+    # row is kept or not, because one mask byte is not enough to see that the
+    # next cache line of rows is going to be dropped whole. A block read is,
+    # and a block that keeps nothing costs a cursor advance and no stores at
+    # all. That only pays when empty blocks are common, so the count the
+    # offsets pass has already produced decides it rather than a guess.
+    var skipping = dense and not has_null and kept * FILTER_SKIP_SHARE < n
+
     def compact(w: Int) raises {mut out, mut flags, imm}:
         var target = out.unsafe_mut_ptr()
         var marks = flags.mut_bitcast[DType.uint8]()
         var limit = places[w + 1]
         var written = places[w]
         var i = w * FILTER_MORSEL_ROWS
+
+        if skipping:
+            # A worker cannot walk out of its own morsel here. Leaving it would
+            # mean skipping every remaining row in the morsel, and a skipped
+            # block keeps nothing, so `written` would have reached `limit`
+            # first and the loop would have stopped.
+            comptime MSTEP = min(simd_width_of[DType.uint8](), FILTER_SKIP_ROWS)
+            while written < limit and i + FILTER_SKIP_ROWS <= n:
+                var some = False
+                comptime for k in range(FILTER_SKIP_ROWS // MSTEP):
+                    var bytes = mask_bytes.unsafe_offset(
+                        i + k * MSTEP
+                    ).unsafe_load[width=MSTEP]()
+                    some = some or bytes.ne(0).reduce_or()
+                if not some:
+                    i += FILTER_SKIP_ROWS
+                    continue
+                var stop = i + FILTER_SKIP_ROWS
+                while i < stop and written < limit:
+                    target.unsafe_offset(written).unsafe_write(
+                        source.unsafe_offset(i).unsafe_load()
+                    )
+                    written += Int(
+                        Bool(mask_values.unsafe_offset(i).unsafe_load())
+                    )
+                    i += 1
+
         while written < limit:
             target.unsafe_offset(written).unsafe_write(
                 source.unsafe_offset(i).unsafe_load()
