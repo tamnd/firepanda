@@ -20,6 +20,20 @@
 # `FIREPANDA_TEST_JOBS` overrides the width. Set it to 1 to get the old
 # behaviour when a failure is confusing enough to want a clean serial log.
 #
+# `FIREPANDA_TEST_SHARDS` and `FIREPANDA_TEST_SHARD` cut the list of files into
+# pieces so that several machines can each run one. One machine with four cores
+# was taking thirty nine minutes of the fifty one this step's job cost, and the
+# reason is that a test file spends most of its wall clock compiling the library
+# again rather than running assertions, so there is nothing to share between
+# files and the only way to go faster is more machines. `.github/workflows/ci.yml`
+# runs ten of them.
+#
+# The split is by file size rather than round robin. Sizes span two orders of
+# magnitude here and compile time tracks them closely enough, so round robin
+# leaves one shard holding three of the big files and every other shard idle
+# while it finishes. Largest first into whichever shard has least so far is the
+# standard greedy schedule for that and it costs one pass of awk.
+#
 # The logs go under `build/` rather than under `TMPDIR`, which they used to. On
 # macOS `TMPDIR` is a per-session directory under `/var/folders` that the system
 # is free to reap, and it does: a run of this script reported twenty four of a
@@ -56,6 +70,43 @@ if [ ! -e "${files[0]}" ]; then
   exit 1
 fi
 
+shards=${FIREPANDA_TEST_SHARDS:-1}
+shard=${FIREPANDA_TEST_SHARD:-1}
+if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
+  echo "FIREPANDA_TEST_SHARD=$shard is not between 1 and $shards" >&2
+  exit 1
+fi
+
+total=${#files[@]}
+if [ "$shards" -gt 1 ]; then
+  # Every shard runs this over the whole list and keeps the files that fall to
+  # it, so they agree on the assignment without talking to each other.
+  #
+  # `read` in a loop rather than `mapfile`, because the macOS runner's bash is
+  # 3.2 and does not have it.
+  picked=()
+  while IFS= read -r file; do
+    picked[${#picked[@]}]=$file
+  done < <(
+    for file in "${files[@]}"; do
+      printf '%s %s\n' "$(wc -c < "$file")" "$file"
+    done \
+      | sort -k1,1nr -k2,2 \
+      | awk -v n="$shards" -v mine="$shard" '
+          {
+            least = 1
+            for (s = 2; s <= n; s++) if (load[s] < load[least]) least = s
+            load[least] += $1
+            if (least == mine) print $2
+          }'
+  )
+  if [ "${#picked[@]}" -eq 0 ]; then
+    echo "shard $shard of $shards has no files out of $total, which cannot be right" >&2
+    exit 1
+  fi
+  files=("${picked[@]}")
+fi
+
 # The process id is in the name because two runs of this in the same checkout at
 # once is a normal thing to want and they must not share a log directory.
 logs=build/testlogs.$$
@@ -63,7 +114,11 @@ rm -rf "$logs"
 mkdir -p "$logs"
 trap 'rm -rf "$logs"' EXIT
 
-echo "running ${#files[@]} test files, $jobs at a time"
+if [ "$shards" -gt 1 ]; then
+  echo "running ${#files[@]} of $total test files, shard $shard of $shards, $jobs at a time"
+else
+  echo "running ${#files[@]} test files, $jobs at a time"
+fi
 
 run_one() {
   local file=$1 logs=$2
@@ -101,4 +156,8 @@ if [ "$failed" -ne 0 ]; then
   echo "$failed of ${#files[@]} test files failed"
   exit 1
 fi
-echo "${#files[@]} test files passed"
+if [ "$shards" -gt 1 ]; then
+  echo "${#files[@]} test files passed, shard $shard of $shards"
+else
+  echo "${#files[@]} test files passed"
+fi

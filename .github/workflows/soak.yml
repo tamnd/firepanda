@@ -1,0 +1,81 @@
+# The checks that get better the longer they run, which is the opposite of what
+# a pull request wants from them.
+#
+# The differential fuzzers were a step in the build job, bounded to five minutes
+# a fuzzer so that the pull request pipeline could contain them. That bound is
+# the whole problem: five minutes is not where a fuzzer finds anything, it is
+# where it has finished warming up, and the person who set it was not choosing a
+# fuzzing budget but choosing how long to make somebody wait. Every seed they
+# find is a test that gets checked in and then runs in the pull request pipeline
+# forever, so the fuzzing itself belongs where nothing is waiting for it.
+#
+# Half an hour a fuzzer, nightly, which is six times the coverage at no cost to
+# anybody's merge.
+name: Soak
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per fuzzer
+        required: false
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Differential fuzz
+    runs-on: ubuntu-latest
+    # A fuzzer that hangs should be reported rather than left to burn six hours
+    # of the runner pool. The bound below is half an hour a fuzzer and they run
+    # four at a time, so a healthy run is well under this.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pixi
+
+      - name: Build
+        run: pixi run build
+
+      - name: Differential fuzz
+        env:
+          SECONDS_PER_FUZZER: ${{ inputs.seconds || '1800' }}
+        run: pixi run fuzz -- --max-total-time="$SECONDS_PER_FUZZER"
+
+  report:
+    name: Open or update tracking issue
+    needs: fuzz
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      # The same shape as the nightly canary's reporter, and for the same
+      # reason: a scheduled job that fails into an inbox nobody reads has not
+      # told anyone anything.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Soak fuzzing failing"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label "test" --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n\n- run: %s\n' \
+            "A differential fuzzer found a disagreement, or failed to run." "$RUN")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label "test" --body "$body"
+          fi
