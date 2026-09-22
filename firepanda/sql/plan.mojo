@@ -517,6 +517,7 @@ from .ast import (
     EXPR_IN_SUBQUERY,
     EXPR_INTERVAL,
     EXPR_LAMBDA,
+    EXPR_LIST,
     EXPR_LITERAL,
     EXPR_NAMED_ARGUMENT,
     EXPR_QUANTIFIED,
@@ -580,6 +581,7 @@ from .unsupported import (
     INTERVAL,
     LAMBDA,
     LIST_COMPREHENSION,
+    LIST_VALUE,
     NAMED_ARGUMENT,
     ROW_VALUE,
     SELECT_SAMPLE,
@@ -3081,6 +3083,8 @@ def _lower_expr(
         raise not_implemented(COLUMNS, "", "")
     if node.kind == EXPR_ARRAY:
         raise not_implemented(ARRAY_SUBQUERY, "", "")
+    if node.kind == EXPR_LIST:
+        raise not_implemented(LIST_VALUE, "", "")
     raise Error("an expression shape firepanda does not lower yet")
 
 

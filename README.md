@@ -172,6 +172,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `quantified-value` | ANY or ALL over a value | DuckDB unnests the right side when it is a list, so x = ANY ([1, 2]) is a membership test written the long way. Write it as IN, or put a SELECT on the right. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `aggregate-filter` | FILTER on {} | A filter is read as a CASE around the argument, which answers the same number for a fold that passes over a null. first, last and any_value read a null as a value, so it would not, no fold here reads more than one argument, and a name that is not a fold has nothing for the CASE to go inside. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `list-value` | a list written out | A literal in the plan is one scalar, and a list is a value with a length. LIST is a type firepanda has and a column can hold one, so what is missing is the constant rather than the type. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 
 <!-- end sql-support -->
 
