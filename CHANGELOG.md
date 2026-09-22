@@ -42,6 +42,14 @@ A lookaround standing alone is still handed straight back to the machine, so no 
 
 It also found a line in a comparison driver. `tests/differential/regex_match.mojo` picked the engine with `if program.refs` where the column kernel picks with `refs or cuts or asks`, so a program holding a cut or a test went to the machine that cannot obey either. That had been wrong since document 99 and was unreachable, because such a program arrives there only beside a lookaround. All seven differentials are at zero disagreements. Document 120.
 
+## [0.8.25] - 2026-09-23
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release, and most of it is about the pipeline rather than about the engine. One construct the regular expression engine can now hold beside a lookaround, one shape of list the parser now refuses by name instead of by accident, and two fixes to a pipeline that had stopped telling the truth: the Python suite had been red on main for five merges asserting refusals the engine had stopped making, and the Actions cache had been over its allowance for long enough that it was evicting entries somebody was about to need.
+
+Neither of those two is a change to what the library does. Both are changes to whether anybody would find out if it broke, which is the same thing one step removed.
+
 ## [0.8.24] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).
