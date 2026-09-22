@@ -31,10 +31,17 @@ end of each morsel clears the rows where either side was missing. The value
 under a null is false either way, so nothing depends on which branch the loop
 took there.
 
-Both forms run on every core. A row's cost here depends on its own bytes and on
-nothing else, so the column splits over morsels with no more care than a numeric
-kernel needs, and the only thing that had to move is the constant's view, which
-is now built once above the split rather than once per worker.
+Both mask forms run on every core. A row's cost here depends on its own bytes
+and on nothing else, so the column splits over morsels with no more care than a
+numeric kernel needs, and the only thing that had to move is the constant's view,
+which is now built once above the split rather than once per worker.
+
+There is a third form against a constant, which answers the rows it keeps rather
+than a column of bits, and it is serial. A filter is the only caller, the filter
+is already on a worker, and the bool column between the comparison and the rows
+was a byte a row written and read for nothing. It has an arm that reads the
+column through a selection, which is what keeps a text condition sitting behind
+other conditions from gathering the column it compares.
 """
 
 from std.collections.span import Span
@@ -216,4 +223,183 @@ def compare_text_const[
     parallel_morsels(compute, n)
 
     out.data.validity = validity^
+    return out^
+
+
+def _text_holds[
+    op: Int
+](
+    a: StringArray, i: Int, b: Span[UInt8, _], probe: StringView, short: Bool
+) raises -> Bool:
+    """Answers one comparison between an element and the constant.
+
+    Args:
+        a: The column.
+        i: The element.
+        b: The constant's bytes.
+        probe: The constant as a view, built only when it is short and the
+            operation is equality. Not read otherwise.
+        short: Whether `probe` holds the constant.
+
+    Parameters:
+        op: One of the `CMP_` codes.
+
+    Returns:
+        Whether the comparison is true of the pair, taking the element as
+        present.
+
+    Raises:
+        Never. The signature carries it because the element readers do.
+    """
+    comptime if op == CMP_EQ or op == CMP_NE:
+        var same = views_equal_short(a.view(i), probe) if short else a.equals(
+            i, b
+        )
+        comptime if op == CMP_EQ:
+            return same
+        else:
+            return not same
+    else:
+        var order = a.compare(i, b)
+        comptime if op == CMP_LT:
+            return order < 0
+        elif op == CMP_LE:
+            return order <= 0
+        elif op == CMP_GT:
+            return order > 0
+        else:
+            return order >= 0
+
+
+def compare_text_const_positions[
+    op: Int
+](a: StringArray, b: Span[UInt8, _]) raises -> List[UInt32]:
+    """Compares a text column against a constant and returns the rows it keeps.
+
+    What `compare_text_const` followed by `select_positions` answers, without the
+    bool column in the middle, and the text half of what
+    `compare_const_positions` does for the fixed width dtypes. A filter over
+    `SearchPhrase <> ''` is eleven of the ClickBench statements, and every one of
+    them wrote a byte a row and read it back to carry an answer the loop already
+    had.
+
+    Serial, unlike `compare_text_const`, because the cursor is the loop and the
+    caller is already on a worker of its own. That is the same trade the numeric
+    positions kernels make and the reason is written out there.
+
+    A null element drops the row, which is what `select_positions` does to a null
+    in a mask and is what makes the two routes agree. It matters more here than
+    it does for numbers: a null element's view is the view of the empty string,
+    so a null would otherwise answer true to `= ''` rather than dropping out of
+    both that and its opposite.
+
+    Args:
+        a: The column.
+        b: The constant's bytes. Borrowed for the length of the call and not
+            stored.
+
+    Parameters:
+        op: One of the `CMP_` codes from `compare.mojo`.
+
+    Returns:
+        The positions the comparison is true on, in order.
+
+    Raises:
+        Never. The signature carries it because the element readers do.
+    """
+    var n = len(a)
+    # Room for every row taken in front and cut back at the end, which is what
+    # the numeric positions kernels do and for the reason written there.
+    var out = List[UInt32](unsafe_uninit_length=n)
+    var target = out.unsafe_ptr()
+    var at = 0
+
+    # The same hoist the mask form does, and only for equality, since ordering
+    # has no use for the view. There is no block compare here: a block settles
+    # `EQUAL_BLOCK` rows at once and the cursor takes them one at a time anyway.
+    var short = False
+    var probe = StringView()
+    comptime if op == CMP_EQ or op == CMP_NE:
+        short = len(b) <= INLINE_CAPACITY
+        if short:
+            probe = make_inline(b)
+
+    # The branchless cursor, from `select_positions`. A row nobody keeps is a
+    # store the next row overwrites.
+    if a.null_count() == 0:
+        for i in range(n):
+            target.unsafe_offset(at).unsafe_write(UInt32(i))
+            at += Int(_text_holds[op](a, i, b, probe, short))
+        out.resize(at, 0)
+        return out^
+
+    for i in range(n):
+        var valid = Int(a.validity.get(i))
+        target.unsafe_offset(at).unsafe_write(UInt32(i))
+        at += valid & Int(_text_holds[op](a, i, b, probe, short))
+    out.resize(at, 0)
+    return out^
+
+
+def compare_text_const_positions_through[
+    op: Int
+](a: StringArray, b: Span[UInt8, _], picks: List[UInt32]) raises -> List[
+    UInt32
+]:
+    """The same comparison over a column that is read through a selection.
+
+    The rows are `a[picks[0]]`, `a[picks[1]]` and so on, and what comes back is
+    positions into `picks` rather than into `a`, so it composes with the
+    selection the chunk arrived under exactly as a mask over those rows would
+    have.
+
+    This is the arm the ClickBench page view statements land on. `URL <> ''` is
+    the last of six conditions there, so by the time it runs the five in front of
+    it have composed a selection holding a small part of the rows, and the only
+    way to compare without this was to gather the whole URL column through that
+    selection first. A gathered text column is not the cheap kind of copy either:
+    it is a payload as well as a view per row.
+
+    Args:
+        a: The column the positions point into.
+        b: The constant's bytes. Borrowed for the length of the call and not
+            stored.
+        picks: The selection, one position per row.
+
+    Parameters:
+        op: One of the `CMP_` codes from `compare.mojo`.
+
+    Returns:
+        The positions into `picks` the comparison is true on, in order.
+
+    Raises:
+        Never. The signature carries it because the element readers do.
+    """
+    var n = len(picks)
+    var read = picks.unsafe_ptr()
+    var out = List[UInt32](unsafe_uninit_length=n)
+    var target = out.unsafe_ptr()
+    var at = 0
+
+    var short = False
+    var probe = StringView()
+    comptime if op == CMP_EQ or op == CMP_NE:
+        short = len(b) <= INLINE_CAPACITY
+        if short:
+            probe = make_inline(b)
+
+    if a.null_count() == 0:
+        for j in range(n):
+            var i = Int(read.unsafe_offset(j).unsafe_load())
+            target.unsafe_offset(at).unsafe_write(UInt32(j))
+            at += Int(_text_holds[op](a, i, b, probe, short))
+        out.resize(at, 0)
+        return out^
+
+    for j in range(n):
+        var i = Int(read.unsafe_offset(j).unsafe_load())
+        var valid = Int(a.validity.get(i))
+        target.unsafe_offset(at).unsafe_write(UInt32(j))
+        at += valid & Int(_text_holds[op](a, i, b, probe, short))
+    out.resize(at, 0)
     return out^
