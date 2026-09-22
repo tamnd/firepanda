@@ -81,17 +81,20 @@ rows, so the copy is not new work. The builder is also the key column the
 operator wants at the end, so the keys are stored once and not twice.
 """
 
+from std.sys.intrinsics import PrefetchOptions, prefetch
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
+from firepanda.exec.morsel import parallel_morsels
 from firepanda.kernel.concat import concat_any
 from firepanda.kernel.select import take_any
 
 from .factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
-from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
-from .table import HashTable
+from .function import DEFAULT_SEED, hash_bytes, hash_chunk
+from .table import PROBE_LOOKAHEAD, HashTable
 
 
 comptime LASTING_SPAN = 1 << 18
@@ -107,6 +110,17 @@ rather than at it.
 
 comptime LASTING_TEXT_SLOTS = 1 << 10
 """How many slots a text map starts with, before it doubles."""
+
+
+comptime LASTING_TEXT_MORSEL = 1 << 12
+"""Rows a worker takes at a time on the two passes that do not write the map.
+
+Smaller than `MORSEL_ROWS`, and that is the whole point of naming it. A chunk is
+one morsel, so a pass that asked for the engine's morsel size would be handed its
+own chunk back as a single piece and would run on the thread that called it. Four
+thousand rows puts thirty two pieces in front of ten workers on a chunk, which is
+enough that the last one finishing is not the whole tail.
+"""
 
 
 struct LastingText(Movable):
@@ -125,6 +139,12 @@ struct LastingText(Movable):
     over the groups than arriving there directly would have cost, and the guess
     would have to be made from the first chunk, which is the part of the input
     that says least about the whole of it.
+
+    A chunk is taken in three passes and only the last of them writes anything,
+    which is what lets the first two run on the cores. The operator above holds
+    one chunk at a time and the engine gives it no second thread, so a map that
+    did all of its work in one loop would do all of it on one core however many
+    the machine has.
     """
 
     var slots: Buffer
@@ -162,8 +182,28 @@ struct LastingText(Movable):
 
     def ordinals(
         mut self, col: StringArray, rows: Int, mut codes: Array[DType.uint32]
-    ):
+    ) raises:
         """Gives every row of one chunk the ordinal its key holds in the map.
+
+        Three passes, and the split is about cores rather than about cache. Only
+        the last of them writes the map, and only the rows whose key the map has
+        never seen reach it, so on a chunk of a column the operator is well into
+        the serial pass is the short one.
+
+        Hashing is a pass over the chunk's bytes and nothing else, so it goes on
+        the cores. Looking a row up is a probe into a table far past any cache
+        and then a comparison against bytes somewhere else again, which is the
+        expensive pass and which reads the map without changing it, so it goes
+        on the cores too. Inserting is the one that hands out an ordinal, and an
+        ordinal is the order the keys were first seen in, so it stays on one
+        thread and walks the leftovers in row order.
+
+        The pass that does not write is run over every row rather than over the
+        rows the pass before it is unsure about, because there is no pass
+        before it. A row whose key is new probes to an empty slot and stops
+        there, which on the first chunk of a query is most of them and is also
+        when the table is small enough to sit in cache, so the pass it wastes is
+        the cheapest one it will ever run.
 
         Args:
             col: The chunk's key column. Must have no nulls, for the reason
@@ -171,15 +211,97 @@ struct LastingText(Movable):
             rows: The chunk's height.
             codes: Filled with one ordinal per row of the chunk.
         """
+        if rows <= 0:
+            return
         if self.capacity == 0:
             self._resize(LASTING_TEXT_SLOTS)
-        var hashes = Buffer(CHUNK_ROWS * 8)
-        var at = 0
-        while at < rows:
-            var count = min(CHUNK_ROWS, rows - at)
-            hash_strings_chunk(col, at, count, DEFAULT_SEED, hashes)
-            self._insert(col, at, count, hashes, codes)
-            at += count
+        var hashes = Buffer(rows * 8)
+        var missed = Array[DType.uint8](overwritten=rows)
+        self._hash(col, rows, hashes)
+        self._look(col, rows, hashes, codes, missed)
+        self._insert(col, rows, hashes, codes, missed)
+
+    def _hash(self, col: StringArray, rows: Int, mut hashes: Buffer) raises:
+        """Hashes every row of the chunk, on the cores.
+
+        Args:
+            col: The chunk's key column.
+            rows: The chunk's height.
+            hashes: Filled with one hash per row, indexed by row.
+        """
+        var out = hashes.mut_bitcast[DType.uint64]()
+
+        def body(begin: Int, stop: Int) raises {imm}:
+            for i in range(begin, stop):
+                out.unsafe_offset(i).unsafe_store(
+                    hash_bytes(col.unsafe_bytes(i), DEFAULT_SEED)
+                )
+
+        parallel_morsels(body, rows, LASTING_TEXT_MORSEL)
+
+    def _look(
+        self,
+        col: StringArray,
+        rows: Int,
+        hashes: Buffer,
+        mut codes: Array[DType.uint32],
+        mut missed: Array[DType.uint8],
+    ) raises:
+        """Looks every row up without changing anything, on the cores.
+
+        A row whose key is in the map gets its ordinal here and is done with. A
+        row that probes to an empty slot is marked, and the serial pass decides
+        what its ordinal is, because that is a question about the order the rows
+        come in and not about what the map holds.
+
+        Args:
+            col: The chunk's key column.
+            rows: The chunk's height.
+            hashes: One hash per row, indexed by row.
+            codes: The ordinal of every row whose key was found.
+            missed: One byte per row, one where the key was not found.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var slots = self.slots.bitcast[DType.uint64]()
+        var mask = self.mask
+        var found = codes.unsafe_mut_ptr()
+        var marks = missed.unsafe_mut_ptr()
+
+        def body(begin: Int, stop: Int) raises {imm}:
+            for i in range(begin, stop):
+                # The table is past every cache on the column this exists for,
+                # so the slot the row after next wants is read for while this
+                # row is still waiting on its own. Every other probe loop here
+                # does the same and for the same reason.
+                if i + PROBE_LOOKAHEAD < stop:
+                    var ahead = (
+                        hash.unsafe_offset(i + PROBE_LOOKAHEAD).unsafe_load()
+                        & mask
+                    )
+                    prefetch[PrefetchOptions().for_read().high_locality()](
+                        slots.unsafe_offset(Int(ahead) * 2)
+                    )
+
+                var wanted = hash.unsafe_offset(i).unsafe_load()
+                var at = wanted & mask
+                marks.unsafe_offset(i).unsafe_write(UInt8(0))
+                while True:
+                    var slot = Int(at) * 2
+                    var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                    if ordinal == 0:
+                        marks.unsafe_offset(i).unsafe_write(UInt8(1))
+                        break
+                    if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                        if self.store.element_equals_foreign(
+                            Int(ordinal) - 1, col.view(i), col
+                        ):
+                            found.unsafe_offset(i).unsafe_write(
+                                UInt32(Int(ordinal) - 1)
+                            )
+                            break
+                    at = (at + 1) & mask
+
+        parallel_morsels(body, rows, LASTING_TEXT_MORSEL)
 
     def take_keys(mut self) -> StringArray:
         """Gives up the key store as a column.
@@ -198,26 +320,68 @@ struct LastingText(Movable):
     def _insert(
         mut self,
         col: StringArray,
-        base: Int,
-        count: Int,
+        rows: Int,
         hashes: Buffer,
         mut codes: Array[DType.uint32],
+        missed: Array[DType.uint8],
     ):
-        """Looks one hashed run of the chunk up, inserting what it has not seen.
+        """Gives an ordinal to every row the read only pass did not settle.
+
+        In row order, because the ordinal a key gets is the position of the row
+        that first carried it, and because a key that is new to the map can be
+        on twenty rows of this chunk and has to come out of all twenty the same.
+        The first of them opens the group and the other nineteen find it here,
+        which is why this probes rather than assuming a marked row is a new key.
+
+        The rows it has to visit are collected into a list first rather than
+        found by testing a byte a row on the way past. That is one sequential
+        pass over a byte a row to save a branch that does not predict, and it is
+        what lets the probe run ahead of itself: the slot the next row but eight
+        wants can only be read for early if which row that is is known early.
+
+        Args:
+            col: The chunk's key column.
+            rows: The chunk's height.
+            hashes: One hash per row, indexed by row.
+            codes: The ordinal of every row this settles.
+            missed: One byte per row, one where the read only pass gave up.
         """
         var hash = hashes.bitcast[DType.uint64]()
         var out = codes.unsafe_mut_ptr()
+        var marks = missed.unsafe_ptr()
+
+        var left = 0
+        for i in range(rows):
+            left += Int(marks.unsafe_offset(i).unsafe_load())
+        if left == 0:
+            return
+        var todo = Array[DType.uint32](overwritten=left)
+        var wanted_rows = todo.unsafe_mut_ptr()
+        var at_row = 0
+        for i in range(rows):
+            if marks.unsafe_offset(i).unsafe_load() != 0:
+                wanted_rows.unsafe_offset(at_row).unsafe_write(UInt32(i))
+                at_row += 1
+
         var slots = self.slots.mut_bitcast[DType.uint64]()
         var mask = self.mask
 
-        for j in range(count):
-            var i = base + j
+        for k in range(left):
+            var i = Int(wanted_rows.unsafe_offset(k).unsafe_load())
+            if k + PROBE_LOOKAHEAD < left:
+                var next_row = Int(
+                    wanted_rows.unsafe_offset(k + PROBE_LOOKAHEAD).unsafe_load()
+                )
+                var ahead = hash.unsafe_offset(next_row).unsafe_load() & mask
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * 2)
+                )
             if (self.groups + 1) * 2 > self.capacity:
                 self._resize(self.capacity * 2)
                 slots = self.slots.mut_bitcast[DType.uint64]()
                 mask = self.mask
 
-            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var wanted = hash.unsafe_offset(i).unsafe_load()
             var at = wanted & mask
             while True:
                 var slot = Int(at) * 2
