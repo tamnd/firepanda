@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: AT on a table reads and prints, and lowering is what turns it down
+
+`SELECT a FROM t AT (VERSION => 42)` asks for a table as of a version, and `AT (TIMESTAMP => ...)` asks for it as of a moment. The transformer used to stop on both. It now reads them and the printer writes them back, and what turns them down is lowering, because what the clause asks for is a table the catalog has no way to hand back and not a spelling the parser cannot make sense of.
+
+What follows the arrow is a whole expression rather than a value. The corpus writes a call, a subquery, an arithmetic on a timestamp and a typed literal there, and all four go into the AST as the expressions they are, so a typed literal is the cast it means here the same as it is anywhere else.
+
+The reference keeps the clause the way it already kept a sample, which is a statement node hanging off a field of its own. That leaves the order of the three things a table reference can carry to the printer, since the grammar writes the alias first, then the `AT`, then the sample.
+
+Eight more corpus statements make the round trip.
+
 ## [0.8.22] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).

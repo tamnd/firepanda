@@ -212,10 +212,10 @@ def test_a_refusal_on_the_second_line_counts_lines() raises:
     var ast = Ast()
     var text = String()
     try:
-        _ = rules.parse_statement("SELECT 1\nFROM t AT (VERSION => 2)", g, ast)
+        _ = rules.parse_statement("SELECT 1\nFROM t WHERE MAP {'a': 1}", g, ast)
     except error:
         text = String(error)
-    assert_true("LINE 2: FROM t AT (VERSION => 2)" in text, text)
+    assert_true("LINE 2: FROM t WHERE MAP {'a': 1}" in text, text)
 
 
 def test_the_readme_table_is_the_refusal_table() raises:

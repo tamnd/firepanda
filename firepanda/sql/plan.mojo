@@ -585,6 +585,7 @@ from .unsupported import (
     SELECT_SAMPLE,
     SPECIAL_CALL,
     SUBSCRIPT,
+    TABLE_AT,
     TABLE_SAMPLE,
     WITH_ORDINALITY,
     WITH_USING_KEY,
@@ -4686,6 +4687,11 @@ def _source(
         source.kind == REF_PARENS and source.b != NO_NODE
     ):
         raise not_implemented(TABLE_SAMPLE, "", "")
+    # An `AT` rides on a table the same way, and is turned down here rather
+    # than in the transformer because the shape reads and prints and it is the
+    # catalog that has nothing to answer it with.
+    if source.kind == REF_TABLE and source.b != NO_NODE:
+        raise not_implemented(TABLE_AT, "", "")
     if source.kind == REF_TABLE:
         return _table(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_JOIN:

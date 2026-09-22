@@ -735,8 +735,63 @@ def test_the_colon_alias_on_a_table_is_the_same_alias() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="SELECT a FROM t AT (VERSION => 1)"):
-        _ = _printed("SELECT a FROM t AT (VERSION => 1)", g, rules)
+    with assert_raises(contains="SELECT MAP {'a': 1} FROM t"):
+        _ = _printed("SELECT MAP {'a': 1} FROM t", g, rules)
+
+
+def test_the_at_on_a_table_reads_and_prints() raises:
+    # `AT` asks for a table as of a version or a moment. There are two units
+    # and what follows the arrow is a whole expression, so all of it goes in
+    # the AST and comes back out the way it was written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a FROM t AT (VERSION => 42)", g, rules),
+        "SELECT a FROM t AT (VERSION => 42)",
+    )
+    # A typed literal is the cast it means everywhere else and is the cast it
+    # means here too, which is the point of reading the value as an expression
+    # rather than giving the clause a little language of its own.
+    assert_equal(
+        _printed(
+            "SELECT a FROM t AT (TIMESTAMP => TIMESTAMP '2020-01-01')",
+            g,
+            rules,
+        ),
+        "SELECT a FROM t AT (TIMESTAMP => CAST('2020-01-01' AS TIMESTAMP))",
+    )
+    # The corpus writes a call, an arithmetic and a subquery in this position,
+    # which is why the value is read as an expression and not as a literal.
+    assert_equal(
+        _printed("SELECT a FROM t AT (TIMESTAMP => now())", g, rules),
+        "SELECT a FROM t AT (TIMESTAMP => now())",
+    )
+    assert_equal(
+        _printed(
+            "SELECT a FROM t AT (TIMESTAMP => (SELECT min(ts) FROM u))",
+            g,
+            rules,
+        ),
+        "SELECT a FROM t AT (TIMESTAMP => (SELECT min(ts) FROM u))",
+    )
+
+
+def test_the_at_is_written_after_the_alias_and_before_the_sample() raises:
+    # The grammar takes the alias, then the `AT`, then the sample, and the
+    # three live in three places on the reference, so the order they go back
+    # out in is the printer's to get right rather than something it inherits.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a FROM t s(c1, c2) AT (VERSION => 1)", g, rules),
+        "SELECT a FROM t AS s (c1, c2) AT (VERSION => 1)",
+    )
+    assert_equal(
+        _printed(
+            "SELECT a FROM t AS s AT (VERSION => 1) TABLESAMPLE 10%", g, rules
+        ),
+        "SELECT a FROM t AS s AT (VERSION => 1) TABLESAMPLE 10%",
+    )
 
 
 def test_a_grouping_set_of_one_column_is_the_column() raises:
