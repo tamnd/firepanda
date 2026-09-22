@@ -20,6 +20,19 @@
 # that skipped a third of the suite is not the thing that decides whether a
 # branch is good.
 #
+# `--changed` leaves out the files that cannot have broken, which is a different
+# cut of the same idea and a sharper one. A test file cannot break unless
+# something it imports changed, Mojo imports are static, so the set is readable
+# straight off the source. `tools/affected.py` works it out and records what it
+# is worth: the median library file selects sixteen per cent of the suite, the
+# SQL front end files select twelve, and a quarter of the files select under
+# three. The other quarter are the ones everything imports and select the lot.
+# It is the same loop `--fast` is for, and like `--fast` it is not what decides
+# whether a branch is good.
+#
+# `FIREPANDA_TEST_ONLY` names the files to run outright, which is how a machine
+# that has no `.git` to diff gets told what a selection came to.
+#
 # Output is collected per file and printed in filename order once that file
 # finishes, so the log reads the same as the serial one did rather than as four
 # test suites interleaved. Every file is run even after one fails, because a
@@ -206,6 +219,24 @@ files=(tests/test_*.mojo)
 if [ ! -e "${files[0]}" ]; then
   echo "no test files found under tests/" >&2
   exit 1
+fi
+
+# `FIREPANDA_TEST_ONLY` names the files to run and nothing else. It is how
+# `tools/run_tests_remote.sh` sends a selection to a machine that cannot work
+# one out for itself, since the tree it rsyncs over does not carry `.git`.
+if [ -n "${FIREPANDA_TEST_ONLY:-}" ]; then
+  picked=()
+  for name in $FIREPANDA_TEST_ONLY; do
+    if [ ! -e "$name" ]; then
+      echo "FIREPANDA_TEST_ONLY names $name, which is not here" >&2
+      exit 1
+    fi
+    picked[${#picked[@]}]=$name
+  done
+  files=("${picked[@]}")
+  echo "running the ${#files[@]} test files that were asked for, which is not" \
+    "the whole suite and does not decide whether a branch is good"
+  changed=0
 fi
 
 # `--changed` runs only the files that import something this branch touched.
