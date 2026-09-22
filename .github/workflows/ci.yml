@@ -262,7 +262,11 @@ jobs:
     # generics are instantiated into whichever program uses them, so
     # `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds where
     # `mojo run -I .` against the sources takes 193. All 422 tests pass either
-    # way, so the package is right and simply does not save anything.
+    # way, so the package is right and simply does not save anything. This job
+    # used to precompile it first regardless, for between fifty seven and eighty
+    # nine seconds a shard, and then compile every test file against the sources
+    # anyway. That step is now in the budget job on one platform, which is the
+    # only thing that ever wanted it.
     #
     # What does help is the compiler's own cache, which is a different thing and
     # was confused with that one for a while. It is restored below.
@@ -311,9 +315,6 @@ jobs:
       - name: Toolchain versions
         run: pixi run mojo --version
 
-      - name: Build
-        run: pixi run build
-
       - name: Unit and docstring tests
         env:
           FIREPANDA_TEST_SHARDS: 8
@@ -336,9 +337,6 @@ jobs:
       - uses: ./.github/actions/setup-pixi
         with:
           cache-slot: extension
-
-      - name: Build
-        run: pixi run build
 
       # The extension, and the claim that it carries everything it needs. The
       # claim was first measured by hand on one laptop, and the ways it stops
@@ -409,7 +407,20 @@ jobs:
         with:
           cache-slot: budget
 
-      - name: Build
+      # The only place left that runs it, and one platform is enough. `pixi run
+      # build` precompiles the library into a package for Mojo callers outside
+      # this repository, and nothing inside it reads the result: the tests
+      # compile against the sources, the extension builds against the sources,
+      # and the comment in the test job says why the package would be slower to
+      # hand them anyway. So it was thirty jobs a run paying between fifty seven
+      # and eighty nine seconds for an artefact none of them opened, which in
+      # shards six and seven was longer than the tests that followed it.
+      #
+      # It stays here once because a break in `mojo precompile` is a real break
+      # for whoever consumes the package, and with the step gone everywhere else
+      # nothing else in the pipeline would say so.
+      - name: The package still precompiles
+        if: matrix.os == 'ubuntu-latest'
         run: pixi run build
 
       - name: Concurrency stress

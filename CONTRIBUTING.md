@@ -36,9 +36,10 @@ conversation to have in an issue first.
 ```sh
 curl -fsSL https://pixi.sh/install.sh | bash
 pixi install
-pixi run build
 pixi run test
 ```
+
+`pixi run build` precompiles the library into `build/firepanda.mojoc` for Mojo callers outside this repository. You do not need it to work on firepanda: the tests, the extension and the fuzzers all compile against the sources with `-I .`, and handing them the package is slower rather than faster because generics are instantiated into whichever program uses them.
 
 ### The rules that are not negotiable
 
