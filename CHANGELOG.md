@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a dotted name says which position turned it down
+
+Twenty five places in the grammar take a plain name, and all twenty five used to refuse a dotted one with the same six words, "a dotted name here". In a statement with several names in it that is true and no help at all, because the reader is left to work out which of the names was the one. Every caller knows which position it is and the refusal table cannot, so the caller says it now and the message reads "a dotted name where a column USING names goes", or where the name of a WITH entry goes, or where a column alias goes.
+
+The advice is rewritten too, since the old sentence said only that a plain name fits here without saying what to do. It now says a name with dots in it qualifies one thing by another, that this position takes the name of one thing, and to write the last part on its own.
+
+Naming all twenty five turned up something worth knowing, which is that three of them can be reached. `EXCLUDE`, `REPLACE` and the left side of a `RENAME` take a node the grammar will put a dot in, and everywhere else the dot is a syntax error one step earlier, so the query never arrives. That agrees with the corpus: all thirty four statements that hit this refusal are `EXCLUDE` or `RENAME`, twenty four and ten. So the thing to build, when `dotted-name` is answered rather than named, is a star modifier that keeps a run of name parts, which is the change a composed collation already got.
+
+Nothing is accepted that was not accepted before. This is the message and not the rule.
+
 ### Fixed: the extension tests caught up with the engine that stopped refusing
 
 The Python suite went red on main five merges ago and stayed there. Nothing in it was wrong about the engine, it was wrong about the refusals: eight rows asserted that a pattern raises `NotImplementedError`, and the two changes that taught the engine to answer those patterns moved the Mojo tests beside them and left these behind. Six of the eight came from the change above and two from the one that kept the groups a lookaround matched, so the shape of the fix is the same in all eight, which is to ask pandas what the answer is and compare against it rather than to name a gap that has been closed.
