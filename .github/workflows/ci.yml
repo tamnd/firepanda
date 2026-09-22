@@ -28,6 +28,8 @@ jobs:
       has_mojo: ${{ steps.detect.outputs.has_mojo }}
       has_python: ${{ steps.detect.outputs.has_python }}
       os_matrix: ${{ steps.matrix.outputs.os }}
+      shards: ${{ steps.matrix.outputs.shards }}
+      shard_count: ${{ steps.matrix.outputs.shard_count }}
     steps:
       - uses: actions/checkout@v7
       - id: detect
@@ -64,6 +66,25 @@ jobs:
           else
             echo 'os=["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]' >> "$GITHUB_OUTPUT"
           fi
+          # The shard count is written once and read twice, as the list the
+          # matrix fans out over and as the number the runner is told to divide
+          # the suite into. Those two used to be separate literals and they went
+          # out of step the first time anybody edited one of them: the matrix
+          # said four and the runner still said eight, so four jobs ran shards
+          # one to four of eight, eighty six of the hundred and sixty two test
+          # files were never run at all, and the whole thing went green.
+          #
+          # That failure cannot announce itself, because every shard that does
+          # run passes and a shard is not told what the other shards were given.
+          # So the count is derived here rather than repeated there.
+          #
+          # `awk` rather than `seq -s,` because BSD `seq` puts the separator
+          # after the last number as well and GNU `seq` does not, and a trailing
+          # comma is not JSON. This job runs on Linux today, which is exactly
+          # the sort of thing that makes the other case a surprise later.
+          count=8
+          echo "shard_count=$count" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(awk -v n="$count" 'BEGIN { for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? "," : ""), i }')]" >> "$GITHUB_OUTPUT"
         shell: bash
 
   spec:
@@ -239,7 +260,7 @@ jobs:
         run: uvx mypy
 
   build:
-    name: Tests (${{ matrix.os }}, shard ${{ matrix.shard }} of 8)
+    name: Tests (${{ matrix.os }}, shard ${{ matrix.shard }} of ${{ needs.guard.outputs.shard_count }})
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ${{ matrix.os }}
@@ -250,7 +271,7 @@ jobs:
     # slowest job in this workflow and told us nothing the canary had not already
     # told us that morning.
     #
-    # The shards are eight machines running an eighth of the test files each.
+    # The shards are four machines running a quarter of the test files each.
     # This step was thirty nine minutes of a fifty one minute job and it does not
     # get faster on one machine: Mojo 1.0 has no `mojo test`, so each test file
     # is its own program that compiles the library again, and almost all of that
@@ -271,21 +292,49 @@ jobs:
     # What does help is the compiler's own cache, which is a different thing and
     # was confused with that one for a while. It is restored below.
     #
-    # Eight rather than ten, because past a point more machines stop buying wall
-    # clock. A shard cannot finish before its longest file does, and on a runner
-    # tests/test_sql_run.mojo is 596 seconds of the 12086 the suite costs. Ten
-    # shards leave seven of them finishing in around 310 seconds and waiting on
-    # that one file; eight leave five at around 380. Both come out at 596, so the
-    # two extra machines were buying nothing and were still queueing behind every
-    # other job when several pull requests are open at once, which is where the
-    # real wall clock has been going lately.
+    # Eight, and an attempt to make it four is why the count is now derived in
+    # the guard job rather than written here. Both halves of that are worth
+    # keeping, because the reasoning that said four was wrong in a way that
+    # looked like measurement.
     #
-    # Not six, which the same arithmetic also says comes out at 596. Runners
-    # differ from each other by about a third: one run's shards were predicted at
-    # 1209 to 1217 seconds of work and measured at 784 to 1313. Eight leaves the
-    # busiest unfloored shard at 384 against a 596 second floor, which is room for
-    # a machine half again as slow as the model. Six leaves it at 542, which is
-    # room for ten per cent, and a slow runner there becomes the new wall clock.
+    # The claim was that a shard cannot finish before its longest file does,
+    # that the file is tests/test_sql_run.mojo, and so the slowest shard is that
+    # one file plus overhead at any count from three to eight. The first two are
+    # true. The third is only true once there are enough shards for everything
+    # else to spread out underneath it, and eight is roughly where that happens:
+    #
+    #   shards   slowest shard   runner seconds
+    #        8             628             3814
+    #        6             628             3366
+    #        5             643             3205
+    #        4             794             3164
+    #        3            1043             3127
+    #
+    # So eight is already sitting on the floor, 596 seconds for that one file
+    # plus 32 of job overhead, and four is a 26 per cent regression bought for a
+    # 17 per cent saving in runner seconds. More shards than eight cannot help
+    # either, for the same reason: the floor is one compile.
+    #
+    # What made four look free was the cost table. It was regenerated from a
+    # green run, which sounds like the careful thing to do and is not, because
+    # the per-file times a run reports are times with the compiler cache already
+    # warm for the files that shard owns. The regenerated table came out at 5076
+    # seconds against 12086 and the difference was read as the suite having got
+    # faster. It had not. Against a cold run the old table lands within two per
+    # cent and the regenerated one is out by a median factor of five and a
+    # maximum of twenty. tools/test_costs_from_ci.sh says so at the top now.
+    #
+    # The one thing that survived all that is the queueing, which is real and is
+    # not addressed here. The merge matrix is three platforms deep and macOS
+    # runners are the scarce ones: on merge 001b7393 the macOS shards waited
+    # 2359 seconds between them for a machine, the last of them taking 1067
+    # seconds of which 699 was the wait. That is worth fixing and fewer shards
+    # is not the way to fix it, since fewer shards each wait just as long and
+    # then take longer to run.
+    #
+    # The way to make this faster is to make that one file cheaper, which is the
+    # generic instantiation work in #979, or to split it. Nothing about the
+    # shard count moves it.
     #
     # tools/run_tests.sh splits the list on the measured times in
     # tools/test_costs.txt, largest first into whichever shard has least so far.
@@ -301,7 +350,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.guard.outputs.shards) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -317,7 +366,7 @@ jobs:
 
       - name: Unit and docstring tests
         env:
-          FIREPANDA_TEST_SHARDS: 8
+          FIREPANDA_TEST_SHARDS: ${{ needs.guard.outputs.shard_count }}
           FIREPANDA_TEST_SHARD: ${{ matrix.shard }}
         run: pixi run test
 

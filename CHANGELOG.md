@@ -46,6 +46,20 @@ Three parts or more is refused by name, as `modifier-schema`. `EXCLUDE (s.t.a)` 
 
 In DuckDB's corpus, `dotted-name` was thirty four statements, twenty four `EXCLUDE` and ten `RENAME`. It is now none, and `modifier-schema` is nine, so twenty five statements that were refused now parse, transform and print back to the same text twice.
 
+### Fixed: a cost table measured with the compiler cache warm, and the shard count that rested on it
+
+`tools/test_costs_from_ci.sh` rebuilds the table the test shards balance on out of a CI run's logs, and it would take any run whose shards all passed. That is not enough. The time a shard prints beside a file is wall clock for compiling and running it, the compiler cache is restored per shard slot, and on a run where the slots already held the right files most of that number is a cache hit rather than a compile. A table built from one of those is a record of what was cached rather than of what the files cost.
+
+The numbers are not subtly wrong. A table regenerated that way came out at 5076 seconds against the 12086 the suite really costs, which reads as the suite having become more than twice as fast. Checked against a cold run afterwards the old table was within two per cent and the regenerated one was out by a median factor of five and a maximum of twenty, with `tests/test_category_compare.mojo` written down as 7 seconds where it actually costs 142.
+
+The tool now says all of this at the top and refuses a table that comes out more than a third cheaper than the one it would replace, which is what a warm run looks like from the outside, leaving the existing table untouched unless `COSTS_ANYWAY=1` says the run really was cold.
+
+The reason this is worth an entry rather than a quiet fix is what was nearly built on top of it. On the warm table every shard count from three to eight has the same slowest shard, so the four extra machines look free and dropping to four looks like a saving. On the real table the slowest shard is 628 seconds at eight and 794 at four, so that would have been a 26 per cent regression bought for a 17 per cent saving in runner time. Eight is already sitting on the floor, which is 596 seconds for `tests/test_sql_run.mojo` plus 32 of job overhead, and more shards cannot go below it either. The only thing that moves that floor is making that one file cheaper to compile.
+
+### Fixed: the shard count is derived in one place instead of written in two
+
+The matrix fanned out over a list of shard numbers and the runner was told separately how many shards there were, and the first edit to one of them put the two out of step: the matrix said four and the runner still said eight, so four jobs ran shards one to four of eight, 86 of the 162 test files were never run, and CI went green. That failure cannot announce itself, because every shard that does run passes and no shard is told what the others were given. The count is now written once in the guard job and read from there by the matrix, the job name and the runner.
+
 ## [0.8.26] - 2026-09-23
 
 Built against Mojo 1.0.0 (ed45d567).
