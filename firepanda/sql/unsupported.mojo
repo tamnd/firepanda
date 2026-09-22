@@ -198,6 +198,9 @@ comptime NO_CASE: UInt16 = 36
 comptime AGGREGATE_FILTER: UInt16 = 37
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
+comptime LIST_VALUE: UInt16 = 38
+"""A list written out, `[1, 2]` or `ARRAY[1, 2]`."""
+
 
 def sql_support() -> List[Refusal]:
     """Everything firepanda's SQL front end refuses, in one list.
@@ -580,6 +583,17 @@ def sql_support() -> List[Refusal]:
                 " not a fold has nothing for the CASE to go inside."
             ),
             SQL_ISSUE,
+        ),
+        Refusal(
+            "list-value",
+            "a list written out",
+            (
+                "A literal in the plan is one scalar, and a list is a value"
+                " with a length. LIST is a type firepanda has and a column can"
+                " hold one, so what is missing is the constant rather than the"
+                " type."
+            ),
+            STAGE_ISSUE,
         ),
     ]
 

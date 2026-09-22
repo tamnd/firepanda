@@ -1343,6 +1343,23 @@ def test_a_comprehension_is_refused_here_not_in_the_transformer() raises:
         _ = _plan("SELECT [x FOR x IN l IF x > 2] FROM t")
 
 
+def test_a_list_written_out_is_refused_by_name() raises:
+    # Both spellings land on the one node, so both get the one refusal. What it
+    # used to get was the message for an expression with no case at all, which
+    # carries no position and no link and reads as if firepanda had lost track
+    # of the shape rather than known about it.
+    with assert_raises(contains="a list written out"):
+        _ = _plan("SELECT [1, 2] FROM t")
+    with assert_raises(contains="a list written out"):
+        _ = _plan("SELECT ARRAY[1, 2] FROM t")
+    with assert_raises(contains="a list written out"):
+        _ = _plan("SELECT a FROM t WHERE a = [1]")
+    # An empty one is the same node with nothing in it, so it stops the same
+    # way rather than folding into a null.
+    with assert_raises(contains="a list written out"):
+        _ = _plan("SELECT [] FROM t")
+
+
 def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
     # Which of the three families a subscript belongs to, a list, an array or a
     # string, depends on what the operand holds, so this is the first stage

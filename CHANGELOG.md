@@ -14,6 +14,14 @@ The Python suite went red on main five merges ago and stayed there. Nothing in i
 
 Three of the rows were called `test_a_lookaround_beside_one_is_still_a_gap` and it is not one, three were called `test_a_pattern_the_other_engine_would_run_is_not_implemented` and it is implemented, and two said `extract` takes a group beside a lookaround but not inside one and it takes both. They are renamed for what they now measure. The list the last three were guarding is empty: every construct pandas sends to Python's own engine is answered here.
 
+### Changed: a list written out is refused by name
+
+`SELECT [1, 2]` and `SELECT ARRAY[1, 2]` stop with a message that names the spelling, says why, gives the position and links the issue, the way every other thing the SQL front end turns down does. What they used to get was the message for an expression firepanda has no case for at all, which carries none of that and reads as if the shape had been lost track of rather than known about. The shape was never lost: it reads, it prints, it round trips, and the only stage with nothing to say about it was lowering.
+
+Both spellings land on the one node so both get the one refusal, and an empty list is the same node with nothing in it and stops the same way rather than folding into a null. Of the 71438 statements in DuckDB's corpus, 35047 get as far as an AST and 2861 of those hold a list written out, so this is the largest single shape that was falling into the unnamed bucket.
+
+What is missing is the constant and not the type. `LIST` is a type firepanda has, a column can hold one, and the nested array is already there. A literal in the plan is one scalar and a list is a value with a length, so building one is the piece of work this points at.
+
 ### Added: a lookaround can stand beside a backreference, an atomic group or a conditional
 
 `(?=(a))a\1`, `(?=ab)(?>a+)b` and `(?=(a))(?(1)a|b)` are answered now. Each of those was refused with a sentence of its own, added by documents 95, 99 and 100, and all three said the same thing: a lookaround is a search inside a search, the machine was the only engine that could run the inner one, and a backreference, a cut and a test are the three shapes the machine cannot be handed, so a pattern holding both had nowhere to go.
