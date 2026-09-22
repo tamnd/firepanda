@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a streaming group by on a text key does most of its work on the cores
+
+The map a text key was given in #986 did less work than the stacking merge it replaced and did all of it on one thread, and on one query that was a bad trade. The stacking merge concatenated the running table with the chunk's and grouped the whole thing again, which is a factorize over a column far larger than one morsel, so the kernel spread it over the machine. The map replaced that with a single loop on the thread that owns the pipeline: hash the key, probe the table, compare the bytes, append the key if it is new. `SELECT URL, COUNT(*) FROM hits GROUP BY URL` over a million rows and two hundred and seventy five thousand distinct URLs went from two and a half cores to one, and took twice as long while doing less.
+
+A chunk is taken in three passes now and only the last of them writes the map. Hashing a row is a pass over that row's bytes, and looking a row up is a probe and a byte comparison that changes nothing, so both of those go on the cores. Only a row carrying a key the map has never seen has to be settled on one thread, because the ordinal a key gets is the position of the row that first carried it, and on a chunk of a column the operator is well into that is a small share of the rows. The read only pass also prefetches the slot eight rows ahead, which every other probe loop in `hash/table.mojo` already did and the one added in #986 did not, on the one table here that is guaranteed not to fit in cache.
+
+Measured on the ClickBench 1M set through the planner, three drivers built from the same source and run back to back, four interleaved rounds, five runs a query, wall clock in milliseconds: the unfiltered group by on URL is 103 before and 74 after, the filtered one is 51 and 39, the group by on SearchPhrase is 8.2 and 7.2, the count of distinct users by search phrase is 14 and 17, the group by on Title is 39 and 30, and the second filtered URL one is 8.1 and 6.3. A group by on an int key does not move.
+
+The unfiltered group by on URL is still above the 51 milliseconds it cost before #986, and it is the only one of the six that is. It groups every row of the table with no filter under it, so the pass that has to stay on one thread is the longest it gets, and what is left of the gap is that pass. That is #991 and it stays open.
+
+All forty three ClickBench statements agree with the build before #986 on every row count, sum and hash, as do the ten extra statements written for the shapes the suite does not have.
+
 ### Changed: the test suite runs on other machines, and runs fewer files
 
 Nothing about the library changed here, only what it costs to work on it. The suite is 12086 seconds and a test file spends nearly all of that compiling the library again rather than running assertions, which leaves exactly two levers: more machines and fewer files. Both are now there.
