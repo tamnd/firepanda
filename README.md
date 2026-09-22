@@ -144,7 +144,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `call-argument` | {} inside a call | Both read and print back where they were written. An ordered aggregate gives the fold an order to see the rows in and a null treatment gives it a rule for what to do with a null, and firepanda has no fold that can be told either. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `array-subquery` | ARRAY over a subquery | It reads and prints, and lowering stops on it, since collecting a whole column into one list value is a way of running a subquery that firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `dotted-name` | a dotted name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `quoted-name` | anything but a plain name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `quoted-name` | anything but a name here | Only a name fits in this position. Dots in it are fine, since that is how two collations are composed. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `not-subquery` | NOT in front of a subquery | Write NOT EXISTS or NOT IN, which say which of the two this means. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `select-clause` | {} in a SELECT | The query node has a slot for each clause firepanda runs, and none for this one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `select-sample` | a sample on a SELECT | The sample reads and prints, and lowering stops on it, since taking a share of the rows is a row source of its own and firepanda has no node for one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |

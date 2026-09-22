@@ -399,6 +399,39 @@ def test_collate_keeps_a_name_and_not_a_column() raises:
     assert_equal(_printed("a COLLATE nocase", g, rules), "(a COLLATE nocase)")
 
 
+def test_a_composed_collation_keeps_both_of_its_parts() raises:
+    # DuckDB composes collations by writing them with dots between, and means
+    # all of them at once. The name is kept the way a qualified name is kept,
+    # so nothing about it is thrown away and it reads back as written.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("a COLLATE nocase.noaccent", g, rules),
+        "(a COLLATE nocase.noaccent)",
+    )
+    assert_equal(
+        _printed("a COLLATE de.nocase.noaccent", g, rules),
+        "(a COLLATE de.nocase.noaccent)",
+    )
+    # Two of them in a row is two nodes, each with a name of its own, which is
+    # the same thing the grammar makes of it.
+    assert_equal(
+        _printed("a COLLATE nocase COLLATE noaccent", g, rules),
+        "((a COLLATE nocase) COLLATE noaccent)",
+    )
+
+
+def test_collate_still_turns_down_what_is_not_a_name() raises:
+    # A name with dots in it is a collation. A call or a literal is not, and
+    # storing one would be storing something no catalog can be asked for.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="anything but a name here"):
+        _ = _printed("a COLLATE f(1)", g, rules)
+    with assert_raises(contains="anything but a name here"):
+        _ = _printed("a COLLATE 1", g, rules)
+
+
 def test_an_interval_keeps_its_amount_and_its_unit() raises:
     var g = Grammar()
     var rules = Transform(g)

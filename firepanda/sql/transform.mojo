@@ -2286,9 +2286,12 @@ struct Transform(Movable):
         """Folds `x COLLATE c`, whose right side names a collation.
 
         The grammar puts a whole expression on the right of `COLLATE` because
-        that is what the level below it produces, but only a bare name is
-        meaningful there, so anything else refuses rather than being stored as
-        a collation nobody can look up.
+        that is what the level below it produces, but only a name is meaningful
+        there, so anything else refuses rather than being stored as a collation
+        nobody can look up. The name is allowed to have dots in it, because
+        that is how DuckDB composes two collations: `COLLATE nocase.noaccent`
+        asks for both and is one name in the same shape a qualified column name
+        has.
 
         Args:
             tree: The parse.
@@ -2333,8 +2336,8 @@ struct Transform(Movable):
         node: UInt32,
         mut ast: Ast,
         mut work: Work,
-    ) raises -> String:
-        """Reads a sub tree that has to be a single unqualified name.
+    ) raises -> UInt32:
+        """Reads a sub tree that has to be a name.
 
         Args:
             tree: The parse.
@@ -2344,16 +2347,16 @@ struct Transform(Movable):
             work: The walk, for the value of the node.
 
         Returns:
-            The name.
+            The run of interned name parts the name is made of.
 
         Raises:
-            Error: If it is anything but one name part.
+            Error: If it is anything but a name.
         """
         var built = work.value(node)
         ref item = ast.exprs[Int(built)]
-        if item.kind != EXPR_COLUMN or ast.length(item.children) != 1:
+        if item.kind != EXPR_COLUMN or ast.length(item.children) == 0:
             raise _unsupported(tree, sql, node, QUOTED_NAME)
-        return String(ast.text(ast.at(item.children, 0)))
+        return item.children
 
     def _is(
         self,

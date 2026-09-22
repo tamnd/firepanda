@@ -414,9 +414,19 @@ def test_a_struct_wants_one_value_per_name() raises:
 def test_collate_prints_after_its_operand() raises:
     var g = Grammar()
     var ast = Ast()
+    var operand = ast.column(_parts("a"))
+    var one = ast.names(_parts("nocase"))
     assert_equal(
-        print_expr(ast, ast.collate(ast.column(_parts("a")), "nocase"), g),
+        print_expr(ast, ast.collate(operand, one), g),
         "(a COLLATE nocase)",
+    )
+    # Two collations composed are one name with a dot in it, which is how
+    # DuckDB writes asking for both of them.
+    var other = ast.column(_parts("a"))
+    var both = ast.names(_parts("nocase", "noaccent"))
+    assert_equal(
+        print_expr(ast, ast.collate(other, both), g),
+        "(a COLLATE nocase.noaccent)",
     )
 
 
@@ -510,7 +520,8 @@ def test_printed_expressions_parse() raises:
     _ = _round_trips(ast, ast.in_list(a, [one], negated=True), g)
     _ = _round_trips(ast, ast.list_of([one, one]), g)
     _ = _round_trips(ast, ast.list_of(List[UInt32]()), g)
-    _ = _round_trips(ast, ast.collate(a, "nocase"), g)
+    var nocase = ast.names(_parts("nocase"))
+    _ = _round_trips(ast, ast.collate(a, nocase), g)
     _ = _round_trips(ast, ast.parameter("?"), g)
     _ = _round_trips(ast, ast.parameter("$", "1"), g)
     _ = _round_trips(ast, ast.parameter("$", "name"), g)
