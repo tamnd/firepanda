@@ -27,6 +27,19 @@ What follows the arrow is a whole expression rather than a value. The corpus wri
 The reference keeps the clause the way it already kept a sample, which is a statement node hanging off a field of its own. That leaves the order of the three things a table reference can carry to the printer, since the grammar writes the alias first, then the `AT`, then the sample.
 
 Eight more corpus statements make the round trip.
+### Changed: a group by on a text key keeps a group's ordinal across chunks
+
+A streaming group by has had two routes for a while. One looks each chunk's keys up in a map that outlives the chunk, so a group keeps the ordinal it was first given and absorbing a chunk is a fold into slots both sides already agree on. The other groups each chunk on its own, which gives it ordinals that mean something only inside that chunk, so it then stacks the running table on top of the chunk's table, groups the whole stack again, and gathers the key columns back out of it. The second is a copy, a rehash and a regather of the entire running table, once per chunk.
+
+A text key took the second route, and the reason was not about text being slow. The map stores a 64 bit hash and nothing else, which is exact for a fixed width key because the hash is a bijection on the key bits, and is not exact for text, where two names longer than eight bytes can land on one hash and would be given one group between them. The per chunk grouping settles that by comparing the bytes when the hashes match, and it can only do that because its keys and the chunk it grouped die together. A map that outlives the chunk has nowhere to read the bytes from.
+
+So it keeps them. `LastingText` copies the bytes of a key the first time it sees one, into a builder it holds for the query, and a hash match is a candidate those bytes settle. The copy is one per group rather than one per row, and the route it replaces was going to copy the same bytes anyway when it gathered its representative rows, so it is not new work. The builder is also the key column the operator hands out at the end, so the keys are stored once and not twice.
+
+A count of rows is let through the value side of the gate as well. That side refuses a column that is not fixed width, because a running slot is a number in an array, and `count(*) group by url` was failing it over a column nothing reads: after the projection the only column left is the key, so the count is handed the URL column and never looks at it. `accumulate_any` now answers a count of rows before it looks at a dtype at all, which is also the honest thing to do there, since a string column's physical dtype is uint8 and dispatch would have sent it to a loop written for bytes.
+
+Measured on the ClickBench 1M set through the planner, CPU time per run, five runs a side and five rounds interleaved: q36 falls from 159 to 101 milliseconds, q12 from 26 to 15, q33 from 175 to 140, q13 from 33 to 27, q37 from 71 to 59 and q38 from 18 to 16. A group by on an int key does not move, which is q9 and q14 at 47 and 33 either side, and neither does a query with no group by in it. A key of two columns still takes the stacking merge, because there is no single hash over a tuple that is exact and nowhere cheaper than grouping the chunk to compare one, and q34 sits where it was.
+
+All forty three ClickBench statements were run through both builds and agree on every row count, sum and hash.
 
 ## [0.8.22] - 2026-09-22
 

@@ -698,6 +698,51 @@ struct StringBuilder(Movable, Sized):
         """
         return len(self._views)
 
+    def element_equals_foreign(
+        self, at: Int, other: StringView, source: StringArray
+    ) -> Bool:
+        """Compares an appended element against a view of another column's.
+
+        `StringArray.element_equals_foreign` against a column that is still
+        being built. A key map that outlives the chunk it was given has exactly
+        that shape: the keys it has already seen are in a builder of its own,
+        the row it is asking about is in the chunk it was handed, and the two
+        payloads are separate buffers, so which buffer a long view's offset is
+        added to is the whole of the difference.
+
+        The null flag is not read. The caller that has this shape never appends
+        a null, and an element appended as one carries the view of the empty
+        string, so it compares as the empty string rather than as anything
+        undefined.
+
+        Args:
+            at: The index of the appended element.
+            other: A view of an element of `source`.
+            source: The column `other` came from.
+
+        Returns:
+            True if the appended element is byte-identical to the view's.
+        """
+        var mine = self._views[at]
+        if len(mine) != len(other) or mine.prefix() != other.prefix():
+            return False
+        if mine.is_inline():
+            return views_equal_short(mine, other)
+        return _bytes_equal(
+            Span[UInt8, origin_of(self)](
+                unsafe_ptr=self._payload.unsafe_ptr()
+                .unsafe_offset(mine.offset())
+                .unsafe_origin_cast[origin_of(self)](),
+                length=len(mine),
+            ),
+            Span[UInt8, origin_of(source)](
+                unsafe_ptr=source.payload.unsafe_ptr()
+                .unsafe_offset(other.offset())
+                .unsafe_origin_cast[origin_of(source)](),
+                length=len(other),
+            ),
+        )
+
     def append(mut self, bytes: Span[UInt8, _]):
         """Appends one present element.
 

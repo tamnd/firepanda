@@ -59,17 +59,38 @@ of the query rather than by one, so it can afford a wider one, and `LASTING_SPAN
 is that number. At its widest the table is a megabyte, which is less than the
 hash table for the same group count, so the wider ceiling costs no memory
 anywhere it is taken.
+
+## Text
+
+A text key gets a map of its own, `LastingText`, and the reason it cannot use
+the one above is what a stored key is. The fixed width routes store the hash and
+nothing else, because the hash is a bijection on the key bits and two different
+keys cannot land on one, so a slot's hash matching is the answer. Two names
+longer than eight bytes can land on one hash, so a match there is a candidate
+and the bytes have to be compared, and comparing them means the bytes are still
+somewhere to be read.
+
+The per chunk factorize keeps a view per group into the chunk it grouped, which
+is enough for a map that dies with its chunk and useless for one that does not:
+a long view is an offset into a payload buffer, and the chunk that owned the
+buffer is gone by the time the next chunk asks. So this copies the bytes of a
+key the first time it sees one, into a builder it keeps, and compares against
+that. The copy is one per group rather than one per row, and the per chunk route
+was going to copy the same bytes anyway when it gathered its representative
+rows, so the copy is not new work. The builder is also the key column the
+operator wants at the end, so the keys are stored once and not twice.
 """
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.kernel.concat import concat_any
 from firepanda.kernel.select import take_any
 
 from .factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
-from .function import DEFAULT_SEED, hash_chunk
+from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
 from .table import HashTable
 
 
@@ -82,6 +103,173 @@ slot are counted. The direct table is the smaller of the two everywhere it is
 taken, which is why this sits four doublings above the per column `DIRECT_LIMIT`
 rather than at it.
 """
+
+
+comptime LASTING_TEXT_SLOTS = 1 << 10
+"""How many slots a text map starts with, before it doubles."""
+
+
+struct LastingText(Movable):
+    """The text keys a streaming operator has seen, and the ordinal each got.
+
+    An open addressed table of hashes beside a builder holding one copy of each
+    distinct key, in ordinal order. A slot whose hash matches sends the row to
+    the builder to have its bytes compared, and a mismatch keeps probing the way
+    an occupied slot with a different hash does, so two keys that collide get
+    two ordinals rather than one group between them.
+
+    The table doubles from a small start rather than being sized from a guess at
+    the group count. `HashTable` guesses because it is built once per column and
+    a rehash it could have avoided is a real share of that; this one is built
+    once per query, the rehashes on the way to a size total about one more pass
+    over the groups than arriving there directly would have cost, and the guess
+    would have to be made from the first chunk, which is the part of the input
+    that says least about the whole of it.
+    """
+
+    var slots: Buffer
+    """Two words a slot: the key's hash, and its ordinal plus one so that a
+    fresh buffer of zeros reads as all empty."""
+
+    var mask: UInt64
+    """One less than the slot count, which is a power of two."""
+
+    var capacity: Int
+    """The slot count."""
+
+    var store: StringBuilder
+    """One copy of each distinct key, in ordinal order. The keys the operator
+    asks for at the end and the bytes the comparison reads are the same bytes."""
+
+    var groups: Int
+    """Ordinals handed out so far."""
+
+    def __init__(out self):
+        """Constructs an empty map with no table allocated yet."""
+        self.slots = Buffer(0)
+        self.mask = 0
+        self.capacity = 0
+        self.store = StringBuilder()
+        self.groups = 0
+
+    def __len__(self) -> Int:
+        """Returns the number of ordinals handed out.
+
+        Returns:
+            The group count.
+        """
+        return self.groups
+
+    def ordinals(
+        mut self, col: StringArray, rows: Int, mut codes: Array[DType.uint32]
+    ):
+        """Gives every row of one chunk the ordinal its key holds in the map.
+
+        Args:
+            col: The chunk's key column. Must have no nulls, for the reason
+                `LastingKeys.ordinals` gives.
+            rows: The chunk's height.
+            codes: Filled with one ordinal per row of the chunk.
+        """
+        if self.capacity == 0:
+            self._resize(LASTING_TEXT_SLOTS)
+        var hashes = Buffer(CHUNK_ROWS * 8)
+        var at = 0
+        while at < rows:
+            var count = min(CHUNK_ROWS, rows - at)
+            hash_strings_chunk(col, at, count, DEFAULT_SEED, hashes)
+            self._insert(col, at, count, hashes, codes)
+            at += count
+
+    def take_keys(mut self) -> StringArray:
+        """Gives up the key store as a column.
+
+        Returns:
+            One row per group, in ordinal order.
+        """
+        var held = self.store^
+        self.store = StringBuilder()
+        self.groups = 0
+        self.slots = Buffer(0)
+        self.mask = 0
+        self.capacity = 0
+        return held^.finish()
+
+    def _insert(
+        mut self,
+        col: StringArray,
+        base: Int,
+        count: Int,
+        hashes: Buffer,
+        mut codes: Array[DType.uint32],
+    ):
+        """Looks one hashed run of the chunk up, inserting what it has not seen.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var out = codes.unsafe_mut_ptr()
+        var slots = self.slots.mut_bitcast[DType.uint64]()
+        var mask = self.mask
+
+        for j in range(count):
+            var i = base + j
+            if (self.groups + 1) * 2 > self.capacity:
+                self._resize(self.capacity * 2)
+                slots = self.slots.mut_bitcast[DType.uint64]()
+                mask = self.mask
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * 2
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_store(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_store(
+                        UInt64(self.groups + 1)
+                    )
+                    out.unsafe_offset(i).unsafe_write(UInt32(self.groups))
+                    self.store.append(col.unsafe_bytes(i))
+                    self.groups += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    if self.store.element_equals_foreign(
+                        Int(ordinal) - 1, col.view(i), col
+                    ):
+                        out.unsafe_offset(i).unsafe_write(
+                            UInt32(Int(ordinal) - 1)
+                        )
+                        break
+                at = (at + 1) & mask
+
+    def _resize(mut self, capacity: Int):
+        """Moves every live slot into a fresh table of a given size.
+
+        Reinsertion needs no hashing and no comparison. The stored hash is what
+        the slot is found by, and two keys already in the table are already
+        known to be different keys, so a collision in the new table is settled
+        by probing on alone.
+
+        Args:
+            capacity: The new slot count. A power of two.
+        """
+        var bigger = Buffer(capacity * 2 * 8)
+        var into = bigger.mut_bitcast[DType.uint64]()
+        var mask = UInt64(capacity - 1)
+        if self.capacity > 0:
+            var from_ = self.slots.bitcast[DType.uint64]()
+            for s in range(self.capacity):
+                var ordinal = from_.unsafe_offset(s * 2 + 1).unsafe_load()
+                if ordinal == 0:
+                    continue
+                var wanted = from_.unsafe_offset(s * 2).unsafe_load()
+                var at = wanted & mask
+                while into.unsafe_offset(Int(at) * 2 + 1).unsafe_load() != 0:
+                    at = (at + 1) & mask
+                into.unsafe_offset(Int(at) * 2).unsafe_store(wanted)
+                into.unsafe_offset(Int(at) * 2 + 1).unsafe_store(ordinal)
+        self.slots = bigger^
+        self.mask = mask
+        self.capacity = capacity
 
 
 struct LastingKeys(Movable):
@@ -121,6 +309,13 @@ struct LastingKeys(Movable):
     there were chunks that introduced a group. Kept in pieces because a chunk
     knows its own new keys and joining them up is work for the end."""
 
+    var text: LastingText
+    """The text route's map. Untouched unless the key column is text, and it
+    holds the keys itself when it is, so `keys` stays empty."""
+
+    var textual: Bool
+    """Whether the key column is text, and so whether `text` is the map."""
+
     def __init__(out self):
         """Constructs an empty map that has not yet picked a route."""
         self.table = HashTable()
@@ -131,6 +326,8 @@ struct LastingKeys(Movable):
         self.seen = 0
         self.opened = False
         self.keys = List[AnyArray]()
+        self.text = LastingText()
+        self.textual = False
 
     def __len__(self) -> Int:
         """Returns the number of ordinals handed out.
@@ -155,6 +352,16 @@ struct LastingKeys(Movable):
         Raises:
             If the key dtype has no physical layout.
         """
+        if key.is_string():
+            # Text has one route and the first chunk decides nothing, so there
+            # is no plan to make and no window to fix. The map holds the keys
+            # itself, which is why nothing is appended to the store here.
+            self.opened = True
+            self.textual = True
+            self.text.ordinals(key.strings(), rows, codes)
+            self.groups = self.text.groups
+            return
+
         var firsts = List[Int]()
         comptime for candidate in ALL:
             if key.dtype() == candidate:
@@ -181,6 +388,8 @@ struct LastingKeys(Movable):
         Raises:
             If the pieces cannot be stacked.
         """
+        if self.textual:
+            return AnyArray(self.text.take_keys())
         var out = concat_any(self.keys)
         self.keys = List[AnyArray]()
         return out^
