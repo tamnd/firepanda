@@ -341,7 +341,9 @@ if [ "$shards" -gt 1 ]; then
           }'
   )
   if [ "${#picked[@]}" -eq 0 ]; then
-    echo "shard $shard of $shards has no files out of $total, which cannot be right" >&2
+    echo "shard $shard of $shards has no files out of $total, so either the" \
+      "cost table is wrong or there are fewer files than shards, which a" \
+      "selection can do" >&2
     exit 1
   fi
   files=("${picked[@]}")
