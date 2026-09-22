@@ -130,13 +130,19 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 fast=0
+changed=0
 for arg in "$@"; do
   case $arg in
     --fast) fast=1 ;;
-    *) echo "unknown argument $arg, expected --fast" >&2; exit 2 ;;
+    --changed) changed=1 ;;
+    *)
+      echo "unknown argument $arg, expected --fast or --changed" >&2
+      exit 2
+      ;;
   esac
 done
 [ -n "${FIREPANDA_TEST_FAST:-}" ] && fast=1
+[ -n "${FIREPANDA_TEST_CHANGED:-}" ] && changed=1
 
 # What `--fast` calls expensive. The distribution is lopsided enough that one
 # number separates the suite cleanly: 55 of the 162 files are at or above a
@@ -200,6 +206,49 @@ files=(tests/test_*.mojo)
 if [ ! -e "${files[0]}" ]; then
   echo "no test files found under tests/" >&2
   exit 1
+fi
+
+# `--changed` runs only the files that import something this branch touched.
+# `tools/affected.py` explains how much that is worth and when it refuses to
+# answer, and when it refuses the list is left alone, which is the whole suite.
+#
+# The comparison is against the merge base rather than against `main`, so that
+# somebody else's commits landing while this branch was open do not select the
+# suite. The working tree is asked as well as the branch, because the file being
+# edited is the reason for running this at all and is usually not committed.
+#
+# Nothing here is allowed to fail quietly. A `git` that does not answer, an
+# `affected.py` that cannot tell, an empty answer that might be an empty answer
+# or might be a broken one, all of them end up running everything.
+if [ "$changed" -eq 1 ]; then
+  base=$(git merge-base origin/main HEAD 2> /dev/null)
+  touched=$(
+    {
+      [ -n "$base" ] && git diff --name-only "$base" HEAD
+      git diff --name-only HEAD
+      git ls-files --others --exclude-standard
+    } 2> /dev/null | sort -u
+  )
+  if [ -z "$base" ] || [ -z "$touched" ]; then
+    echo "nothing to compare against, so this runs the whole suite"
+  # The answer is taken into a variable rather than read off a pipe, because a
+  # pipe hands back the exit status of the loop reading it and the exit status
+  # is how this says it could not tell.
+  elif ! answer=$(python3 tools/affected.py $touched 2> /dev/null); then
+    echo "the change reaches further than an import graph can say, so this" \
+      "runs the whole suite"
+  elif [ -z "$answer" ]; then
+    echo "nothing this branch changed reaches a test file"
+    exit 0
+  else
+    picked=()
+    while IFS= read -r line; do
+      [ -n "$line" ] && picked[${#picked[@]}]=$line
+    done <<< "$answer"
+    files=("${picked[@]}")
+    echo "running the ${#files[@]} test files this branch can reach, which is" \
+      "not the whole suite and does not decide whether a branch is good"
+  fi
 fi
 
 shards=${FIREPANDA_TEST_SHARDS:-1}
