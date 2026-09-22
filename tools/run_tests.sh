@@ -20,6 +20,19 @@
 # that skipped a third of the suite is not the thing that decides whether a
 # branch is good.
 #
+# `--changed` leaves out the files that cannot have broken, which is a different
+# cut of the same idea and a sharper one. A test file cannot break unless
+# something it imports changed, Mojo imports are static, so the set is readable
+# straight off the source. `tools/affected.py` works it out and records what it
+# is worth: the median library file selects sixteen per cent of the suite, the
+# SQL front end files select twelve, and a quarter of the files select under
+# three. The other quarter are the ones everything imports and select the lot.
+# It is the same loop `--fast` is for, and like `--fast` it is not what decides
+# whether a branch is good.
+#
+# `FIREPANDA_TEST_ONLY` names the files to run outright, which is how a machine
+# that has no `.git` to diff gets told what a selection came to.
+#
 # Output is collected per file and printed in filename order once that file
 # finishes, so the log reads the same as the serial one did rather than as four
 # test suites interleaved. Every file is run even after one fails, because a
@@ -130,13 +143,19 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 fast=0
+changed=0
 for arg in "$@"; do
   case $arg in
     --fast) fast=1 ;;
-    *) echo "unknown argument $arg, expected --fast" >&2; exit 2 ;;
+    --changed) changed=1 ;;
+    *)
+      echo "unknown argument $arg, expected --fast or --changed" >&2
+      exit 2
+      ;;
   esac
 done
 [ -n "${FIREPANDA_TEST_FAST:-}" ] && fast=1
+[ -n "${FIREPANDA_TEST_CHANGED:-}" ] && changed=1
 
 # What `--fast` calls expensive. The distribution is lopsided enough that one
 # number separates the suite cleanly: 55 of the 162 files are at or above a
@@ -202,6 +221,67 @@ if [ ! -e "${files[0]}" ]; then
   exit 1
 fi
 
+# `FIREPANDA_TEST_ONLY` names the files to run and nothing else. It is how
+# `tools/run_tests_remote.sh` sends a selection to a machine that cannot work
+# one out for itself, since the tree it rsyncs over does not carry `.git`.
+if [ -n "${FIREPANDA_TEST_ONLY:-}" ]; then
+  picked=()
+  for name in $FIREPANDA_TEST_ONLY; do
+    if [ ! -e "$name" ]; then
+      echo "FIREPANDA_TEST_ONLY names $name, which is not here" >&2
+      exit 1
+    fi
+    picked[${#picked[@]}]=$name
+  done
+  files=("${picked[@]}")
+  echo "running the ${#files[@]} test files that were asked for, which is not" \
+    "the whole suite and does not decide whether a branch is good"
+  changed=0
+fi
+
+# `--changed` runs only the files that import something this branch touched.
+# `tools/affected.py` explains how much that is worth and when it refuses to
+# answer, and when it refuses the list is left alone, which is the whole suite.
+#
+# The comparison is against the merge base rather than against `main`, so that
+# somebody else's commits landing while this branch was open do not select the
+# suite. The working tree is asked as well as the branch, because the file being
+# edited is the reason for running this at all and is usually not committed.
+#
+# Nothing here is allowed to fail quietly. A `git` that does not answer, an
+# `affected.py` that cannot tell, an empty answer that might be an empty answer
+# or might be a broken one, all of them end up running everything.
+if [ "$changed" -eq 1 ]; then
+  base=$(git merge-base origin/main HEAD 2> /dev/null)
+  touched=$(
+    {
+      [ -n "$base" ] && git diff --name-only "$base" HEAD
+      git diff --name-only HEAD
+      git ls-files --others --exclude-standard
+    } 2> /dev/null | sort -u
+  )
+  if [ -z "$base" ] || [ -z "$touched" ]; then
+    echo "nothing to compare against, so this runs the whole suite"
+  # The answer is taken into a variable rather than read off a pipe, because a
+  # pipe hands back the exit status of the loop reading it and the exit status
+  # is how this says it could not tell.
+  elif ! answer=$(python3 tools/affected.py $touched 2> /dev/null); then
+    echo "the change reaches further than an import graph can say, so this" \
+      "runs the whole suite"
+  elif [ -z "$answer" ]; then
+    echo "nothing this branch changed reaches a test file"
+    exit 0
+  else
+    picked=()
+    while IFS= read -r line; do
+      [ -n "$line" ] && picked[${#picked[@]}]=$line
+    done <<< "$answer"
+    files=("${picked[@]}")
+    echo "running the ${#files[@]} test files this branch can reach, which is" \
+      "not the whole suite and does not decide whether a branch is good"
+  fi
+fi
+
 shards=${FIREPANDA_TEST_SHARDS:-1}
 shard=${FIREPANDA_TEST_SHARD:-1}
 if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
@@ -261,7 +341,9 @@ if [ "$shards" -gt 1 ]; then
           }'
   )
   if [ "${#picked[@]}" -eq 0 ]; then
-    echo "shard $shard of $shards has no files out of $total, which cannot be right" >&2
+    echo "shard $shard of $shards has no files out of $total, so either the" \
+      "cost table is wrong or there are fewer files than shards, which a" \
+      "selection can do" >&2
     exit 1
   fi
   files=("${picked[@]}")

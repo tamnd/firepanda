@@ -50,6 +50,14 @@
 #
 # `--fast` is passed through. `FIREPANDA_TEST_JOBS` is passed through too, per
 # host, which is worth setting when a host is shared with something heavy.
+#
+# `--changed` is not passed through, it is answered here. The hosts get an rsync
+# of the working tree with `.git` left out, which is deliberate and is most of
+# why the copy is quick, so a host has nothing to diff against and cannot work
+# out what changed. So the selection is made once on this machine and sent as a
+# list. Sending the list rather than the diff also means the three hosts cannot
+# disagree about it, which they could if each worked it out from a tree that had
+# been rsynced a second apart from the others.
 
 set -uo pipefail
 
@@ -57,6 +65,36 @@ cd "$(dirname "$0")/.." || exit 1
 
 hosts_default="server1 server2 server3"
 read -r -a hosts <<< "${FIREPANDA_TEST_HOSTS:-$hosts_default}"
+
+# `--changed` is taken out of the arguments here and turned into a list. Every
+# other argument goes on to the hosts untouched.
+only=${FIREPANDA_TEST_ONLY:-}
+passthrough=()
+for arg in "$@"; do
+  if [ "$arg" = "--changed" ]; then
+    base=$(git merge-base origin/main HEAD 2> /dev/null)
+    touched=$(
+      {
+        [ -n "$base" ] && git diff --name-only "$base" HEAD
+        git diff --name-only HEAD
+        git ls-files --others --exclude-standard
+      } 2> /dev/null | sort -u
+    )
+    if [ -z "$base" ] || [ -z "$touched" ]; then
+      echo "nothing to compare against, so this runs the whole suite"
+    elif ! answer=$(python3 tools/affected.py $touched 2> /dev/null); then
+      echo "the change reaches further than an import graph can say, so this" \
+        "runs the whole suite"
+    elif [ -z "$answer" ]; then
+      echo "nothing this branch changed reaches a test file"
+      exit 0
+    else
+      only=$(echo "$answer" | tr '\n' ' ')
+    fi
+  else
+    passthrough[${#passthrough[@]}]=$arg
+  fi
+done
 
 # A shard does not finish until its host does, so one saturated host holds the
 # whole run. This is not hypothetical: the first time this ran, server1 was
@@ -112,8 +150,23 @@ if [ "$shards" -lt 1 ]; then
   exit 1
 fi
 
+# A selection is often smaller than the number of hosts, and a shard with no
+# files in it is an error rather than a quick shard, so the hosts are trimmed to
+# the number of files there are. Copying two and a half gigabytes of tree to a
+# machine so that it can run nothing is also just slower.
+if [ -n "$only" ]; then
+  picked=0
+  for _ in $only; do
+    picked=$((picked + 1))
+  done
+  if [ "$picked" -lt "$shards" ]; then
+    echo "only $picked test files to run, so $picked of the hosts are used"
+    hosts=("${hosts[@]:0:$picked}")
+    shards=$picked
+  fi
+fi
+
 remote_dir=${FIREPANDA_TEST_REMOTE_DIR:-fp-sql-ci}
-passthrough=("$@")
 
 # The logs go under `.cache/` rather than under `build/`, because `build/` is
 # what gets deleted first when this machine runs out of disk, which it does.
@@ -236,6 +289,7 @@ for i in "${!hosts[@]}"; do
       ps -o sid= -p \$\$ | tr -d ' ' > \$HOME/$remote_dir.lock/session && \
       FIREPANDA_TEST_SHARDS=$shards FIREPANDA_TEST_SHARD=$shard \
       ${FIREPANDA_TEST_JOBS:+FIREPANDA_TEST_JOBS=$FIREPANDA_TEST_JOBS} \
+      ${only:+FIREPANDA_TEST_ONLY='$only'} \
       \$HOME/.pixi/bin/pixi run test ${passthrough[*]:-}" \
       >> "$logs/$host.log" 2>&1
     echo "$?" > "$logs/$host.status"

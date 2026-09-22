@@ -8,11 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the test suite runs on other machines, and runs fewer files
+
+Nothing about the library changed here, only what it costs to work on it. The suite is 12086 seconds and a test file spends nearly all of that compiling the library again rather than running assertions, which leaves exactly two levers: more machines and fewer files. Both are now there.
+
+`pixi run test-remote` rsyncs the working tree to the hosts in `~/.ssh/config` and runs one shard on each, picking its hosts by what they are already carrying and saying which ones it left out. Two things that version got wrong are fixed as well, both found by running it. A host holds one shared copy of the tree, so two runs against one host used to take files out from under each other's compiler and report failures that were nobody's change, and a run now takes a lock on the directory and waits its turn. And a run started locally used to outlive the thing that started it, because closing an ssh connection does not stop what is on the far end of it, so a run now records its session id in the lock and gets stopped by it.
+
+`pixi run test-changed` leaves out the files that cannot have broken. A test cannot break unless something it imports changed, Mojo imports are static, so the set is readable straight off the source. Measured over all 199 library files, the median one selects sixteen per cent of the suite and the SQL front end files select twelve, while the files everything imports select the lot, which is the right answer rather than a failure of the idea. `pixi run test-remote-changed` is both together, with the selection made where there is a `.git` to diff and sent to the hosts as a list.
+
+Like `--fast`, neither of these is what decides whether a branch is good, and both say so in their own output. CI still runs everything.
+
 ## [0.8.23] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release with two things the regex and SQL front ends were turning down and one thing the execution engine was doing the long way round. A group written inside a lookaround keeps what it matched, an `AT` clause on a table reads and prints, and a streaming group by on a text key stops rebuilding its running table once per chunk, which is where most of q36 was going.
+
 ### Added: a composed collation keeps both of its names
 
 `a COLLATE nocase.noaccent` reads and prints. DuckDB composes collations by writing them with dots between the parts and means all of them at once, and the transformer used to turn that down because it asked the right side of `COLLATE` for a name with exactly one part in it. It now keeps the whole run of parts, the same way a qualified column name is kept, so nothing about the name is thrown away and it reads back as written.

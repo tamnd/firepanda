@@ -111,6 +111,23 @@ test-fast = "bash tools/run_tests.sh --fast"
 # editor. It picks its hosts by what they are already carrying and says which
 # ones it left out. See the header of `tools/run_tests_remote.sh`.
 test-remote = "bash tools/run_tests_remote.sh"
+
+# Only the test files that import something this branch touched. A test cannot
+# break unless something it imports changed, and Mojo imports are static, so the
+# set is readable straight off the source. Measured over all 199 library files,
+# the median one selects sixteen per cent of the suite and the SQL front end
+# files select twelve. The files everything imports select the lot, which is the
+# right answer rather than a failure of the idea.
+#
+# Like `test-fast`, it is for the loop somebody is in while they are writing
+# code, and it says so on the way in. Anything it cannot reason about, which is
+# any change outside `firepanda/` and `tests/` and anything that is not a `.mojo`
+# file, runs the whole suite. See the header of `tools/affected.py`.
+test-changed = "bash tools/run_tests.sh --changed"
+
+# The two together, which is the combination worth having: the selection is made
+# here, where there is a `.git` to diff, and sent to the hosts as a list.
+test-remote-changed = "bash tools/run_tests_remote.sh --changed"
 format = "mojo format firepanda tests benchmarks tools"
 
 # Regenerates `tools/test_costs.txt`, which is how the workflow's ten test
