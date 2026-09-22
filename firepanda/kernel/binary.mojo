@@ -133,7 +133,12 @@ from .compare import (
     not_equal,
 )
 from .temporal import temporal_as_unit
-from .text import compare_text, compare_text_const
+from .text import (
+    compare_text,
+    compare_text_const,
+    compare_text_const_positions,
+    compare_text_const_positions_through,
+)
 
 
 struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -1300,11 +1305,24 @@ def compare_value_positions(
 
     None comes back when the pair is one this has no loop for, and then the
     caller wants `binary_value_any` and `select_positions` instead. That covers
-    text, category and temporal columns, a null constant, and any pair whose
-    common type is not the column's own, since converting the column to meet the
-    constant is a column written and this exists to write none. Those all
-    compare perfectly well the ordinary way, and none of them is the shape that
-    made #521 worth doing.
+    category columns, a null constant, an instant against a constant of some
+    other temporal type, and any pair whose common type is not the column's own,
+    since converting the column to meet the constant is a column written and
+    this exists to write none. Those all compare perfectly well the ordinary way.
+
+    An instant against a constant of its own type does run here, because it is
+    the integer underneath it compared against a number, and `resolve_constant`
+    has already read a text literal at the column's type. Seven of the
+    ClickBench statements ask for a month of dates, so two of every six
+    conditions in them are that comparison, and sending it the long way round
+    meant gathering the whole date column through the selection the condition in
+    front of it wrote.
+
+    A text column against a text constant runs here too, through the byte loops
+    rather than the register ones, and for the same reason: `SearchPhrase <> ''`
+    and `URL <> ''` are eleven of the statements between them, and in two of
+    those the condition sits behind five others, so the long way round gathered a
+    whole column of strings to answer a question about which of them were empty.
 
     Args:
         a: The column.
@@ -1329,11 +1347,35 @@ def compare_value_positions(
     if not op.is_comparison() or a.is_dictionary():
         return None
     var scalar = resolve_constant(a.type, b, op)
-    if scalar.is_null() or a.type.is_temporal() or scalar.type.is_temporal():
+    if scalar.is_null():
         return None
-    var common = promote(a.type, scalar.type)
-    if common.is_variable_width() or common.physical != a.type.physical:
-        return None
+    if a.type.is_temporal() or scalar.type.is_temporal():
+        # Two instants of the same type are two numbers of the same width, and
+        # the comparison between them is the one the loops below already run.
+        # Anything else here is a date against a timestamp or two timestamps of
+        # different units, which reconcile to the finer of the two, and
+        # reconciling is a column written out.
+        if a.type != scalar.type:
+            return None
+    else:
+        var common = promote(a.type, scalar.type)
+        if common.is_variable_width():
+            # A text column against a text constant is the byte loops, which
+            # have a positions form of their own. A column of some other type
+            # whose common type with the constant is text is not: meeting the
+            # constant there means converting the column, which is a column
+            # written and this exists to write none.
+            if not a.type.is_variable_width():
+                return None
+            return _text_positions_erased(
+                a,
+                scalar,
+                op.mirrored() if value_on_left else op,
+                picks,
+                through,
+            )
+        if common.physical != a.type.physical:
+            return None
     var applied = op.mirrored() if value_on_left else op
     comptime for target in ALL:
         if a.type.physical == target:
@@ -1475,6 +1517,60 @@ def filled_block(type: LogicalType, rows: Int, fill: Value) raises -> AnyArray:
                 out[i] = one
             return AnyArray(out^.into_data(), type)
     raise Error("binary: unsupported dtype " + String(type))
+
+
+def _text_positions_erased(
+    a: AnyArray,
+    b: Value,
+    op: BinaryOp,
+    picks: List[UInt32],
+    through: Bool,
+) raises -> List[UInt32]:
+    """Sends a comparison against a text constant to the byte positions loops.
+
+    The constant's bytes are borrowed from the string it is holding, so the
+    string has to outlive the call and is kept in a local, which is the same
+    care `_compare_text_const_erased` takes and for the same reason.
+
+    Args:
+        a: The column, carrying elements.
+        b: The constant, present and holding text.
+        op: The comparison, already mirrored if the constant was on the left.
+        picks: The selection, read only when `through`.
+        through: Whether the rows are `a` at `picks`.
+
+    Returns:
+        The rows the comparison is true on.
+
+    Raises:
+        If the column does not carry elements, or the constant is not text.
+    """
+    ref x = a.strings()
+    var text = b.as_string()
+    var probe = text.as_bytes()
+    if through:
+        if op == BinaryOp.EQ:
+            return compare_text_const_positions_through[CMP_EQ](x, probe, picks)
+        if op == BinaryOp.NE:
+            return compare_text_const_positions_through[CMP_NE](x, probe, picks)
+        if op == BinaryOp.LT:
+            return compare_text_const_positions_through[CMP_LT](x, probe, picks)
+        if op == BinaryOp.LE:
+            return compare_text_const_positions_through[CMP_LE](x, probe, picks)
+        if op == BinaryOp.GT:
+            return compare_text_const_positions_through[CMP_GT](x, probe, picks)
+        return compare_text_const_positions_through[CMP_GE](x, probe, picks)
+    if op == BinaryOp.EQ:
+        return compare_text_const_positions[CMP_EQ](x, probe)
+    if op == BinaryOp.NE:
+        return compare_text_const_positions[CMP_NE](x, probe)
+    if op == BinaryOp.LT:
+        return compare_text_const_positions[CMP_LT](x, probe)
+    if op == BinaryOp.LE:
+        return compare_text_const_positions[CMP_LE](x, probe)
+    if op == BinaryOp.GT:
+        return compare_text_const_positions[CMP_GT](x, probe)
+    return compare_text_const_positions[CMP_GE](x, probe)
 
 
 def _compare_text_const_erased(

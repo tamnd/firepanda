@@ -245,6 +245,11 @@ from .temporal import (
     temporal_total_seconds,
     unit_named,
 )
-from .text import compare_text, compare_text_const
+from .text import (
+    compare_text,
+    compare_text_const,
+    compare_text_const_positions,
+    compare_text_const_positions_through,
+)
 from .topn import GroupTop, group_top_rows, group_top_rows_any
 from .unary import UnaryOp, absolute, invert, negate, unary_any, unary_type

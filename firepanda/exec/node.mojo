@@ -604,9 +604,10 @@ struct Filter(Movable):
         if straight:
             return straight.take()
 
-        # The pairs the fused loops do not cover: text, category and temporal
-        # columns, a null constant, and a constant the column would have to be
-        # converted to meet. The mask is built and then read for its positions,
+        # The pairs the fused loops do not cover: category columns, a null
+        # constant, an instant against a constant of some other temporal type,
+        # and a constant the column would have to be converted to meet.
+        # The mask is built and then read for its positions,
         # which is what this node did for every comparison before there was a
         # fused form, so the answer is the same and only the cost differs.
         var at_rows = chunk.column(self.on, spread)

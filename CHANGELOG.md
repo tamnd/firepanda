@@ -35,6 +35,17 @@ It now runs once, in the compile budget job on Linux, so a break in `mojo precom
 ### Fixed: a feature filed under the release it missed
 
 `contains` over text and the bare `IN` that means it landed after v0.8.20 was tagged, and its entry went in under the 0.8.20 heading all the same, because two changes were being prepared at once and the release heading moved above an entry that was still unreleased. The entry is in 0.8.21 above, which is the release that actually carries it. Nothing about the code changed.
+### Changed: the fused comparison covers a date against a date literal and a text column against a text literal
+
+A filter over a plain comparison has written the rows it keeps directly since the fused compare landed, with no mask column in between. Until now that only held for a fixed width column against a constant of its own type. Every other pair went the long way round: build a bool column over the rows, read the positions off it, drop the column. Two of the pairs it turned down are the two ClickBench asks for most.
+
+The first is a date against a date literal. A date is the integer underneath it, and `resolve_constant` has already read the literal at the column's type, so the comparison was always two numbers of the same width and the loop for it was already there. The check that sent it away was written for a date against a timestamp, where the two reconcile to the finer unit and reconciling means writing the column out, and it caught the same type case along with it. Seven of the ClickBench statements ask for a month of dates, and each of them asks twice.
+
+The second is a text column against a text literal, which now has positions loops of its own in `kernel/text.mojo` beside the mask ones. Sixteen of the statements compare a text column against the empty string. In two of those the condition sits behind five others, so what the old route did was gather a whole column of strings through a selection holding a small part of the rows, in order to answer a question about which of those strings were empty.
+
+Measured on the ClickBench 1M set through the planner, CPU time per run, five runs a side and three rounds interleaved: q36 falls from 177 to 160 milliseconds and q37 from 87 to 72. The date half is a wash on its own, which is what three rounds over q38 to q42 say, so what that half buys is the two column writes it stops making rather than a number. The gap to the hand written route on q36 is still about twice the CPU, so the text comparison was not the only thing paying there.
+
+Nothing here changes an answer. The fifteen statements with a text comparison in them were run both ways and agree on every row, sum and hash. A null still drops the row, which is what a filter does to a row its mask is null on, and that matters more for text than for numbers: a null element's view is the view of the empty string, so a null would answer true to `= ''` if nothing stopped it.
 
 ## [0.8.20] - 2026-09-22
 

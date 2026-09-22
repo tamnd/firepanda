@@ -20,7 +20,7 @@ from std.testing import assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
-from firepanda.array.strings import strings_from_list
+from firepanda.array.strings import StringBuilder, strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
@@ -4444,11 +4444,84 @@ def test_a_filter_that_kept_every_row_may_reorder_and_repeat() raises:
     assert_equal(third[5], 60, "and the second again, whole")
 
 
+def dates(days: List[Int32]) raises -> AnyArray:
+    """Builds a fully valid date column from days since the epoch."""
+    var col = Array[DType.int32](len(days))
+    for i in range(len(days)):
+        col.set_valid(i, days[i])
+    return AnyArray(col^.into_data(), LogicalType.DATE32)
+
+
+def test_a_comparing_filter_runs_a_date_against_a_date_literal() raises:
+    """A date is the integer underneath it and a date literal is read at the
+    column's own type before anything compares, so this is two numbers and the
+    fused loop runs. Seven of the ClickBench statements are a month of dates and
+    they used to build a mask column for each end of the month."""
+    var columns = List[AnyArray]()
+    columns.append(dates([15886, 15887, 15901, 15917, 15918]))
+    columns.append(numbers([1, 2, 3, 4, 5]))
+    var out = node_apply(
+        Node(Filter(0, Value(String("2013-07-01")), BinaryOp.GE, [1])),
+        Chunk(columns^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 4, "the 30th of June is the only one before it")
+    var kept = ints_of(got.column(0), 4)
+    assert_equal(kept[0], 2, "the first of July")
+    assert_equal(kept[3], 5, "and on past the end of the month")
+
+
+def test_a_comparing_filter_reads_a_date_through_a_selection() raises:
+    """The shape the ClickBench date ranges arrive in: a condition in front of
+    this one has already written a selection, and the date column is still the
+    whole column with the rows it kept pointed at. Reading it through the
+    selection is what the fused loop does instead of gathering it first."""
+    var columns = List[AnyArray]()
+    columns.append(dates([15886, 15887, 15901, 15917, 15918]))
+    columns.append(numbers([1, 2, 3, 4, 5]))
+    var picks = List[UInt32]()
+    picks.append(0)
+    picks.append(2)
+    picks.append(4)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(False)
+    var out = node_apply(
+        Node(Filter(0, Value(String("2013-07-31")), BinaryOp.LE, [1])),
+        Chunk(columns^, picks^, dense^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 2, "two of the three the selection held")
+    var kept = ints_of(got.column(0), 2)
+    assert_equal(kept[0], 1, "the 30th of June")
+    assert_equal(kept[1], 3, "and the 15th of July, not the 1st of August")
+
+
 def test_a_comparing_filter_falls_back_for_a_pair_it_has_no_loop_for() raises:
-    """Text, category and temporal columns compare perfectly well the ordinary
-    way, and none of them is the shape the fused loops were written for. The
-    filter builds the mask for those and reads the rows off it, so the answer is
-    the same and only the cost differs."""
+    """A whole number column against a fractional constant is the pair the fused
+    loops turn down: the two meet at a wider type than the column's own, and
+    meeting it means writing the column out converted. The filter builds the mask
+    for that and reads the rows off it, so the answer is the same and only the
+    cost differs."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    var out = node_apply(
+        Node(Filter(0, Value(Float64(3.5)), BinaryOp.GT, [0])),
+        Chunk(columns^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 3, "four, five and six are over three and a half")
+    var kept = ints_of(got.column(0), 3)
+    assert_equal(kept[0], 4, "the first of them")
+    assert_equal(kept[2], 6, "and the last")
+
+
+def test_a_comparing_filter_runs_text_against_a_text_literal() raises:
+    """The byte loops carry positions the same way the register loops do, so a
+    text column against a text constant never builds a mask either."""
     var columns = List[AnyArray]()
     columns.append(
         AnyArray(strings_from_list(["ok", "fail", "ok", "ok", "fail", "ok"]))
@@ -4464,6 +4537,91 @@ def test_a_comparing_filter_falls_back_for_a_pair_it_has_no_loop_for() raises:
     var kept = ints_of(got.column(0), 4)
     assert_equal(kept[0], 1, "the first of them")
     assert_equal(kept[3], 6, "and the last")
+
+
+def test_a_comparing_filter_orders_text_against_a_text_literal() raises:
+    """Ordering takes the byte loop rather than the view compare, which is a
+    second arm and wants its own row."""
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(strings_from_list(["a", "m", "z", "b", "y"])))
+    columns.append(numbers([1, 2, 3, 4, 5]))
+    var out = node_apply(
+        Node(Filter(0, Value(String("m")), BinaryOp.GE, [1])),
+        Chunk(columns^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 3, "m, z and y are at m or past it")
+    var kept = ints_of(got.column(0), 3)
+    assert_equal(kept[0], 2, "m itself")
+    assert_equal(kept[2], 5, "and y")
+
+
+def test_a_comparing_filter_reads_text_through_a_selection() raises:
+    """The shape `URL <> ''` arrives in: five conditions in front of this one
+    have already written a selection, and the text column is still the whole
+    column with the rows they kept pointed at. Reading it where it lies is what
+    the byte loop does instead of gathering a column of strings first."""
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(strings_from_list(["", "one", "", "two", ""])))
+    columns.append(numbers([1, 2, 3, 4, 5]))
+    var picks = List[UInt32]()
+    picks.append(1)
+    picks.append(2)
+    picks.append(3)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(False)
+    var out = node_apply(
+        Node(Filter(0, Value(String("")), BinaryOp.NE, [1])),
+        Chunk(columns^, picks^, dense^),
+    )
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_equal(len(got), 2, "two of the three the selection held")
+    var kept = ints_of(got.column(0), 2)
+    assert_equal(kept[0], 2, "one")
+    assert_equal(kept[1], 4, "and two")
+
+
+def test_a_comparing_filter_drops_a_null_the_way_a_mask_would() raises:
+    """A null element's view is the view of the empty string, so a null would
+    answer true to `= ''` if nothing stopped it. A filter drops the rows its mask
+    is null on and this has to agree, either side of the comparison."""
+    var builder = StringBuilder(capacity=4)
+    builder.append(String("").as_bytes())
+    builder.append_null()
+    builder.append(String("here").as_bytes())
+    builder.append_null()
+
+    var empty = List[AnyArray]()
+    empty.append(AnyArray(builder^.finish()))
+    empty.append(numbers([1, 2, 3, 4]))
+    var is_empty = node_apply(
+        Node(Filter(0, Value(String("")), BinaryOp.EQ, [1])),
+        Chunk(empty^),
+    )
+    assert_true(is_empty.__bool__(), "a chunk came back")
+    var one = is_empty.take()
+    assert_equal(len(one), 1, "only the row that really is empty")
+    assert_equal(ints_of(one.column(0), 1)[0], 1, "the first row")
+
+    var again = StringBuilder(capacity=4)
+    again.append(String("").as_bytes())
+    again.append_null()
+    again.append(String("here").as_bytes())
+    again.append_null()
+    var filled = List[AnyArray]()
+    filled.append(AnyArray(again^.finish()))
+    filled.append(numbers([1, 2, 3, 4]))
+    var not_empty = node_apply(
+        Node(Filter(0, Value(String("")), BinaryOp.NE, [1])),
+        Chunk(filled^),
+    )
+    assert_true(not_empty.__bool__(), "a chunk came back")
+    var other = not_empty.take()
+    assert_equal(len(other), 1, "and only the row that really has something")
+    assert_equal(ints_of(other.column(0), 1)[0], 3, "the third row")
 
 
 def test_a_comparing_filter_runs_in_a_pipeline() raises:
