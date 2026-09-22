@@ -30,7 +30,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.frame import DataFrame
 from firepanda.sql.catalog import Catalog
-from firepanda.sql.run import run
+from firepanda.sql.run import Dialect, run
 
 
 def numbers(values: List[Int64]) raises -> AnyArray:
@@ -5811,6 +5811,50 @@ def test_an_answer_of_no_text_rows_can_still_be_read() raises:
     var out = run("SELECT 'sold' AS tag FROM sales WHERE qty = 999", session())
     assert_equal(len(out), 0, "no rows")
     assert_true(out[0].is_string(), "and the column is still a text one")
+
+
+def test_a_held_dialect_answers_what_the_free_function_answers() raises:
+    """The same statements through both routes, three times through the held one.
+
+    The point of holding a `Dialect` is that the grammar, the jump table and
+    the function catalog are read once instead of per statement, and the point
+    of this test is that reading them once leaves nothing behind. A table that
+    kept any state from the statement before it would show up on the second and
+    third run and not on the first, so each one is run three times.
+    """
+    var dialect = Dialect()
+    var queries = List[String]()
+    queries.append("SELECT qty, price FROM sales WHERE qty > 10")
+    queries.append("SELECT shop, sum(qty) AS n FROM sales GROUP BY shop")
+    queries.append("SELECT qty FROM sales ORDER BY qty LIMIT 3")
+    queries.append("SELECT count(*) AS n FROM sales")
+    for i in range(len(queries)):
+        var wanted = run(queries[i], session())
+        for _ in range(3):
+            var got = dialect.run(queries[i], session())
+            assert_equal(len(got), len(wanted), "same row count")
+            assert_equal(got.width(), wanted.width(), "same width")
+            for c in range(wanted.width()):
+                assert_equal(
+                    got.schema[c].name,
+                    wanted.schema[c].name,
+                    "same column name",
+                )
+
+
+def test_a_held_dialect_refuses_what_the_free_function_refuses() raises:
+    var dialect = Dialect()
+    for _ in range(3):
+        with assert_raises(contains="nothing to truncate to called fortnight"):
+            _ = dialect.run(
+                "SELECT date_trunc('fortnight', eventdate) FROM hits",
+                session(),
+            )
+        # A refusal leaves the tables alone, so a statement that runs still
+        # runs after one. This is the case a registry rebuilt per statement
+        # could never have got wrong and a held one could.
+        var out = dialect.run("SELECT count(*) AS n FROM sales", session())
+        assert_equal(len(out), 1, "one row back after the refusal")
 
 
 def main() raises:

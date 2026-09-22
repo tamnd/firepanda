@@ -17,6 +17,17 @@ The advice is rewritten too, since the old sentence said only that a plain name 
 Naming all twenty five turned up something worth knowing, which is that three of them can be reached. `EXCLUDE`, `REPLACE` and the left side of a `RENAME` take a node the grammar will put a dot in, and everywhere else the dot is a syntax error one step earlier, so the query never arrives. That agrees with the corpus: all thirty four statements that hit this refusal are `EXCLUDE` or `RENAME`, twenty four and ten. So the thing to build, when `dotted-name` is answered rather than named, is a star modifier that keeps a run of name parts, which is the change a composed collation already got.
 
 Nothing is accepted that was not accepted before. This is the message and not the rule.
+### Changed: the three tables the SQL front end reads can now be held instead of rebuilt per statement
+
+`firepanda.sql.run` built a `Grammar`, a `Transform` over it and a `Registry` on every call, used them once and threw them away. None of the three depends on the statement, the catalog or the data. They are read out of the generated tables at construction and only looked at afterwards, which is what makes rebuilding them per call pure overhead rather than a correctness matter.
+
+Timed on their own they are 0.64 ms, 0.50 ms and 0.90 ms, so a little over two milliseconds of a statement that otherwise takes under a millisecond to parse. On a one column table `SELECT c0 FROM t LIMIT 10` ran in 3.05, 4.05 and 2.71 ms across three rounds of forty, and the same statement through a held `Dialect` ran in 0.23, 0.39 and 0.18. On a 105 column table `SELECT * FROM t LIMIT 10` went from 10.28, 9.03 and 8.66 to 6.67, 5.73 and 5.97, which is the same two milliseconds against a much larger bill.
+
+`Dialect` is the new struct that holds them, with a `run` method taking the same arguments the free function takes. It is still not the front door: a front door owns the prepared statement cache, parameters, the capability flag and a latency budget, and this owns none of those. It owns the tables, which is the part that was measurably wrong. It costs a few hundred kilobytes and is read only once built, so one per process is the intended number and one per thread is also fine.
+
+`run(sql, catalog)` keeps working exactly as it did and is now a one line call into `Dialect().run(sql, catalog)`, so nothing calling it has to change and the seam test stays the seam test. Anything running a second statement should hold a `Dialect` instead.
+
+The migration is for `firepanda.sql.lower`, which is exported and now takes a fifth argument. A call written `lower(ast, statement, catalog, grammar)` becomes `lower(ast, statement, catalog, grammar, registry)`, and a caller with no reason to hold one can pass `Registry()` at the call site for the behaviour it had before.
 
 ### Fixed: the extension tests caught up with the engine that stopped refusing
 

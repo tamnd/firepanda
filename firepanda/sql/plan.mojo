@@ -1604,7 +1604,7 @@ def _function_name(ast: Ast, run: UInt32) -> String:
         return String()
 
 
-def _check_functions(ast: Ast) raises:
+def _check_functions(ast: Ast, registry: Registry) raises:
     """Reads every function name in a statement against the catalog.
 
     A pass of its own, run before anything is lowered, rather than a check at
@@ -1628,11 +1628,13 @@ def _check_functions(ast: Ast) raises:
 
     Args:
         ast: The arenas the statement lives in.
+        registry: The function catalog, handed in rather than built here.
+            Reading the table costs about a millisecond and the table is the
+            same every time, so the caller holds one and this borrows it.
 
     Raises:
         If a call names a function that gets nowhere.
     """
-    var registry = Registry()
     for at in range(len(ast.exprs)):
         if ast.exprs[at].kind != EXPR_FUNCTION:
             continue
@@ -4772,7 +4774,11 @@ def _from(
 
 
 def lower(
-    ast: Ast, statement: UInt32, catalog: Catalog, grammar: Grammar
+    ast: Ast,
+    statement: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    registry: Registry,
 ) raises -> Lowered:
     """Lowers a `SELECT` into a logical plan.
 
@@ -4788,6 +4794,9 @@ def lower(
         catalog: What the table names are resolved against.
         grammar: A loaded grammar, for the printer that names an output
             column the query did not name.
+        registry: The function catalog, for the check that a name gets
+            somewhere. Handed in for the same reason the grammar is: it is the
+            same table on every statement and reading it is not free.
 
     Returns:
         The plan, its root and the schemas the scans read.
@@ -4796,7 +4805,7 @@ def lower(
         If the statement names a function that gets nowhere, or is a shape this
         does not lower yet.
     """
-    _check_functions(ast)
+    _check_functions(ast, registry)
     var plan = Plan()
     var sources = List[Schema]()
     var scope = _Scope()
