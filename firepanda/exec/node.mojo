@@ -5365,17 +5365,24 @@ struct Group(Movable):
     folding are `firepanda/kernel/running.mojo`, and they are the accumulator
     this node was written without.
 
-    Two things keep `_absorb` alive rather than deleting it. The map is either
-    an array indexed by the key or a table of 64 bit hashes, and the hash is a
-    bijection on the key bits, so both are exact for a fixed width key and
-    neither is for text, where two names longer than eight bytes can land on one
-    hash. A key tuple of several columns has no single hash that is exact
-    either, for the same reason. A running slot is a number in an array as well,
-    so a minimum over a column of names has nowhere to live and falls back too.
-    So `_push` takes one fixed width key with fixed width values and `_absorb`
-    takes everything else. A null key falls back as well, because the map
-    reserves no ordinal for one and the group order the result promises is the
-    order the groups were first seen, which a reserved ordinal would not give.
+    Two things keep `_absorb` alive rather than deleting it. The fixed width
+    map is an array indexed by the key or a table of 64 bit hashes, and the hash
+    is a bijection on the key bits, so both are exact. A key tuple of several
+    columns has no single hash that is exact, and that is what still falls back:
+    two tuples landing on one hash would be one group, and there is nowhere to
+    compare them that is cheaper than grouping the chunk. A text key used to
+    fall back for the same reason and no longer does. `LastingText` keeps a copy
+    of the bytes of every key it has seen, so a hash match there is a candidate
+    the bytes settle, which is what the per chunk factorize has always done and
+    what it could only do because its keys and its chunk died together.
+
+    A running slot is a number in an array, so a minimum over a column of names
+    has nowhere to live and falls back too. A count of rows does not, because it
+    never reads the column it is given. So `_push` takes one key of either width
+    with values that are fixed width or unread, and `_absorb` takes everything
+    else. A null key falls back as well, because the map reserves no ordinal for
+    one and the group order the result promises is the order the groups were
+    first seen, which a reserved ordinal would not give.
     `_demote` is the handover, and it can happen in the middle of a query,
     because whether a key column has a null is not known until the chunk holding
     it arrives.
@@ -5711,17 +5718,23 @@ struct Group(Movable):
                 self._merge.append(_merge_kind(kind))
                 self._as_float.append(False)
 
-        # One fixed width key is the shape the persistent table is exact for,
+        # One key is the shape the persistent map is exact for, of either width,
         # and a fixed width value is the shape a running slot can accumulate.
         # Everything else keeps the stacking merge. This is the schema half of
         # the question; the data half is the null check in `process`, which
         # cannot be asked until a chunk arrives.
-        self._fast = (
-            len(self.keys) == 1
-            and not self.input[self.keys[0]].dtype.is_variable_width()
-        )
+        #
+        # A count of rows is let through over a column of any width because it
+        # never reads one. That is not a corner: `count(*) group by url` is the
+        # query the text key is here for, the plan gives the count the only
+        # column left after the projection, and refusing on the width of a
+        # column nothing looks at would refuse the whole shape.
+        self._fast = len(self.keys) == 1
         for s in range(len(self._source)):
-            if self.input[self._source[s]].dtype.is_variable_width():
+            if (
+                self.input[self._source[s]].dtype.is_variable_width()
+                and not self._produce[s].counts_rows()
+            ):
                 self._fast = False
 
         # The keys are only kept when something is held, because they are only
@@ -5903,7 +5916,13 @@ struct Group(Movable):
         if self._map.groups == 0:
             return
         var out = List[AnyArray](capacity=1 + len(self._values))
-        out.append(self._map.take_keys())
+        var keys = self._map.take_keys()
+        # The text map builds its key column out of the bytes it kept rather
+        # than gathering one, so what comes back is labelled text whatever the
+        # input column was called. A binary key is the same bytes under another
+        # name, and the schema this node reported is what says which.
+        keys.type = self.input[self.keys[0]].dtype
+        out.append(keys^)
         for s in range(len(self._values)):
             out.append(
                 settle_any(

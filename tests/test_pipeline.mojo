@@ -2396,6 +2396,208 @@ def test_a_marked_group_of_nothing_but_nulls_sums_to_null() raises:
     assert_equal(read_back(out, "total")[0], 5, "the five is still a five")
 
 
+def read_words(df: DataFrame, name: String) raises -> List[String]:
+    """Reads a text column out as a plain list."""
+    var col = df.column(name)
+    var out = List[String](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col.text(i))
+    return out^
+
+
+def words_present(df: DataFrame, name: String) raises -> List[Bool]:
+    """Which rows of a text column have a value in them."""
+    var col = df.column(name)
+    ref text = col.values.strings()
+    var out = List[Bool](capacity=len(text))
+    for i in range(len(text)):
+        out.append(text.is_valid(i))
+    return out^
+
+
+def text_key_frame() raises -> DataFrame:
+    """Four text keys over nine rows, in three chunks, keyed on column one.
+
+    Every key turns up in more than one chunk, which is what makes the second
+    chunk and the third look up ordinals the first handed out. Two of the four
+    are past twelve bytes and agree for their first twenty two, so the
+    comparison that settles them reaches the payload and has to read to the end
+    of it. The other two fit inside the view and settle without a payload at
+    all.
+    """
+    var key = ChunkedArray(LogicalType.STRING)
+    key.append(
+        AnyArray(
+            strings_from_list(
+                [
+                    "ok",
+                    "a-key-well-past-twelve-1",
+                    "no",
+                    "a-key-well-past-twelve-2",
+                ]
+            )
+        )
+    )
+    key.append(AnyArray(strings_from_list(["no", "a-key-well-past-twelve-1"])))
+    key.append(
+        AnyArray(
+            strings_from_list(
+                ["a-key-well-past-twelve-2", "ok", "a-key-well-past-twelve-1"]
+            )
+        )
+    )
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3, 4]))
+    n.append(numbers([5, 6]))
+    n.append(numbers([7, 8, 9]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(key^)
+    return DataFrame(Schema(key_fields()), columns^)
+
+
+def late_null_key_frame() raises -> DataFrame:
+    """The same shape with a null key in the second chunk.
+
+    The map reserves no ordinal for a null, so the chunk that holds one is where
+    the operator gives the map up and goes back to the stacking merge, and which
+    chunk that is cannot be known until it arrives. The rows either side of it
+    are the ones that say the handover kept what had already been counted.
+    """
+    var key = ChunkedArray(LogicalType.STRING)
+    key.append(AnyArray(strings_from_list(["ok", "no", "ok"])))
+    var builder = StringBuilder(capacity=3)
+    builder.append(String("no").as_bytes())
+    builder.append_null()
+    builder.append(String("ok").as_bytes())
+    key.append(AnyArray(builder^.finish()))
+    key.append(AnyArray(strings_from_list(["ok", "no"])))
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2, 3]))
+    n.append(numbers([4, 5, 6]))
+    n.append(numbers([7, 8]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(key^)
+    return DataFrame(Schema(key_fields()), columns^)
+
+
+def crowded_key_frame() raises -> DataFrame:
+    """Twelve hundred distinct text keys, seen twice each, in four chunks.
+
+    The text map starts at a thousand and twenty four slots, so twelve hundred
+    keys take it through two growths, and every key is looked up again after the
+    second of them. That is what says a growth moved the slots without moving
+    the ordinals: a key that came back with three rather than two would be a key
+    whose second sighting opened a group of its own.
+    """
+    var key = ChunkedArray(LogicalType.STRING)
+    var n = ChunkedArray(LogicalType.INT64)
+    for _ in range(2):
+        for half in range(2):
+            var words = List[String]()
+            var ones = List[Int64]()
+            for j in range(600):
+                var i = half * 600 + j
+                if i % 2 == 0:
+                    words.append("k" + String(i))
+                else:
+                    words.append("a-key-well-past-twelve-" + String(i))
+                ones.append(1)
+            key.append(AnyArray(strings_from_list(words)))
+            n.append(numbers(ones))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(key^)
+    return DataFrame(Schema(key_fields()), columns^)
+
+
+def test_a_group_by_on_text_gives_a_key_the_same_ordinal_in_every_chunk() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(text_key_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    var words = read_words(out, "key")
+    assert_equal(len(words), 4, "four groups")
+    assert_equal(words[0], String("ok"), "the first key seen")
+    assert_equal(
+        words[1], String("a-key-well-past-twelve-1"), "the second key seen"
+    )
+    assert_equal(words[2], String("no"), "the third key seen")
+    assert_equal(
+        words[3], String("a-key-well-past-twelve-2"), "the fourth key seen"
+    )
+    assert_equal(
+        read_back(out, "total"),
+        [9, 17, 8, 11],
+        "every row landed in the group its key names",
+    )
+
+
+def test_a_group_by_on_text_counts_rows_without_reading_the_column() raises:
+    """`count(*) group by url` with nothing else selected, which is the shape
+    the text key is here for. The only column the count can be given is the key
+    itself, and the count never reads it."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SIZE, "rows"))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(text_key_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    var words = read_words(out, "key")
+    assert_equal(len(words), 4, "the same four groups")
+    assert_equal(words[0], String("ok"), "the first of them")
+    assert_equal(
+        words[1], String("a-key-well-past-twelve-1"), "the second of them"
+    )
+    assert_equal(read_back(out, "rows"), [2, 3, 2, 2], "nine rows in four")
+
+
+def test_a_group_by_on_text_survives_the_map_growing() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(crowded_key_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1200, "one group per distinct key")
+    var totals = read_back(out, "total")
+    var twice = 0
+    for i in range(len(totals)):
+        if totals[i] == 2:
+            twice += 1
+    assert_equal(twice, 1200, "every key was seen exactly twice")
+
+
+def test_a_null_text_key_hands_the_group_by_back_to_the_stacking_merge() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(late_null_key_frame())
+    pipeline.add(Node(Group(keys^, aggs^)))
+    var out = pipeline^.run()
+    var words = read_words(out, "key")
+    assert_equal(len(words), 3, "two keys and the null")
+    assert_equal(words[0], String("ok"), "the first key seen")
+    assert_equal(words[1], String("no"), "the second key seen")
+    assert_equal(
+        words_present(out, "key"),
+        [True, True, False],
+        "the last group is a null rather than an empty string",
+    )
+    assert_equal(
+        read_back(out, "total"),
+        [17, 14, 5],
+        "what the map had counted before the handover was kept",
+    )
+
+
 def test_a_held_column_survives_the_parallel_route() raises:
     """Two hundred rows in forty chunks through a filter, which is the shape
     that runs the front of the pipeline on every core and hands the reduction

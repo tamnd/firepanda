@@ -248,6 +248,17 @@ def accumulate_any(
         If the dtype has no physical layout, or if the reduction is one this does
         not fold in place.
     """
+    # A count of rows never reads a value, so it is settled before the dtype is
+    # looked at rather than inside a loop that would be handed a column it has
+    # no business reading. That is not only tidiness: uint8 is in `ALL` and a
+    # string column matches it, the way `aggregate_group_any` says, so dispatch
+    # would send a column of names to a loop written for bytes and the loop
+    # would happen to be right only because this reduction ignores what it is
+    # given.
+    if kind == AggKind.SIZE:
+        _tally(state, codes, rows)
+        return
+
     comptime for source in ALL:
         if values.dtype() == source:
             _accumulate[source](state, values, kind, codes, rows, as_float)
@@ -255,6 +266,27 @@ def accumulate_any(
     raise Error(
         "running: dtype " + String(values.dtype()) + " has no physical layout"
     )
+
+
+def _tally(mut state: AnyArray, codes: Array[DType.uint32], rows: Int) raises:
+    """Adds one to the slot of every row's group.
+
+    Args:
+        state: The running table for one count, written in place.
+        codes: The group ordinal of every row.
+        rows: How many rows to count.
+
+    Raises:
+        If the state is not the int64 a count accumulates in.
+    """
+    ref into = state.as_typed_view[DType.int64]()
+    var tally = into.unsafe_mut_ptr()
+    var at = codes.unsafe_ptr()
+    for i in range(rows):
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        tally.unsafe_offset(g).unsafe_store(
+            tally.unsafe_offset(g).unsafe_load() + 1
+        )
 
 
 def _accumulate[
@@ -303,16 +335,6 @@ def _accumulate[
             total.unsafe_offset(g).unsafe_store(
                 total.unsafe_offset(g).unsafe_load()
                 + src.unsafe_offset(i).unsafe_load().cast[acc]()
-            )
-        return
-
-    if kind == AggKind.SIZE:
-        ref into = state.as_typed_view[DType.int64]()
-        var tally = into.unsafe_mut_ptr()
-        for i in range(rows):
-            var g = Int(at.unsafe_offset(i).unsafe_load())
-            tally.unsafe_offset(g).unsafe_store(
-                tally.unsafe_offset(g).unsafe_load() + 1
             )
         return
 
