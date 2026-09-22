@@ -675,9 +675,9 @@ comptime REF_TABLE: UInt8 = 1
 """A named table, `t` or `s.t`.
 
 `children` is a run of interned name parts, outermost first. `payload` is the
-alias run and `a` is a `STMT_SAMPLE` node, or 0 when no sample was written.
-Whether the name is a table, a view or a file that reads as one is the
-catalog's business and not this stage's.
+alias run, `a` is a `STMT_SAMPLE` node and `b` is a `STMT_AT` node, either of
+them 0 when the query wrote none. Whether the name is a table, a view or a file
+that reads as one is the catalog's business and not this stage's.
 """
 
 comptime REF_SUBQUERY: UInt8 = 2
@@ -899,6 +899,21 @@ the grammar takes all of them in both positions and none of them changes what
 the sample means. Which keyword introduced it, whether the count is a plain
 number or carries `%`, `PERCENT` or `ROWS`, and whether the method stands in
 front of the parentheses or inside them.
+"""
+
+
+comptime STMT_AT: UInt8 = 16
+"""An `AT` clause, which names the version of a table a query reads.
+
+`a` is the expression after `=>`, which is a whole expression and not a value:
+the corpus writes a subquery, a call and an arithmetic on a timestamp in this
+position. `payload` is the interned unit word as the query wrote it, which is
+`VERSION` or `TIMESTAMP`.
+
+The unit is kept as the word rather than as a tag because there are two of them
+and they stand for two different kinds of thing to ask a catalog for, so a
+reader that learns one of them has to name it anyway. A sample keeps tags
+because what it keeps is how one thing was spelled.
 """
 
 
@@ -2220,6 +2235,7 @@ struct Ast(Movable):
         name: StringSlice = "",
         columns: List[String] = List[String](),
         sample: UInt32 = NO_NODE,
+        at: UInt32 = NO_NODE,
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds a named table reference.
@@ -2229,6 +2245,7 @@ struct Ast(Movable):
             name: The alias, empty for none.
             columns: The column aliases, in order.
             sample: A `STMT_SAMPLE` node, or 0 for none.
+            at: A `STMT_AT` node, or 0 for none.
             token: The token it starts at.
 
         Returns:
@@ -2239,6 +2256,7 @@ struct Ast(Movable):
                 kind=REF_TABLE,
                 token=token,
                 a=sample,
+                b=at,
                 children=self.names(parts),
                 payload=self.alias(name, columns),
             )
@@ -2726,6 +2744,28 @@ struct Ast(Movable):
                 b=sample_tags(unit, tablesample, method_first),
                 children=self.run(seeds),
                 payload=self.intern(method),
+            )
+        )
+
+    def at_version(
+        mut self, unit: StringSlice, value: UInt32, token: UInt32 = 0
+    ) -> UInt32:
+        """Builds an `AT` clause.
+
+        Args:
+            unit: The unit word as written, `VERSION` or `TIMESTAMP`.
+            value: The expression after `=>`.
+            token: The token the keyword is at.
+
+        Returns:
+            The statement node index.
+        """
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_AT,
+                token=token,
+                a=value,
+                payload=self.intern(unit),
             )
         )
 

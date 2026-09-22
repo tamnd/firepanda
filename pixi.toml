@@ -104,6 +104,13 @@ test = "bash tools/run_tests.sh"
 # runner says which files it left out, so a green one here is never mistaken for
 # a green `pixi run test`.
 test-fast = "bash tools/run_tests.sh --fast"
+
+# The same suite, one shard per remote host. The laptop these worktrees live on
+# carries several projects at once and the suite is the first thing to feel it,
+# so this hands the work to machines that are at least not also running the
+# editor. It picks its hosts by what they are already carrying and says which
+# ones it left out. See the header of `tools/run_tests_remote.sh`.
+test-remote = "bash tools/run_tests_remote.sh"
 format = "mojo format firepanda tests benchmarks tools"
 
 # Regenerates `tools/test_costs.txt`, which is how the workflow's ten test

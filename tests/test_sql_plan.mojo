@@ -1305,6 +1305,18 @@ def test_a_sample_is_refused_here_not_in_the_transformer() raises:
     _ = _plan("SELECT a FROM t WHERE a > 1")
 
 
+def test_an_at_is_refused_here_not_in_the_transformer() raises:
+    # It reads and prints, and what it asks for is a table as of a version or a
+    # moment, which is the catalog's to answer and not the transformer's to
+    # turn down. Both units stop in the same place.
+    with assert_raises(contains="AT on a table"):
+        _ = _plan("SELECT a FROM t AT (VERSION => 1)")
+    with assert_raises(contains="AT on a table"):
+        _ = _plan("SELECT a FROM t AT (TIMESTAMP => TIMESTAMP '2020-01-01')")
+    # The same table with no `AT` on it lowers, so what stops is the clause.
+    _ = _plan("SELECT a FROM t")
+
+
 def test_using_key_is_refused_here_not_in_the_transformer() raises:
     # It reads and prints, and it is the entry that stops rather than the
     # statement, so a WITH that writes one on any of its entries stops even
