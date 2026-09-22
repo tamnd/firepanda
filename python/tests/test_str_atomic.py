@@ -238,23 +238,23 @@ def test_asking_for_no_case_is_not_the_same_as_naming_a_flag(
 
 
 @needs_pandas
-def test_a_lookaround_beside_one_is_still_a_gap(firepanda: ModuleType) -> None:
+def test_a_lookaround_beside_one_is_answered(firepanda: ModuleType) -> None:
     """For the same reason a lookaround beside a backreference is. A lookaround
-    is a search inside a search and the engine that keeps a path has one stack to
-    run it on, so a program holding one goes to the engine that merges threads,
-    and that engine cannot obey a cut. A pattern holding both has nowhere to go.
+    is a search inside a search and the engine that keeps a path used to have
+    one stack to run it on, so a program holding one went to the engine that
+    merges threads, and that engine cannot obey a cut. A pattern holding both
+    had nowhere to go.
 
-    pandas answers it, so this is a gap as well, and it is the one thing this
-    slice took away from what the flags path could do before it.
+    #994 gave the first engine a stack per search, so it runs both and the
+    pattern stays on it. pandas answered these all along, so the row compares
+    the two rather than naming a gap.
     """
     mine, them = made(firepanda), theirs()
     assert mask_of(them.str.contains(r"(?=a)(?>a*)b", flags=re.IGNORECASE))[0] is True
-    with pytest.raises(NotImplementedError) as caught:
-        mine.str.contains(r"(?=a)(?>a*)b", flags=re.IGNORECASE)
-    assert "lookaround beside an atomic group" in str(caught.value)
-    with pytest.raises(NotImplementedError) as second:
-        mine.str.contains(r"(?<=a)a*+b", flags=re.IGNORECASE)
-    assert "lookaround beside an atomic group" in str(second.value)
+    for pattern in (r"(?=a)(?>a*)b", r"(?<=a)a*+b"):
+        got = without_the_missing(mine.str.contains(pattern, flags=re.IGNORECASE).tolist())
+        want = without_the_missing(mask_of(them.str.contains(pattern, flags=re.IGNORECASE)))
+        assert got == want, pattern
 
 
 @needs_pandas

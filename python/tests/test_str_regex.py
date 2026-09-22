@@ -209,30 +209,31 @@ def test_a_missing_row_stays_missing_and_na_fills_it(firepanda: ModuleType) -> N
         assert getattr(mine.str, name)("a.c", na=True).tolist()[-1] is True, name
 
 
-def test_a_pattern_the_other_engine_would_run_is_not_implemented(
+@needs_pandas
+def test_a_pattern_the_other_engine_would_run_is_answered(
     firepanda: ModuleType,
 ) -> None:
-    """An atomic group goes to Python's `re` upstream, and this engine has not
-    got it.
+    """An atomic group goes to Python's `re` upstream, and this engine answers
+    it now.
 
-    pandas answers these, so the refusal is a gap rather than a difference of
-    opinion, and `NotImplementedError` is what a gap is spelled. The message
-    says which gap it is and quotes the pattern back.
+    This row asked the opposite question until #994. Both halves of the
+    lookaround were on the list first and so was the backreference, documents
+    93, 94 and 95 answered those, and the rows that used to be here moved to
+    `test_str_lookahead.py`, `test_str_lookbehind.py` and
+    `test_str_backreference.py`. The atomic group was the last one left and it
+    is gone the same way, so there is nothing to spell `NotImplementedError`
+    over and the row compares against pandas like every other row in the file.
 
-    Both halves of the lookaround used to be on this list and so did the
-    backreference. Documents 93, 94 and 95 answered them, and the rows that
-    used to be here are now in `test_str_lookahead.py`,
-    `test_str_lookbehind.py` and `test_str_backreference.py` asking the
-    opposite question. The lookahead in front of each pattern below is what
-    routes the call, since an atomic group and a possessive quantifier are not
-    constructs the router walks for.
+    The lookahead in front of each pattern is still what routes the call, since
+    an atomic group and a possessive quantifier are not constructs the router
+    walks for.
     """
-    mine = made(firepanda)
+    mine, them = made(firepanda), theirs()
     for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
         for name in ("contains", "match", "fullmatch"):
-            with pytest.raises(NotImplementedError) as caught:
-                getattr(mine.str, name)(pattern)
-            assert pattern in str(caught.value), (name, pattern)
+            got = without_the_missing(getattr(mine.str, name)(pattern).tolist())
+            want = without_the_missing(getattr(them.str, name)(pattern).tolist())
+            assert got == want, (name, pattern)
 
 
 def test_a_pattern_the_engine_refuses_is_a_value_error(firepanda: ModuleType) -> None:

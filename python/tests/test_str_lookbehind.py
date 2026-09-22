@@ -150,20 +150,22 @@ def test_the_anchored_pair_take_it_too(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_extract_takes_a_group_beside_one_but_not_inside_one(
+def test_extract_takes_a_group_beside_one_and_a_group_inside_one(
     firepanda: ModuleType,
 ) -> None:
-    """A group inside a lookbehind keeps what it matched upstream, and the
-    second machine this engine runs the body with carries no slots, so that
-    shape is refused rather than answered wrongly. A group beside one is
-    ordinary. The same pair of rules the lookahead has."""
+    """A group inside a lookbehind keeps what it matched upstream, and it keeps
+    it here too now that the second machine this engine runs the body with
+    carries slots of its own. It used to be refused rather than answered
+    wrongly. A group beside one was always ordinary. The same pair of rules the
+    lookahead has, and #985 moved both of them at once."""
     mine, them = made(firepanda), theirs()
     assert mine.str.extract("(?<=a)(b)").iloc[:, 0].tolist() == texts_of(
         them.str.extract("(?<=a)(b)")[0]
     )
     assert them.str.extract("(?<=(a))b")[0].tolist()[0] == "a"
-    with pytest.raises(NotImplementedError):
-        mine.str.extract("(?<=(a))b")
+    assert mine.str.extract("(?<=(a))b").iloc[:, 0].tolist() == texts_of(
+        them.str.extract("(?<=(a))b")[0]
+    )
 
 
 @needs_pandas

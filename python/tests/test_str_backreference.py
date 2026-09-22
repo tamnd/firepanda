@@ -212,21 +212,23 @@ def test_the_ignore_case_flag_reads_the_two_characters_lowered(
 
 
 @needs_pandas
-def test_a_lookaround_beside_one_is_still_a_gap(firepanda: ModuleType) -> None:
-    """The two constructs live on different engines here. A lookaround needs a
-    second search, which the engine that merges threads runs, and a
-    backreference is the one thing that engine cannot be handed. A pattern
-    holding both has nowhere to go, so it is refused rather than answered by
+def test_a_lookaround_beside_one_is_answered(firepanda: ModuleType) -> None:
+    """The two constructs used to live on different engines here. A lookaround
+    needs a second search, which the engine that merges threads runs, and a
+    backreference is the one thing that engine cannot be handed, so a pattern
+    holding both had nowhere to go and was refused rather than answered by
     whichever of the two was met first.
 
-    pandas answers it, so this is a gap as well, and it is the one thing this
-    slice took away from what the two before it could do.
+    #994 gave the engine that keeps a path a second stack to run the lookaround
+    on, so both constructs are served by that one engine and the pattern no
+    longer has to choose. pandas answered it all along, so what this row
+    measures is that the two agree.
     """
     mine, them = made(firepanda), theirs()
     assert mask_of(them.str.contains(r"(?=\w)(\w)\1"))[0] is True
-    with pytest.raises(NotImplementedError) as caught:
-        mine.str.contains(r"(?=\w)(\w)\1")
-    assert "lookaround beside a backreference" in str(caught.value)
+    assert without_the_missing(mine.str.contains(r"(?=\w)(\w)\1").tolist()) == (
+        without_the_missing(mask_of(them.str.contains(r"(?=\w)(\w)\1")))
+    )
 
 
 @needs_pandas

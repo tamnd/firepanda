@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the extension tests caught up with the engine that stopped refusing
+
+The Python suite went red on main five merges ago and stayed there. Nothing in it was wrong about the engine, it was wrong about the refusals: eight rows asserted that a pattern raises `NotImplementedError`, and the two changes that taught the engine to answer those patterns moved the Mojo tests beside them and left these behind. Six of the eight came from the change above and two from the one that kept the groups a lookaround matched, so the shape of the fix is the same in all eight, which is to ask pandas what the answer is and compare against it rather than to name a gap that has been closed.
+
+Three of the rows were called `test_a_lookaround_beside_one_is_still_a_gap` and it is not one, three were called `test_a_pattern_the_other_engine_would_run_is_not_implemented` and it is implemented, and two said `extract` takes a group beside a lookaround but not inside one and it takes both. They are renamed for what they now measure. The list the last three were guarding is empty: every construct pandas sends to Python's own engine is answered here.
+
 ### Added: a lookaround can stand beside a backreference, an atomic group or a conditional
 
 `(?=(a))a\1`, `(?=ab)(?>a+)b` and `(?=(a))(?(1)a|b)` are answered now. Each of those was refused with a sentence of its own, added by documents 95, 99 and 100, and all three said the same thing: a lookaround is a search inside a search, the machine was the only engine that could run the inner one, and a backreference, a cut and a test are the three shapes the machine cannot be handed, so a pattern holding both had nowhere to go.
