@@ -26,9 +26,8 @@ A pattern is set aside when firepanda's own compiler says the refusal is a gap
 here rather than something Python refuses too, and the reasons are tallied so
 that setting a pattern aside is a number somebody watches. The reasons are
 shorter than the RE2 ones and every one of them is this library falling short of
-an engine that reads the pattern: a lookaround beside one of the three
-constructs only the backtracker runs, a named character and a repeat counted
-higher than this compiler will unroll.
+an engine that reads the pattern: a named character and a repeat counted higher
+than this compiler will unroll.
 
 Usage:
     pixi run differential-regex-python

@@ -332,23 +332,21 @@ def test_re2_still_has_neither_of_them() raises:
     assert_equal(said("a*+b", ENGINE_RE2), "!RE2 has no possessive quantifier")
 
 
-def test_a_lookaround_beside_one_is_still_refused() raises:
-    """For the same reason a lookaround beside a backreference is. A lookaround
-    is a search inside a search and the backtracker has one stack to run it on,
-    so the program goes to the machine, and the machine cannot obey a cut. The
-    two refusals say which of the two things was in the way."""
-    assert_equal(
-        said("(?=a)(?>b)", ENGINE_PYTHON),
-        "!this engine has no lookaround beside an atomic group yet",
-    )
-    assert_equal(
-        said("(?<=a)b*+", ENGINE_PYTHON),
-        "!this engine has no lookaround beside an atomic group yet",
-    )
-    assert_equal(
-        said("(?=a)(b)\\1", ENGINE_PYTHON),
-        "!this engine has no lookaround beside a backreference yet",
-    )
+def test_a_lookaround_beside_one_runs_here_now() raises:
+    """It used to be refused, because a lookaround is a search inside a search
+    and the backtracker had one stack to run it on, so the program went to the
+    machine and the machine cannot obey a cut. The body is walked on the same
+    stack from the height it stood at now, so the two constructs sit beside
+    each other and a cut inside a body reaches back to its own mark and no
+    further. Document 120."""
+    assert_equal(said("(?=a)(?>a)b", ENGINE_PYTHON), "ok")
+    assert_equal(said("(?<=a)b*+", ENGINE_PYTHON), "ok")
+    assert_equal(said("(?=a)(a)\\1", ENGINE_PYTHON), "ok")
+    assert_true(hits("(?=ab)(?>a+)b", "ab"))
+    assert_false(hits("(?=aa)(?>a+)a", "aa"))
+    assert_true(hits("(?>a+)(?=b)", "aab"))
+    assert_true(hits("(?<=(?>a))b", "ab"))
+    assert_true(hits("(?<=a(?>b))c", "abc"))
 
 
 def test_the_router_sends_one_to_pythons_engine_only_on_the_flags_path() raises:

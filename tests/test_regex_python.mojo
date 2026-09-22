@@ -199,24 +199,19 @@ def test_everything_the_two_readings_share_is_still_shared() raises:
 
 def test_a_pattern_python_answers_and_re2_refuses_is_still_a_gap() raises:
     """The constructs are the part of the router that is not closed by this. A
-    lookahead beside a conditional group is a pattern pandas answers and this
-    library has no engine that can run both at once, and saying so is the whole
-    of what the flag is for.
+    named character is a pattern pandas answers and this library cannot resolve
+    the name in yet, and saying so is the whole of what the flag is for.
 
     The lookahead was this row's example until document 93 answered it, the
     lookbehind was until document 94 did, the backreference was until document
-    95 did, the atomic group was until document 99 did and the conditional
-    group was until document 100 did, which is every one of the five constructs
-    moving out of this list and leaving the three pairings behind."""
-    var program = compile_program(
-        parse_pattern("(?=a)(a)(?(1)b|c)"), ENGINE_PYTHON
-    )
+    95 did, the atomic group was until document 99 did, the conditional group
+    was until document 100 did and the three pairings of a lookaround with one
+    of the other three were until document 120 did, which is every construct
+    moving out of this list and leaving the table of names behind."""
+    var program = compile_program(parse_pattern("\\N{BULLET}"), ENGINE_PYTHON)
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(
-        program.problem,
-        "this engine has no lookaround beside a conditional group yet",
-    )
+    assert_equal(program.problem, "a named character is not resolved yet")
 
 
 def test_syntax_only_re2_refuses_is_not_refused_for_python() raises:

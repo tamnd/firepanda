@@ -241,11 +241,15 @@ def sweep(
         var slots = List[Int32]()
         for which in range(len(points)):
             # The column kernel picks the same way. A program holding a
-            # backreference is one neither the machine nor the cache can read,
-            # so it goes to the third engine, and the choosing is by the
-            # program rather than by the row. Document 95.
+            # backreference, an atomic group or a conditional is one neither
+            # the machine nor the cache can read, so it goes to the third
+            # engine, and the choosing is by the program rather than by the
+            # row. This used to read the backreference alone, which was wrong
+            # and was invisible: a cut or a test reached here only in a pattern
+            # the router sends to RE2, which refuses both, until document 120
+            # let one stand beside a lookaround. Documents 95, 99, 100 and 120.
             var ours: Bool
-            if program.refs:
+            if program.refs or program.cuts or program.asks:
                 ours = (
                     searched(
                         program, Span(points[which]), 0, machine, bounded, slots

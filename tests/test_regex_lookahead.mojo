@@ -32,7 +32,7 @@ from firepanda.kernel.regex.method import (
 )
 from firepanda.kernel.regex.parse import parse_pattern
 from firepanda.kernel.regex.count import counted_python_text
-from firepanda.kernel.regex.pike import matches_text
+from firepanda.kernel.regex.backtrack import held_text
 from firepanda.kernel.regex.program import compile_program
 from firepanda.kernel.regex.route import ENGINE_PYTHON, ENGINE_RE2
 
@@ -54,8 +54,14 @@ def said(pattern: StringSlice, engine: UInt8, captures: Bool = False) -> String:
     return String("!", program.problem)
 
 
-def hits(pattern: StringSlice, text: StringSlice) -> Bool:
+def hits(pattern: StringSlice, text: StringSlice) raises -> Bool:
     """Whether a pattern matches somewhere in a text, on Python's engine.
+
+    Through the door that picks between the two machines rather than through
+    the machine, because a lookaround standing beside a backreference, an
+    atomic group or a conditional is read by the backtracker and a lookaround
+    standing alone is read by the one next door. The door is the only caller
+    that can see both. Document 120.
 
     Args:
         pattern: The pattern.
@@ -63,9 +69,12 @@ def hits(pattern: StringSlice, text: StringSlice) -> Bool:
 
     Returns:
         True when it matches.
+
+    Raises:
+        Error: If the row ran out of steps, which no row in this file does.
     """
     var program = compile_program(parse_pattern(pattern), ENGINE_PYTHON)
-    return matches_text(program, text)
+    return held_text(program, text)
 
 
 def found(pattern: StringSlice, text: StringSlice) raises -> Int:
@@ -236,22 +245,54 @@ def test_a_routed_call_is_rewritten_the_way_an_argued_one_is() raises:
     assert_true(c.slots > 0)
 
 
-def test_the_constructs_that_are_still_refused_are_refused_the_same_way() raises:
-    """The other half of the branch above, which is that folding the two did not
-    change what a caller hears about a construct that has not landed. The
-    message names the construct rather than the rewrite, because the walk that
-    finds it reads the whole tree and the anchors are not part of it."""
-    var back = program_for(METHOD_MATCH, "(?=a)(b)\\1", 0, False, 14)
-    assert_false(back.ok)
-    assert_equal(
-        back.problem, "this engine has no lookaround beside a backreference yet"
-    )
+def test_the_pairings_that_used_to_be_refused_compile_now() raises:
+    """The other half of the branch above, which used to be that folding the two
+    did not change what a caller hears about a construct that has not landed.
+    There is nothing left for it to hear. A lookaround standing beside a
+    backreference, an atomic group or a conditional group is read by the
+    backtracker, which walks the body on the stack it already has. Both ways
+    into Python's engine are still rewritten the same way, so the anchor and
+    the slots a method needs are there on either. Document 120."""
+    var back = program_for(METHOD_MATCH, "(?=a)(a)\\1", 0, False, 14)
+    assert_true(back.ok)
+    assert_true(back.anchored)
     var atomic = program_for(METHOD_COUNT, "(?=a)(?>a)b", 0, False, 14)
-    assert_false(atomic.ok)
-    assert_equal(
-        atomic.problem,
-        "this engine has no lookaround beside an atomic group yet",
-    )
+    assert_true(atomic.ok)
+    assert_true(atomic.slots > 0)
+    var asked = program_for(METHOD_MATCH, "(?=(a))(?(1)a|b)", 0, False, 14)
+    assert_true(asked.ok)
+
+
+def test_a_lookahead_beside_a_backreference_runs() raises:
+    """The pairing the corpus has the most of. The body writes a group and the
+    text outside reads it back, so the walk that answered the assertion has to
+    leave what it matched behind it and the walk outside has to be able to undo
+    that when it takes another path."""
+    assert_true(hits("(?=(a))a\\1", "aa"))
+    assert_false(hits("(?=(a))a\\1", "ab"))
+    assert_true(hits("(a)(?=b)b\\1", "aba"))
+    assert_false(hits("(a)(?=b)b\\1", "abc"))
+    assert_true(hits("(?!(a))(b)\\2", "bb"))
+
+
+def test_a_lookahead_beside_an_atomic_group_runs() raises:
+    """A cut throws away every choice back to the mark, and the body of an
+    assertion is walked from the height the stack stood at, so a cut inside one
+    cannot reach past where the body began and a cut outside one cannot be
+    stopped by a body that has already been unwound."""
+    assert_true(hits("(?=ab)(?>a+)b", "ab"))
+    assert_false(hits("(?=aa)(?>a+)a", "aa"))
+    assert_true(hits("(?>a+)(?=b)", "aab"))
+
+
+def test_a_lookahead_beside_a_conditional_runs() raises:
+    """A conditional asks whether a group took part, and a group the body of an
+    assertion opened is one that did, so the two constructs meet in the slots
+    rather than anywhere else."""
+    assert_true(hits("(?=(a))(?(1)a|b)", "a"))
+    assert_false(hits("(?=(a))(?(1)a|b)", "b"))
+    assert_true(hits("((?=x)y)?(?(1)p|q)", "q"))
+    assert_true(hits("(?!(a))b(?(1)x|y)", "by"))
 
 
 def main() raises:

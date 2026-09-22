@@ -427,38 +427,37 @@ def test_re2_still_has_no_conditional_group() raises:
     )
 
 
-def test_a_lookaround_beside_one_is_still_refused() raises:
-    """For the reason a lookaround beside a backreference is. A lookaround is a
-    search inside a search and the backtracker has one stack to run it on, so
-    the program goes to the machine, and the machine cannot answer a test. The
-    sentence names the conditional, and a pattern holding a backreference as
-    well is named by the older construct, since a person told about either one
-    has been told what to take out."""
-    assert_equal(
-        said("(?=a)(a)?(?(1)b|c)", ENGINE_PYTHON),
-        "!this engine has no lookaround beside a conditional group yet",
-    )
-    assert_equal(
-        said("(?<=a)(b)?(?(1)c|d)", ENGINE_PYTHON),
-        "!this engine has no lookaround beside a conditional group yet",
-    )
-    assert_equal(
-        said("(?=a)(a)?(?(1)b|c)(d)\\2", ENGINE_PYTHON),
-        "!this engine has no lookaround beside a backreference yet",
-    )
+def test_a_lookaround_beside_one_runs_here_now() raises:
+    """It used to be refused. A lookaround is a search inside a search and the
+    backtracker had one stack to run it on, so the program went to the machine
+    and the machine cannot answer a test. The body is walked on the same stack
+    from the height it stood at now, so a conditional can stand either side of
+    an assertion and a group the body opened is a group the test can read.
+    Document 120."""
+    assert_equal(first("(?=a)(a)?(?(1)b|c)", "ab"), "ab@0")
+    assert_equal(first("(?=a)(a)?(?(1)b|c)", "ac"), "-")
+    assert_equal(first("(?<=a)(b)?(?(1)c|d)", "abc"), "bc@1")
+    assert_equal(first("(?<=a)(b)?(?(1)c|d)", "ad"), "d@1")
+    assert_equal(first("(?=a)(a)?(?(1)b|c)(d)\\2", "abdd"), "abdd@0")
+    assert_equal(first("(?=(a))(?(1)a|b)", "a"), "a@0")
+    assert_equal(first("(?=(a))(?(1)a|b)", "b"), "-")
+    assert_equal(first("((?=x)y)?(?(1)p|q)", "q"), "q@0")
+    assert_equal(first("(?<=(a))(?(1)b|c)", "ab"), "b@1")
+    assert_equal(first("(?<=(a))(?(1)b|c)", "zc"), "-")
 
 
 def test_a_conditional_inside_a_lookbehind_is_measured_for_width() raises:
     """A lookbehind has to know how wide it is, and a conditional is as wide as
     its arms when they agree and refused when they do not. That refusal is
-    upstream's and it is a `ValueError`, which is a different answer from the
-    gap the two of them together get, so the width is asked even though a
-    program that passes the width goes on to be refused for the other reason.
-    Document 100 section 7."""
-    assert_equal(
-        said("(?P<n>a)(?<=(?(1)b|c))", ENGINE_PYTHON),
-        "!this engine has no lookaround beside a conditional group yet",
-    )
+    upstream's and it is a `ValueError`. A body that passes the width used to be
+    turned down further along anyway, for the pairing, so the width walk was
+    kept only to tell the two buckets apart. The pairing is answered now, so the
+    walk is the whole of the difference and both sides of it are visible: a body
+    whose arms agree is a column and one whose arms do not is upstream's error.
+    Documents 100 section 7 and 120."""
+    assert_equal(said("(?P<n>a)(?<=(?(1)b|c))", ENGINE_PYTHON), "ok")
+    assert_equal(first("(?P<n>b)(?<=(?(1)b|c))", "b"), "b@0")
+    assert_equal(first("(?P<n>a)(?<=(?(1)b|c))", "a"), "-")
     assert_equal(
         said("(?P<n>a)(?<=(?(1)b|cc))", ENGINE_PYTHON),
         (
