@@ -533,7 +533,18 @@ def _queue(
                 word,
             )
     elif instruction.op == IN_LOOK:
-        var found = _looks(program, instruction.a, points, lead, position, word)
+        # The groups the body matched come back in `carry`, and they are put
+        # back on the way out for the same reason a save puts back what its
+        # slot held: this walk is one path through the program and the next
+        # path does not go through this lookaround. A body that fails writes
+        # nothing at all, and a caller with no slots copies nothing either way.
+        # Document 119.
+        var kept = List[Int32]()
+        for i in range(nslots):
+            kept.append(carry[i])
+        var found = _looks(
+            program, instruction.a, points, lead, position, word, nslots, carry
+        )
         if found == (instruction.b == 1):
             _queue(
                 program,
@@ -549,14 +560,19 @@ def _queue(
                 nslots,
                 word,
             )
+        for i in range(nslots):
+            carry[i] = kept[i]
     elif instruction.op == IN_BEHIND:
         # The width is packed above the sign because an instruction carries two
         # numbers and this asks for three. A body wider than the text behind the
         # thread has nowhere to start, which is a False without a machine being
         # run, and a negative lookbehind is happy with that.
         var back = position - (Int(instruction.b) >> 1)
+        var kept_behind = List[Int32]()
+        for i in range(nslots):
+            kept_behind.append(carry[i])
         var found = back >= 0 and _looks(
-            program, instruction.a, points, lead, back, word
+            program, instruction.a, points, lead, back, word, nslots, carry
         )
         if found == ((instruction.b & 1) == 1):
             _queue(
@@ -573,6 +589,8 @@ def _queue(
                 nslots,
                 word,
             )
+        for i in range(nslots):
+            carry[i] = kept_behind[i]
     elif instruction.op == IN_REF:
         # The thread dies, and the reason it dies rather than being answered is
         # the reason this machine is safe. Two threads standing at the same
@@ -656,6 +674,8 @@ def _looks(
     lead: Int,
     position: Int,
     word: Span[Int32, _],
+    nslots: Int,
+    mut carry: List[Int32],
 ) -> Bool:
     """Whether the body of a lookaround matches starting exactly here.
 
@@ -678,9 +698,23 @@ def _looks(
     not always the same number. Nothing in here knows which direction it is
     answering, and there is nothing it would do with knowing.
 
-    Nothing is carried back out. A group inside the body would keep what it
-    matched upstream and does not here, which is why the compiler refuses that
-    shape when the caller asked for captures rather than answering it wrongly.
+    The groups are carried back out, and that is the only thing the body leaves
+    behind. A group inside a lookaround keeps what it matched upstream, so
+    `re.match(r"(?=(a))a", "a").group(1)` is `a`, and the way it gets here is
+    that the body is run with a copy of the path's slots and the winning
+    thread's copy is written into `carry`. The winner is picked the way the
+    machine outside picks one: a thread reaching the end ends every thread
+    behind it in the list and the walk carries on, so a thread the pattern
+    preferred that is still reading can match further along and take the answer
+    off the one that got there first. That is the difference between `(ab)` and
+    `(a)` in `(?=(ab)|(a))ab`, where upstream sets the first group and a machine
+    that stopped at the first end it saw would set the second. Nothing is
+    written when the body does not match, which is what leaves a group under a
+    negative lookaround unset the way upstream leaves it. Document 119.
+
+    A caller with no slots is answered the moment a thread reaches the end,
+    since which thread got there is a question only the groups can tell apart
+    and that caller has not asked it.
 
     The buffers are allocated per call. A machine outside is built once per
     column for the good reason that a row should not pay for one, and the same
@@ -696,6 +730,11 @@ def _looks(
         lead: How many unreadable bytes stand in front of it.
         position: Where the body has to start matching.
         word: Python's word characters as ranges.
+        nslots: How many slots a thread carries, which is zero when the caller
+            asked a question with no use for them.
+        carry: The slots of the path that reached the lookaround, read in so
+            that a group opened before it is still set inside it, and written
+            back only when the body matches.
 
     Returns:
         True when the body matches.
@@ -703,46 +742,59 @@ def _looks(
     var stamp = List[Int32](length=program.sized(), fill=-1)
     var here = List[Int32]()
     var next = List[Int32]()
-    var slots = List[Int32]()
-    var carry = List[Int32]()
+    var slots_here = List[Int32]()
+    var slots_next = List[Int32]()
+    var inner = List[Int32]()
+    for i in range(nslots):
+        inner.append(carry[i])
     var length = lead + len(points)
     var at = position
     _queue(
         program,
         here,
-        slots,
-        carry,
+        slots_here,
+        inner,
         stamp,
         Int32(at),
         entry,
         points,
         lead,
         at,
-        0,
+        nslots,
         word,
     )
+    var won = False
+    var slots_won = List[Int32]()
     while True:
         var i = 0
         while i < len(here):
             var pc = here[i]
             var instruction = program.code[Int(pc)]
             if instruction.op == IN_MATCH:
-                return True
+                if nslots == 0:
+                    return True
+                won = True
+                slots_won.clear()
+                for k in range(nslots):
+                    slots_won.append(slots_here[i * nslots + k])
+                break
             if at < length and accepts(
                 instruction, program.ranges, point_at(points, lead, at)
             ):
+                for k in range(nslots):
+                    inner[k] = slots_here[i * nslots + k]
                 _queue(
                     program,
                     next,
-                    slots,
-                    carry,
+                    slots_next,
+                    inner,
                     stamp,
                     Int32(at + 1),
                     pc + 1,
                     points,
                     lead,
                     at + 1,
-                    0,
+                    nslots,
                     word,
                 )
             i += 1
@@ -753,10 +805,16 @@ def _looks(
             # time to learn what it already knew a few characters in. A
             # lookahead wins the same way whenever its body is short, which most
             # of them are.
-            return False
+            break
         swap(here, next)
+        swap(slots_here, slots_next)
         next.clear()
+        slots_next.clear()
         at += 1
+    if won:
+        for k in range(nslots):
+            carry[k] = slots_won[k]
+    return won
 
 
 struct Machine(Movable):

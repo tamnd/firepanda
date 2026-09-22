@@ -857,6 +857,33 @@ def _measured() -> List[String]:
         "[(?)]",
         "(?-)",
         "(?P<n>(?))",
+        # A capturing group inside a lookaround, written without a
+        # backreference beside it. The generated half opens a group inside an
+        # assertion only in order to refer to it afterwards, so every pattern
+        # of this shape in the corpus was also refused for holding a
+        # backreference beside a lookaround, and the construct landing changed
+        # no number at all. These are the same shape with nothing else in the
+        # way. Document 119.
+        "(?=(a))a",
+        "(?=(ab))a",
+        "(?=(a|ab))ab",
+        "(?=(ab)|(a))ab",
+        "(a)(?=(b))",
+        "(?!(a))(b)",
+        "(?=(a(?=(b))))ab",
+        "((?=(a))|b)a",
+        "(?=(a)*)aa",
+        "(?=((a)))a",
+        "(?=(a))(?=(b))?",
+        "(a)(?!(b))",
+        "(?=(\\d+))\\w",
+        "(?=(.)).",
+        "(?<=(a))b",
+        "(?<!(a))b",
+        "(?<=(a)(b))c",
+        "(?<=(ab))c",
+        "(?=(a{2}))aa",
+        "(?=(a))*",
     ]
     return out^
 
