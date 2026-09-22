@@ -363,7 +363,8 @@ def sql_support() -> List[Refusal]:
             "table-at",
             "AT on a table",
             (
-                "It reads a table as of a version or a timestamp, and firepanda"
+                "It reads and prints, and lowering turns it down, because it"
+                " asks for a table as of a version or a moment and firepanda"
                 " has no storage that keeps either one."
             ),
             SQL_ISSUE,

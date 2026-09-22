@@ -147,7 +147,6 @@ from .unsupported import (
     STATEMENT_LATER,
     STATEMENT_NEVER,
     SUBSCRIPT,
-    TABLE_AT,
     TABLE_MODIFIER,
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
@@ -5221,11 +5220,12 @@ struct Transform(Movable):
         var named = NO_NODE
         var sampled = NO_NODE
         var colon = NO_NODE
+        var at_clause = NO_NODE
         for kid in tree.children(node):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_AT):
-                raise _unsupported(tree, sql, kid, TABLE_AT)
+                at_clause = kid
             elif self._marked(tree, kid, _MARK_SAMPLE):
                 sampled = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
@@ -5234,6 +5234,22 @@ struct Transform(Movable):
                 name = kid
         if name == NO_NODE:
             raise _malformed(tree, sql, node, "a table with no name")
+        # `AtClause <- 'AT' Parens(AtSpecifier)` and `AtSpecifier <- AtUnit
+        # '=>' Expression`, so what follows the arrow is a whole expression and
+        # not a value: the corpus writes a call, a subquery and an arithmetic
+        # on a timestamp there. It is warmed before the sample is built so that
+        # a retry finds the arena the way it left it.
+        var at_value = NO_NODE
+        var at_unit = String()
+        if at_clause != NO_NODE:
+            var specifier = self._only(tree, self._only(tree, at_clause))
+            var asked = tree.children(specifier)
+            if len(asked) != 2:
+                raise _malformed(tree, sql, at_clause, "an AT with no value")
+            at_unit = String(_word(tree, sql, asked[0]))
+            at_value = asked[1]
+            var wanted: List[UInt32] = [at_value]
+            work.warm(wanted)
         return ast.table(
             self._name_parts(tree, sql, name),
             self._alias_name(tree, sql, named, colon),
@@ -5241,6 +5257,14 @@ struct Transform(Movable):
             sample=(
                 NO_NODE if sampled
                 == NO_NODE else self._sample(tree, sql, sampled, ast, work)
+            ),
+            at=(
+                NO_NODE if at_clause
+                == NO_NODE else ast.at_version(
+                    at_unit,
+                    work.value(at_value),
+                    tree.nodes[Int(at_clause)].token_start,
+                )
             ),
             token=tree.nodes[Int(node)].token_start,
         )

@@ -135,6 +135,7 @@ from .ast import (
     STMT_CTE,
     STMT_GROUP,
     STMT_ITEM,
+    STMT_AT,
     STMT_MODIFIERS,
     STMT_ORDER,
     STMT_PIVOT,
@@ -1566,6 +1567,30 @@ def _write_query(
         _write_sample(ast, sample, grammar, out)
 
 
+def _write_at(ast: Ast, node: UInt32, grammar: Grammar, mut out: String) raises:
+    """Appends an `AT` clause.
+
+    Args:
+        ast: The AST.
+        node: The index in the statement arena.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not an `AT`, or could not be printed.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null statement")
+    ref item = ast.stmts[Int(node)]
+    if item.kind != STMT_AT:
+        raise Error(String("an AT holding statement kind ", item.kind))
+    out += "AT ("
+    out += ast.text(item.payload)
+    out += " => "
+    _write(ast, item.a, grammar, out)
+    out += ")"
+
+
 def _write_sample(
     ast: Ast, node: UInt32, grammar: Grammar, mut out: String
 ) raises:
@@ -1884,6 +1909,11 @@ def _write_ref(
             raise Error("a table reference with no name parts in it")
         out += _names(ast, item.children, grammar)
         _write_alias(ast, item.payload, grammar, out)
+        # The grammar writes the alias, then the `AT`, then the sample, and
+        # they go back out in that order.
+        if item.b != NO_NODE:
+            out += " "
+            _write_at(ast, item.b, grammar, out)
         if item.a != NO_NODE:
             out += " "
             _write_sample(ast, item.a, grammar, out)
