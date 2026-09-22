@@ -1586,31 +1586,6 @@ def _refuse_construct(mut b: _Builder, what: String):
     b.give_up(String("RE2 has no ", what))
 
 
-def _holds_group(nodes: List[Node], node: Int32) -> Bool:
-    """Whether a subtree opens a bracket somebody could refer to.
-
-    Every `OP_SUBPATTERN` the parser leaves behind is a capturing one, because a
-    non capturing group is inlined, so this is a search for the node rather than
-    a search for a number on it.
-
-    Args:
-        nodes: The arena.
-        node: Where to start, which may be a whole list of siblings.
-
-    Returns:
-        True when there is a capturing group anywhere under it.
-    """
-    var at = node
-    while at >= 0:
-        var it = nodes[Int(at)]
-        if it.op == OP_SUBPATTERN:
-            return True
-        if _holds_group(nodes, it.first):
-            return True
-        at = it.next
-    return False
-
-
 def _holds_ref(nodes: List[Node], node: Int32) -> Bool:
     """Whether a subtree reads a group rather than only matching one.
 
@@ -1848,23 +1823,12 @@ def _check_node(mut b: _Builder, nodes: List[Node], node: Int32, budget: Int32):
                 )
             )
             return
-        if b.captures and _holds_group(nodes, it.first):
-            # A group inside a lookahead keeps what it matched upstream, so
-            # `re.match(r"(?=(a))a", "a").group(1)` is `a`. The body here is run
-            # by a second machine that carries no slots, so the parent thread
-            # would come back with the group empty, which is a wrong answer
-            # rather than a refusal. Only a caller who asked for captures can
-            # see the difference, which is why the question is asked of the
-            # builder rather than of the tree alone.
-            b.give_up(
-                String(
-                    "this engine has no capture inside a ",
-                    "lookbehind" if behind else "lookahead",
-                    " yet",
-                ),
-                True,
-            )
-            return
+        # A group inside a lookaround used to be refused here, because the body
+        # was run by a second machine that carried no slots and the thread
+        # outside would have come back with the group empty, which is a wrong
+        # answer rather than a refusal. The second machine carries them now and
+        # hands back what the arm the pattern preferred matched, so there is
+        # nothing left to ask the builder about. Document 119.
     if it.op == OP_GROUPREF:
         if not b.python:
             if it.b != 0:

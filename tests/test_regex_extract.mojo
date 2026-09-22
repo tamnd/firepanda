@@ -18,7 +18,7 @@ why it is here: `\\w` reads 138558 code points for this method and 63 for
 would answer this column correctly for every pattern made of ASCII.
 """
 
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_true
 
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.exec import MORSEL_ROWS
@@ -289,20 +289,77 @@ def test_a_named_group_is_a_group_that_also_has_a_label() raises:
     assert_equal(read(out[1], 0), "1")
 
 
-def test_a_pattern_python_refuses_is_refused_here_in_pythons_voice() raises:
-    """This method never reaches RE2, so a construct neither engine has yet is
-    a shortfall here rather than agreement with upstream, and the flag on the
-    refusal says so. The construct was a backreference until document 95
-    answered it, an atomic group until document 99 did and a conditional group
-    until document 100 did. What is left is the one this method cannot avoid
-    asking about, since a capture inside a lookahead is only refused for a
-    caller who wants the groups and this method is the one that wants them."""
-    var program = program_for(METHOD_EXTRACT, "(?=(a))a")
-    assert_false(program.ok)
-    assert_true(program.gap)
-    assert_equal(
-        program.problem, "this engine has no capture inside a lookahead yet"
+def test_a_group_inside_a_lookahead_is_pulled_out_like_any_other() raises:
+    """The construct this method could not avoid asking about, since a capture
+    inside a lookahead was refused only for a caller who wants the groups and
+    this method is the one that wants them. It was the last one left: a
+    backreference was refused until document 95, an atomic group until document
+    99, a conditional group until document 100 and this until document 119.
+
+    The body is wider than the match here on purpose. `(?=(ab))a` reads two
+    characters inside the lookahead, gives the position back and then matches
+    one, so the group holds `ab` where the match holds `a`, and a kernel that
+    quietly reported the text the match covered rather than the text the body
+    covered would answer the first row with the wrong letter count. The second
+    row is a row the body turns down, which is null everywhere."""
+    var program = compiled("(?=(ab))a")
+    var a = column(["ab", "ac"], [])
+    var out = text_extract_regex(a, program)
+    assert_equal(len(out), 1)
+    assert_equal(read(out[0], 0), "ab")
+    assert_equal(read(out[0], 1), "null")
+
+
+def test_the_groups_a_lookaround_leaves_are_the_ones_upstream_leaves() raises:
+    """Seven shapes, every answer read off a running CPython rather than
+    reasoned about, because the interesting half of this is which group is left
+    unset rather than which text lands in the ones that are set.
+
+    The first says the body is matched the way the pattern prefers rather than
+    the way that reads most, since `a|ab` takes its first arm and the match
+    that follows reads both characters anyway. The second is the same question
+    asked of two groups: the arm nobody took is null and stays null. The third
+    is a group each side of the assertion. The fourth is the rule for a
+    negative one, which is that a body that matched is a body the pattern threw
+    away, so its group is not set. The fifth is a lookahead inside a lookahead,
+    which is the nesting working by recursion. The sixth is the one that would
+    have caught a machine that wrote the body's slots into the path before
+    knowing the body matched: the arm holding the assertion fails at position
+    zero and the arm beside it wins, so group two is null rather than holding
+    what the failed body read. And the seventh is the other direction."""
+    var prefers = text_extract_regex(
+        column(["ab"], []), compiled("(?=(a|ab))ab")
     )
+    assert_equal(read(prefers[0], 0), "a")
+
+    var arms = text_extract_regex(
+        column(["ab"], []), compiled("(?=(ab)|(a))ab")
+    )
+    assert_equal(read(arms[0], 0), "ab")
+    assert_equal(read(arms[1], 0), "null")
+
+    var both = text_extract_regex(column(["ab"], []), compiled("(a)(?=(b))"))
+    assert_equal(read(both[0], 0), "a")
+    assert_equal(read(both[1], 0), "b")
+
+    var negative = text_extract_regex(
+        column(["cb"], []), compiled("(?!(a))(b)")
+    )
+    assert_equal(read(negative[0], 0), "null")
+    assert_equal(read(negative[1], 0), "b")
+
+    var nested = text_extract_regex(
+        column(["ab"], []), compiled("(?=(a(?=(b))))ab")
+    )
+    assert_equal(read(nested[0], 0), "a")
+    assert_equal(read(nested[1], 0), "b")
+
+    var dead = text_extract_regex(column(["ba"], []), compiled("((?=(a))|b)a"))
+    assert_equal(read(dead[0], 0), "b")
+    assert_equal(read(dead[1], 0), "null")
+
+    var behind = text_extract_regex(column(["ab"], []), compiled("(?<=(a))b"))
+    assert_equal(read(behind[0], 0), "a")
 
 
 def test_syntax_only_re2_refuses_is_compiled_rather_than_refused() raises:

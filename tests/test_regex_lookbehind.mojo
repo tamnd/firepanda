@@ -250,17 +250,18 @@ def test_the_scan_counts_characters_rather_than_bytes_behind_it() raises:
     assert_equal(subbed("(?<=.)x", "ßx"), "ß#")
 
 
-def test_a_group_inside_one_is_refused_only_when_somebody_asked_for_groups() raises:
-    """The same rule the lookahead has and for the same reason, which is that
-    the second machine carries no slots. The message names the direction so that
-    a caller with both in one pattern can tell which one it is about."""
+def test_a_group_inside_one_keeps_what_it_matched() raises:
+    """The same rule the lookahead has and by the same route, which is that the
+    second machine carries slots now and hands them back. Both directions are
+    one function and neither of them knows which one it is answering, so the
+    only way this could have gone differently is if the width arithmetic had
+    put the body somewhere else, and the row below is what says it has not."""
     assert_equal(said("(?<=(a))b", ENGINE_PYTHON, False), "ok")
-    assert_equal(
-        said("(?<=(a))b", ENGINE_PYTHON, True),
-        "!this engine has no capture inside a lookbehind yet",
-    )
+    assert_equal(said("(?<=(a))b", ENGINE_PYTHON, True), "ok")
     assert_equal(said("(?<=(?:a))b", ENGINE_PYTHON, True), "ok")
     assert_equal(said("(a)(?<=a)", ENGINE_PYTHON, True), "ok")
+    assert_true(hits("(?<=(a))b", "ab"))
+    assert_false(hits("(?<=(a))b", "cb"))
 
 
 def test_re2_still_refuses_the_construct_because_upstream_does() raises:

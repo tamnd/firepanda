@@ -167,17 +167,18 @@ def test_a_lookbehind_is_the_other_half_and_answers_too() raises:
     assert_false(hits("(?<=a)b", "cb"))
 
 
-def test_a_group_inside_one_is_refused_only_when_somebody_asked_for_groups() raises:
-    """A group inside a lookahead keeps what it matched upstream and the second
-    machine carries no slots, so the wrong answer is available only to a caller
-    who asked for the groups. Everybody else is answered."""
+def test_a_group_inside_one_keeps_what_it_matched() raises:
+    """A group inside a lookahead keeps what it matched upstream, and it keeps
+    it here, because the second machine carries slots and the thread outside
+    takes back the ones the winning arm wrote. It used to be refused for a
+    caller who asked for the groups and answered for everybody else, which is
+    the shape the assertions below had until document 119."""
     assert_equal(said("(?=(a))a", ENGINE_PYTHON, False), "ok")
-    assert_equal(
-        said("(?=(a))a", ENGINE_PYTHON, True),
-        "!this engine has no capture inside a lookahead yet",
-    )
+    assert_equal(said("(?=(a))a", ENGINE_PYTHON, True), "ok")
     assert_equal(said("(?=(?:a))a", ENGINE_PYTHON, True), "ok")
     assert_equal(said("(a)(?=b)", ENGINE_PYTHON, True), "ok")
+    assert_true(hits("(?=(a))a", "ab"))
+    assert_false(hits("(?=(a))a", "bb"))
 
 
 def test_a_negative_lookaround_with_nothing_in_it_never_matches() raises:
@@ -197,12 +198,13 @@ def test_a_negative_lookaround_with_nothing_in_it_never_matches() raises:
 def test_a_lookahead_still_travels_through_the_method_that_never_routes() raises:
     """`extract` is compiled for Python whatever the pattern holds, so it is the
     one method that reaches this without a flag in sight, and it is also the one
-    that asks for captures."""
+    that asks for captures. Both shapes compile since document 119, the group
+    outside the lookahead and the group inside it, and the second of them is
+    the one this method used to turn down."""
     var program = program_for(METHOD_EXTRACT, "(?=a)(b)", 0, False, 14)
     assert_true(program.ok)
-    var refused = program_for(METHOD_EXTRACT, "(?=(a))b", 0, False, 14)
-    assert_false(refused.ok)
-    assert_true(refused.gap)
+    var inside = program_for(METHOD_EXTRACT, "(?=(a))b", 0, False, 14)
+    assert_true(inside.ok)
 
 
 def test_an_unflagged_contains_is_still_a_question_for_the_router() raises:

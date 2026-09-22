@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a capturing group inside a lookaround keeps what it matched
+
+`str.extract(r"(?=(ab))a")` answers the column `ab` now, and every other shape of a group written inside an assertion answers too. This was the last thing document 93 left behind when the lookahead landed, and it was refused in the compiler rather than in the machine: a program was turned down when the caller had asked for groups and the tree held a capture underneath an assertion, which meant the four methods that never ask for groups were answering the construct all along and `str.extract` was the one raising.
+
+The nested walk carries slots now. It reads in the slots of the path that reached the assertion, so a group opened before it is still set inside it, it runs the body with a copy per thread, and it writes the winner's copy back into the caller's list only once the body has matched. That last part is where the rule for a negative form comes from without a case for it: `(?!(a))(b)` on `cb` leaves group one unset the way upstream does, because a body that matched under a negative assertion is a body the pattern threw away and a body that failed writes nothing. The two call sites put the path's slots back after the call, which is what a save already does, because a walk is one path through the program and the path beside it does not go through this assertion.
+
+Which thread wins is picked the way the machine outside picks one, which is not what the nested walk used to do. It used to return the moment any thread reached the end of the body, and that is correct for a question whose answer is yes or no and wrong for one with groups in it. `(?=(ab)|(a))ab` is the pattern that says so: at the position after `a` the second arm has finished and the first is a character short and still alive, and upstream sets group one. A walk that stopped there would set group two instead and raise nothing. A caller with no slots is still answered on the spot, since which thread won is a question only the groups answer.
+
+Seven shapes went into `tests/test_regex_extract.mojo` with every expectation read off a running CPython, and the corpus gained twenty patterns, because the generated half of it opens a group inside an assertion only in order to write a backreference to it afterwards, so thirty thousand patterns could not show this construct working on its own. All seven differentials are still at zero disagreements. Document 119.
+
 ## [0.8.22] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -53,6 +63,7 @@ It now runs once, in the compile budget job on Linux, so a break in `mojo precom
 ### Fixed: a feature filed under the release it missed
 
 `contains` over text and the bare `IN` that means it landed after v0.8.20 was tagged, and its entry went in under the 0.8.20 heading all the same, because two changes were being prepared at once and the release heading moved above an entry that was still unreleased. The entry is in 0.8.21 above, which is the release that actually carries it. Nothing about the code changed.
+
 ## [0.8.20] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).
