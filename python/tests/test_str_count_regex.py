@@ -210,24 +210,25 @@ def test_a_missing_row_stays_missing(firepanda: ModuleType) -> None:
     assert made(firepanda).str.count("abc").tolist()[-1] is None
 
 
-def test_a_pattern_the_other_engine_would_run_is_not_implemented(
+@needs_pandas
+def test_a_pattern_the_other_engine_would_run_is_answered(
     firepanda: ModuleType,
 ) -> None:
-    """An atomic group goes to Python's `re` upstream.
+    """An atomic group goes to Python's `re` upstream, and `count` answers it.
 
     Upstream routes `count` by the same rule it routes the other three by, so
-    the same patterns leave Arrow, and this engine has not got this one.
-
-    Both halves of the lookaround used to be on this list and so did the
-    backreference, and all three are answered now, which is what documents 93,
-    94 and 95 did. The route did not change, only what waits at the end of it,
-    and the lookahead in front of each pattern below is what routes it.
+    the same patterns leave Arrow. Both halves of the lookaround used to be on
+    this list and so did the backreference, documents 93, 94 and 95 answered
+    those, and #994 answered the atomic group, so the list is empty and the row
+    compares instead of refusing. The route did not change, only what waits at
+    the end of it, and the lookahead in front of each pattern below is what
+    routes it.
     """
-    mine = made(firepanda)
+    mine, them = made(firepanda), theirs()
     for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
-        with pytest.raises(NotImplementedError) as caught:
-            mine.str.count(pattern)
-        assert pattern in str(caught.value), pattern
+        got = without_the_missing(mine.str.count(pattern).tolist())
+        want = without_the_missing(them.str.count(pattern).tolist())
+        assert got == want, pattern
 
 
 def test_a_pattern_the_engine_refuses_is_a_value_error(firepanda: ModuleType) -> None:

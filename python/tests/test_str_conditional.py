@@ -276,23 +276,23 @@ def test_a_group_number_nothing_opens_is_refused_by_both(
 
 
 @needs_pandas
-def test_a_lookaround_beside_one_is_still_a_gap(firepanda: ModuleType) -> None:
+def test_a_lookaround_beside_one_is_answered(firepanda: ModuleType) -> None:
     """For the reason a lookaround beside a backreference is. A lookaround is a
-    search inside a search and the engine that keeps a path has one stack to run
-    it on, so a program holding one goes to the engine that merges threads, and
-    that engine cannot answer a test. A pattern holding both has nowhere to go.
+    search inside a search and the engine that keeps a path used to have one
+    stack to run it on, so a program holding one went to the engine that merges
+    threads, and that engine cannot answer a test. A pattern holding both had
+    nowhere to go.
 
-    pandas answers it, so this is a gap as well, and it is the one thing this
-    slice took away from what the flags path could do before it.
+    #994 gave the first engine a stack per search, so it runs both and the
+    pattern stays on it. pandas answered these all along, so the row compares
+    the two rather than naming a gap.
     """
     mine, them = made(firepanda), theirs()
     assert mask_of(them.str.contains(r"(?=a)(a)?(?(1)b|c)", flags=re.IGNORECASE))[0] is True
-    with pytest.raises(NotImplementedError) as caught:
-        mine.str.contains(r"(?=a)(a)?(?(1)b|c)", flags=re.IGNORECASE)
-    assert "lookaround beside a conditional group" in str(caught.value)
-    with pytest.raises(NotImplementedError) as second:
-        mine.str.contains(r"(?<=a)(b)?(?(1)c|d)", flags=re.IGNORECASE)
-    assert "lookaround beside a conditional group" in str(second.value)
+    for pattern in (r"(?=a)(a)?(?(1)b|c)", r"(?<=a)(b)?(?(1)c|d)"):
+        got = without_the_missing(mine.str.contains(pattern, flags=re.IGNORECASE).tolist())
+        want = without_the_missing(mask_of(them.str.contains(pattern, flags=re.IGNORECASE)))
+        assert got == want, pattern
 
 
 @needs_pandas

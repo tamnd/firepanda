@@ -224,18 +224,20 @@ def test_a_replacement_re2_cannot_read_is_a_value_error(firepanda: ModuleType) -
             theirs().str.replace(pattern, repl, regex=True)
 
 
-def test_a_pattern_the_other_engine_would_run_is_not_implemented(
+@needs_pandas
+def test_a_pattern_the_other_engine_would_run_is_answered(
     firepanda: ModuleType,
 ) -> None:
-    """An atomic group goes to Python's `re` upstream. Both halves of the
-    lookaround used to be on this list and so did the backreference, and all
-    three are answered now. Documents 93, 94 and 95. The lookahead in front of
-    each pattern below is what routes the call."""
-    mine = made(firepanda)
+    """An atomic group goes to Python's `re` upstream, and `replace` answers it.
+    Both halves of the lookaround used to be on this list and so did the
+    backreference, documents 93, 94 and 95 answered those, and #994 answered the
+    atomic group, so the list is empty. The lookahead in front of each pattern
+    below is what routes the call."""
+    mine, them = made(firepanda), theirs()
     for pattern in (r"(?=a)(?>a)b", r"(?=a)a*+b"):
-        with pytest.raises(NotImplementedError) as caught:
-            mine.str.replace(pattern, "#", regex=True)
-        assert pattern in str(caught.value), pattern
+        got = without_the_missing(mine.str.replace(pattern, "#", regex=True).tolist())
+        want = without_the_missing(them.str.replace(pattern, "#", regex=True).tolist())
+        assert got == want, pattern
 
 
 def test_a_pattern_the_engine_refuses_is_a_value_error(firepanda: ModuleType) -> None:
