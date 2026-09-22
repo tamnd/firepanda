@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.23] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release with two things the regex and SQL front ends were turning down and one thing the execution engine was doing the long way round. A group written inside a lookaround keeps what it matched, an `AT` clause on a table reads and prints, and a streaming group by on a text key stops rebuilding its running table once per chunk, which is where most of q36 was going.
+
 ### Added: a capturing group inside a lookaround keeps what it matched
 
 `str.extract(r"(?=(ab))a")` answers the column `ab` now, and every other shape of a group written inside an assertion answers too. This was the last thing document 93 left behind when the lookahead landed, and it was refused in the compiler rather than in the machine: a program was turned down when the caller had asked for groups and the tree held a capture underneath an assertion, which meant the four methods that never ask for groups were answering the construct all along and `str.extract` was the one raising.
@@ -27,6 +33,7 @@ What follows the arrow is a whole expression rather than a value. The corpus wri
 The reference keeps the clause the way it already kept a sample, which is a statement node hanging off a field of its own. That leaves the order of the three things a table reference can carry to the printer, since the grammar writes the alias first, then the `AT`, then the sample.
 
 Eight more corpus statements make the round trip.
+
 ### Changed: a group by on a text key keeps a group's ordinal across chunks
 
 A streaming group by has had two routes for a while. One looks each chunk's keys up in a map that outlives the chunk, so a group keeps the ordinal it was first given and absorbing a chunk is a fold into slots both sides already agree on. The other groups each chunk on its own, which gives it ordinals that mean something only inside that chunk, so it then stacks the running table on top of the chunk's table, groups the whole stack again, and gathers the key columns back out of it. The second is a copy, a rehash and a regather of the entire running table, once per chunk.
@@ -9087,7 +9094,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.22...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.23...HEAD
+[0.8.23]: https://github.com/tamnd/firepanda/releases/tag/v0.8.23
 [0.8.22]: https://github.com/tamnd/firepanda/releases/tag/v0.8.22
 [0.8.21]: https://github.com/tamnd/firepanda/releases/tag/v0.8.21
 [0.8.20]: https://github.com/tamnd/firepanda/releases/tag/v0.8.20
