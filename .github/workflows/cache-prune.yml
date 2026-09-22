@@ -1,0 +1,97 @@
+# The compiler cache from #959 is keyed on the commit and restored by prefix, so
+# every merge writes about twenty new entries and the ones they replace are never
+# read again. Nothing deletes them, and the repository's cache allowance is ten
+# gigabytes, so they pile up until GitHub starts evicting to make room.
+#
+# What it evicts is the least recently used entry, which is not the same as the
+# useless one. The entries this workflow deletes are useless by construction and
+# the ones eviction reaches for are whichever platform has been quiet for a day,
+# so an allowance spent on superseded entries is paid for by some shard going
+# cold on the next run. That is worth between three and nine times on a test file,
+# measured in `.github/actions/setup-pixi/action.yml`.
+#
+# It was found at 10.85 GB against the 10 GB allowance, with 3.59 of that in
+# entries that had already been replaced.
+#
+# The rule is one entry per key family, the newest, where a family is the key with
+# the trailing commit sha taken off and the ref it belongs to left on. A job
+# restoring by prefix takes the newest match anyway, so the rest can only ever
+# occupy space. Keys with no sha on the end are their own family, which keeps this
+# from collapsing two unrelated entries that happen to share a name across refs.
+name: Cache prune
+
+on:
+  # After CI, because that is what writes them. The run this reacts to has
+  # finished, so its own post-job saves are already in and get counted.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  # A backstop, for the weeks nothing merges and the dependabot runs still write.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time. Two of these racing would both read the same list and both try
+  # to delete the same entries, and the loser logs a string of failures for
+  # entries that are already gone.
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Delete superseded cache entries
+    runs-on: ubuntu-latest
+    permissions:
+      # Listing and deleting caches is the Actions API rather than the contents
+      # API, and deleting needs write. This is the only thing in the repository
+      # that asks for it.
+      actions: write
+    steps:
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh cache list -R "$REPO" --limit 100 \
+            --json id,key,ref,sizeInBytes,createdAt > caches.json
+          python3 - <<'PY' > to_delete.txt
+          import json, re, sys
+          entries = json.load(open("caches.json"))
+          entries.sort(key=lambda e: e["createdAt"], reverse=True)
+          total = sum(e["sizeInBytes"] for e in entries)
+          print(f"{len(entries)} entries, {total / 1e9:.2f} GB of the 10 GB allowance", file=sys.stderr)
+          seen = set()
+          for e in entries:
+              # The compiler cache keys end in the commit that wrote them. Take
+              # that off and everything before it names the thing being cached:
+              # operating system, architecture, pixi environment and cache slot.
+              stripped = re.sub(r"-[0-9a-f]{40}$", "", e["key"])
+              family = (e["ref"], stripped)
+              if family in seen:
+                  print(f'{e["id"]}\t{e["sizeInBytes"]}\t{e["key"]}')
+              else:
+                  seen.add(family)
+          PY
+          if [ ! -s to_delete.txt ]; then
+            echo "nothing superseded" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          freed=0
+          while IFS=$'\t' read -r id size key; do
+            if gh cache delete "$id" -R "$REPO" > /dev/null 2>&1; then
+              freed=$((freed + size))
+              echo "deleted $key"
+            else
+              # Not a failure. Another run of this, or GitHub's own eviction, can
+              # take an entry between the list and the delete, and the outcome
+              # either way is that it is gone.
+              echo "already gone $key"
+            fi
+          done < to_delete.txt
+          {
+            echo "Deleted $(wc -l < to_delete.txt) superseded entries, $((freed / 1000000)) MB."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
