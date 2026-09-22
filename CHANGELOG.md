@@ -8,15 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Changed: a dotted name says which position turned it down
+## [0.8.26] - 2026-09-23
 
-Twenty five places in the grammar take a plain name, and all twenty five used to refuse a dotted one with the same six words, "a dotted name here". In a statement with several names in it that is true and no help at all, because the reader is left to work out which of the names was the one. Every caller knows which position it is and the refusal table cannot, so the caller says it now and the message reads "a dotted name where a column USING names goes", or where the name of a WITH entry goes, or where a column alias goes.
+Built against Mojo 1.0.0 (ed45d567).
 
-The advice is rewritten too, since the old sentence said only that a plain name fits here without saying what to do. It now says a name with dots in it qualifies one thing by another, that this position takes the name of one thing, and to write the last part on its own.
+A patch release with one thing the SQL front end stopped paying for and one thing it stopped being vague about. The grammar, the jump table built from it and the function catalog are read out of generated tables, are never written to afterwards, and were being built and thrown away on every statement, which was two of the three milliseconds a statement cost before it touched a row. They can be held now. A narrow statement went from about three milliseconds to about two tenths of one.
 
-Naming all twenty five turned up something worth knowing, which is that three of them can be reached. `EXCLUDE`, `REPLACE` and the left side of a `RENAME` take a node the grammar will put a dot in, and everywhere else the dot is a syntax error one step earlier, so the query never arrives. That agrees with the corpus: all thirty four statements that hit this refusal are `EXCLUDE` or `RENAME`, twenty four and ten. So the thing to build, when `dotted-name` is answered rather than named, is a star modifier that keeps a run of name parts, which is the change a composed collation already got.
+The other change is a refusal message. Twenty five positions in the grammar turned a dotted name down with the same six words, and each of them now says which position it was.
 
-Nothing is accepted that was not accepted before. This is the message and not the rule.
+This release also files four entries that belong to 0.8.25. They were written before that release and left above its heading rather than under it, so the section read as a summary with nothing beneath it while the entries sat in Unreleased. The tag is unchanged and so is what shipped in it.
+
 ### Changed: the three tables the SQL front end reads can now be held instead of rebuilt per statement
 
 `firepanda.sql.run` built a `Grammar`, a `Transform` over it and a `Registry` on every call, used them once and threw them away. None of the three depends on the statement, the catalog or the data. They are read out of the generated tables at construction and only looked at afterwards, which is what makes rebuilding them per call pure overhead rather than a correctness matter.
@@ -28,6 +29,44 @@ Timed on their own they are 0.64 ms, 0.50 ms and 0.90 ms, so a little over two m
 `run(sql, catalog)` keeps working exactly as it did and is now a one line call into `Dialect().run(sql, catalog)`, so nothing calling it has to change and the seam test stays the seam test. Anything running a second statement should hold a `Dialect` instead.
 
 The migration is for `firepanda.sql.lower`, which is exported and now takes a fifth argument. A call written `lower(ast, statement, catalog, grammar)` becomes `lower(ast, statement, catalog, grammar, registry)`, and a caller with no reason to hold one can pass `Registry()` at the call site for the behaviour it had before.
+
+### Changed: a dotted name says which position turned it down
+
+Twenty five places in the grammar take a plain name, and all twenty five used to refuse a dotted one with the same six words, "a dotted name here". In a statement with several names in it that is true and no help at all, because the reader is left to work out which of the names was the one. Every caller knows which position it is and the refusal table cannot, so the caller says it now and the message reads "a dotted name where a column USING names goes", or where the name of a WITH entry goes, or where a column alias goes.
+
+The advice is rewritten too, since the old sentence said only that a plain name fits here without saying what to do. It now says a name with dots in it qualifies one thing by another, that this position takes the name of one thing, and to write the last part on its own.
+
+Naming all twenty five turned up something worth knowing, which is that three of them can be reached. `EXCLUDE`, `REPLACE` and the left side of a `RENAME` take a node the grammar will put a dot in, and everywhere else the dot is a syntax error one step earlier, so the query never arrives. That agrees with the corpus: all thirty four statements that hit this refusal are `EXCLUDE` or `RENAME`, twenty four and ten. So the thing to build, when `dotted-name` is answered rather than named, is a star modifier that keeps a run of name parts, which is the change a composed collation already got.
+
+Nothing is accepted that was not accepted before. This is the message and not the rule.
+
+## [0.8.25] - 2026-09-23
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release, and most of it is about the pipeline rather than about the engine. One construct the regular expression engine can now hold beside a lookaround, one shape of list the parser now refuses by name instead of by accident, and two fixes to a pipeline that had stopped telling the truth: the Python suite had been red on main for five merges asserting refusals the engine had stopped making, and the Actions cache had been over its allowance for long enough that it was evicting entries somebody was about to need.
+
+Neither of those two is a change to what the library does. Both are changes to whether anybody would find out if it broke, which is the same thing one step removed.
+
+### Added: a lookaround can stand beside a backreference, an atomic group or a conditional
+
+`(?=(a))a\1`, `(?=ab)(?>a+)b` and `(?=(a))(?(1)a|b)` are answered now. Each of those was refused with a sentence of its own, added by documents 95, 99 and 100, and all three said the same thing: a lookaround is a search inside a search, the machine was the only engine that could run the inner one, and a backreference, a cut and a test are the three shapes the machine cannot be handed, so a pattern holding both had nowhere to go.
+
+The backtracker runs the inner search itself now, on the stack it already has. The walk was split in two and given the height the stack stood at when the body started, which is the same way an atomic group already knows which choices are its own, and the body is ordinary instructions so it is the same walk. On the way out the stack is unwound to that height and every save above it is paid, so a body that matched and a body that failed leave the same nothing behind, and the caller keeps the body's groups only when a positive assertion was taken. That is document 119's rule read backwards rather than a case for the negative form, and the groups it keeps are pushed back as saves to be put back the way any other slot is.
+
+The one place the bitmap's sentence is false is between two askings of the same body. A body that matched marked every pair on the way, and the next question asked of it at the same position would read those marks as an answer already found. The first version of this turned the bitmap off for the whole program and the corpus said no: seven patterns of thirty thousand ran out of steps, all of them an assertion under a repeat, because a star over something that reads nothing is a loop and the bitmap was what stopped it. So the body forgets its own marks instead, using the list the stamp already keeps for a program that changes a slot, and forgetting too much of that list is free.
+
+A lookaround standing alone is still handed straight back to the machine, so no pattern that works today changes engines. The corpus gained 24 hand written patterns, because the generator writes the first pairing in quantity, the other two almost never, and none of them with the second construct inside the body. Held out falls from 230 to 171 on `str.contains`, `str.count` and `str.replace`, from 124 to 65 on `str.match` and `str.fullmatch`, and from 474 to 387 on `str.findall`, which is exactly the 59 and 87 those four documents said the pairings were worth.
+
+It also found a line in a comparison driver. `tests/differential/regex_match.mojo` picked the engine with `if program.refs` where the column kernel picks with `refs or cuts or asks`, so a program holding a cut or a test went to the machine that cannot obey either. That had been wrong since document 99 and was unreachable, because such a program arrives there only beside a lookaround. All seven differentials are at zero disagreements. Document 120.
+
+### Changed: a list written out is refused by name
+
+`SELECT [1, 2]` and `SELECT ARRAY[1, 2]` stop with a message that names the spelling, says why, gives the position and links the issue, the way every other thing the SQL front end turns down does. What they used to get was the message for an expression firepanda has no case for at all, which carries none of that and reads as if the shape had been lost track of rather than known about. The shape was never lost: it reads, it prints, it round trips, and the only stage with nothing to say about it was lowering.
+
+Both spellings land on the one node so both get the one refusal, and an empty list is the same node with nothing in it and stops the same way rather than folding into a null. Of the 71438 statements in DuckDB's corpus, 35047 get as far as an AST and 2861 of those hold a list written out, so this is the largest single shape that was falling into the unnamed bucket.
+
+What is missing is the constant and not the type. `LIST` is a type firepanda has, a column can hold one, and the nested array is already there. A literal in the plan is one scalar and a list is a value with a length, so building one is the piece of work this points at.
 
 ### Fixed: the extension tests caught up with the engine that stopped refusing
 
@@ -42,34 +81,6 @@ The compiler cache is keyed on the commit that wrote it and restored by prefix, 
 Going over the allowance is not free and it is not self correcting in the direction you want. GitHub evicts the least recently used entry, which is not the same as the useless one, so the space held by a superseded entry is paid for by whichever platform has been quiet for a day going cold on its next run. That is worth between three and nine times on a test file.
 
 A job at the end of CI deletes them, keeping the newest entry per key family, where a family is the key with the trailing commit sha taken off and the ref it belongs to left on. A job restoring by prefix takes the newest match anyway, so the rest can only ever occupy space. It runs on a merge and it needs the jobs that write the entries, so the moment it prunes at is the moment the writing finished, and it runs whether or not they went green because an entry a red run superseded is superseded either way.
-
-### Changed: a list written out is refused by name
-
-`SELECT [1, 2]` and `SELECT ARRAY[1, 2]` stop with a message that names the spelling, says why, gives the position and links the issue, the way every other thing the SQL front end turns down does. What they used to get was the message for an expression firepanda has no case for at all, which carries none of that and reads as if the shape had been lost track of rather than known about. The shape was never lost: it reads, it prints, it round trips, and the only stage with nothing to say about it was lowering.
-
-Both spellings land on the one node so both get the one refusal, and an empty list is the same node with nothing in it and stops the same way rather than folding into a null. Of the 71438 statements in DuckDB's corpus, 35047 get as far as an AST and 2861 of those hold a list written out, so this is the largest single shape that was falling into the unnamed bucket.
-
-What is missing is the constant and not the type. `LIST` is a type firepanda has, a column can hold one, and the nested array is already there. A literal in the plan is one scalar and a list is a value with a length, so building one is the piece of work this points at.
-
-### Added: a lookaround can stand beside a backreference, an atomic group or a conditional
-
-`(?=(a))a\1`, `(?=ab)(?>a+)b` and `(?=(a))(?(1)a|b)` are answered now. Each of those was refused with a sentence of its own, added by documents 95, 99 and 100, and all three said the same thing: a lookaround is a search inside a search, the machine was the only engine that could run the inner one, and a backreference, a cut and a test are the three shapes the machine cannot be handed, so a pattern holding both had nowhere to go.
-
-The backtracker runs the inner search itself now, on the stack it already has. The walk was split in two and given the height the stack stood at when the body started, which is the same way an atomic group already knows which choices are its own, and the body is ordinary instructions so it is the same walk. On the way out the stack is unwound to that height and every save above it is paid, so a body that matched and a body that failed leave the same nothing behind, and the caller keeps the body's groups only when a positive assertion was taken. That is document 119's rule read backwards rather than a case for the negative form, and the groups it keeps are pushed back as saves to be put back the way any other slot is.
-
-The one place the bitmap's sentence is false is between two askings of the same body. A body that matched marked every pair on the way, and the next question asked of it at the same position would read those marks as an answer already found. The first version of this turned the bitmap off for the whole program and the corpus said no: seven patterns of thirty thousand ran out of steps, all of them an assertion under a repeat, because a star over something that reads nothing is a loop and the bitmap was what stopped it. So the body forgets its own marks instead, using the list the stamp already keeps for a program that changes a slot, and forgetting too much of that list is free.
-
-A lookaround standing alone is still handed straight back to the machine, so no pattern that works today changes engines. The corpus gained 24 hand written patterns, because the generator writes the first pairing in quantity, the other two almost never, and none of them with the second construct inside the body. Held out falls from 230 to 171 on `str.contains`, `str.count` and `str.replace`, from 124 to 65 on `str.match` and `str.fullmatch`, and from 474 to 387 on `str.findall`, which is exactly the 59 and 87 those four documents said the pairings were worth.
-
-It also found a line in a comparison driver. `tests/differential/regex_match.mojo` picked the engine with `if program.refs` where the column kernel picks with `refs or cuts or asks`, so a program holding a cut or a test went to the machine that cannot obey either. That had been wrong since document 99 and was unreachable, because such a program arrives there only beside a lookaround. All seven differentials are at zero disagreements. Document 120.
-
-## [0.8.25] - 2026-09-23
-
-Built against Mojo 1.0.0 (ed45d567).
-
-A patch release, and most of it is about the pipeline rather than about the engine. One construct the regular expression engine can now hold beside a lookaround, one shape of list the parser now refuses by name instead of by accident, and two fixes to a pipeline that had stopped telling the truth: the Python suite had been red on main for five merges asserting refusals the engine had stopped making, and the Actions cache had been over its allowance for long enough that it was evicting entries somebody was about to need.
-
-Neither of those two is a change to what the library does. Both are changes to whether anybody would find out if it broke, which is the same thing one step removed.
 
 ## [0.8.24] - 2026-09-22
 
@@ -9192,6 +9203,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
 [Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.24...HEAD
+[0.8.26]: https://github.com/tamnd/firepanda/releases/tag/v0.8.26
+[0.8.25]: https://github.com/tamnd/firepanda/releases/tag/v0.8.25
 [0.8.24]: https://github.com/tamnd/firepanda/releases/tag/v0.8.24
 [0.8.23]: https://github.com/tamnd/firepanda/releases/tag/v0.8.23
 [0.8.22]: https://github.com/tamnd/firepanda/releases/tag/v0.8.22
