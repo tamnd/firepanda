@@ -36,6 +36,7 @@ from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import Ast
 from firepanda.sql.catalog import Catalog
 from firepanda.sql.plan import lower
+from firepanda.sql.registry import Registry
 
 
 def _schema() -> Schema:
@@ -129,7 +130,7 @@ def _plan(sql: StringSlice) raises -> String:
     var rules = Transform(grammar)
     var ast = Ast()
     var node = rules.parse_statement(sql, grammar, ast)
-    var out = lower(ast, node, _catalog(), grammar)
+    var out = lower(ast, node, _catalog(), grammar, Registry())
     _ = bind(out.plan, out.root, out.sources)
     return explain(out.plan, out.root)
 
@@ -990,7 +991,7 @@ def test_a_values_column_is_the_type_that_holds_every_row() raises:
     var rules = Transform(grammar)
     var ast = Ast()
     var node = rules.parse_statement("VALUES (1), (NULL)", grammar, ast)
-    var out = lower(ast, node, _catalog(), grammar)
+    var out = lower(ast, node, _catalog(), grammar, Registry())
     var schema = bind(out.plan, out.root, out.sources)
     assert_equal(len(schema), 1, "one column")
     assert_equal(schema[0].name, "col0", "named the way DuckDB names it")
@@ -1062,7 +1063,7 @@ def test_the_two_arms_of_a_set_operation_bind_against_their_own_tables() raises:
     var node = rules.parse_statement(
         "SELECT a FROM t UNION SELECT b FROM t", grammar, ast
     )
-    var out = lower(ast, node, _catalog(), grammar)
+    var out = lower(ast, node, _catalog(), grammar, Registry())
     assert_equal(len(out.sources), 2, "one schema for each arm")
     var schema = bind(out.plan, out.root, out.sources)
     assert_equal(len(schema), 1, "one column out")

@@ -201,7 +201,7 @@ from .resolve import (
     score,
 )
 from .result import result_type
-from .run import run
+from .run import Dialect, run
 from .star import (
     NOT_REPLACED,
     Renaming,
