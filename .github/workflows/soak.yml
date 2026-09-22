@@ -45,9 +45,10 @@ jobs:
 
       - uses: ./.github/actions/setup-pixi
 
-      - name: Build
-        run: pixi run build
-
+      # No precompile step. `tools/run_fuzz.sh` runs each fuzzer with
+      # `mojo run -I .` against the sources, so the package this used to produce
+      # was never opened here either. .github/workflows/ci.yml has the long
+      # version.
       - name: Differential fuzz
         env:
           SECONDS_PER_FUZZER: ${{ inputs.seconds || '1800' }}

@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the test jobs stopped precompiling a package nothing opens
+
+`pixi run build` precompiles the library into `build/firepanda.mojoc`, and every job in the pipeline ran it before doing anything else. Nothing in this repository reads the result. The test runner compiles each file with `mojo run -I .` against the sources, `tools/build_extension.sh` builds the shared library the same way, and `tools/run_fuzz.sh` runs the fuzzers the same way. The package is a product for Mojo callers outside the repository, not an input to anything inside it.
+
+The workflow already recorded why handing it to the test files would not help: generics are instantiated into whichever program uses them, so `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds where `mojo run -I .` takes 193, with all 422 tests passing either way. The step survived anyway, and on the last merge it cost between fifty seven and eighty nine seconds in each of thirty jobs. In the two shards that hold no expensive file it was longer than the tests that followed it, with shard six spending eighty one seconds precompiling and sixty four running.
+
+It now runs once, in the compile budget job on Linux, so that a break in `mojo precompile` is still a break somebody hears about. `pixi run test` no longer depends on it either, which is what made it show up in every job in the first place.
+
 ## [0.8.20] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).

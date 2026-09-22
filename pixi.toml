@@ -77,13 +77,25 @@ differential = { features = ["dev", "differential"] }
 # The mkdir is not decoration. `mojo precompile` will not create the directory
 # its output path names, it fails with "No such file or directory", and a fresh
 # checkout has no build/ because build/ is ignored.
-# `inputs` and `outputs` so that `pixi run test`, which depends on this, does not
-# precompile a second time immediately after the workflow's own build step has
-# just done it. That was thirty six seconds on every one of the ten test shards.
+#
+# Nothing in this repository reads what it writes. The test runner compiles each
+# file with `mojo run -I .` against the sources, `tools/build_extension.sh`
+# builds the shared library with `-I "$root"`, and the differential builds have
+# their own tasks. The package is a product for Mojo callers outside the
+# repository rather than an input to anything inside it, and the comment in
+# .github/workflows/ci.yml says why handing it to the test files would not help
+# anyway: generics are instantiated into whichever program uses them, so
+# `mojo run -I build` is slower than `mojo run -I .`, not faster.
+#
+# So `test` no longer depends on it. That dependency was costing between fifty
+# seven and eighty nine seconds in every job of every run, which on the merge
+# matrix is thirty jobs, and in the two shards that hold no expensive file it was
+# longer than the tests it preceded: shard six spent eighty one seconds
+# precompiling and sixty four running.
 build = { cmd = "mkdir -p build && mojo precompile firepanda -o build/firepanda.mojoc", inputs = [
   "firepanda/**",
 ], outputs = ["build/firepanda.mojoc"] }
-test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
+test = "bash tools/run_tests.sh"
 
 # The same suite without the fifty one files that cost a minute or more. Those
 # fifty one are seventy four per cent of the run, so this is two files in three
@@ -91,7 +103,7 @@ test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
 # they are writing code rather than for deciding whether a branch is good. The
 # runner says which files it left out, so a green one here is never mistaken for
 # a green `pixi run test`.
-test-fast = { cmd = "bash tools/run_tests.sh --fast", depends-on = ["build"] }
+test-fast = "bash tools/run_tests.sh --fast"
 format = "mojo format firepanda tests benchmarks tools"
 
 # Regenerates `tools/test_costs.txt`, which is how the workflow's ten test
@@ -104,7 +116,7 @@ format = "mojo format firepanda tests benchmarks tools"
 # workstation as on a four core runner, so a table measured here balances the
 # runner badly: one measured on sixteen cores put the shards within half a per
 # cent of each other there and at 423 against 622 seconds on the runner.
-test-costs = { cmd = "FIREPANDA_TEST_WRITE_COSTS=tools/test_costs.txt bash tools/run_tests.sh", depends-on = ["build"] }
+test-costs = "FIREPANDA_TEST_WRITE_COSTS=tools/test_costs.txt bash tools/run_tests.sh"
 
 # The CPython extension, and everything it needs, in one directory that points at
 # nothing outside itself. Separate from `build` because it is a different output
