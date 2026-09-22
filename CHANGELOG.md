@@ -8,13 +8,33 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.21] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. One feature that shipped after the last tag and was filed under it by mistake, and the pipeline losing a step that had been compiling something nobody read.
+
+### Added: contains runs over text, and so does the IN that means it
+
+`contains(a, b)` asks whether `b` appears in `a`. Over text that is `strpos(a, b) > 0`, and it is that exactly: a null on either side makes the search null and the comparison null with it, which is what DuckDB answers. So lowering builds the search and the comparison rather than asking for a kernel by that name, and nothing new was needed in the engine.
+
+`a IN b` with no parentheses is the same call with the arguments the other way round, which is how DuckDB reads the spelling and what it names the column, so that form runs now too. `a NOT IN b` is the search negated.
+
+The other reading of `contains` is over a list or a map. Both of those bind as text here and are turned down as text, which is the right answer until there is a list type to answer about.
+
+A call with the wrong number of arguments says `contains`, because the count is wrong in the call the query wrote and not in the one lowering built out of it. A call with the wrong argument types still says `instr`, which is the same thing `strpos` and `POSITION` have always done.
+
 ### Changed: the test jobs stopped precompiling a package nothing opens
 
 `pixi run build` precompiles the library into `build/firepanda.mojoc`, and every job in the pipeline ran it before doing anything else. Nothing in this repository reads the result. The test runner compiles each file with `mojo run -I .` against the sources, `tools/build_extension.sh` builds the shared library the same way, and `tools/run_fuzz.sh` runs the fuzzers the same way. The package is a product for Mojo callers outside the repository, not an input to anything inside it.
 
-The workflow already recorded why handing it to the test files would not help: generics are instantiated into whichever program uses them, so `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds where `mojo run -I .` takes 193, with all 422 tests passing either way. The step survived anyway, and on the last merge it cost between fifty seven and eighty nine seconds in each of thirty jobs. In the two shards that hold no expensive file it was longer than the tests that followed it, with shard six spending eighty one seconds precompiling and sixty four running.
+The workflow already recorded why handing it to the test files would not help: generics are instantiated into whichever program uses them, so `mojo run -I build tests/test_sql_run.mojo` takes 206 seconds where `mojo run -I .` takes 193, with all 422 tests passing either way. The step survived the finding anyway, and on the merge before this one it cost between fifty seven and eighty nine seconds in each of thirty jobs.
 
-It now runs once, in the compile budget job on Linux, so that a break in `mojo precompile` is still a break somebody hears about. `pixi run test` no longer depends on it either, which is what made it show up in every job in the first place.
+It now runs once, in the compile budget job on Linux, so a break in `mojo precompile` is still a break somebody hears about. Merge to merge, on the full three platform matrix and with both commits touching no Mojo source, the pipeline went from 8718 runner seconds and an 887 second longest job to 5337 and 549.
+
+### Fixed: a feature filed under the release it missed
+
+`contains` over text and the bare `IN` that means it landed after v0.8.20 was tagged, and its entry went in under the 0.8.20 heading all the same, because two changes were being prepared at once and the release heading moved above an entry that was still unreleased. The entry is in 0.8.21 above, which is the release that actually carries it. Nothing about the code changed.
 
 ## [0.8.20] - 2026-09-22
 
@@ -28,16 +48,6 @@ A patch release. The entry that matters is the version number itself, and one mo
 
 All three read 0.8.20 now, and the spec job compares them on every run. Nothing in the build derives any of them from the tag, so a check is the only thing that would notice, and the note in `version.mojo` had already predicted what happens without one.
 
-
-### Added: contains runs over text, and so does the IN that means it
-
-`contains(a, b)` asks whether `b` appears in `a`. Over text that is `strpos(a, b) > 0`, and it is that exactly: a null on either side makes the search null and the comparison null with it, which is what DuckDB answers. So lowering builds the search and the comparison rather than asking for a kernel by that name, and nothing new was needed in the engine.
-
-`a IN b` with no parentheses is the same call with the arguments the other way round, which is how DuckDB reads the spelling and what it names the column, so that form runs now too. `a NOT IN b` is the search negated.
-
-The other reading of `contains` is over a list or a map. Both of those bind as text here and are turned down as text, which is the right answer until there is a list type to answer about.
-
-A call with the wrong number of arguments says `contains`, because the count is wrong in the call the query wrote and not in the one lowering built out of it. A call with the wrong argument types still says `instr`, which is the same thing `strpos` and `POSITION` have always done.
 
 ### Added: IN over a bare value is read as the containment it is
 
