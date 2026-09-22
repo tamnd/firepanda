@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.24] - 2026-09-22
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release over 0.8.23, and most of it is the other half of a change that release carried. The text key map added there did less work than what it replaced and did all of it on one thread, which cost more than the work it saved on the one query that groups every row of a table on a text column. It is three passes now and two of them run on the cores.
+
 ### Changed: a streaming group by on a text key does most of its work on the cores
 
 The map a text key was given in #986 did less work than the stacking merge it replaced and did all of it on one thread, and on one query that was a bad trade. The stacking merge concatenated the running table with the chunk's and grouped the whole thing again, which is a factorize over a column far larger than one morsel, so the kernel spread it over the machine. The map replaced that with a single loop on the thread that owns the pipeline: hash the key, probe the table, compare the bytes, append the key if it is new. `SELECT URL, COUNT(*) FROM hits GROUP BY URL` over a million rows and two hundred and seventy five thousand distinct URLs went from two and a half cores to one, and took twice as long while doing less.
@@ -9122,7 +9128,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.23...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.24...HEAD
+[0.8.24]: https://github.com/tamnd/firepanda/releases/tag/v0.8.24
 [0.8.23]: https://github.com/tamnd/firepanda/releases/tag/v0.8.23
 [0.8.22]: https://github.com/tamnd/firepanda/releases/tag/v0.8.22
 [0.8.21]: https://github.com/tamnd/firepanda/releases/tag/v0.8.21
