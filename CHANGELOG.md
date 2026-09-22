@@ -14,6 +14,14 @@ The Python suite went red on main five merges ago and stayed there. Nothing in i
 
 Three of the rows were called `test_a_lookaround_beside_one_is_still_a_gap` and it is not one, three were called `test_a_pattern_the_other_engine_would_run_is_not_implemented` and it is implemented, and two said `extract` takes a group beside a lookaround but not inside one and it takes both. They are renamed for what they now measure. The list the last three were guarding is empty: every construct pandas sends to Python's own engine is answered here.
 
+### Fixed: the cache allowance stopped being spent on entries nothing reads
+
+The compiler cache is keyed on the commit that wrote it and restored by prefix, so every merge writes about twenty new entries and the ones they replace are never read again. Nothing deleted them. The repository allowance is ten gigabytes and it was found at 10.85, with 3.59 of that in entries that had already been superseded.
+
+Going over the allowance is not free and it is not self correcting in the direction you want. GitHub evicts the least recently used entry, which is not the same as the useless one, so the space held by a superseded entry is paid for by whichever platform has been quiet for a day going cold on its next run. That is worth between three and nine times on a test file.
+
+A job at the end of CI deletes them, keeping the newest entry per key family, where a family is the key with the trailing commit sha taken off and the ref it belongs to left on. A job restoring by prefix takes the newest match anyway, so the rest can only ever occupy space. It runs on a merge and it needs the jobs that write the entries, so the moment it prunes at is the moment the writing finished, and it runs whether or not they went green because an entry a red run superseded is superseded either way.
+
 ### Changed: a list written out is refused by name
 
 `SELECT [1, 2]` and `SELECT ARRAY[1, 2]` stop with a message that names the spelling, says why, gives the position and links the issue, the way every other thing the SQL front end turns down does. What they used to get was the message for an expression firepanda has no case for at all, which carries none of that and reads as if the shape had been lost track of rather than known about. The shape was never lost: it reads, it prints, it round trips, and the only stage with nothing to say about it was lowering.
