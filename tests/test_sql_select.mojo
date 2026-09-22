@@ -1105,5 +1105,47 @@ def test_the_table_is_total_over_everything_it_can_reach() raises:
     )
 
 
+def test_a_dotted_name_says_which_position_turned_it_down() raises:
+    # Twenty five places in the grammar take a plain name and they all used to
+    # refuse the same six words. In a statement with several names in it that
+    # is true and no help at all, since the reader is left to work out which of
+    # the names was the one. The position is the part only the caller knows.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="where a column EXCLUDE names goes"):
+        _ = _printed("SELECT * EXCLUDE (a.b) FROM t", g, rules)
+    with assert_raises(contains="where a column REPLACE names goes"):
+        _ = _printed("SELECT * REPLACE (1 AS a.b) FROM t", g, rules)
+    with assert_raises(contains="where the column RENAME renames goes"):
+        _ = _printed("SELECT * RENAME (a.b AS c) FROM t", g, rules)
+
+
+def test_only_the_star_modifiers_can_reach_the_dotted_name_refusal() raises:
+    # Three of the twenty five positions take a node the grammar will put a dot
+    # in. The rest stop at the parser, which is a better error than the refusal
+    # would have been and is why naming the position was worth measuring rather
+    # than assuming. Each of these is a name in one of the other positions and
+    # each of them stops one step earlier.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("SELECT * RENAME (a AS b.c) FROM t", g, rules)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("SELECT 1 AS a.b FROM t", g, rules)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("SELECT * FROM t JOIN u USING (a.b)", g, rules)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("WITH a.b AS (SELECT 1) SELECT 1", g, rules)
+
+
+def test_the_dotted_name_refusal_still_says_what_to_write_instead() raises:
+    # The position is what was added. The advice was the point of the entry and
+    # it is the same advice wherever it is raised from.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="Write the last part on its own"):
+        _ = _printed("SELECT * EXCLUDE (a.b) FROM t", g, rules)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -304,8 +304,12 @@ def sql_support() -> List[Refusal]:
         ),
         Refusal(
             "dotted-name",
-            "a dotted name here",
-            "Only a plain name fits in this position.",
+            "a dotted name where {} goes",
+            (
+                "A name with dots in it qualifies one thing by another, and"
+                " this position takes the name of one thing. Write the last"
+                " part on its own."
+            ),
             SQL_ISSUE,
         ),
         Refusal(

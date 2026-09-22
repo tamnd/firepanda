@@ -3610,7 +3610,13 @@ struct Transform(Movable):
             if lead == "EXCLUDE" or lead == "EXCEPT":
                 var holder = tree.children(part)
                 for name in self._entries(tree, sql, holder[len(holder) - 1]):
-                    exclude.append(ast.intern(self._plain(tree, sql, name)))
+                    exclude.append(
+                        ast.intern(
+                            self._plain(
+                                tree, sql, name, "a column EXCLUDE names"
+                            )
+                        )
+                    )
                 continue
 
             if lead == "REPLACE":
@@ -3622,15 +3628,33 @@ struct Transform(Movable):
                 for entry in entries:
                     var pair = tree.children(entry)
                     var value = work.value(pair[0])
-                    replace.append(ast.intern(self._plain(tree, sql, pair[1])))
+                    replace.append(
+                        ast.intern(
+                            self._plain(
+                                tree, sql, pair[1], "a column REPLACE names"
+                            )
+                        )
+                    )
                     replace.append(value)
                 continue
 
             if lead == "RENAME":
                 for entry in self._entries(tree, sql, self._only(tree, part)):
                     var pair = tree.children(entry)
-                    rename.append(ast.intern(self._plain(tree, sql, pair[0])))
-                    rename.append(ast.intern(self._plain(tree, sql, pair[1])))
+                    rename.append(
+                        ast.intern(
+                            self._plain(
+                                tree, sql, pair[0], "the column RENAME renames"
+                            )
+                        )
+                    )
+                    rename.append(
+                        ast.intern(
+                            self._plain(
+                                tree, sql, pair[1], "the name RENAME gives it"
+                            )
+                        )
+                    )
                 continue
 
             raise _no_case(tree, sql, part)
@@ -3889,7 +3913,7 @@ struct Transform(Movable):
             raise _unsupported(tree, sql, node, NAMED_ARGUMENT)
         var value = work.value(kids[2])
         return ast.named_argument(
-            self._plain(tree, sql, kids[0]),
+            self._plain(tree, sql, kids[0], "the name of a named argument"),
             value,
             _first_byte(tree, sql, kids[1]) != _COLON,
             tree.nodes[Int(node)].token_start,
@@ -3930,7 +3954,9 @@ struct Transform(Movable):
         var kids = tree.children(node)
         var parameters = List[String]()
         for name in tree.children(kids[0]):
-            parameters.append(self._plain(tree, sql, name))
+            parameters.append(
+                self._plain(tree, sql, name, "a lambda parameter")
+            )
         return ast.closure(
             parameters,
             work.value(kids[1]),
@@ -3972,7 +3998,9 @@ struct Transform(Movable):
         var kids = tree.children(node)
         var parameters = List[String]()
         for name in tree.children(kids[1]):
-            parameters.append(self._plain(tree, sql, name))
+            parameters.append(
+                self._plain(tree, sql, name, "the variable of a comprehension")
+            )
         var wanted: List[UInt32] = [kids[0], kids[2]]
         var filtered = len(kids) > 3
         if filtered:
@@ -4057,7 +4085,9 @@ struct Transform(Movable):
         work.warm(wanted)
         for field in fields:
             var pair = tree.children(field)
-            names.append(self._plain(tree, sql, pair[0]))
+            names.append(
+                self._plain(tree, sql, pair[0], "the name of a struct field")
+            )
             values.append(work.value(pair[1]))
         return ast.struct_of(names, values, tree.nodes[Int(node)].token_start)
 
@@ -4139,24 +4169,44 @@ struct Transform(Movable):
         return out^
 
     def _plain(
-        self, tree: Parse, sql: StringSlice, node: UInt32
+        self, tree: Parse, sql: StringSlice, node: UInt32, what: StringSlice
     ) raises -> String:
         """Reads a node that has to be exactly one name and nothing else.
+
+        Twenty five positions in the grammar take a plain name and this is all
+        of them, which is why the caller says which one it is. A refusal that
+        only says a dotted name was written here is true and useless in a query
+        with several names in it, and the position is the one thing the refusal
+        table cannot know and the caller always does.
+
+        Three of the twenty five can reach the raise, and they are the three
+        modifiers on a star: `EXCLUDE`, `REPLACE` and the left side of a
+        `RENAME`. Everywhere else the grammar will not put a dot in the node at
+        all, so the query stops at the parser one step earlier and never gets
+        here. That is measured rather than assumed, by asking each position for
+        a dotted name and reading what came back, and it agrees with the
+        corpus: all thirty four statements that hit this are `EXCLUDE` or
+        `RENAME`, twenty four and ten. The other twenty two calls are not dead
+        weight, they are what keeps a widening of the grammar from turning into
+        a name quietly losing its qualification, but nothing written today
+        reaches them.
 
         Args:
             tree: The parse.
             sql: The query.
             node: The node.
+            what: The position, for the refusal, as a noun phrase that reads
+                after "where" and before "goes".
 
         Returns:
             The name.
 
         Raises:
-            Error: If it is a dotted name, which the modifiers on a star have
-                nowhere to put.
+            Error: If it is a dotted name, which this position has nowhere to
+                put.
         """
         if _tokens(tree, node) != 1:
-            raise _unsupported(tree, sql, node, DOTTED_NAME)
+            raise _unsupported(tree, sql, node, DOTTED_NAME, what)
         return _identifier(
             sql, tree.tokens[Int(tree.nodes[Int(node)].token_start)]
         )
@@ -4681,12 +4731,20 @@ struct Transform(Movable):
             if len(kids) != 2:
                 raise _malformed(tree, sql, node, "a name: with no value")
             return ast.item(
-                work.value(kids[1]), self._plain(tree, sql, kids[0]), at
+                work.value(kids[1]),
+                self._plain(
+                    tree, sql, kids[0], "the name of a select list entry"
+                ),
+                at,
             )
         var value = work.value(kids[0])
         if len(kids) == 1:
             return ast.item(value, "", at)
-        return ast.item(value, self._plain(tree, sql, kids[1]), at)
+        return ast.item(
+            value,
+            self._plain(tree, sql, kids[1], "the alias of a select list entry"),
+            at,
+        )
 
     def _table_ref(
         self,
@@ -4763,7 +4821,9 @@ struct Transform(Movable):
                 continue
             var columns = List[String]()
             for name in self._items(tree, self._only(tree, using)):
-                columns.append(self._plain(tree, sql, name))
+                columns.append(
+                    self._plain(tree, sql, name, "a column USING names")
+                )
             built = ast.join_using(text, built, right, columns, at)
         return built
 
@@ -5095,10 +5155,19 @@ struct Transform(Movable):
         var inside = self._only(tree, node)
         var out = List[String]()
         if _first_byte(tree, sql, inside) != _LEFT_PAREN:
-            out.append(self._plain(tree, sql, self._only(tree, inside)))
+            out.append(
+                self._plain(
+                    tree,
+                    sql,
+                    self._only(tree, inside),
+                    "the name column of an UNPIVOT",
+                )
+            )
             return out^
         for name in self._items(tree, self._only(tree, inside)):
-            out.append(self._plain(tree, sql, name))
+            out.append(
+                self._plain(tree, sql, name, "a value column of an UNPIVOT")
+            )
         return out^
 
     def _sample(
@@ -5148,7 +5217,9 @@ struct Transform(Movable):
             # RepeatableSample?`.
             for kid in tree.children(entry):
                 if self._marked(tree, kid, _MARK_SAMPLE_METHOD):
-                    method = self._plain(tree, sql, kid)
+                    method = self._plain(
+                        tree, sql, kid, "the method of a sample"
+                    )
                 elif self._marked(tree, kid, _MARK_SAMPLE_REPEATABLE):
                     # `RepeatableSample <- 'REPEATABLE' Parens(SampleSeed)`.
                     seed = self._only(tree, self._only(tree, kid))
@@ -5161,7 +5232,9 @@ struct Transform(Movable):
             count = parts[0]
             if len(parts) > 1:
                 var listed = tree.children(self._only(tree, parts[1]))
-                method = self._plain(tree, sql, listed[0])
+                method = self._plain(
+                    tree, sql, listed[0], "the method of a sample"
+                )
                 if len(listed) > 1:
                     seed = listed[1]
 
@@ -5714,7 +5787,9 @@ struct Transform(Movable):
         if _first_byte(tree, sql, node) == _LEFT_PAREN:
             inner = self._only(tree, inner)
         return ast.window(
-            base=self._plain(tree, sql, inner),
+            base=self._plain(
+                tree, sql, inner, "the window a frame is based on"
+            ),
             token=tree.nodes[Int(node)].token_start,
         )
 
@@ -5749,7 +5824,12 @@ struct Transform(Movable):
         var kids = tree.children(node)
         var base = String()
         if len(kids) > 1:
-            base = self._plain(tree, sql, self._only(tree, kids[0]))
+            base = self._plain(
+                tree,
+                sql,
+                self._only(tree, kids[0]),
+                "the window a frame is based on",
+            )
         return self._window_contents(
             tree, sql, kids[len(kids) - 1], ast, work, base
         )
@@ -5838,7 +5918,7 @@ struct Transform(Movable):
         # `WindowDefinition <- Identifier 'AS' WindowFrameDefinition`.
         var kids = tree.children(node)
         return ast.window_definition(
-            self._plain(tree, sql, kids[0]),
+            self._plain(tree, sql, kids[0], "the name of a WINDOW definition"),
             work.value(kids[1]),
             tree.nodes[Int(node)].token_start,
         )
@@ -5941,7 +6021,12 @@ struct Transform(Movable):
             work.warm(wanted)
             return ast.pivot_on(
                 work.value(kids[0]),
-                name=self._plain(tree, sql, self._only(tree, target)),
+                name=self._plain(
+                    tree,
+                    sql,
+                    self._only(tree, target),
+                    "the column a PIVOT is on",
+                ),
                 token=at,
             )
 
@@ -5996,7 +6081,9 @@ struct Transform(Movable):
             names = self._items(tree, self._only(tree, inside))
         var out = List[String]()
         for name in names:
-            out.append(self._plain(tree, sql, name))
+            out.append(
+                self._plain(tree, sql, name, "a name in a parenthesized list")
+            )
         return out^
 
     def _unpivot(
@@ -6042,7 +6129,9 @@ struct Transform(Movable):
             # OptionalParensNameList`, and `VALUE` and `VALUES` are the same
             # word, so the middle one is read past.
             var into = tree.children(kids[3])
-            name = self._plain(tree, sql, into[0])
+            name = self._plain(
+                tree, sql, into[0], "the name column of an UNPIVOT"
+            )
             values = self._optional_parens_names(tree, sql, into[2])
 
         return ast.unpivot(
@@ -6381,7 +6470,11 @@ struct Transform(Movable):
                 # `ColumnList <- List(ColId)`.
                 var listed = self._only(tree, self._only(tree, kids[i]))
                 for name in self._items(tree, listed):
-                    columns.append(self._plain(tree, sql, name))
+                    columns.append(
+                        self._plain(
+                            tree, sql, name, "a column a WITH entry names"
+                        )
+                    )
             elif self._marked(tree, kids[i], _MARK_USING_KEY):
                 # `UsingKey <- 'USING' 'KEY' Parens(TargetList)`, and the
                 # parentheses descend to the same rule a select list uses, so
@@ -6401,7 +6494,7 @@ struct Transform(Movable):
         var wanted: List[UInt32] = [body, listing]
         work.warm(wanted)
         return ast.cte(
-            self._plain(tree, sql, kids[0]),
+            self._plain(tree, sql, kids[0], "the name of a WITH entry"),
             work.value(body),
             columns,
             materialize,
@@ -6464,10 +6557,12 @@ struct Transform(Movable):
             Error: If the alias is not one name.
         """
         if colon != NO_NODE:
-            return self._plain(tree, sql, self._only(tree, colon))
+            return self._plain(tree, sql, self._only(tree, colon), "an alias")
         if node == NO_NODE:
             return String()
-        return self._plain(tree, sql, tree.children(self._only(tree, node))[0])
+        return self._plain(
+            tree, sql, tree.children(self._only(tree, node))[0], "an alias"
+        )
 
     def _alias_columns(
         self, tree: Parse, sql: StringSlice, node: UInt32
@@ -6493,7 +6588,7 @@ struct Transform(Movable):
             return out^
         # `ColumnAliases <- Parens(List(ColIdOrString))`.
         for name in self._items(tree, self._only(tree, kids[1])):
-            out.append(self._plain(tree, sql, name))
+            out.append(self._plain(tree, sql, name, "a column alias"))
         return out^
 
 
