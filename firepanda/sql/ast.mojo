@@ -162,7 +162,9 @@ be one would mean the printer had to decide when a literal was really a name.
 comptime EXPR_COLLATE: UInt8 = 13
 """`x COLLATE c`.
 
-`a` is the operand and `payload` is the interned collation name.
+`a` is the operand and `children` is a run of interned collation name parts.
+There is more than one part when the query composes collations, which DuckDB
+spells `COLLATE nocase.noaccent` and means as both of them.
 """
 
 comptime EXPR_PARAMETER: UInt8 = 14
@@ -1951,21 +1953,25 @@ struct Ast(Movable):
         return self.add(Expr(kind=EXPR_STRUCT, token=token, children=run))
 
     def collate(
-        mut self, operand: UInt32, collation: StringSlice, token: UInt32 = 0
+        mut self, operand: UInt32, collation: UInt32, token: UInt32 = 0
     ) -> UInt32:
         """Builds `x COLLATE c`.
 
+        The collation is a run of name parts rather than one name because
+        DuckDB composes collations by writing them with dots between, as in
+        `COLLATE nocase.noaccent`, which asks for both. That is the same shape
+        a qualified name has, so it is kept the same way.
+
         Args:
             operand: What is being collated.
-            collation: The collation name.
+            collation: A run of interned collation name parts, outermost first.
             token: The token it starts at.
 
         Returns:
             The node index.
         """
-        var text = self.intern(collation)
         return self.add(
-            Expr(kind=EXPR_COLLATE, token=token, a=operand, payload=text)
+            Expr(kind=EXPR_COLLATE, token=token, a=operand, children=collation)
         )
 
     def interval(

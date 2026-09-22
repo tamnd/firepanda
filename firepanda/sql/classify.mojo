@@ -718,16 +718,15 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
     var kind = item.kind
     if kind == EXPR_COLUMN:
         return _folded_names(ast, item.children)
+    if kind == EXPR_COLLATE:
+        # The collation is a name run rather than one name, because a composed
+        # collation is written with dots between the parts.
+        return _folded_names(ast, item.children)
     if kind == EXPR_FUNCTION:
         return String(_folded_names(ast, item.payload), "/", item.a)
     if kind == EXPR_LITERAL:
         return String(item.b, "/", ast.text(item.payload))
-    if (
-        kind == EXPR_UNARY
-        or kind == EXPR_BINARY
-        or kind == EXPR_COLLATE
-        or kind == EXPR_INTERVAL
-    ):
+    if kind == EXPR_UNARY or kind == EXPR_BINARY or kind == EXPR_INTERVAL:
         return String(ast.text(item.payload))
     if kind == EXPR_CAST:
         return String(item.b, "/", ast.text(item.payload))

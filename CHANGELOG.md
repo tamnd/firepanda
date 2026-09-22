@@ -13,6 +13,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release with two things the regex and SQL front ends were turning down and one thing the execution engine was doing the long way round. A group written inside a lookaround keeps what it matched, an `AT` clause on a table reads and prints, and a streaming group by on a text key stops rebuilding its running table once per chunk, which is where most of q36 was going.
+### Added: a composed collation keeps both of its names
+
+`a COLLATE nocase.noaccent` reads and prints. DuckDB composes collations by writing them with dots between the parts and means all of them at once, and the transformer used to turn that down because it asked the right side of `COLLATE` for a name with exactly one part in it. It now keeps the whole run of parts, the same way a qualified column name is kept, so nothing about the name is thrown away and it reads back as written.
+
+What is still refused there is anything that is not a name, which is what the refusal was for. `a COLLATE f(1)` and `a COLLATE 1` stop with the same message, reworded to say that dots are fine. Nine statements in the corpus are the composed form.
 
 ### Added: a capturing group inside a lookaround keeps what it matched
 

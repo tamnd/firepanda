@@ -307,8 +307,11 @@ def sql_support() -> List[Refusal]:
         ),
         Refusal(
             "quoted-name",
-            "anything but a plain name here",
-            "Only a plain name fits in this position.",
+            "anything but a name here",
+            (
+                "Only a name fits in this position. Dots in it are fine, since"
+                " that is how two collations are composed."
+            ),
             SQL_ISSUE,
         ),
         Refusal(

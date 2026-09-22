@@ -130,8 +130,9 @@ def test_a_refusal_with_no_position_still_carries_the_rest() raises:
         text,
         String(
             "Not Implemented Error: firepanda does not support anything but a"
-            " plain name here.\n"
-            "Only a plain name fits in this position. See"
+            " name here.\n"
+            "Only a name fits in this position. Dots in it are fine, since"
+            " that is how two collations are composed. See"
             " https://github.com/tamnd/firepanda/issues/13"
         ),
     )

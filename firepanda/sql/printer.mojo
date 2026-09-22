@@ -794,7 +794,10 @@ def _write_step(
             stack.append(_Step(item.a, 0))
             return
         out += " COLLATE "
-        out += quote_name(ast.text(item.payload), grammar)
+        # A composed collation is written with dots between the parts, which is
+        # what `_names` does, and each part is quoted on its own so that a dot
+        # inside one of them still reads back as one part.
+        out += _names(ast, item.children, grammar)
         out += ")"
         return
 
