@@ -63,6 +63,7 @@ It now runs once, in the compile budget job on Linux, so a break in `mojo precom
 ### Fixed: a feature filed under the release it missed
 
 `contains` over text and the bare `IN` that means it landed after v0.8.20 was tagged, and its entry went in under the 0.8.20 heading all the same, because two changes were being prepared at once and the release heading moved above an entry that was still unreleased. The entry is in 0.8.21 above, which is the release that actually carries it. Nothing about the code changed.
+
 ## [0.8.20] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).

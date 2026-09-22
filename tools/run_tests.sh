@@ -117,7 +117,13 @@
 # is worse than no tally, so the logs now live somewhere nothing else prunes.
 #
 # A missing log is also reported as what it is. It is not a test failure and
-# saying so sent someone looking at the wrong thing for an afternoon.
+# saying so sent someone looking at the wrong thing for an afternoon. A file
+# whose compiler was killed is reported the same way and for the same reason:
+# on a shared machine the thing that kills it is the kernel reclaiming memory,
+# which says nothing at all about the code under test.
+#
+# `tools/run_tests_remote.sh` runs one shard of this on each of several hosts,
+# which is the only lever that works and is why the sharding above exists.
 
 set -uo pipefail
 
@@ -161,15 +167,31 @@ fi
 # width is capped by what there is to run in as well as by what there is to run
 # on. A CI runner, which is the case that matters, has its memory to itself and
 # never reaches this.
-if [ -z "${FIREPANDA_TEST_JOBS:-}" ] && command -v vm_stat > /dev/null 2>&1; then
-  spare=$(vm_stat | awk '
-    /page size of/ { for (i = 1; i <= NF; i++) if ($i == "of") size = $(i + 1) }
-    /Pages free/ || /Pages inactive/ || /Pages speculative/ { gsub(/\./, "", $NF); pages += $NF }
-    END { if (size > 0) print int(pages * size / 1048576) }')
-  if [ -n "${spare:-}" ] && [ "$spare" -gt 0 ] && [ $((spare / 768)) -lt "$jobs" ]; then
-    echo "only ${spare}MB of memory is going spare, so $((spare / 768)) at a time rather than $jobs"
-    jobs=$((spare / 768))
+#
+# The reading is taken two ways because the two systems this runs on count
+# spare memory differently and neither command exists on the other. It was
+# macOS only for a while, which was the wrong half: the machine that pages is
+# whichever one is shared, and the shared ones here are Linux servers. One of
+# them went to a load of 36 with one gigabyte of eleven left while running this,
+# and the width it had picked was eight.
+spare=
+if [ -z "${FIREPANDA_TEST_JOBS:-}" ]; then
+  if command -v vm_stat > /dev/null 2>&1; then
+    spare=$(vm_stat | awk '
+      /page size of/ { for (i = 1; i <= NF; i++) if ($i == "of") size = $(i + 1) }
+      /Pages free/ || /Pages inactive/ || /Pages speculative/ { gsub(/\./, "", $NF); pages += $NF }
+      END { if (size > 0) print int(pages * size / 1048576) }')
+  elif [ -r /proc/meminfo ]; then
+    # `MemAvailable` is the kernel's own estimate of what can be handed out
+    # without swapping, which is the question being asked. `MemFree` is not: on
+    # a server that has been up for months it is near zero and almost all of the
+    # difference is page cache that would be given back on demand.
+    spare=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
   fi
+fi
+if [ -n "${spare:-}" ] && [ "$spare" -gt 0 ] && [ $((spare / 768)) -lt "$jobs" ]; then
+  echo "only ${spare}MB of memory is going spare, so $((spare / 768)) at a time rather than $jobs"
+  jobs=$((spare / 768))
 fi
 
 [ "$jobs" -lt 1 ] && jobs=1
@@ -312,8 +334,15 @@ run_one() {
   # one second is plenty: the files run from one second to five minutes and this
   # number is only ever used to decide which shard a file belongs in.
   SECONDS=0
-  if mojo run -I . "$file" > "$logs/$base.log" 2>&1; then
+  local status=0
+  mojo run -I . "$file" > "$logs/$base.log" 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
     : > "$logs/$base.ok"
+  elif [ "$status" -gt 128 ]; then
+    # A status above 128 is a signal, and the signal that turns up here is the
+    # kernel killing the compiler because the machine ran out of memory. That is
+    # not a test failure and must not be counted as one. See the report below.
+    echo "$status" > "$logs/$base.killed"
   fi
   echo "$SECONDS" > "$logs/$base.time"
 }
@@ -341,7 +370,22 @@ for file in "${reading[@]}"; do
   fi
   if [ -e "$logs/$base.log" ]; then
     cat "$logs/$base.log"
-    [ -e "$logs/$base.ok" ] || failed=$((failed + 1))
+    if [ -e "$logs/$base.ok" ]; then
+      :
+    elif [ -e "$logs/$base.killed" ]; then
+      # Counted with the lost files rather than with the failures. A file whose
+      # compiler was killed says nothing about the code, and calling it a
+      # failure sends whoever reads the report looking for a bug that is not
+      # there. This turned up on a shared server with seven gigabytes going
+      # spare and six files compiling at once, where five of the first thirty
+      # one were killed and every one of them passed on its own afterwards.
+      # The width backs off from what is spare, which makes this rarer, but the
+      # memory can go away after the width is picked.
+      echo "the compiler was killed by signal $(($(cat "$logs/$base.killed") - 128)), so this file did not run to a result"
+      lost=$((lost + 1))
+    else
+      failed=$((failed + 1))
+    fi
   else
     echo "no output was captured for this file, so it did not run to a result"
     lost=$((lost + 1))
@@ -387,7 +431,7 @@ fi
 
 echo
 if [ "$lost" -ne 0 ]; then
-  echo "$lost of ${#files[@]} test files produced no log, so this run says nothing"
+  echo "$lost of ${#files[@]} test files did not run to a result, so this run says nothing"
   echo "the log directory was $logs"
   exit 1
 fi
