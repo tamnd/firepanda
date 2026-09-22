@@ -27,10 +27,10 @@ from std.testing import (
     assert_true,
 )
 
+from firepanda.kernel.regex.backtrack import held_text
 from firepanda.kernel.regex.count import counted_python_text
 from firepanda.kernel.regex.method import METHOD_COUNT, program_for
 from firepanda.kernel.regex.parse import parse_pattern
-from firepanda.kernel.regex.pike import matches_text
 from firepanda.kernel.regex.program import compile_program
 from firepanda.kernel.regex.replace import (
     parse_rewrite_python,
@@ -56,8 +56,13 @@ def said(pattern: StringSlice, engine: UInt8, captures: Bool = False) -> String:
     return String("!", program.problem)
 
 
-def hits(pattern: StringSlice, text: StringSlice) -> Bool:
+def hits(pattern: StringSlice, text: StringSlice) raises -> Bool:
     """Whether a pattern matches somewhere in a text, on Python's engine.
+
+    Through the door that picks between the two machines rather than through
+    the machine, because a lookbehind standing beside a backreference, an
+    atomic group or a conditional group is read by the backtracker and one
+    standing alone is read by the machine next door. Document 120.
 
     Args:
         pattern: The pattern.
@@ -65,9 +70,12 @@ def hits(pattern: StringSlice, text: StringSlice) -> Bool:
 
     Returns:
         True when it matches.
+
+    Raises:
+        Error: If the row ran out of steps, which no row in this file does.
     """
     var program = compile_program(parse_pattern(pattern), ENGINE_PYTHON)
-    return matches_text(program, text)
+    return held_text(program, text)
 
 
 def found(pattern: StringSlice, text: StringSlice) raises -> Int:
@@ -283,6 +291,22 @@ def test_an_unflagged_call_is_still_routed_to_python_by_the_construct() raises:
     assert_true(program.ok)
     assert_true(program.python)
     assert_true(program.slots > 0)
+
+
+def test_the_pairings_that_used_to_be_refused_run_here_too() raises:
+    """A lookbehind is the same walk as a lookahead started earlier, so a
+    backreference, an atomic group or a conditional beside one meets it the
+    same way. The rows are separate from the lookahead's because the body of a
+    lookbehind is entered at a position the outside walk has already gone past,
+    and a slot written there is one the outside walk has to be able to undo.
+    Document 120."""
+    assert_true(hits("(?<=(a))b\\1", "aba"))
+    assert_false(hits("(?<=(a))b\\1", "abc"))
+    assert_true(hits("(?<=(?>a))b", "ab"))
+    assert_true(hits("(?<=a(?>b))c", "abc"))
+    assert_true(hits("(?<=(a))(?(1)b|c)", "ab"))
+    assert_false(hits("(?<=(a))(?(1)b|c)", "zc"))
+    assert_true(hits("(?<!(a))b(?(1)x|y)", "cby"))
 
 
 def main() raises:

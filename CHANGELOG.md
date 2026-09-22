@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a lookaround can stand beside a backreference, an atomic group or a conditional
+
+`(?=(a))a\1`, `(?=ab)(?>a+)b` and `(?=(a))(?(1)a|b)` are answered now. Each of those was refused with a sentence of its own, added by documents 95, 99 and 100, and all three said the same thing: a lookaround is a search inside a search, the machine was the only engine that could run the inner one, and a backreference, a cut and a test are the three shapes the machine cannot be handed, so a pattern holding both had nowhere to go.
+
+The backtracker runs the inner search itself now, on the stack it already has. The walk was split in two and given the height the stack stood at when the body started, which is the same way an atomic group already knows which choices are its own, and the body is ordinary instructions so it is the same walk. On the way out the stack is unwound to that height and every save above it is paid, so a body that matched and a body that failed leave the same nothing behind, and the caller keeps the body's groups only when a positive assertion was taken. That is document 119's rule read backwards rather than a case for the negative form, and the groups it keeps are pushed back as saves to be put back the way any other slot is.
+
+The one place the bitmap's sentence is false is between two askings of the same body. A body that matched marked every pair on the way, and the next question asked of it at the same position would read those marks as an answer already found. The first version of this turned the bitmap off for the whole program and the corpus said no: seven patterns of thirty thousand ran out of steps, all of them an assertion under a repeat, because a star over something that reads nothing is a loop and the bitmap was what stopped it. So the body forgets its own marks instead, using the list the stamp already keeps for a program that changes a slot, and forgetting too much of that list is free.
+
+A lookaround standing alone is still handed straight back to the machine, so no pattern that works today changes engines. The corpus gained 24 hand written patterns, because the generator writes the first pairing in quantity, the other two almost never, and none of them with the second construct inside the body. Held out falls from 230 to 171 on `str.contains`, `str.count` and `str.replace`, from 124 to 65 on `str.match` and `str.fullmatch`, and from 474 to 387 on `str.findall`, which is exactly the 59 and 87 those four documents said the pairings were worth.
+
+It also found a line in a comparison driver. `tests/differential/regex_match.mojo` picked the engine with `if program.refs` where the column kernel picks with `refs or cuts or asks`, so a program holding a cut or a test went to the machine that cannot obey either. That had been wrong since document 99 and was unreachable, because such a program arrives there only beside a lookaround. All seven differentials are at zero disagreements. Document 120.
+
 ## [0.8.24] - 2026-09-22
 
 Built against Mojo 1.0.0 (ed45d567).

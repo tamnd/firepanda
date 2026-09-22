@@ -501,24 +501,32 @@ def test_they_agree_when_a_match_of_no_width_is_refused() raises:
                 compared(program, all_texts[t], first, advance=True)
 
 
-def test_a_lookahead_is_handed_straight_back() raises:
-    """The one pattern shape this engine refuses. A lookahead is a search inside
-    a search and there is one stack and one bitmap here, so a program holding
-    one says so at the moment it is sized rather than walking off the end of the
-    instruction set and answering something wrong. The machine underneath
-    answers those rows, which is the arrangement the row being too long already
-    has."""
+def test_a_lookahead_alone_is_handed_straight_back() raises:
+    """A program this engine can run and does not have to. A lookahead is a
+    search inside a search and this engine can walk one, on the stack it
+    already has, but the machine next door starts a second machine for it and
+    pays nothing here that it does not pay there. So a program whose only
+    unusual thing is an assertion goes there, and this engine says so at the
+    moment it is sized rather than answering a row the machine would have
+    answered the same way for less. Put a backreference beside it and there is
+    nowhere else for it to go, and then it runs here. Documents 93 and 120."""
     var program = grouped("a(?=b)", ENGINE_PYTHON)
     var bounded = Bounded(program)
     var found = List[Int32]()
     assert_equal(
         bounded.search(program, Span(decoded("ab")), 0, 0, found), GAVE_UP
     )
-    # And the plain pattern next to it, so that the refusal is read as being
-    # about the lookahead rather than about the engine.
+    # And the plain pattern next to it, so that the handing back is read as
+    # being about the lookahead rather than about the engine.
     var plain = grouped("ab", ENGINE_PYTHON)
     var other = Bounded(plain)
     assert_equal(other.search(plain, Span(decoded("ab")), 0, 0, found), 2)
+    # And the same lookahead with a backreference beside it, which is the
+    # program this engine is the only one that can run.
+    var paired = grouped("(a)\\1(?=b)", ENGINE_PYTHON)
+    var third = Bounded(paired)
+    assert_true(third.ok)
+    assert_equal(third.search(paired, Span(decoded("aab")), 0, 0, found), 2)
 
 
 def main() raises:

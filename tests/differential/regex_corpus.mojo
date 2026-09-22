@@ -884,6 +884,36 @@ def _measured() -> List[String]:
         "(?<=(ab))c",
         "(?=(a{2}))aa",
         "(?=(a))*",
+        # A lookaround standing beside a backreference, an atomic group or a
+        # conditional group. The generator writes plenty of the first pairing
+        # and almost none of the other two, and none of the three with the
+        # second construct inside the body of the assertion rather than beside
+        # it, which is the half of the change that the recursion is for.
+        # Document 120.
+        "(?=(a))a\\1",
+        "(a)(?=b)b\\1",
+        "(?!(a))(b)\\2",
+        "(?<=(a))b\\1",
+        "(a)\\1(?=b)",
+        "(a)\\1(?<=aa)",
+        "(?=(a)(b))ab\\1\\2",
+        "(?=ab)(?>a+)b",
+        "(?=aa)(?>a+)a",
+        "(?>a+)(?=b)",
+        "(?<=(?>a))b",
+        "(?<=a(?>b))c",
+        "(?=a)b*+",
+        "(?>a|ab)(?!c)",
+        "(?=(a))(?(1)a|b)",
+        "((?=x)y)?(?(1)p|q)",
+        "(?<=(a))(?(1)b|c)",
+        "(?!(a))b(?(1)x|y)",
+        "(a)?(?=b)(?(1)c|b)",
+        "(?=(a))a(?(1)\\1|b)",
+        "(?=(a))(?>a+)\\1",
+        "(?<=(?=a)a)b",
+        "(?=(?>a+))ab",
+        "(?!(?>a+))b",
     ]
     return out^
 

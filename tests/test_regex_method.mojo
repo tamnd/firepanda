@@ -156,24 +156,24 @@ def test_a_pattern_the_engine_can_run_compiles_for_all_three() raises:
 
 
 def test_a_pattern_the_other_engine_would_run_is_a_gap_here() raises:
-    """A lookahead beside a conditional group goes to Python's `re` upstream and
-    this library has no engine that can run both at once, so the refusal is its
-    own and names what is in the way rather than naming the engine. It used to
-    say the engine was not written at all, which was true until document 81
-    wrote it and which threw away the one thing the caller could act on.
+    """A named character goes to Python's `re` upstream and this library cannot
+    resolve the name yet, so the refusal is its own and names what is in the way
+    rather than naming the engine. It used to say the engine was not written at
+    all, which was true until document 81 wrote it and which threw away the one
+    thing the caller could act on.
 
     This row used to ask about a lookaround, then about a backreference, then
-    about an atomic group and then about a conditional group, all of which are
-    answered now, so what is left of it is the pairing. The lookahead in front
-    is still what routes the call, since a conditional group is not one of the
-    constructs the router walks for. Documents 93, 94, 95, 99 and 100."""
-    var program = program_for(METHOD_MATCH, "(?=a)(a)(?(1)b|c)")
+    about an atomic group, then about a conditional group and then about the
+    three pairings of a lookaround with one of the other three, all of which
+    are answered now. What is left is the table of names nobody has written
+    down. The lookahead in front is still what routes the call, since a name is
+    not one of the constructs the router walks for and an unrouted one is a
+    pattern RE2 refuses rather than a gap. Documents 93, 94, 95, 99, 100, 114
+    and 120."""
+    var program = program_for(METHOD_MATCH, "(?=a)\\N{BULLET}")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(
-        program.problem,
-        "this engine has no lookaround beside a conditional group yet",
-    )
+    assert_equal(program.problem, "a named character is not resolved yet")
 
 
 def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
@@ -188,19 +188,16 @@ def test_the_engine_is_picked_before_the_pattern_is_rewritten() raises:
     construct is now the only shortfall left in this pattern and the refusal is
     the one the caller can act on.
 
-    The construct here has been three of them. It was a lookaround until
+    The construct here has been four of them. It was a lookaround until
     documents 93 and 94 answered both halves, then a backreference under the
-    wide reading of this very flag until document 97 answered that, and it is
-    now the one pair that is still refused on this engine, a lookaround
-    standing beside a backreference. Each time the row kept its point, which is
-    that the refusal names the construct rather than the rewrite."""
-    var program = program_for(METHOD_FULLMATCH, "(?i)(?=a)(b)\\1")
+    wide reading of this very flag until document 97 answered that, then a
+    lookaround standing beside a backreference until document 120 answered
+    that, and it is a named character now. Each time the row kept its point,
+    which is that the refusal names the construct rather than the rewrite."""
+    var program = program_for(METHOD_FULLMATCH, "(?i)\\N{BULLET}(a)\\1")
     assert_false(program.ok)
     assert_true(program.gap)
-    assert_equal(
-        program.problem,
-        "this engine has no lookaround beside a backreference yet",
-    )
+    assert_equal(program.problem, "a named character is not resolved yet")
 
 
 def test_a_pattern_re2_refuses_is_refused_rather_than_held_out() raises:

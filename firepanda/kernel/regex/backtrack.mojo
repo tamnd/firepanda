@@ -95,6 +95,17 @@ backreference runs under: the bitmap kept, forgotten the moment a slot changes
 value, with the step count underneath. What it does not share is the cost, since
 the question is settled by looking at two numbers and going one way or the other
 rather than by reading the text again. Document 100.
+
+A lookaround is none of those three. It is the one construct here the machine
+next door can also run, and it is here so that it can stand beside one of the
+three that the machine cannot. A search inside a search runs on the stack that
+is already here, from the height the stack stood at when the body started,
+which is the same way an atomic group already knows which choices are its own.
+The body's marks are forgotten on the way out, because a body that matched
+marked every pair on the way and the next question asked of it at the same
+position would read those marks as an answer already found. A program whose
+only unusual thing is an assertion is still handed straight back, so nothing
+that ran on the machine before runs here now. Document 120.
 """
 
 from std.collections.span import Span
@@ -300,15 +311,17 @@ struct Bounded(Movable):
     """Whether this can be asked anything at all, which is whether the program
     compiled and whether it holds a question about the text ahead. The
     assertions and the captures it answers itself, unlike the state cache, and
-    the row being too long is its other way out. A lookaround is the one shape it
-    hands straight back, because a lookaround is a search inside a search and
-    there is one stack and one bitmap here to run it on.
+    the row being too long is its other way out. A lookaround it hands back
+    only when the machine next door could have taken the program anyway, since
+    that machine pays for a search inside a search what this engine pays and no
+    more, and a program that holds nothing else this engine is needed for is
+    better off there.
 
-    The traffic runs the other way for a backreference and for an atomic group.
-    Those are the two shapes this engine takes and the machine cannot, so a
-    program holding either arrives here and is never handed back, which is why
-    the compiler refuses a pattern holding a lookaround beside one of them.
-    Documents 95 and 99."""
+    The traffic runs the other way for a backreference, an atomic group and a
+    conditional. Those are the three shapes this engine takes and the machine
+    cannot, so a program holding any of them arrives here and is never handed
+    back, and a lookaround standing beside one of them is walked here too.
+    Documents 95, 99, 100 and 120."""
 
     var seen: List[UInt64]
     """One bit per instruction per position, `pc * (length + 1) + at`. Cleared
@@ -411,6 +424,21 @@ struct Bounded(Movable):
     overrun is an error and this is several layers below the one that raises.
     """
 
+    var nests: Bool
+    """Whether the program holds a lookaround, which is a search inside a
+    search and is the one thing here that walks from a height other than
+    nothing.
+
+    A program holding one keeps its bitmap and turns the stamp on. The bitmap
+    says that arriving twice at an instruction and a position is worth nothing
+    the second time, which is as true inside a body as it is outside one and is
+    false only across two separate askings of the same body: a body that
+    matched marked every pair on the way to matching, and the next question
+    asked of it at the same position would read those marks as an answer
+    already found. So the body forgets its own marks on the way out, using the
+    list the stamp already keeps, and everything outside the body goes on being
+    bounded by the bitmap rather than by the step count. Document 120."""
+
     var runs: List[Int32]
     """Which splits are a repeat of one character and where the body of each
     one is, worked out once per program by `run_bodies`. A split with an entry
@@ -441,17 +469,11 @@ struct Bounded(Movable):
         self.steps = 0
         self.overrun = False
         self.runs = run_bodies(Span(program.code))
+        self.nests = False
         for i in range(len(program.code)):
             var instruction = program.code[i]
             if instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
-                # The machine runs a lookaround by starting a second machine on
-                # the text around, with buffers of its own, and comes back with
-                # one answer. There is no second stack and no second bitmap
-                # here, and giving this one a nested walk would mean a path
-                # that is two paths, so the whole program goes to the machine.
-                # Documents 93 and 94.
-                self.ok = False
-                return
+                self.nests = True
             if instruction.op == IN_REF and instruction.b == REF_WIDE:
                 if len(self.lower) == 0:
                     self.lower = lower_table()
@@ -462,6 +484,14 @@ struct Bounded(Movable):
                 instruction.a == Int32(Int(AT_NON_BOUNDARY_UNICODE))
             ):
                 self.word = word_ranges_unicode()
+        if self.nests and not self.alone:
+            # A lookaround is run here only when this is the engine that has to
+            # run the program. The machine next door runs one by starting a
+            # second machine with buffers of its own, it pays nothing here that
+            # it does not pay there, and a program holding nothing else this
+            # engine is needed for is a program it can have. Documents 93, 94
+            # and 120.
+            self.ok = False
 
     def _reads_again(
         self,
@@ -551,10 +581,28 @@ struct Bounded(Movable):
 
     def _forget(mut self):
         """Clears the cells set since the last slot changed."""
-        for i in range(len(self.marks)):
+        self._forget_from(0)
+
+    def _forget_from(mut self, base: Int):
+        """Clears the cells marked since the list was this long.
+
+        Forgetting a cell is always safe, because the bitmap only ever says
+        that a pair is not worth arriving at twice and forgetting it costs the
+        walk a second arrival rather than an answer. So the one thing this has
+        to get right is forgetting enough, and a list shorter than the height
+        it is asked about means a slot changed in the meantime and took the
+        whole list with it, so everything left was written after that and all
+        of it goes.
+
+        Args:
+            base: The height the list stood at.
+        """
+        var height = base if base <= len(self.marks) else 0
+        for i in range(height, len(self.marks)):
             var cell = Int(self.marks[i])
             self.seen[cell >> 6] &= ~(UInt64(1) << UInt64(cell & 63))
-        self.marks.clear()
+        while len(self.marks) > height:
+            _ = self.marks.pop()
 
     def _cut(mut self):
         """Throws away every choice the group that is closing could have made.
@@ -616,7 +664,96 @@ struct Bounded(Movable):
         self.jobs_pc.clear()
         self.jobs_at.clear()
         self._push(0, Int32(start))
-        while len(self.jobs_pc) > 0:
+        return self._walk(
+            program, points, lead, length, start, 0, found, advance
+        )
+
+    def _body(
+        mut self,
+        program: Program,
+        entry: Int32,
+        points: Span[UInt32, _],
+        lead: Int,
+        length: Int,
+        at: Int,
+        mut inner: List[Int32],
+    ) -> Bool:
+        """Whether the body of a lookaround matches starting exactly here.
+
+        A search inside a search, run on the stack that is already here rather
+        than on a second one. The body's own part of the stack is everything
+        above the height the stack stood at when it started, which is the same
+        way an atomic group already knows which choices are its own, and the
+        walk is the same walk because the body is ordinary instructions.
+
+        What comes back out is the groups, in `inner`, and the caller decides
+        whether to keep them. Everything else is put back: the stack is unwound
+        to the height it stood at and every save above that is paid, so a body
+        that matched and a body that failed leave the slots where the path
+        outside left them. Upstream keeps what a group inside a positive
+        assertion matched and leaves a group inside a negative one unset, and
+        both of those are the caller writing back what is in `inner` or not
+        writing it.
+
+        Args:
+            program: The compiled pattern, whose instructions hold the body.
+            entry: Where the body starts.
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of them.
+            length: One past the last position, counting those bytes.
+            at: Where the body has to start matching.
+            inner: Filled with the slots as they stood at the end of the body,
+                when it matched.
+
+        Returns:
+            True when the body matches.
+        """
+        var base = len(self.jobs_pc)
+        var marked = len(self.marks)
+        self._push(entry, Int32(at))
+        var end = self._walk(
+            program, points, lead, length, at, base, inner, False
+        )
+        if self.stamped:
+            self._forget_from(marked)
+        while len(self.jobs_pc) > base:
+            var pc = self.jobs_pc.pop()
+            var value = self.jobs_at.pop()
+            if pc < 0 and pc != MARKED:
+                self._write(Int(-pc - 1), value)
+        return end != NO_MATCH
+
+    def _walk(
+        mut self,
+        program: Program,
+        points: Span[UInt32, _],
+        lead: Int,
+        length: Int,
+        start: Int,
+        base: Int,
+        mut found: List[Int32],
+        advance: Bool,
+    ) -> Int:
+        """Follows every path on the stack above one height until one matches.
+
+        The body of `_attempt`, taken out so that the body of a lookaround can
+        be walked by the same code from a different height. Nothing in here
+        reads the height except the loop that stops at it.
+
+        Args:
+            program: The compiled pattern.
+            points: The text, as code points.
+            lead: How many unreadable bytes stand in front of them.
+            length: One past the last position, counting those bytes.
+            start: Where this walk begins, which the refusal below reads.
+            base: How high the stack stood before this walk pushed anything.
+            found: Filled with the slots of the match, when there is one.
+            advance: Whether a match of no width is refused at `start`.
+
+        Returns:
+            Where the match ends, or `NO_MATCH`.
+        """
+        while len(self.jobs_pc) > base:
             var pc = self.jobs_pc.pop()
             var at = self.jobs_at.pop()
             if pc < 0:
@@ -753,6 +890,38 @@ struct Bounded(Movable):
                         instruction.b,
                     ):
                         self._push(pc + 1, at + Int32(width))
+            elif instruction.op == IN_LOOK or instruction.op == IN_BEHIND:
+                # Where the body has to start, which is the whole of the
+                # difference between the two directions: a lookahead starts it
+                # where the path is standing and a lookbehind that many
+                # characters further back, which lands the end of the body on
+                # the path because the compiler has refused every body whose
+                # width is not always the same number.
+                var behind = instruction.op == IN_BEHIND
+                var width = Int(instruction.b) >> 1 if behind else 0
+                var want = (
+                    (instruction.b & 1) == 1 if behind else instruction.b == 1
+                )
+                var into = Int(at) - width
+                var inner = List[Int32]()
+                var got = into >= 0 and self._body(
+                    program, instruction.a, points, lead, length, into, inner
+                )
+                if self.overrun:
+                    return NO_MATCH
+                if got == want:
+                    if got:
+                        # The groups the body matched, kept the way upstream
+                        # keeps them, and owed back to the path outside the
+                        # same way a save is owed back. A body that failed
+                        # wrote nothing, and a body that matched under a
+                        # negative assertion is a body the pattern threw away,
+                        # so neither of those is here.
+                        for k in range(self.nslots):
+                            if self.slots[k] != inner[k]:
+                                self._push(Int32(-k - 1), self.slots[k])
+                                self._write(k, inner[k])
+                    self._push(pc + 1, at)
             elif Int(at) < length and accepts(
                 instruction, program.ranges, point_at(points, lead, Int(at))
             ):
@@ -824,6 +993,15 @@ struct Bounded(Movable):
                     self.seen[i] = 0
             self.bitmap = True
             self.stamped = not self.memo
+        if self.nests and self.bitmap:
+            # For the reason on the field, which is that a body that matched
+            # marked every pair on the way, and the next question asked of the
+            # same body at the same position would read those marks as an
+            # answer already found. The stamp is the list of what has been
+            # marked and it is already here for the program that changes a
+            # slot, so a body forgets its own marks on the way out and the
+            # bitmap goes on bounding everything outside it.
+            self.stamped = True
         self.counting = not self.bitmap or self.stamped
         for k in range(self.nslots):
             self.slots[k] = -1

@@ -1737,13 +1737,12 @@ def _fixed_width(nodes: List[Node], node: Int32) -> Int:
         # the arm that was not written reads nothing. `(?<=(?(1)^))` is a
         # lookbehind upstream compiles, because both of its arms are empty, and
         # `(?<=(?(1)b))` is one upstream refuses, because one arm reads a
-        # character and the other does not. A lookbehind holding a conditional
-        # is turned down further along either way, since a lookaround beside one
-        # is a nested walk the backtracker has nowhere to put, but the two
-        # refusals are not the same refusal: the width one is a `ValueError` and
-        # agrees with upstream, and the other is a gap. So the width is asked
-        # here to keep a pattern upstream refuses out of the gap bucket, and to
-        # keep one upstream compiles out of the `ValueError`.
+        # character and the other does not. Both of them used to be turned down
+        # further along, because a lookaround beside a conditional was a nested
+        # walk the backtracker had nowhere to put, and the first of the two is
+        # a column now that document 120 has given it somewhere. So this walk
+        # is what separates a pattern upstream refuses from one upstream
+        # answers, and it always was, and now both halves of it are visible.
         var arms = 0
         var width = 0
         var child = it.first
@@ -2995,10 +2994,11 @@ def compile_program(
         return out^
     # Asked of the instructions rather than of the tree, because a construct
     # under a repeat of zero is in the tree and not in the program. A pattern
-    # holding both is refused: the backtracker is the only engine that can read
-    # a backreference and it has one stack and one bitmap, so a lookaround,
-    # which is a search inside a search, is a walk it has nowhere to put.
-    var saw_look = False
+    # holding one of these beside a lookaround used to be refused here, because
+    # the backtracker is the only engine that can read a backreference and it
+    # had one stack and nowhere to put a search inside a search. It walks the
+    # body on the stack it already has now, from the height the stack stood at,
+    # so there is nothing left to refuse. Document 120.
     for i in range(len(b.code)):
         var op = b.code[i].op
         if op == IN_REF:
@@ -3007,38 +3007,6 @@ def compile_program(
             out.cuts = True
         elif op == IN_TEST:
             out.asks = True
-        elif op == IN_LOOK or op == IN_BEHIND:
-            saw_look = True
-    if saw_look and (out.refs or out.cuts or out.asks):
-        # The same refusal for the same reason three times over. A lookaround is
-        # a search inside a search, the machine runs one by starting a second
-        # machine, and the backtracker has one stack and one bitmap and so has
-        # nowhere to put a nested walk. That is fine while every program holding
-        # a lookaround can be given to the machine, and these three are the
-        # programs that cannot be.
-        #
-        # The naming is in the order the constructs landed rather than in the
-        # order they appear in the pattern, so a pattern holding two of them is
-        # named by the older one. Nothing reads the sentence but a person, and a
-        # person told about either of the two has been told what to take out.
-        out.ok = False
-        if out.refs:
-            out.problem = String(
-                "this engine has no lookaround beside a backreference yet"
-            )
-        elif out.cuts:
-            out.problem = String(
-                "this engine has no lookaround beside an atomic group yet"
-            )
-        else:
-            out.problem = String(
-                "this engine has no lookaround beside a conditional group yet"
-            )
-        out.refs = False
-        out.cuts = False
-        out.asks = False
-        out.gap = True
-        return out^
     out.code = b.code.copy()
     out.ranges = b.ranges.copy()
     out.anchored = _anchored(Span(out.code))

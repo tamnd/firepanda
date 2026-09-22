@@ -271,27 +271,29 @@ def test_the_other_engine_still_refuses_one() raises:
     assert_false(program.ok)
 
 
-def test_a_lookaround_beside_one_is_refused_for_now() raises:
-    """The two constructs live on different engines. A lookaround is a search
-    inside a search and the machine is what runs the inner one, and a
-    backreference is the one shape the machine cannot be handed. A pattern
-    holding both has nowhere to go, so it is refused rather than answered by
-    whichever of the two was asked first."""
-    var refused = String(
-        "!this engine has no lookaround beside a backreference yet"
-    )
-    assert_equal(said("(?=a)(b)\\1", ENGINE_PYTHON), refused)
-    assert_equal(said("(a)\\1(?=b)", ENGINE_PYTHON), refused)
-    assert_equal(said("(?<=a)(b)\\1", ENGINE_PYTHON), refused)
-    var program = compile_program(parse_pattern("(?=a)(b)\\1"), ENGINE_PYTHON)
-    assert_false(program.ok)
-    assert_true(program.gap)
+def test_a_lookaround_beside_one_is_answered_here() raises:
+    """The two constructs used to live on different engines. A lookaround is a
+    search inside a search and the machine was what ran the inner one, and a
+    backreference is the one shape the machine cannot be handed, so a pattern
+    holding both had nowhere to go. This engine runs the inner search itself
+    now, on the stack it already has, so both of them are here. Document 120."""
+    assert_equal(said("(?=a)(a)\\1", ENGINE_PYTHON), "ok")
+    assert_equal(said("(a)\\1(?=b)", ENGINE_PYTHON), "ok")
+    assert_equal(said("(?<=a)(b)\\1", ENGINE_PYTHON), "ok")
+    assert_true(hits("(?=(a))a\\1", "aa"))
+    assert_false(hits("(?=(a))a\\1", "ab"))
+    assert_true(hits("(a)\\1(?=b)", "aab"))
+    assert_false(hits("(a)\\1(?=b)", "aac"))
+    assert_true(hits("(?<=(a))b\\1", "aba"))
+    assert_false(hits("(?<=(a))b\\1", "abc"))
 
 
 def test_a_construct_under_a_repeat_of_zero_is_not_in_the_program() raises:
-    """Which is why the pair above is looked for in the instructions rather
-    than in the tree. `(?=a){0}` is parsed and never written, so a pattern with
-    that and a backreference in it holds only one of the two and is answered."""
+    """Which is why the flags that pick the engine are set from the
+    instructions rather than from the tree. `(?=a){0}` is parsed and never
+    written, so a pattern with that and a backreference in it is a program
+    holding one construct rather than two, and the engine it goes to is the
+    engine that construct needs."""
     assert_equal(said("(?=a){0}(b)\\1", ENGINE_PYTHON), "ok")
     assert_true(hits("(?=a){0}(b)\\1", "bb"))
 
