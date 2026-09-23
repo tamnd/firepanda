@@ -79,15 +79,50 @@ that. The copy is one per group rather than one per row, and the per chunk route
 was going to copy the same bytes anyway when it gathered its representative
 rows, so the copy is not new work. The builder is also the key column the
 operator wants at the end, so the keys are stored once and not twice.
+
+## A tuple of keys
+
+Two or more key columns have no single hash that is exact, and until
+`LastingTuple` that sent every such query back to stacking the running table
+with each chunk's table and grouping the two, which costs the height of the
+running table on every chunk. ClickBench's q18 and q39 group on three and five
+keys with hundreds of thousands of groups, and that term was most of what they
+cost.
+
+`LastingTuple` makes the tuple exact by writing it out. Every row's tuple is
+written as bytes, a presence byte per key and then the value's own bytes, with
+a length in front of text, in two passes on the cores: one to size each row and
+one to write it where a prefix sum put it. Two tuples are equal exactly when
+their bytes are, so the rows go into a `LastingText`, whose hash match is only
+a candidate the bytes settle, and each row comes back with its group's ordinal.
+
+Grouping the chunk on its own first and writing only its distinct tuples was
+tried, and was slower: the chunk's grouping pass costs about what the writing
+saves. The route only pays when there is text among the keys and more than one
+chunk, and `Group` in `exec/node` is where that is decided.
+
+A null is a presence byte of zero and nothing else, so a tuple with a null in
+it is a tuple like any other here and does not send the query off this route,
+which the single key maps cannot say.
 """
 
+from std.memory import unsafe_memcpy
 from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strview import (
+    INLINE_CAPACITY,
+    VIEW_SIZE,
+    StringView,
+    make_inline_at,
+    make_long_at,
+)
+from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
-from firepanda.dtype.lists import ALL
+from firepanda.dtype.lists import ALL, dtype_size
+from firepanda.dtype.logical import LogicalType
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.kernel.concat import concat_any
 from firepanda.kernel.select import take_any
@@ -711,3 +746,199 @@ struct LastingKeys(Movable):
                     firsts,
                 )
         self.keys = store^
+
+
+def tuple_holds(type: LogicalType) -> Bool:
+    """Reports whether `LastingTuple` can write a key of this type as bytes.
+
+    Text and binary, the integers and the three temporal types. A float is left
+    out because two of its bit patterns can be one value, zero and minus zero,
+    and a byte comparison would make them two groups where the chunk's own
+    grouping made one. A boolean is left out because it is stored as bits, and a
+    dictionary or a nested column because what it stores is not its value.
+
+    Args:
+        type: The key column's type.
+
+    Returns:
+        True if a key of this type can be part of a lasting tuple.
+    """
+    if type.is_variable_width():
+        return True
+    if type.physical == DType.bool:
+        return False
+    return type.is_integer() or type.is_temporal()
+
+
+struct LastingTuple(Movable):
+    """The key tuples a streaming operator has seen, and the ordinal each got.
+
+    The module docstring has the argument. Each chunk is grouped on its own,
+    its distinct tuples are written out as bytes, and the bytes are looked up
+    in a `LastingText`, which hands an ordinal to a tuple the first time it
+    sees one and the same ordinal every time after.
+    """
+
+    var text: LastingText
+    """The map from a tuple's bytes to its ordinal."""
+
+    var keys: List[List[AnyArray]]
+    """Per key column, its values one row per group in ordinal order, in as
+    many pieces as there were chunks that introduced a group."""
+
+    var groups: Int
+    """Ordinals handed out so far."""
+
+    def __init__(out self):
+        """Constructs an empty map."""
+        self.text = LastingText()
+        self.keys = List[List[AnyArray]]()
+        self.groups = 0
+
+    def __len__(self) -> Int:
+        """Returns the number of ordinals handed out.
+
+        Returns:
+            The group count.
+        """
+        return self.groups
+
+    def ordinals(
+        mut self,
+        columns: List[AnyArray],
+        at: List[Int],
+        rows: Int,
+        mut codes: Array[DType.uint32],
+    ) raises:
+        """Gives every row of one chunk the ordinal its tuple holds in the map.
+
+        Args:
+            columns: The chunk's columns, borrowed.
+            at: Which of them are the keys, in the order the output has them.
+                Every one must be a type `tuple_holds` accepts.
+            rows: The chunk's height.
+            codes: Filled with one ordinal per row of the chunk.
+
+        Raises:
+            If the chunk cannot be grouped or a key cannot be gathered.
+        """
+        if rows <= 0:
+            return
+        if len(self.keys) == 0:
+            for _ in range(len(at)):
+                self.keys.append(List[AnyArray]())
+
+        # Two passes on the cores, one to size every row's bytes and one to
+        # write them, with the running total between them the only serial part.
+        # What a row asks of each key is read out here once rather than asked
+        # of the column on every row, which was a third of what writing cost.
+        var width = List[Int](capacity=len(at))
+        var gaps = List[Bool](capacity=len(at))
+        var texts = List[StringArray](capacity=len(at))
+        for k in range(len(at)):
+            ref col = columns[at[k]]
+            gaps.append(col.null_count() > 0)
+            if col.is_string():
+                width.append(0)
+                texts.append(StringArray(copy=col.strings()))
+            else:
+                width.append(dtype_size(col.dtype()))
+                texts.append(StringBuilder().finish())
+        var sizes = Array[DType.int64](overwritten=rows)
+        var sized = sizes.unsafe_mut_ptr()
+
+        def size(begin: Int, stop: Int) raises {imm}:
+            for i in range(begin, stop):
+                var n = 0
+                for k in range(len(at)):
+                    n += 1
+                    if gaps[k] and not columns[at[k]].is_valid(i):
+                        continue
+                    if width[k] == 0:
+                        n += 4 + texts[k].byte_length(i)
+                    else:
+                        n += width[k]
+                sized[i] = Int64(n)
+
+        parallel_morsels(size, rows, LASTING_TEXT_MORSEL)
+
+        var starts = Array[DType.int64](overwritten=rows)
+        var begun = starts.unsafe_mut_ptr()
+        var total = 0
+        for i in range(rows):
+            begun[i] = Int64(total)
+            total += Int(sized[i])
+
+        var payload = Buffer(overwritten=max(total, 1))
+        var out = payload.unsafe_mut_ptr()
+        var views = Buffer(rows * VIEW_SIZE)
+        var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+
+        def write(begin: Int, stop: Int) raises {imm}:
+            for i in range(begin, stop):
+                var first = Int(begun[i])
+                var end = first
+                for k in range(len(at)):
+                    ref col = columns[at[k]]
+                    if gaps[k] and not col.is_valid(i):
+                        out[end] = 0
+                        end += 1
+                        continue
+                    out[end] = 1
+                    end += 1
+                    if width[k] == 0:
+                        var held = texts[k].unsafe_bytes(i)
+                        var n = len(held)
+                        for b in range(4):
+                            out[end + b] = UInt8((n >> (8 * b)) & 0xFF)
+                        end += 4
+                        unsafe_memcpy(
+                            dest=out + end, src=held.unsafe_ptr(), count=n
+                        )
+                        end += n
+                    else:
+                        unsafe_memcpy(
+                            dest=out + end,
+                            src=col.unsafe_ptr[DType.uint8]() + i * width[k],
+                            count=width[k],
+                        )
+                        end += width[k]
+                var n = end - first
+                if n <= INLINE_CAPACITY:
+                    target[i] = make_inline_at(out + first, n)
+                else:
+                    target[i] = make_long_at(out + first, n, 0, first)
+
+        parallel_morsels(write, rows, LASTING_TEXT_MORSEL)
+
+        var tuples = StringArray(views^, payload^, Bitmap(rows), rows)
+        self.text.ordinals(tuples, rows, codes)
+
+        # The map hands ordinals out in row order, so a group's first row is the
+        # row whose ordinal is the next one due.
+        var firsts = List[Int]()
+        var seen = codes.unsafe_ptr()
+        for i in range(rows):
+            if Int(seen[i]) == self.groups:
+                firsts.append(i)
+                self.groups += 1
+        if len(firsts) > 0:
+            for k in range(len(at)):
+                self.keys[k].append(take_any(columns[at[k]], firsts))
+
+    def take_keys(mut self) raises -> List[AnyArray]:
+        """Stacks each key column's pieces and gives up the store.
+
+        Returns:
+            One column per key, one row per group, in ordinal order.
+
+        Raises:
+            If the pieces cannot be stacked.
+        """
+        var out = List[AnyArray](capacity=len(self.keys))
+        for k in range(len(self.keys)):
+            out.append(concat_any(self.keys[k]))
+        self.keys = List[List[AnyArray]]()
+        self.text = LastingText()
+        self.groups = 0
+        return out^

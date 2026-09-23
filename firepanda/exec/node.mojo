@@ -96,7 +96,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.frame.frame import DataFrame
 from firepanda.hash.grouping import group_ordinals
-from firepanda.hash.lasting import LastingKeys
+from firepanda.hash.lasting import LastingKeys, LastingTuple, tuple_holds
 from firepanda.join.keys import (
     BuildSide,
     build_side,
@@ -5367,25 +5367,27 @@ struct Group(Movable):
 
     Two things keep `_absorb` alive rather than deleting it. The fixed width
     map is an array indexed by the key or a table of 64 bit hashes, and the hash
-    is a bijection on the key bits, so both are exact. A key tuple of several
-    columns has no single hash that is exact, and that is what still falls back:
-    two tuples landing on one hash would be one group, and there is nowhere to
-    compare them that is cheaper than grouping the chunk. A text key used to
-    fall back for the same reason and no longer does. `LastingText` keeps a copy
-    of the bytes of every key it has seen, so a hash match there is a candidate
-    the bytes settle, which is what the per chunk factorize has always done and
-    what it could only do because its keys and its chunk died together.
+    is a bijection on the key bits, so both are exact. A text key has no exact
+    hash either and does not fall back. `LastingText` keeps a copy of the bytes
+    of every key it has seen, so a hash match there is a candidate the bytes
+    settle, which is what the per chunk factorize has always done and what it
+    could only do because its keys and its chunk died together. A key tuple of
+    several columns used to fall back and now goes the same way: `LastingTuple`
+    groups the chunk, writes each of its distinct tuples out as bytes and hands
+    those to a `LastingText`. A float in the tuple still falls back, because
+    zero and minus zero are one key with two sets of bytes.
 
     A running slot is a number in an array, so a minimum over a column of names
     has nowhere to live and falls back too. A count of rows does not, because it
-    never reads the column it is given. So `_push` takes one key of either width
-    with values that are fixed width or unread, and `_absorb` takes everything
-    else. A null key falls back as well, because the map reserves no ordinal for
-    one and the group order the result promises is the order the groups were
-    first seen, which a reserved ordinal would not give.
-    `_demote` is the handover, and it can happen in the middle of a query,
-    because whether a key column has a null is not known until the chunk holding
-    it arrives.
+    never reads the column it is given. So `_push` takes one key of either
+    width, or a tuple of them, with values that are fixed width or unread,
+    and `_absorb` takes everything else. A null in a single key falls back
+    as well, because the map reserves no ordinal for one and the group order
+    the result promises is the order the groups were first seen, which a
+    reserved ordinal would not give. A null in a tuple does not, because the
+    tuple map writes it as a byte. `_demote` is the handover, and it can
+    happen in the middle of a query, because whether a key column has a null
+    is not known until the chunk holding it arrives.
 
     What that is worth, on an i9-13900K with the same query over the same rows
     through the same driver, in nanoseconds a row: at a hundred thousand groups
@@ -5517,10 +5519,25 @@ struct Group(Movable):
 
     var _map: LastingKeys
     """The key to ordinal map that outlives the chunk, and the keys it has been
-    given. Empty unless `_fast`."""
+    given. Empty unless `_fast` with one key."""
+
+    var _tuple: LastingTuple
+    """The same map for a tuple of two keys or more. Empty unless `_fast` with
+    more than one key."""
+
+    var _tupled: Bool
+    """Whether there is more than one key, and so whether `_tuple` rather than
+    `_map` is the map `_push` asks."""
 
     var _fast: Bool
     """Whether chunks are still going through `_push` rather than `_absorb`."""
+
+    var _waiting: List[AnyArray]
+    """The first chunk of a tuple, held until a second one says the map is
+    worth building. Empty when nothing is held."""
+
+    var _waiting_rows: Int
+    """The height of `_waiting`, and zero when nothing is held."""
 
     var _values: List[AnyArray]
     """The running table's state columns on the `_push` route, without the key
@@ -5559,7 +5576,11 @@ struct Group(Movable):
         self.emit = List[AnyArray]()
         self.width = 0
         self._map = LastingKeys()
+        self._tuple = LastingTuple()
+        self._tupled = False
         self._fast = False
+        self._waiting = List[AnyArray]()
+        self._waiting_rows = 0
         self._values = List[AnyArray]()
         self._room = 0
 
@@ -5729,7 +5750,26 @@ struct Group(Movable):
         # query the text key is here for, the plan gives the count the only
         # column left after the projection, and refusing on the width of a
         # column nothing looks at would refuse the whole shape.
-        self._fast = len(self.keys) == 1
+        #
+        # A tuple of keys takes the route too when every key is a type
+        # `LastingTuple` can write out as bytes, which is the integers, the
+        # temporal types and text, and at least one of them is text. A float
+        # key keeps the tuple on `_absorb`, and so does a tuple of integers
+        # alone, because grouping those is a pass of fixed width hashing on the
+        # cores that the byte map's serial insert only makes slower. q35 of
+        # ClickBench, four integer keys over eight chunks, went from 21 to 28
+        # ms on the map.
+        self._tupled = len(self.keys) > 1
+        self._fast = True
+        var texts = False
+        for k in range(len(self.keys)):
+            var type = self.input[self.keys[k]].dtype
+            if self._tupled and not tuple_holds(type):
+                self._fast = False
+            if type.is_variable_width():
+                texts = True
+        if self._tupled and not texts:
+            self._fast = False
         for s in range(len(self._source)):
             if (
                 self.input[self._source[s]].dtype.is_variable_width()
@@ -5797,6 +5837,26 @@ struct Group(Movable):
             for h in range(len(self._kept)):
                 self.held[h].append(AnyArray(copy=columns[self._kept[h]]))
 
+        if self._fast and self._tupled:
+            # The tuple map writes a null as a byte like any other, so nothing
+            # about the data sends a tuple off the route. What it does not do
+            # is win on one chunk: the map inserts its groups one at a time in
+            # the order they were first seen, and a table that arrives whole is
+            # grouped faster by one pass on the cores. So the first chunk
+            # waits, and the map is only built once a second one turns up.
+            if not self.started and self._waiting_rows == 0:
+                self._waiting = columns^
+                self._waiting_rows = rows
+                return None
+            if self._waiting_rows > 0:
+                var first = List[AnyArray]()
+                swap(first, self._waiting)
+                var height = self._waiting_rows
+                self._waiting_rows = 0
+                self._push(first, height)
+            self._push(columns, rows)
+            return None
+
         if self._fast:
             if columns[self.keys[0]].null_count() == 0:
                 self._push(columns, rows)
@@ -5806,6 +5866,19 @@ struct Group(Movable):
             # that puts a null group where its first null was.
             self._demote()
 
+        self._fold(columns, rows)
+        return None
+
+    def _fold(mut self, columns: List[AnyArray], rows: Int) raises:
+        """Groups one chunk on its own and merges it through `_absorb`.
+
+        Args:
+            columns: The chunk's columns, borrowed.
+            rows: The chunk's height.
+
+        Raises:
+            If a reduction fails on the chunk's data.
+        """
         var refs = borrow_columns(columns)
         var local = group_ordinals(refs, self.keys, rows)
         var made = List[AnyArray](capacity=len(self.keys) + len(self._source))
@@ -5823,7 +5896,6 @@ struct Group(Movable):
                 )
             )
         self._absorb(made^)
-        return None
 
     def _push(mut self, columns: List[AnyArray], rows: Int) raises:
         """Adds one chunk to the running table through the persistent map.
@@ -5849,11 +5921,13 @@ struct Group(Movable):
         Raises:
             If the key dtype has no physical layout, or if a reduction fails.
         """
-        ref key = columns[self.keys[0]]
-        var before = self._map.groups
         var codes = Array[DType.uint32](rows)
-        self._map.ordinals(key, rows, codes)
-        var after = self._map.groups
+        var before = self._groups()
+        if self._tupled:
+            self._tuple.ordinals(columns, self.keys, rows, codes)
+        else:
+            self._map.ordinals(columns[self.keys[0]], rows, codes)
+        var after = self._groups()
 
         if before == 0:
             # The first chunk gets its state from the ordinary kernel, which is
@@ -5913,27 +5987,55 @@ struct Group(Movable):
         Raises:
             If the key pieces cannot be stacked.
         """
-        if self._map.groups == 0:
+        var groups = self._groups()
+        if groups == 0:
             return
-        var out = List[AnyArray](capacity=1 + len(self._values))
+        var out = List[AnyArray](capacity=len(self.keys) + len(self._values))
+        if self._tupled:
+            var keys = self._tuple.take_keys()
+            for k in range(len(keys)):
+                keys[k].type = self.input[self.keys[k]].dtype
+                out.append(AnyArray(copy=keys[k]))
+        else:
+            out.append(self._single_key())
+        for s in range(len(self._values)):
+            out.append(
+                settle_any(
+                    AnyArray(copy=self._values[s]),
+                    self._produce[s],
+                    groups,
+                )
+            )
+        self._values = List[AnyArray]()
+        self._room = 0
+        self.state = out^
+
+    def _groups(self) -> Int:
+        """Returns how many groups the live map has handed out.
+
+        Returns:
+            The group count of `_tuple` or `_map`, whichever `_push` asks.
+        """
+        if self._tupled:
+            return self._tuple.groups
+        return self._map.groups
+
+    def _single_key(mut self) raises -> AnyArray:
+        """Takes the one key column out of the single key map.
+
+        Returns:
+            The key column, one row per group, labelled with the input's type.
+
+        Raises:
+            If the key pieces cannot be stacked.
+        """
         var keys = self._map.take_keys()
         # The text map builds its key column out of the bytes it kept rather
         # than gathering one, so what comes back is labelled text whatever the
         # input column was called. A binary key is the same bytes under another
         # name, and the schema this node reported is what says which.
         keys.type = self.input[self.keys[0]].dtype
-        out.append(keys^)
-        for s in range(len(self._values)):
-            out.append(
-                settle_any(
-                    AnyArray(copy=self._values[s]),
-                    self._produce[s],
-                    self._map.groups,
-                )
-            )
-        self._values = List[AnyArray]()
-        self._room = 0
-        self.state = out^
+        return keys^
 
     def _demote(mut self) raises:
         """Gives up the persistent map and goes back to the stacking merge.
@@ -6071,6 +6173,15 @@ struct Group(Movable):
             held columns cannot be grouped and reduced.
         """
         self.width = len(self.keys) + len(self.aggs)
+        if self._waiting_rows > 0:
+            # The only chunk there was. It goes the one pass way, and the map
+            # was never built.
+            self._fast = False
+            var only = List[AnyArray]()
+            swap(only, self._waiting)
+            var height = self._waiting_rows
+            self._waiting_rows = 0
+            self._fold(only, height)
         if self._fast:
             self._fast = False
             self._gather()

@@ -38,7 +38,7 @@ from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
-from firepanda.array.strings import strings_from_list
+from firepanda.array.strings import StringBuilder, strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
@@ -1284,6 +1284,197 @@ def test_a_key_that_walks_out_of_the_direct_window_keeps_its_ordinals() raises:
     var got = run_group(frame^, [0], aggs^)
     assert_equal(len(got), 25, "five shared keys and five new ones a chunk")
     same_ints(got, want, "a key that walked out of the direct window")
+
+
+def phrases(values: List[String], present: List[Bool]) raises -> AnyArray:
+    """Builds a text column with a null wherever `present` is False."""
+    var out = StringBuilder()
+    for i in range(len(values)):
+        if present[i]:
+            out.append(values[i].as_bytes())
+        else:
+            out.append_null()
+    return AnyArray(out^.finish())
+
+
+def same_rows(got: DataFrame, want: DataFrame, what: String) raises:
+    """Asserts two frames of int64 and text columns hold the same rows."""
+    assert_equal(len(got.schema), len(want.schema), what + ": width")
+    assert_equal(len(got), len(want), what + ": height")
+    for c in range(len(want.schema)):
+        var name = want.schema[c].name
+        assert_equal(got.schema[c].name, name, what + ": column name")
+        var a = got.column(name)
+        var b = want.column(name)
+        for r in range(len(want)):
+            assert_equal(a.is_valid(r), b.is_valid(r), what + ": " + name)
+            if not b.is_valid(r):
+                continue
+            if b.is_string():
+                assert_equal(a.text(r), b.text(r), what + ": " + name)
+            else:
+                assert_equal(
+                    a.as_typed[DType.int64]()[r],
+                    b.as_typed[DType.int64]()[r],
+                    what + ": " + name,
+                )
+
+
+def test_a_tuple_with_text_in_it_agrees_with_the_frame_method() raises:
+    """Three keys over uneven chunks, with nulls in two of them.
+
+    A number, a short phrase and a second number, where the phrase can be empty
+    or missing and the second number can be missing. The key space is a few
+    hundred tuples, so most groups turn up in most chunks and the map has to
+    hand each one back the ordinal it got the first time, and the group order
+    the frame method gives is the order the node has to match.
+    """
+    check_a_text_tuple(False, "a tuple with text and nulls in it")
+
+
+def test_a_tuple_with_text_in_one_chunk_agrees_with_the_frame_method() raises:
+    """The same table arriving whole, which never builds the map.
+
+    The first chunk of a tuple waits for a second one, and when `finish` comes
+    first the waiting chunk is grouped the one pass way. That is a different
+    route to the same answer, so it is held to the same answer.
+    """
+    check_a_text_tuple(True, "a tuple with text in one chunk")
+
+
+def check_a_text_tuple(whole: Bool, what: String) raises:
+    """Groups the three key table either in one chunk or in uneven ones.
+
+    Args:
+        whole: True to hand the node the table as one chunk.
+        what: What to call the check when it fails.
+    """
+    var rng = Rng(20260924)
+    var words: List[String] = ["", "a", "ab", "b", "abc", "a long phrase here"]
+    var firsts = ChunkedArray(LogicalType.INT64)
+    var texts = ChunkedArray(LogicalType.STRING)
+    var thirds = ChunkedArray(LogicalType.INT64)
+    var values = ChunkedArray(LogicalType.INT64)
+    var total = 0
+    while total < 12000:
+        var rows = 50 + rng.next_below(500)
+        if whole or total + rows > 12000:
+            rows = 12000 - total
+        var one = List[Int64](capacity=rows)
+        var said = List[String](capacity=rows)
+        var said_present = List[Bool](capacity=rows)
+        var three = List[Int64](capacity=rows)
+        var three_present = List[Bool](capacity=rows)
+        var v = List[Int64](capacity=rows)
+        for _ in range(rows):
+            one.append(Int64(rng.next_below(12)))
+            said.append(words[rng.next_below(len(words))])
+            said_present.append(rng.next_below(8) != 0)
+            three.append(Int64(rng.next_below(3)))
+            three_present.append(rng.next_below(6) != 0)
+            v.append(Int64(rng.next_below(1000)))
+        firsts.append(numbers(one))
+        texts.append(phrases(said, said_present))
+        thirds.append(maybe(three, three_present))
+        values.append(numbers(v))
+        total += rows
+
+    var fields = List[Field]()
+    fields.append(Field("a", LogicalType.INT64))
+    fields.append(Field("s", LogicalType.STRING))
+    fields.append(Field("b", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var columns = List[ChunkedArray]()
+    columns.append(firsts^)
+    columns.append(texts^)
+    columns.append(thirds^)
+    columns.append(values^)
+    var frame = DataFrame(Schema(fields^), columns^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    specs.append(AggSpec("v", AggKind.SIZE))
+    var want = flat(frame).group_by(
+        ["a", "s", "b"], specs^, dropna=False, sort=False
+    )
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(3, AggKind.SUM, "v_sum"))
+    aggs.append(GroupAgg(3, AggKind.SIZE, "v_size"))
+    var got = run_group(frame^, [0, 1, 2], aggs^)
+    assert_true(len(want) > 300, "enough tuples to mean something")
+    same_rows(got, want, what)
+
+
+def test_a_tuple_tells_apart_the_same_bytes_split_differently() raises:
+    """`ab` then `c` is not `a` then `bc`, though both are the bytes `abc`.
+
+    The tuple is written out as bytes before it is looked up, so the length in
+    front of each piece of text is what keeps these apart. An empty piece and a
+    missing one are apart as well, which is the presence byte.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(AnyArray(strings_from_list(["ab", "a", "abc"])))
+    one.append(AnyArray(strings_from_list(["c", "bc", ""])))
+    one.append(numbers([1, 2, 3]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(phrases(["", "a", "ab"], [True, True, True]))
+    two.append(phrases(["abc", "", "c"], [True, False, True]))
+    two.append(numbers([4, 5, 6]))
+    pieces.append(two^)
+    var fields = List[Field]()
+    fields.append(Field("x", LogicalType.STRING))
+    fields.append(Field("y", LogicalType.STRING))
+    fields.append(Field("n", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "total"))
+    var out = run_group(frame^, [0, 1], aggs^)
+    assert_equal(len(out), 5, "ab c twice, and four tuples once each")
+    var totals = read_ints(out, "total")
+    assert_equal(totals[0], Int64(7), "ab then c is rows 1 and 6")
+    assert_equal(totals[1], Int64(2), "a then bc")
+    assert_equal(totals[2], Int64(3), "abc then the empty string")
+    assert_equal(totals[3], Int64(4), "the empty string then abc")
+    assert_equal(totals[4], Int64(5), "a then a null")
+    assert_true(not out.column("y").is_valid(4), "the null is kept a null")
+
+
+def test_a_float_in_the_tuple_groups_zero_with_minus_zero() raises:
+    """A float key keeps the tuple off the byte route, where the two would part.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([1, 1]))
+    one.append(doubles([0.0, 2.5]))
+    one.append(numbers([1, 2]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([1, 1]))
+    two.append(doubles([-0.0, 2.5]))
+    two.append(numbers([3, 4]))
+    pieces.append(two^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("r", LogicalType.FLOAT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var want = flat(frame).group_by(
+        ["k", "r"], specs^, dropna=False, sort=False
+    )
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "v_sum"))
+    var got = run_group(frame^, [0, 1], aggs^)
+    assert_equal(len(got), len(want), "the frame method's groups")
+    assert_equal(len(got), 2, "zero and minus zero are one key")
+    var sums = read_ints(got, "v_sum")
+    assert_equal(sums[0], Int64(4), "rows 1 and 3")
 
 
 def main() raises:
