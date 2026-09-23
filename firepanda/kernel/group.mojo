@@ -2591,6 +2591,34 @@ def _sem_core[
     return out^
 
 
+def _anchor_near[dt: DType](centre: Float64) -> Scalar[dt]:
+    """The value of an integer type nearest a float, for measuring from.
+
+    A mean always lies between the smallest and the largest value it was taken
+    over, so it is inside the type's range, except that the sum it came from was
+    rounded and can land a hair outside. Those edges are clamped, because a cast
+    of an out of range float to an integer has no defined answer. A group with
+    no values has a NaN for a mean and gets zero, which nothing reads.
+
+    Parameters:
+        dt: The integer type of the column.
+
+    Args:
+        centre: A group's mean.
+
+    Returns:
+        A value of the column's type within one unit of the mean when the mean
+        is representable, and the nearer end of the range when it is not.
+    """
+    if isnan(centre):
+        return Scalar[dt](0)
+    if centre >= Scalar[dt].MAX.cast[DType.float64]():
+        return Scalar[dt].MAX
+    if centre <= Scalar[dt].MIN.cast[DType.float64]():
+        return Scalar[dt].MIN
+    return centre.cast[dt]()
+
+
 def _skew_core[
     dt: DType, //, origin: ImmOrigin
 ](
@@ -2651,6 +2679,27 @@ def _skew_core[
     var centre = means.unsafe_ptr()
     var at = codes.unsafe_ptr()
 
+    # An integer column is measured from a whole number beside each group's
+    # mean rather than from the mean itself. Casting a value near 4.6e18 to a
+    # float moves it by up to 512, which is invisible in a variance and is the
+    # seventh digit of a skewness, and it happens before any correction can see
+    # it. The difference of two integers is exact, it is small whenever the
+    # spread is, and a small integer is a float without rounding, so the only
+    # error left is the centre's, which the residual below takes out. A float
+    # column has nothing to gain and keeps the plain subtraction.
+    var anchors = Array[dt](groups)
+    var offsets = Array[DType.float64](groups)
+    comptime if dt.is_integral():
+        for g in range(groups):
+            var anchor = _anchor_near[dt](centre.unsafe_offset(g).unsafe_load())
+            anchors.unsafe_mut_ptr().unsafe_offset(g).unsafe_store(anchor)
+            offsets.unsafe_mut_ptr().unsafe_offset(g).unsafe_store(
+                centre.unsafe_offset(g).unsafe_load()
+                - anchor.cast[DType.float64]()
+            )
+    var anchor_at = anchors.unsafe_ptr()
+    var offset_at = offsets.unsafe_ptr()
+
     var deltas = Array[DType.float64](groups * workers)
     var squares = Array[DType.float64](groups * workers)
     var cubes = Array[DType.float64](groups * workers)
@@ -2664,10 +2713,23 @@ def _skew_core[
             if not _there(source, validity, has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
-            var delta = (
-                source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-                - centre.unsafe_offset(g).unsafe_load()
-            )
+            var delta: Float64
+            comptime if dt.is_integral():
+                var gap = (
+                    source.unsafe_offset(i).unsafe_load().cast[DType.int128]()
+                    - anchor_at.unsafe_offset(g)
+                    .unsafe_load()
+                    .cast[DType.int128]()
+                )
+                delta = (
+                    gap.cast[DType.float64]()
+                    - offset_at.unsafe_offset(g).unsafe_load()
+                )
+            else:
+                delta = (
+                    source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                    - centre.unsafe_offset(g).unsafe_load()
+                )
             var squared = delta * delta
             first.unsafe_offset(g).unsafe_store(
                 first.unsafe_offset(g).unsafe_load() + delta
@@ -2708,7 +2770,8 @@ def _skew_core[
         # than the second whenever the data is anywhere near symmetric, so an
         # error too small to see in a variance is the leading term in a skewness.
         # On a column at 4.6e18 with a spread of 4.2e9 this is the difference
-        # between five correct digits and eight.
+        # between five correct digits and eight, and with the integer anchor
+        # above it is the difference between eight and all of them.
         var residual = first_total.unsafe_offset(g).unsafe_load() / size
         var second_moment = (
             target.unsafe_offset(g).unsafe_load() / size - residual * residual
