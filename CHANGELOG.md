@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a pull request runs the tests its change can reach, not all 162
+
+The test shards on a pull request now run `tools/run_tests.sh --changed`, which picks the test files that import something the branch touched and falls back to the whole suite whenever it cannot tell. A push to main still runs everything, so main is gated exactly as before. Over the last eight merged branches this runs nothing for the three that only touched the Python package, 30 files for a planner change, 135 for a kernel change, and the whole suite for the three that touched `tools/bindings.py` or the manifests. The shards still all start, since the selection is made inside each one, but a shard with nothing to run now finishes green in the time it takes to set up instead of failing.
+
+`tools/affected.py` no longer treats `CHANGELOG.md`, `docs/`, or the Python package as reasons to run the whole suite. No Mojo test reads any of them, which was checked rather than assumed, and without this nearly every branch touched the changelog and selected everything. A `.mojo` file under `python/` still selects the whole suite.
+
 ### Added
 
 - `quantile` takes `interpolation="lower"`, `"higher"`, `"midpoint"` and `"nearest"` and a list of quantiles, on a series and down the columns of a frame, all of which were refused. The four rules land on a value in the column or halfway between two, at the position numpy reads, which is `q` times one less than the count with no round trip through a percentage, and `nearest` rounds a half to the even position as `numpy.around` does. The column is sorted once and every position a list needs is read in one take. A list answers a series labelled by the quantiles on a series and a frame with a row per quantile on a frame, and a scalar under one of the four rules answers a series labelled by the columns on a frame. `linear` is still the kernel, one reduction per quantile. The eight newer rules numpy added are still refused by name, and so is a list or a rule on a groupby and a frame along its rows. The out of range errors now say what pandas 3 says, which is one sentence for a quantile and a list of them alike, and a sentence of its own on a groupby. (Issue #8)

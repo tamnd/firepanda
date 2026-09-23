@@ -251,6 +251,7 @@ fi
 # Nothing here is allowed to fail quietly. A `git` that does not answer, an
 # `affected.py` that cannot tell, an empty answer that might be an empty answer
 # or might be a broken one, all of them end up running everything.
+selected=0
 if [ "$changed" -eq 1 ]; then
   base=$(git merge-base origin/main HEAD 2> /dev/null)
   touched=$(
@@ -277,6 +278,7 @@ if [ "$changed" -eq 1 ]; then
       [ -n "$line" ] && picked[${#picked[@]}]=$line
     done <<< "$answer"
     files=("${picked[@]}")
+    selected=1
     echo "running the ${#files[@]} test files this branch can reach, which is" \
       "not the whole suite and does not decide whether a branch is good"
   fi
@@ -340,6 +342,15 @@ if [ "$shards" -gt 1 ]; then
             if (least == mine) print $2
           }'
   )
+  # A selection of thirty files over eight shards leaves some shards with
+  # nothing, and that is the selection working rather than the table being
+  # wrong, so it passes. Without one an empty shard still means the table and
+  # the tree disagree, which is the case this was written for.
+  if [ "${#picked[@]}" -eq 0 ] && [ "$selected" -eq 1 ]; then
+    echo "shard $shard of $shards has none of the $total files this branch" \
+      "can reach, so there is nothing for it to run"
+    exit 0
+  fi
   if [ "${#picked[@]}" -eq 0 ]; then
     echo "shard $shard of $shards has no files out of $total, so either the" \
       "cost table is wrong or there are fewer files than shards, which a" \

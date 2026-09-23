@@ -19,10 +19,11 @@ of the current milestone is, and nothing at all on a change to the bottom of the
 library. That last case is the point rather than a flaw. It is the same answer
 the suite would give, arrived at without running it.
 
-What it does not do is decide. It prints a list and `tools/run_tests.sh
---changed` runs it, and a branch is still merged on a full run. This is for the
-loop somebody is in while they are writing code, which is the same thing
-`--fast` is for and is why it says so in its own output.
+It prints a list and `tools/run_tests.sh --changed` runs it. That started as a
+tool for the loop somebody is in while they are writing code, and it is now also
+what a pull request runs in CI, because the full suite on every branch was what
+kept every branch queueing behind every other one. What decides is still the
+full run, which every push to main gets.
 
 Anything it does not understand means the whole suite. A changed file that is
 not under `firepanda/` or `tests/` could be the pixi manifest or the runner
@@ -149,6 +150,33 @@ def reaches(edges, start):
     return seen
 
 
+def unseen(path):
+    """Says whether no Mojo test can see a changed file at all.
+
+    The rule above is that a file this does not understand means the whole
+    suite, and it stays the rule. These are the exceptions, and each one is here
+    because it was checked rather than assumed. Nothing under `tests/` opens the
+    changelog or anything in `docs/`, the mentions of `docs/specs` in the test
+    files are all in docstrings, and the Python package is a different program
+    with its own job. The changelog matters most, because nearly every branch
+    touches it, so without this line every branch selected the whole suite and
+    `--changed` in CI would have been the full run under another name.
+
+    A `.mojo` file under `python/` is still not one of these. It is not under
+    `firepanda/` or `tests/`, so it means the whole suite like anything else
+    this cannot follow.
+
+    Args:
+        path: A changed path, relative to the repository root.
+
+    Returns:
+        True if no test file can observe it.
+    """
+    if path == "CHANGELOG.md" or path.startswith("docs/"):
+        return True
+    return path.startswith("python/") and not path.endswith(".mojo")
+
+
 def affected(changed):
     """Names the tests a set of changed files can reach.
 
@@ -158,6 +186,9 @@ def affected(changed):
     Returns:
         A sorted list of test files, or None meaning run all of them.
     """
+    changed = [path for path in changed if not unseen(path)]
+    if not changed:
+        return []
     interesting = [path for path in changed if path.endswith(".mojo")]
     if len(interesting) != len(changed):
         return None
