@@ -11097,3 +11097,299 @@ def to_datetime(
         )
     except Exception as error:
         raise translate(error) from None
+
+
+_READ_CSV_ENGINES = ("c", "python", "pyarrow")
+"""The three parsers pandas can be told to use, all of which give one answer here."""
+
+_UTF8 = ("utf-8", "utf8", "utf_8")
+"""The spellings of the one encoding the reader decodes, compared lowercased."""
+
+
+def read_csv(
+    filepath_or_buffer: Any,
+    *,
+    sep: Any = NO_DEFAULT,
+    delimiter: Any = None,
+    header: Any = "infer",
+    names: Any = NO_DEFAULT,
+    index_col: Any = None,
+    usecols: Any = None,
+    dtype: Any = None,
+    engine: Any = None,
+    converters: Any = None,
+    true_values: Any = None,
+    false_values: Any = None,
+    skipinitialspace: bool = False,
+    skiprows: Any = None,
+    skipfooter: int = 0,
+    nrows: Any = None,
+    na_values: Any = None,
+    keep_default_na: bool = True,
+    na_filter: bool = True,
+    skip_blank_lines: bool = True,
+    parse_dates: Any = None,
+    date_format: Any = None,
+    dayfirst: bool = False,
+    cache_dates: bool = True,
+    iterator: bool = False,
+    chunksize: Any = None,
+    compression: Any = "infer",
+    thousands: Any = None,
+    decimal: str = ".",
+    lineterminator: Any = None,
+    quotechar: str = '"',
+    quoting: int = 0,
+    doublequote: bool = True,
+    escapechar: Any = None,
+    comment: Any = None,
+    encoding: Any = None,
+    encoding_errors: Any = "strict",
+    dialect: Any = None,
+    on_bad_lines: Any = "error",
+    low_memory: bool = True,
+    memory_map: bool = False,
+    float_precision: Any = None,
+    storage_options: Any = None,
+    dtype_backend: Any = NO_DEFAULT,
+) -> DataFrame:
+    """Reads a CSV file into a frame, which is `pandas.read_csv`.
+
+    Hand written for the reason `to_datetime` is: the reader underneath takes a
+    path and nothing else, and pandas declares forty eight more parameters. All
+    of them are declared here with pandas' defaults, so a caller who passes one
+    gets a sentence about that parameter rather than a TypeError about an
+    unexpected keyword. They fall into four groups.
+
+    Two are implemented after the read, because the answer does not depend on
+    when they are applied. `usecols` keeps some columns, and pandas infers each
+    column's type on its own, so dropping the others afterwards changes nothing
+    about the ones kept. `index_col` moves one column into the row labels.
+
+    Six are accepted at every value, because they choose how pandas gets to the
+    answer rather than what the answer is: `engine`, `cache_dates`,
+    `low_memory` and `memory_map`, plus `sep` and `delimiter` at a comma and
+    `encoding` at any spelling of UTF-8.
+
+    The rest are refused at anything but their default, each by name. Some of
+    them look as if they could be applied afterwards and cannot: `nrows` reads
+    fewer rows, and an integer column whose only gap is below the cut is int64
+    in pandas and float64 if the whole file is read first and then cut. `dtype`
+    is the same, since a column of `007` read as text keeps its zeros and one
+    read as numbers and then cast does not.
+
+    Args:
+        filepath_or_buffer: A path, as a string or anything `os.fspath` takes.
+            A buffer or an open file is refused.
+        sep: The separator. A comma, or left out.
+        delimiter: The other name for `sep`. Passing both is an error.
+        header: `infer` or 0, which read the first line as the names.
+        names: Refused.
+        index_col: A column name or position to use as the row labels, or
+            None or False for none.
+        usecols: The columns to keep, as names or as positions. They come back
+            in the order the file has them, whatever order they were listed in.
+        dtype: Refused.
+        engine: Any of pandas' three parsers, or None.
+        converters: Refused.
+        true_values: Refused.
+        false_values: Refused.
+        skipinitialspace: Refused at True.
+        skiprows: Refused.
+        skipfooter: Refused at anything but zero.
+        nrows: Refused.
+        na_values: Refused.
+        keep_default_na: Refused at False.
+        na_filter: Refused at False.
+        skip_blank_lines: Refused at False.
+        parse_dates: Refused.
+        date_format: Refused.
+        dayfirst: Refused at True.
+        cache_dates: Accepted and has no effect.
+        iterator: Refused at True.
+        chunksize: Refused.
+        compression: `infer` or None.
+        thousands: Refused.
+        decimal: A full stop.
+        lineterminator: Refused.
+        quotechar: A double quote.
+        quoting: Zero, which is `csv.QUOTE_MINIMAL`.
+        doublequote: True.
+        escapechar: Refused.
+        comment: Refused.
+        encoding: None or UTF-8.
+        encoding_errors: `strict`.
+        dialect: Refused.
+        on_bad_lines: `error`.
+        low_memory: Accepted and has no effect.
+        memory_map: Accepted and has no effect.
+        float_precision: Refused.
+        storage_options: Refused.
+        dtype_backend: Refused. The pandas facing reader widens a column of
+            integers with a gap to float64, which is pandas' default, and
+            `firepanda.from_arrow` is the door that keeps Arrow's types.
+
+    Returns:
+        The frame.
+
+    Raises:
+        NotImplementedError: For a buffer, and for a refused argument at
+            anything but its default.
+        ValueError: For `sep` and `delimiter` both given, an unknown engine, an
+            unknown `dtype_backend`, and a `usecols` naming a column the file
+            does not have, each with pandas' message.
+        OSError: When the file cannot be read.
+    """
+    import os
+
+    from ._frame import _read_csv
+
+    if not isinstance(filepath_or_buffer, (str, os.PathLike)):
+        raise NotImplementedError(
+            "reading from a buffer is not supported yet, because the reader maps a"
+            " file by its path and has nothing to map an object in memory with"
+        )
+    path = os.fspath(filepath_or_buffer)
+    if not isinstance(path, str):
+        raise NotImplementedError("a path given as bytes is not supported yet")
+
+    if sep is not NO_DEFAULT and delimiter is not None:
+        raise ValueError("Specified a sep and a delimiter; you can only specify one.")
+    if engine is not None and engine not in _READ_CSV_ENGINES:
+        raise ValueError(
+            f'Unknown engine: {engine} (valid options are "c", "python", or "pyarrow")'
+        )
+    if dtype_backend is not NO_DEFAULT and dtype_backend not in ("numpy_nullable", "pyarrow"):
+        raise ValueError(
+            f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and"
+            " 'pyarrow' are allowed."
+        )
+    separator = delimiter if sep is NO_DEFAULT else sep
+    if separator is not None and separator != ",":
+        raise NotImplementedError(
+            f"sep={separator!r} is not supported yet, because the reader splits on"
+            " a comma and has no setting for anything else"
+        )
+    if header not in ("infer", 0):
+        raise NotImplementedError(
+            f"header={header!r} is not supported yet, because the reader takes the"
+            " names from the first line and has no setting for any other"
+        )
+    if names is not NO_DEFAULT and names is not None:
+        raise NotImplementedError(
+            "names= is not supported yet, because the reader takes the names from the"
+            " first line and has no way to be handed them instead"
+        )
+    if dtype_backend is not NO_DEFAULT:
+        raise NotImplementedError(
+            f"dtype_backend={dtype_backend!r} is not supported yet, because read_csv"
+            " answers pandas' default types, and firepanda.from_arrow is the door"
+            " that keeps Arrow's"
+        )
+    if compression not in ("infer", None):
+        raise NotImplementedError(
+            f"compression={compression!r} is not supported yet, because the reader"
+            " maps the file as it is on disk"
+        )
+    if encoding is not None and str(encoding).lower() not in _UTF8:
+        raise NotImplementedError(
+            f"encoding={encoding!r} is not supported yet, because the reader decodes"
+            " UTF-8 and nothing else"
+        )
+    fixed = "the reader has one reading of a CSV file and no setting for this"
+    for name, value in (
+        ("dtype", dtype),
+        ("converters", converters),
+        ("true_values", true_values),
+        ("false_values", false_values),
+        ("skiprows", skiprows),
+        ("nrows", nrows),
+        ("na_values", na_values),
+        ("parse_dates", parse_dates),
+        ("date_format", date_format),
+        ("chunksize", chunksize),
+        ("thousands", thousands),
+        ("lineterminator", lineterminator),
+        ("escapechar", escapechar),
+        ("comment", comment),
+        ("dialect", dialect),
+        ("float_precision", float_precision),
+        ("storage_options", storage_options),
+    ):
+        _refuse(name, value, fixed)
+    for name, value, default in (
+        ("skipinitialspace", skipinitialspace, False),
+        ("skipfooter", skipfooter, 0),
+        ("keep_default_na", keep_default_na, True),
+        ("na_filter", na_filter, True),
+        ("skip_blank_lines", skip_blank_lines, True),
+        ("dayfirst", dayfirst, False),
+        ("iterator", iterator, False),
+        ("decimal", decimal, "."),
+        ("quotechar", quotechar, '"'),
+        ("quoting", quoting, 0),
+        ("doublequote", doublequote, True),
+        ("encoding_errors", encoding_errors, "strict"),
+        ("on_bad_lines", on_bad_lines, "error"),
+    ):
+        _held_at(name, value, default, fixed)
+
+    frame = _read_csv(path)
+    if usecols is not None:
+        frame = cast("DataFrame", frame[_usecols(frame.columns, usecols)])
+    if index_col is not None and index_col is not False:
+        if isinstance(index_col, int) and not isinstance(index_col, bool):
+            index_col = list(frame.columns)[index_col]
+        frame = cast("DataFrame", frame.set_index(index_col))
+    return frame
+
+
+def _usecols(columns: Any, usecols: Any) -> list[str]:
+    """The columns `usecols` keeps, in the order the file has them.
+
+    pandas reads the file's order rather than the list's, so `usecols=["b", "a"]`
+    comes back as `a` then `b`. A list of positions is read the same way, and a
+    list mixing names and positions, or a bare string, is the error pandas makes
+    it. An empty list keeps no columns, which is pandas' answer as well.
+
+    Args:
+        columns: The names the file has.
+        usecols: The names or the positions to keep.
+
+    Returns:
+        The names to select, in file order.
+
+    Raises:
+        NotImplementedError: For a callable.
+        ValueError: For a name the file does not have, a mixed list or a string.
+    """
+    if callable(usecols):
+        raise NotImplementedError(
+            "usecols given as a callable is not supported yet, because the columns"
+            " are chosen after the read here and a callable is asked during it"
+        )
+    names = list(columns)
+    wanted: list[Any] = [] if isinstance(usecols, str) else list(usecols)
+    if wanted and all(isinstance(one, str) for one in wanted):
+        missing = [one for one in wanted if one not in names]
+        if missing:
+            raise ValueError(
+                f"Usecols do not match columns, columns expected but not found: {missing}"
+            )
+        kept = set(wanted)
+        return [name for name in names if name in kept]
+    if not isinstance(usecols, str) and all(
+        isinstance(one, int) and not isinstance(one, bool) for one in wanted
+    ):
+        out_of_range = [one for one in wanted if not 0 <= one < len(names)]
+        if out_of_range:
+            raise ValueError(
+                "Defining usecols with out-of-bounds indices is not allowed."
+                f" {out_of_range} are out-of-bounds."
+            )
+        positions = set(wanted)
+        return [name for at, name in enumerate(names) if at in positions]
+    raise ValueError(
+        "'usecols' must either be list-like of all strings, all unicode, all integers or"
+        " a callable."
+    )

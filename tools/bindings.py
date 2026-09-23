@@ -186,9 +186,10 @@ class Binding:
 
     py_params: tuple[tuple[str, str], ...] = ()
     """The Python facing parameter list for a module level function, when it
-    differs from the extension one. pandas calls the first argument of
-    `read_csv` `filepath_or_buffer` and the parity test checks that we do too,
-    while the extension side keeps a plainer name. Empty means the two agree."""
+    differs from the extension one, so that a pandas name such as
+    `filepath_or_buffer` can sit over a plainer name on the extension side.
+    `read_csv` was the one that needed it and is now written by hand in
+    `_pandas.py`, and the field stays for the next. Empty means the two agree."""
 
 
 @dataclass(frozen=True)
@@ -3992,11 +3993,10 @@ INDEX = Exposed(
 FUNCTIONS = (
     Binding(
         mojo="open_csv",
-        name="read_csv",
-        doc="Reads a CSV file into a frame.",
+        name="_read_csv",
+        doc="Reads a CSV file into a frame, behind `read_csv` in `_pandas`.",
         params=(("path", "str"),),
         returns="DataFrame",
-        py_params=(("filepath_or_buffer", "str"),),
     ),
     Binding(
         mojo="open_arrow",
