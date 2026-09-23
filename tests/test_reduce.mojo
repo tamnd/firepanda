@@ -46,7 +46,7 @@ from firepanda.exec import MORSEL_ROWS
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
-from firepanda.kernel.group import AggKind
+from firepanda.kernel.group import AggKind, LAND_COLUMN, LAND_GROUPED
 from firepanda.kernel.reduce import distinct_count_any, reduce_any
 
 
@@ -684,6 +684,55 @@ def test_a_correlation_over_the_whole_frame_agrees_with_the_group_by() raises:
         fast[0].as_typed[DType.float64]()[0],
         slow[1].as_typed[DType.float64]()[0],
     )
+
+
+def landed(values: List[Float64], kind: AggKind) raises -> Float64:
+    """Reduces a column of floats and reads the one answer."""
+    return reduce_any(AnyArray(floats(values)), kind).as_typed[DType.float64]()[
+        0
+    ]
+
+
+def test_a_median_lands_where_pandas_lands_on_either_door() raises:
+    # 0.72 plus half the gap to 6.51 is 3.615 and the two added and halved is
+    # 3.6149999999999998, which is what pandas answers for a column and a
+    # group alike. The SQL rule keeps the first.
+    var two: List[Float64] = [0.72, 6.51]
+    assert_equal(landed(two, AggKind.MEDIAN), 3.615)
+    assert_equal(
+        landed(two, AggKind.MEDIAN.landed(LAND_GROUPED)), 3.6149999999999998
+    )
+    assert_equal(
+        landed(two, AggKind.MEDIAN.landed(LAND_COLUMN)), 3.6149999999999998
+    )
+    # An odd count is the middle value itself, whatever the rule.
+    var three: List[Float64] = [0.6, 5.4, 3.7]
+    assert_equal(landed(three, AggKind.MEDIAN.landed(LAND_COLUMN)), 3.7)
+
+
+def test_a_quantile_past_a_half_lands_the_way_numpy_does() raises:
+    # Four fifths of the way from 0.6 to 3.7. Up from the lower value that is
+    # 3.0800000000000005 and back from the upper one it is 3.08, and numpy
+    # takes the second from a half up. A group keeps the first, as pandas'
+    # Cython does. The SQL rule lets the compiler fuse the multiply and the
+    # add, which rounds once and lands on 3.08 by another road, so it is only
+    # held to being close.
+    var three: List[Float64] = [0.6, 5.4, 3.7]
+    var at = AggKind.quantile_at(0.4)
+    assert_almost_equal(landed(three, at), 3.08)
+    assert_equal(landed(three, at.landed(LAND_GROUPED)), 3.0800000000000005)
+    assert_equal(landed(three, at.landed(LAND_COLUMN)), 3.08)
+    # Below a half the column and the group take the same road.
+    var low = AggKind.quantile_at(0.2)
+    assert_equal(
+        landed(three, low.landed(LAND_COLUMN)),
+        landed(three, low.landed(LAND_GROUPED)),
+    )
+
+
+def test_a_landing_is_not_part_of_which_reduction_it_is() raises:
+    assert_true(AggKind.MEDIAN.landed(LAND_COLUMN) == AggKind.MEDIAN)
+    assert_equal(AggKind.quantile_at(0.3).landed(LAND_COLUMN).param, 0.3)
 
 
 def main() raises:
