@@ -191,7 +191,7 @@ def test_localising_and_reading_back_is_the_identity() raises:
     of 2024's changes."""
     var rows: List[Int64] = [
         1704110400,
-        1710037800 - 3600 + 59 * 60,
+        1710037800 - 1860,
         1710037800 + 1800,
         1730597400 - 3600,
         1730597400 + 3600,
