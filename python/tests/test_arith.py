@@ -19,15 +19,16 @@ the same signature. Nothing here repeats that. What is here is what the calls do
 
 ### Where firepanda and pandas disagree
 
-Two of these are asserted as they are rather than as pandas has them, and each
-is a known gap with an issue rather than something this file is choosing:
+One of these is asserted as it is rather than as pandas has it, and it is a
+known gap with an issue rather than something this file is choosing:
 
-  - A comparison against a row only one side has answers null. pandas answers
-    False, on the ground that a row that is not there is not equal to anything.
   - Integer division by zero answers null. pandas answers zero with a warning.
 
-There used to be a third, which is that two series whose names differ produced a
-series named `""` where pandas produces one named `None`. A name is an
+There used to be two more. A comparison against a row only one side has answered
+null where pandas answers False, and it answers False now, because every
+comparison fills the rows it had no answer for with pandas' answer. The other was
+that two series whose names differ produced a series named `""` where pandas
+produces one named `None`. A name is an
 `Optional[String]` now and that one is gone.
 
 Asserting the current answer is deliberate. A test that skipped them would let
@@ -160,21 +161,18 @@ def test_a_comparison_operator_refuses_to_align(firepanda: ModuleType) -> None:
     assert (left < 2).tolist() == [True, False, False]
 
 
-def test_the_named_comparisons_align_and_answer_null_off_the_end(
+def test_the_named_comparisons_align_and_answer_false_off_the_end(
     firepanda: ModuleType,
 ) -> None:
-    """This is one of the three divergences the module docstring lists.
+    """pandas' answer for a row only one side has, which used to be a null here.
 
-    pandas answers False for row 2, because a row that is not in the right operand
-    is not equal to anything in it. firepanda answers null, which is the kernel's
-    rule for a comparison against a missing value and is applied here to a row
-    that is missing because it was never there. The fill is honoured either way,
-    which is the part that is not a divergence and is worth pinning: `eq` with a
-    `fill_value` is the one comparison pandas does let you answer that row with.
+    A row that is not in the right operand is not equal to anything in it, so `eq`
+    is False there and `ne` is True. The fill is honoured as well, which is the
+    one way pandas lets a caller answer that row with something else.
     """
     left, right = _pair(firepanda)
-    assert left.eq(right).tolist() == [False, False, None]
-    assert left.ne(right).tolist() == [True, True, None]
+    assert left.eq(right).tolist() == [False, False, False]
+    assert left.ne(right).tolist() == [True, True, True]
     assert left.lt(right, fill_value=0).tolist() == [True, True, False]
     assert left.gt(right, fill_value=0).tolist() == [False, False, True]
 

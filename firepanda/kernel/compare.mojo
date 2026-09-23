@@ -16,8 +16,8 @@ separately what a null in a mask means; see `select.mojo`.
 There is a second form that takes a constant on the right, and it needs no flag
 for a constant on the left, because `5 < x` is `x > 5` and the caller mirrors the
 operation rather than the operands. That mirroring is exact, NaN included: both
-readings of the pair are false when either side is not a number, so nothing is
-smuggled in by rewriting one as the other.
+readings of an ordering are false when either side is not a number and `!=` is
+true for both, so nothing is smuggled in by rewriting one as the other.
 
 There is a third form, at the bottom of the file, that answers a comparison
 against a constant with the rows it keeps rather than with a column. A filter
@@ -217,7 +217,10 @@ def _compare[
             comptime if op == CMP_EQ:
                 dst.unsafe_offset(i).unsafe_store(x.eq(y))
             elif op == CMP_NE:
-                dst.unsafe_offset(i).unsafe_store(x.ne(y))
+                # Not `x.ne(y)`, which lowers to the ordered compare and is
+                # false on a NaN lane, where the scalar form and IEEE both say
+                # true. The inverse of equality is true there.
+                dst.unsafe_offset(i).unsafe_store(~x.eq(y))
             elif op == CMP_LT:
                 dst.unsafe_offset(i).unsafe_store(x.lt(y))
             elif op == CMP_LE:
@@ -280,7 +283,10 @@ def compare_const[
             comptime if op == CMP_EQ:
                 dst.unsafe_offset(i).unsafe_store(x.eq(y))
             elif op == CMP_NE:
-                dst.unsafe_offset(i).unsafe_store(x.ne(y))
+                # Not `x.ne(y)`, which lowers to the ordered compare and is
+                # false on a NaN lane, where the scalar form and IEEE both say
+                # true. The inverse of equality is true there.
+                dst.unsafe_offset(i).unsafe_store(~x.eq(y))
             elif op == CMP_LT:
                 dst.unsafe_offset(i).unsafe_store(x.lt(y))
             elif op == CMP_LE:

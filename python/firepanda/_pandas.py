@@ -2384,6 +2384,47 @@ def _flags(inner: Any) -> Any:
     return inner
 
 
+COMPARISON_ON_A_GAP = {"eq": False, "ne": True, "lt": False, "le": False, "gt": False, "ge": False}
+"""What pandas answers for a comparison on a row with a missing value on either side.
+
+A numpy bool has two values and nowhere to put a third, so pandas writes the answer
+the comparison gives against NaN: every one of them false except `!=`, which is
+true. The kernel writes a null there instead, which says more, and this table is how
+the pandas facing operators turn it back into what pandas says.
+"""
+
+
+def _two_valued(inner: Any, op: str) -> Any:
+    """A column of comparisons with each null replaced by pandas' answer for it.
+
+    Args:
+        inner: What the kernel answered, which is a comparison only when `op` is one.
+        op: The operator's name.
+
+    Returns:
+        The column unchanged when `op` is not a comparison or nothing was missing, and
+        otherwise the column with no nulls left in it.
+    """
+    from ._frame import Series
+
+    if op not in COMPARISON_ON_A_GAP or inner.null_count() == 0:
+        return inner
+    return inner.fill_null(Series([COMPARISON_ON_A_GAP[op]])._inner)
+
+
+def _two_valued_frame(inner: Any, op: str) -> Any:
+    """`_two_valued` over every column of a frame of comparisons."""
+    from ._frame import Series
+
+    if op not in COMPARISON_ON_A_GAP:
+        return inner
+    answer = Series([COMPARISON_ON_A_GAP[op]])._inner
+    for name, gaps in zip(inner.names(), inner.null_counts(), strict=True):
+        if gaps:
+            inner = inner.fill_null(name, answer)
+    return inner
+
+
 def _no_gaps(inner: Any) -> Any:
     """The rows to keep, with a false wherever the condition said nothing.
 
@@ -5017,11 +5058,17 @@ class DataFrameMixin:
         try:
             if isinstance(other, DataFrameMixin):
                 if strict:
-                    return DataFrame._wrap(self._inner.compare_frame(other._inner, op))
-                return DataFrame._wrap(self._inner.binary_frame(other._inner, op, flip, None))
+                    return DataFrame._wrap(
+                        _two_valued_frame(self._inner.compare_frame(other._inner, op), op)
+                    )
+                return DataFrame._wrap(
+                    _two_valued_frame(self._inner.binary_frame(other._inner, op, flip, None), op)
+                )
             if isinstance(other, SeriesMixin):
-                return DataFrame._wrap(self._inner.binary_series(other._inner, op, 1, flip))
-            return DataFrame._wrap(self._inner.binary_value(other, op, flip))
+                return DataFrame._wrap(
+                    _two_valued_frame(self._inner.binary_series(other._inner, op, 1, flip), op)
+                )
+            return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
 
@@ -5047,11 +5094,17 @@ class DataFrameMixin:
         number = _axis_number(axis, "DataFrame", 1, (0, 1))
         try:
             if isinstance(other, DataFrameMixin):
-                return DataFrame._wrap(self._inner.binary_frame(other._inner, op, flip, fill_value))
+                return DataFrame._wrap(
+                    _two_valued_frame(
+                        self._inner.binary_frame(other._inner, op, flip, fill_value), op
+                    )
+                )
             if isinstance(other, SeriesMixin):
                 _no_fill_against_a_series(fill_value)
-                return DataFrame._wrap(self._inner.binary_series(other._inner, op, number, flip))
-            return DataFrame._wrap(self._inner.binary_value(other, op, flip))
+                return DataFrame._wrap(
+                    _two_valued_frame(self._inner.binary_series(other._inner, op, number, flip), op)
+                )
+            return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
 
@@ -7065,9 +7118,13 @@ class SeriesMixin:
         try:
             if isinstance(other, SeriesMixin):
                 if strict:
-                    return Series._wrap(self._inner.compare_series(other._inner, op))
-                return Series._wrap(self._inner.binary_series(other._inner, op, flip, None))
-            return Series._wrap(self._inner.binary_value(other, op, flip))
+                    return Series._wrap(
+                        _two_valued(self._inner.compare_series(other._inner, op), op)
+                    )
+                return Series._wrap(
+                    _two_valued(self._inner.binary_series(other._inner, op, flip, None), op)
+                )
+            return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
 
@@ -7090,8 +7147,10 @@ class SeriesMixin:
         _axis_number(axis, "Series", 0, (0,))
         try:
             if isinstance(other, SeriesMixin):
-                return Series._wrap(self._inner.binary_series(other._inner, op, flip, fill_value))
-            return Series._wrap(self._inner.binary_value(other, op, flip))
+                return Series._wrap(
+                    _two_valued(self._inner.binary_series(other._inner, op, flip, fill_value), op)
+                )
+            return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
 
