@@ -178,7 +178,7 @@ comptime GROUPING: UInt16 = 30
 """`GROUPING(a)`, which reports the grouping set a row came from."""
 
 comptime POSITIONAL: UInt16 = 31
-"""`#1`, a column named by its place in the select list."""
+"""`#1`, a column named by its place in the FROM, where it cannot be read."""
 
 comptime DEFAULT_VALUE: UInt16 = 32
 """`DEFAULT` where a value goes."""
@@ -525,10 +525,13 @@ def sql_support() -> List[Refusal]:
         ),
         Refusal(
             "positional",
-            "a column written as #1",
+            "a column written as #1 here",
             (
-                "firepanda reads a column by name. Write the name, or the"
-                " expression the column was built from."
+                "firepanda reads #1 as the first column of the FROM in the"
+                " select list, WHERE, GROUP BY, HAVING and QUALIFY, and as the"
+                " first output column in a bare ORDER BY. In an ON clause, over"
+                " a USING or NATURAL join and in a correlated subquery it does"
+                " not yet, so write the column's name there."
             ),
             STAGE_ISSUE,
         ),

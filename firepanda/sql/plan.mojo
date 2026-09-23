@@ -520,6 +520,7 @@ from .ast import (
     EXPR_LIST,
     EXPR_LITERAL,
     EXPR_NAMED_ARGUMENT,
+    EXPR_POSITIONAL,
     EXPR_QUANTIFIED,
     EXPR_ROW,
     EXPR_STAR,
@@ -583,6 +584,7 @@ from .unsupported import (
     LIST_COMPREHENSION,
     LIST_VALUE,
     NAMED_ARGUMENT,
+    POSITIONAL,
     ROW_VALUE,
     SELECT_SAMPLE,
     SPECIAL_CALL,
@@ -972,6 +974,25 @@ def _number(text: String) raises -> Value:
             )
         )
     return Value(whole.value)
+
+
+def _sort_place(ast: Ast, at: UInt32) -> Int:
+    """The position an ORDER BY entry wrote, or -1 for anything else.
+
+    A bare `#n` there is the nth output column, the same as a bare `n`, and
+    only there. Anywhere else, `ORDER BY #1 + 0` included, it is a column of
+    the FROM, which is what DuckDB reads.
+
+    Args:
+        ast: The arenas.
+        at: The entry's expression.
+
+    Returns:
+        The position as it was written, and -1 when a position was not written.
+    """
+    if at != NO_NODE and ast.exprs[Int(at)].kind == EXPR_POSITIONAL:
+        return Int(ast.exprs[Int(at)].a)
+    return _ordinal(ast, at)
 
 
 def _ordinal(ast: Ast, at: UInt32) -> Int:
@@ -1927,6 +1948,46 @@ leaves `EXCLUDE (x.a)` to be refused by the same check that refuses
 the way DuckDB leaves `RENAME (zzz AS b)` alone."""
 
 
+struct _Positions(Copyable, Movable):
+    """What `#n` counts over, which is the FROM of the query being lowered.
+
+    DuckDB reads `#n` as the nth column the FROM produced, counting every
+    relation left to right. A USING or a NATURAL join is the one place that
+    count and the columns this file builds part ways, because DuckDB still
+    counts both copies of a merged column and the join here keeps one, so a
+    FROM with one of those leaves `live` off and `#n` is refused rather than
+    read one column out.
+    """
+
+    var names: List[String]
+    """The FROM's columns, in the schema's own spelling."""
+
+    var origin: List[Int]
+    """Which relation each of those came from, the same as `_From.origin`."""
+
+    var live: Bool
+    """Whether `#n` may be read here at all."""
+
+    def __init__(out self):
+        """Starts with nothing to count, which is where `#n` is refused."""
+        self.names = List[String]()
+        self.origin = List[Int]()
+        self.live = False
+
+    def __init__(out self, source: _From, live: Bool):
+        """Counts over what a FROM built.
+
+        Args:
+            source: The FROM.
+            live: Whether its count is DuckDB's.
+        """
+        self.names = List[String]()
+        for i in range(len(source.schema)):
+            self.names.append(String(source.schema[i].name))
+        self.origin = source.origin.copy()
+        self.live = live
+
+
 struct _Scope(Movable):
     """What the `FROM` put in reach, and which relation each name is.
 
@@ -1993,6 +2054,14 @@ struct _Scope(Movable):
     nests rather than flattens.
     """
 
+    var positions: _Positions
+    """What `#n` counts over right now.
+
+    Set by the block once its FROM is built and put back to what it was when
+    the block is done. A correlated subquery hides it while it is lowered, since
+    a `#n` in there counts the subquery's FROM and not this one.
+    """
+
     def __init__(out self):
         """Starts with nothing in reach, which is what a query with no FROM has.
         """
@@ -2003,6 +2072,7 @@ struct _Scope(Movable):
         self.merged = List[String]()
         self.pinned = List[Int]()
         self.floor = 0
+        self.positions = _Positions()
 
     def add(mut self, var name: String, table: Int) raises:
         """Puts one name in reach.
@@ -2732,6 +2802,46 @@ def _lower_operand(
     return _lower_expr(ast, at, plan, walk, scope, grouped)
 
 
+def _lower_positional(n: Int, mut plan: Plan, scope: _Scope) raises -> Int:
+    """Lowers `#n` to the column of the FROM it counts to.
+
+    The column goes on qualified by its relation where it has one, so that two
+    tables with a column of the same name still give the one that was counted.
+    A column of a subquery or a table function has no relation to qualify it
+    with and goes on by name, which binding refuses as ambiguous when another
+    source in the FROM has that name too.
+
+    Args:
+        n: Which column, counting from 1.
+        plan: Where the lowered expression goes.
+        scope: What the FROM put in reach.
+
+    Returns:
+        The index in the plan's expression arena.
+
+    Raises:
+        If there is nothing here for `#n` to count, or n is past the end.
+    """
+    ref positions = scope.positions
+    if not positions.live:
+        raise not_implemented(POSITIONAL, "", "")
+    if n > len(positions.names):
+        raise Error(
+            String(
+                "Binder Error: Positional reference ",
+                n,
+                " out of range (total ",
+                len(positions.names),
+                " columns)",
+            )
+        )
+    var name = positions.names[n - 1].copy()
+    var relation = positions.origin[n - 1]
+    if relation >= 0:
+        return plan.exprs.column_of(relation, name^)
+    return plan.exprs.column(name^)
+
+
 def _lower_expr(
     ast: Ast,
     at: UInt32,
@@ -2796,6 +2906,9 @@ def _lower_expr(
         if tag == LITERAL_STRING:
             return plan.exprs.literal(Value(text))
         raise Error("a literal whose kind this does not lower yet")
+
+    if node.kind == EXPR_POSITIONAL:
+        return _lower_positional(Int(node.a), plan, scope)
 
     if node.kind == EXPR_COLUMN:
         var parts = ast.length(node.children)
@@ -6398,6 +6511,8 @@ def _folded_join(
     var merged = len(scope.merged)
     var outside = scope.floor
     scope.floor = reach
+    var held = scope.positions.copy()
+    scope.positions = _Positions()
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -6537,6 +6652,7 @@ def _folded_join(
     # The line between the two queries goes back with it.
     scope.hide(reach, merged)
     scope.floor = outside
+    scope.positions = held^
     walk.scalars.append(at)
     walk.scalar_names.append(called^)
     walk.scalar_zeroes.append(zeroed)
@@ -7129,6 +7245,8 @@ def _exists_join(
     var merged = len(scope.merged)
     var outside = scope.floor
     scope.floor = reach
+    var held = scope.positions.copy()
+    scope.positions = _Positions()
     var right = _from(
         ast, from_clause, catalog, grammar, plan, sources, scope, ctes
     )
@@ -7190,6 +7308,7 @@ def _exists_join(
     # the two queries goes back with it.
     scope.hide(reach, merged)
     scope.floor = outside
+    scope.positions = held^
 
     if len(left_keys) == 0:
         raise Error(
@@ -7293,19 +7412,30 @@ def _block(
     var at: Int
     var schema = Schema()
     var origin = List[Int]()
+    var held = scope.positions.copy()
+    scope.positions = _Positions()
     if from_clause == NO_NODE:
         # A query with no FROM still has to project over something, and one row
         # of one constant is the smallest something there is. The projection
         # above drops the column again, so the value in it is never read and
         # only its row count matters.
         at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
+        # Nothing to count, so any `#n` is past the end, which DuckDB says as
+        # the position it could not find rather than as a refusal.
+        scope.positions.live = True
     else:
+        # A `#n` in an ON clause is lowered while this FROM is still being
+        # built, and there is nothing yet for it to count, so it is refused
+        # there rather than read against the query around this one.
+        scope.positions = _Positions()
+        var merged = len(scope.merged)
         var source = _from(
             ast, from_clause, catalog, grammar, plan, sources, scope, ctes
         )
         at = source.at
         schema = Schema(copy=source.schema)
         origin = source.origin.copy()
+        scope.positions = _Positions(source, len(scope.merged) == merged)
 
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
@@ -7782,7 +7912,7 @@ def _block(
         if (
             len(sort_shapes) == 0
             or entry.a == NO_NODE
-            or _ordinal(ast, entry.a) >= 0
+            or _sort_place(ast, entry.a) >= 0
             or _has_over(ast, entry.a)
         ):
             ordered.append(-1)
@@ -7827,6 +7957,10 @@ def _block(
     elif (query.a & SELECT_DISTINCT) != 0:
         at = plan.distinct(at, List[Int]())
 
+    # An ORDER BY that is not a bare `#n` is lowered above this block, where
+    # the FROM is out of reach, so what `#n` counts goes back to the query
+    # around this one before that happens.
+    scope.positions = held^
     return at
 
 
@@ -7936,6 +8070,13 @@ def _name_of(
             if found != NOT_IN_REACH and found != DERIVED:
                 return scope.spelled_at(found, written)
         return scope.spelled(written)
+    # `#n` is named after the column it counts to, which DuckDB does too. Past
+    # the end it is refused when it is lowered, and the printed name here is
+    # never seen.
+    if node.kind == EXPR_POSITIONAL:
+        ref positions = scope.positions
+        if positions.live and Int(node.a) <= len(positions.names):
+            return positions.names[Int(node.a) - 1].copy()
     try:
         return print_expr(ast, at, grammar)
     except:
@@ -8447,7 +8588,7 @@ def _modifiers(
                     descending.append(down)
                     nulls_last.append(last)
                 continue
-            var position = _ordinal(ast, entry.a)
+            var position = _sort_place(ast, entry.a)
             if position >= 0:
                 # A number here is a position in the select list rather than
                 # the number itself. The names come off the plan for the same
