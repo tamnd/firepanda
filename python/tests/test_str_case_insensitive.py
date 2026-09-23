@@ -202,7 +202,7 @@ def test_replace_folds_the_same_way_the_three_questions_do(firepanda: ModuleType
         got = mine.str.replace(pattern, "#", case=False)
         assert got.tolist() == text_of(them.str.replace(pattern, "#", case=False)), pattern
         changed = [
-            None if row is None else row != answer
+            False if row is None else row != answer
             for row, answer in zip(FOLDING, got.tolist(), strict=True)
         ]
         assert changed == mine.str.contains(pattern, case=False).tolist(), pattern
@@ -264,17 +264,19 @@ def test_a_count_of_zero_means_all_of_them_once_the_search_is_folded(
 
 
 @needs_pandas
-def test_a_folded_search_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
-    """Which pandas does for the replacement and does not for the three masks.
+def test_a_folded_search_answers_what_pandas_answers_on_a_missing_row(
+    firepanda: ModuleType,
+) -> None:
+    """The replacement keeps a missing row missing and the three masks answer False.
 
-    The masks are the `engine/string-predicate-null` divergence, unchanged by
-    the fold and recorded on the board rather than worked around here, and it is
-    asserted in both directions so that a change on either side shows up.
+    Both are pandas' answers. The masks used to be null here, which was the
+    `engine/string-predicate-null` divergence, and the fold does not change
+    what a missing row answers any more than the byte search does.
     """
     mine = made(firepanda)
     for name in ("contains", "match", "fullmatch"):
-        assert getattr(mine.str, name)("a", case=False).tolist()[-1] is None, name
-        assert theirs().str.contains("a", case=False).tolist()[-1] is False
+        assert getattr(mine.str, name)("a", case=False).tolist()[-1] is False, name
+        assert getattr(theirs().str, name)("a", case=False).tolist()[-1] is False, name
     assert mine.str.replace("a", "#", case=False).tolist()[-1] is None
     assert text_of(theirs().str.replace("a", "#", case=False))[-1] is None
 

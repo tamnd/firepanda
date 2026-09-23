@@ -56,6 +56,18 @@ def theirs(values: list[Any] = ROWS) -> Any:
     return pd.Series(values, dtype="object")
 
 
+def by_default(values: list[Any] = ROWS) -> Any:
+    """The same column in pandas, held the way pandas holds text by default.
+
+    The masks are compared against this one rather than against `theirs`,
+    because a column held as object answers None on a missing row and one held
+    as `str` answers False, and a text column here is pandas' `str`.
+    """
+    import pandas as pd
+
+    return pd.Series(values, dtype="str")
+
+
 def like(mine: list[Any], them: list[Any]) -> bool:
     """Compares two columns of values, reading a NaN as a None."""
     if len(mine) != len(them):
@@ -208,13 +220,13 @@ def test_a_missing_row_does_not_make_index_raise(firepanda: ModuleType) -> None:
 def test_startswith_and_endswith_answer_a_mask_with_a_hole_in_it(
     firepanda: ModuleType,
 ) -> None:
-    """The predicates, where a missing row is missing and not false."""
+    """The predicates, where a missing row answers False as it does in pandas."""
     assert like(
         made(firepanda).str.startswith("a").tolist(),
-        theirs().str.startswith("a").tolist(),
+        by_default().str.startswith("a").tolist(),
     )
-    assert like(made(firepanda).str.endswith("a").tolist(), theirs().str.endswith("a").tolist())
-    assert made(firepanda).str.startswith("a").tolist()[4] is None
+    assert like(made(firepanda).str.endswith("a").tolist(), by_default().str.endswith("a").tolist())
+    assert made(firepanda).str.startswith("a").tolist()[4] is False
 
 
 @needs_pandas
@@ -222,11 +234,11 @@ def test_a_tuple_asks_several_questions_at_once(firepanda: ModuleType) -> None:
     """Python's own signature for these two, and the empty tuple that comes with it."""
     assert like(
         made(firepanda).str.startswith(("a", "z")).tolist(),
-        theirs().str.startswith(("a", "z")).tolist(),
+        by_default().str.startswith(("a", "z")).tolist(),
     )
     assert like(
         made(firepanda).str.endswith(("a", "o")).tolist(),
-        theirs().str.endswith(("a", "o")).tolist(),
+        by_default().str.endswith(("a", "o")).tolist(),
     )
 
 

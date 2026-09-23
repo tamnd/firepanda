@@ -200,11 +200,11 @@ def test_a_pattern_with_no_metacharacter_still_takes_the_byte_search(
 
 
 @needs_pandas
-def test_a_missing_row_stays_missing_and_na_fills_it(firepanda: ModuleType) -> None:
-    """The engine never reads a null row, and `na` fills what it left."""
+def test_a_missing_row_answers_false_and_na_fills_it(firepanda: ModuleType) -> None:
+    """The engine never reads a null row, and False or `na` fills what it left."""
     mine = made(firepanda)
     for name in ("contains", "match", "fullmatch"):
-        assert getattr(mine.str, name)("a.c").tolist()[-1] is None, name
+        assert getattr(mine.str, name)("a.c").tolist()[-1] is False, name
         assert getattr(mine.str, name)("a.c", na=False).tolist()[-1] is False, name
         assert getattr(mine.str, name)("a.c", na=True).tolist()[-1] is True, name
 

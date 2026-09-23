@@ -188,22 +188,18 @@ def test_whitespace_is_asked_of_every_character(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_a_question_about_a_missing_row_is_missing_here_and_false_there(
-    firepanda: ModuleType,
-) -> None:
-    """The asserted difference, which is `engine/string-predicate-null` in the registry.
+def test_a_question_about_a_missing_row_answers_false(firepanda: ModuleType) -> None:
+    """What pandas answers when it holds the column the way it does by default.
 
-    pandas holding the column the way it holds it by default has nowhere to put
-    a missing answer, because the answer is a numpy array of bools, so a missing
-    row comes back False and cannot be told from a row that was really not upper
-    case. Held as object it comes back None, which is what this library answers
-    whatever the column is made of.
+    That answer is False, which pandas' `str` dtype writes into a missing row on
+    purpose, and this library now writes the same. It used to answer None, the
+    way pandas does for a column held as object, and that was the
+    `engine/string-predicate-null` divergence.
     """
     import pandas as pd
 
-    assert made(firepanda, ["A", None]).str.isupper().tolist() == [True, None]
+    assert made(firepanda, ["A", None]).str.isupper().tolist() == [True, False]
     assert pd.Series(["A", None], dtype="str").str.isupper().tolist() == [True, False]
-    assert pd.Series(["A", None], dtype="object").str.isupper().tolist() == [True, None]
 
 
 def test_a_question_answers_a_column_of_bools(firepanda: ModuleType) -> None:
@@ -597,8 +593,11 @@ def test_isascii_agrees_on_every_code_point_there_is(firepanda: ModuleType) -> N
     assert made(firepanda, rows).str.isascii().tolist() == theirs(rows).str.isascii().tolist()
 
 
-def test_the_three_new_names_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
-    """Including `isascii`, which says yes to an empty row and still not to a missing one."""
+def test_the_three_new_names_on_a_missing_row(firepanda: ModuleType) -> None:
+    """`title` keeps the row missing and the two questions answer False, as pandas does.
+
+    Including `isascii`, which says yes to an empty row and still not to a missing one.
+    """
     assert made(firepanda, ["a b", None]).str.title().tolist() == ["A B", None]
-    assert made(firepanda, ["Ab", None]).str.istitle().tolist() == [True, None]
-    assert made(firepanda, ["ab", None]).str.isascii().tolist() == [True, None]
+    assert made(firepanda, ["Ab", None]).str.istitle().tolist() == [True, False]
+    assert made(firepanda, ["ab", None]).str.isascii().tolist() == [True, False]
