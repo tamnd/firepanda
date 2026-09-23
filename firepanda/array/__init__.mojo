@@ -4,6 +4,7 @@ from .any import AnyArray
 from .array import Array, from_list
 from .chunked import ChunkedArray
 from .data import ColumnData
+from .encoding import Encoding
 from .strings import (
     StringArray,
     StringBuilder,
