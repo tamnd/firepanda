@@ -702,10 +702,11 @@ def _na_first(na_position: str) -> bool:
 
 # The thirteen interpolations pandas takes, in the order numpy lists them, since
 # pandas hands the name straight to `numpy.quantile` and the message it raises
-# prints numpy's own dictionary. firepanda has written `linear`. The other twelve
-# are a schedule and are refused as one, which is why this list is longer than
-# anything firepanda answers: it is what pandas accepts, and a name that is not
-# on it is a typo rather than a gap.
+# prints numpy's own dictionary. firepanda has written `linear` and the four that
+# pick one of the two values either side or average them, which are `_PICKED`
+# below. The other eight are a schedule and are refused as one, which is why this
+# list is longer than anything firepanda answers: it is what pandas accepts, and a
+# name that is not on it is a typo rather than a gap.
 _INTERPOLATIONS = (
     "inverted_cdf",
     "averaged_inverted_cdf",
@@ -721,6 +722,10 @@ _INTERPOLATIONS = (
     "midpoint",
     "nearest",
 )
+
+# The four interpolations that land on a value in the column, or halfway between
+# two of them, rather than weighting the two by how far along the position is.
+_PICKED = ("lower", "higher", "midpoint", "nearest")
 
 # The four spellings of `nonexistent`, and the sentence pandas refuses a fifth
 # with. pandas takes a timedelta here as well, which is not a string and would
@@ -953,11 +958,12 @@ def _refuses_a_fold(axis: Any, kind: str) -> None:
 
 
 def _quantile_wanted(q: Any, interpolation: str) -> float:
-    """Reads the one quantile a reduction can answer.
+    """Reads the one quantile a group reduction can answer.
 
-    pandas takes a list of quantiles as well as one, and answers a series for a
-    series and a frame for a frame. That is a different shape rather than a
-    longer loop, so it is refused by shape here and the scalar is what crosses.
+    pandas takes a list of quantiles as well as one. Within a group that adds
+    an index level, which is a different shape rather than a longer loop, so it
+    is refused by shape here and the scalar is what crosses. The whole column
+    reductions read theirs with `_quantiles_asked` instead.
 
     Args:
         q: The quantile, between zero and one.
@@ -990,8 +996,94 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
             " answers a Series rather than a value and that is a different shape"
         )
     if not 0.0 <= float(q) <= 1.0:
-        raise InvalidArgumentError(f"percentiles should all be in the interval [0, 1]. Try {q!r}")
+        raise InvalidArgumentError(f"Each 'q' must be between 0 and 1. Got '{q}' instead")
     return float(q)
+
+
+def _quantiles_asked(q: Any) -> tuple[list[float], bool]:
+    """Reads the quantiles a series or a frame was asked for.
+
+    pandas takes one quantile or a list of them. One answers a value for a
+    series and a series for a frame, and a list answers a series labelled by
+    the quantiles for a series and a frame for a frame, so what comes back is
+    the list and whether it arrived as one number, and the caller picks the
+    shape.
+
+    Args:
+        q: One quantile or several, each between zero and one.
+
+    Returns:
+        The quantiles as floats, and True when a single number was asked for.
+
+    Raises:
+        InvalidArgumentError: If any of them is outside zero and one, with
+            pandas' own sentence.
+        NotImplementedError: If it is neither a number nor a list of numbers.
+    """
+    alone = isinstance(q, (int, float)) and not isinstance(q, bool)
+    asked = [q] if alone else q
+    if not isinstance(asked, (list, tuple)) or not all(
+        isinstance(one, (int, float)) and not isinstance(one, bool) for one in asked
+    ):
+        raise NotImplementedError(
+            "q has to be a number or a list of numbers for now, because an array or"
+            " an Index of quantiles is read through numpy upstream"
+        )
+    wanted = [float(one) for one in asked]
+    if not all(0.0 <= one <= 1.0 for one in wanted):
+        raise InvalidArgumentError("percentiles should all be in the interval [0, 1]")
+    return wanted, alone
+
+
+def _interpolation_written(interpolation: str) -> None:
+    """Refuses an interpolation that pandas does not take, then one firepanda has not written.
+
+    Raises:
+        InvalidArgumentError: If pandas would not take it either.
+        NotImplementedError: If it is one of the eight that reweight the sample.
+    """
+    _spelled(
+        interpolation,
+        _INTERPOLATIONS,
+        f"{interpolation!r} is not a valid method. Use one of: " + ", ".join(_INTERPOLATIONS),
+    )
+    if interpolation != "linear" and interpolation not in _PICKED:
+        raise NotImplementedError(
+            f"interpolation={interpolation!r} is not supported yet, because the"
+            " eight rules numpy added beside the original five place the sample"
+            " differently rather than picking or weighting the two values either side"
+        )
+
+
+def _picked_at(count: int, q: float, interpolation: str) -> tuple[int, int]:
+    """The two positions in the sorted values that one of `_PICKED` reads.
+
+    These are numpy's formulas rather than a restatement of them, because the
+    position is a float and where it rounds decides the answer. pandas hands
+    numpy the quantile itself rather than a percentage, and `np.percentile` on
+    `q * 100` lands on a different position for a third, so the product here
+    is `(count - 1) * q` exactly as `np.quantile` writes it. `nearest` is
+    numpy's `around`, which rounds a half to the even position, and Python's
+    `round` rounds a half the same way.
+
+    Args:
+        count: How many values are not missing.
+        q: The quantile.
+        interpolation: One of `_PICKED`.
+
+    Returns:
+        The position below and the position above. They are the same position
+        for every rule except `midpoint` landing between two values.
+    """
+    at = (count - 1) * q
+    below, above = math.floor(at), math.ceil(at)
+    if interpolation == "lower":
+        return below, below
+    if interpolation == "higher":
+        return above, above
+    if interpolation == "nearest":
+        return round(at), round(at)
+    return below, above
 
 
 # Every spelling of a type firepanda has, and the one name firepanda prints for
@@ -1995,6 +2087,21 @@ def _info_write(lines: list[str], buf: Any) -> None:
         buf: Where it goes, or None for standard output.
     """
     (sys.stdout if buf is None else buf).write("\n".join(lines) + "\n")
+
+
+def _quantile_rows(wanted: list[float], names: list[str], columns: dict[str, list[Any]]) -> Any:
+    """A frame with one row per quantile and one column per column read.
+
+    The quantiles become the index the way `_labelled` makes one, by building
+    them as a column and setting it, under a name none of the columns has.
+    """
+    from ._frame import DataFrame
+
+    key = "quantile"
+    while key in columns:
+        key = f"_{key}"
+    made = DataFrame({key: wanted, **columns})
+    return _answered(made.set_index(key)).rename_axis(None)
 
 
 def _labelled(labels: list[Any], values: list[Any]) -> Any:
@@ -5280,9 +5387,24 @@ class DataFrameMixin:
             "computing one quantile over the whole frame at once rather than"
             " over each column is a different reduction",
         )
-        return self._reduce(
-            "quantile", _quantile_wanted(q, interpolation), axis, True, numeric_only, 0
-        )
+        wanted, alone = _quantiles_asked(q)
+        _interpolation_written(interpolation)
+        if alone and interpolation == "linear":
+            return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0)
+        if axis not in (0, "index"):
+            raise NotImplementedError(
+                "axis=1 is not supported yet with a list of quantiles or an"
+                " interpolation other than linear, because each row would be"
+                " sorted on its own"
+            )
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        names = read._inner.names()
+        _no_boolean_quantile(list(read._inner.dtypes()))
+        columns = {name: read[name]._quantiles(wanted, interpolation) for name in names}
+        if alone:
+            answer = [columns[name][0] for name in names]
+            return _labelled(names, answer).rename(None).rename_axis(None)
+        return _quantile_rows(wanted, names, columns)
 
     def _nunique(self, axis: Any, dropna: bool) -> Series:
         """Counts the distinct values in every column.
@@ -7264,9 +7386,56 @@ class SeriesMixin:
             raise translate(error) from None
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
-        """Runs the quantile over the whole column."""
+        """Runs the quantile over the whole column.
+
+        A list of quantiles answers a series labelled by them and carrying the
+        column's name, and a single one answers a value, which is pandas' pair
+        of shapes.
+        """
         _no_boolean_quantile([self._inner.dtype()])
-        return self._reduce("quantile", _quantile_wanted(q, interpolation), 0, True, False, 0)
+        wanted, alone = _quantiles_asked(q)
+        _interpolation_written(interpolation)
+        answers = self._quantiles(wanted, interpolation)
+        if alone:
+            return answers[0]
+        return _labelled(wanted, answers).rename(self.name).rename_axis(None)
+
+    def _quantiles(self, wanted: list[float], interpolation: str) -> list[Any]:
+        """The value at each of several quantiles, under one interpolation.
+
+        `linear` is the kernel's, one reduction per quantile. The four in
+        `_PICKED` read values out of the column rather than blending them, so
+        the column is sorted once, every position any of the quantiles needs is
+        taken in one go, and the answers are read off those. The values keep
+        their type under `lower`, `higher` and `nearest`, so a column of whole
+        numbers answers whole numbers, which is what pandas answers too, and
+        `midpoint` answers a float because it averages.
+
+        The average is numpy's `lerp` at a half, which is `b - (b - a) / 2`
+        rather than `(a + b) / 2`, and the two differ in the last bit often
+        enough that a comparison against pandas would notice.
+        """
+        from ._frame import Series
+
+        if interpolation == "linear":
+            return [self._reduce("quantile", one, 0, True, False, 0) for one in wanted]
+        count = self.count()
+        if count == 0:
+            return [float("nan")] * len(wanted)
+        spots = [_picked_at(count, one, interpolation) for one in wanted]
+        positions = sorted({at for pair in spots for at in pair})
+        ordered = self._inner.sort_values(False, False)
+        values = dict(zip(positions, Series._wrap(ordered.take(positions)).tolist(), strict=True))
+        answers: list[Any] = []
+        for below, above in spots:
+            if interpolation != "midpoint":
+                answers.append(values[below])
+            elif below == above:
+                answers.append(float(values[below]))
+            else:
+                low, high = values[below], values[above]
+                answers.append(high - (high - low) * 0.5)
+        return answers
 
     def _nunique(self, axis: Any, dropna: bool) -> Any:
         """Counts the distinct values in the column.
@@ -10126,9 +10295,11 @@ class GroupByMixin[Answer]:
     def _quantile(self, q: Any, interpolation: str, numeric_only: bool) -> Answer:
         """The value at one quantile within each group.
 
-        `_quantile_wanted` is the same reader the whole column reductions use,
-        so a list of quantiles is refused with the same sentence in both places
-        and the four interpolation rules that are not linear are refused once.
+        `_quantile_wanted` reads one quantile and refuses every interpolation
+        but `linear`. The whole column reductions answer a list and the four
+        rules in `_PICKED` now, and a group does not yet, because a list answers
+        one more index level per group and picking a value means sorting every
+        group on its own.
 
         Args:
             q: The quantile, between zero and one.
