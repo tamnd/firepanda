@@ -2163,6 +2163,13 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.widened_for_missing",
+            name="_widened_for_missing",
+            doc="The frame as pandas would have read it from Arrow.",
+            params=(),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.tail",
             name="tail",
             doc="The last n rows.",

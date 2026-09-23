@@ -3943,6 +3943,34 @@ class DataFrameMixin:
             except Exception as error:
                 raise translate(error) from None
 
+    @classmethod
+    def from_arrow(cls, data: Any) -> DataFrame:
+        """Builds a frame from an Arrow table, the way pandas reads one.
+
+        pandas takes anything that speaks the Arrow PyCapsule protocol and reads
+        it into its own types, which on the numpy backend means an integer
+        column with a missing row comes back as float64 with a NaN in the gap,
+        and a float column's missing row is a NaN too. A column with nothing
+        missing keeps its type. This does the same, because a caller who wrote
+        `DataFrame.from_arrow` wrote the pandas name and should be handed the
+        frame pandas would have handed them. `firepanda.from_arrow` is the other
+        door, and it keeps Arrow's types.
+
+        Args:
+            data: A pyarrow table, a Polars frame, or anything else with
+                `__arrow_c_stream__` or `__arrow_c_array__` that describes a
+                table.
+
+        Returns:
+            The frame.
+        """
+        from ._frame import DataFrame, from_arrow
+
+        try:
+            return DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
+        except Exception as error:
+            raise translate(error) from None
+
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.
 

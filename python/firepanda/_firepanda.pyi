@@ -48,6 +48,9 @@ class DataFrame:
     def head(self, n: int) -> DataFrame:
         """The first n rows."""
         ...
+    def _widened_for_missing(self) -> DataFrame:
+        """The frame as pandas would have read it from Arrow."""
+        ...
     def tail(self, n: int) -> DataFrame:
         """The last n rows."""
         ...
