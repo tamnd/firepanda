@@ -2556,6 +2556,100 @@ def _two_valued(inner: Any, op: str) -> Any:
     return inner.fill_null(Series([COMPARISON_ON_A_GAP[op]])._inner)
 
 
+ARITHMETIC = frozenset({"add", "sub", "mul", "truediv", "floordiv", "mod", "pow"})
+
+
+def _labels_differ(left: Any, right: Any, axis: int) -> bool:
+    """Whether two operands had to be lined up, which is the only way a gap opens.
+
+    Args:
+        left: The series or frame the operator was called on.
+        right: The other operand, a series or a frame.
+        axis: Which axis of a frame a series is lined up against.
+
+    Returns:
+        True when the labels the two are matched on are not the same labels in
+        the same order.
+    """
+    if isinstance(right, DataFrameMixin):
+        return not left.index.equals(right.index) or list(left.columns) != list(right.columns)
+    if isinstance(left, DataFrameMixin) and axis == 1:
+        return list(left.columns) != [str(label) for label in right.index.to_list()]
+    return not left.index.equals(right.index)
+
+
+def _nan_over_gaps(inner: Any, op: str, left: Any, right: Any) -> Any:
+    """An aligned column of arithmetic with each gap held as a NaN, as pandas holds it.
+
+    Two operands whose labels differ leave a gap in every row only one of them
+    has, and the kernel answers that row with a null. pandas answers NaN and
+    widens an integer column to float64 to have somewhere to put it, which is
+    the rule `widen_for_missing` applies on the way in. A gap opened here has to
+    be closed here for the same reason a gap opened by `shift` is closed there,
+    so a numeric column in the pandas facing layer never carries a null.
+
+    Two operands with the same labels open no gap, and a null in their answer
+    is the one an integer division by zero writes, which is the registered
+    divergence `engine/zero-divisor` and is left alone.
+
+    Args:
+        inner: What the kernel answered.
+        op: The operator's name.
+        left: The series the operator was called on.
+        right: The other series.
+
+    Returns:
+        The column unchanged when `op` is not arithmetic, nothing is missing, the
+        labels were the same or the column is not a number, and otherwise the
+        column with NaN in each gap.
+    """
+    from ._frame import Series
+
+    if op not in ARITHMETIC or inner.null_count() == 0 or not _labels_differ(left, right, 0):
+        return inner
+    dtype = inner.dtype()
+    if dtype.startswith(("int", "uint")):
+        inner, dtype = inner.cast("float64", True), "float64"
+    elif not dtype.startswith("float"):
+        return inner
+    return inner.fill_null(Series([float("nan")], dtype=dtype)._inner)
+
+
+def _nan_over_gaps_frame(inner: Any, op: str, left: Any, right: Any, axis: int = 1) -> Any:
+    """`_nan_over_gaps` over every column of an aligned frame."""
+    if op not in ARITHMETIC or not any(inner.null_counts()):
+        return inner
+    if not _labels_differ(left, right, axis):
+        return inner
+    return inner._widened_for_missing()
+
+
+def _broadcast_widened(frame: Any, series: Any, op: str) -> Any:
+    """A series to broadcast along a frame's columns, widened the way pandas widens it.
+
+    pandas lines the series up against the columns before it does any
+    arithmetic, so a column the series has no label for is a gap in the series
+    itself, and an integer series with a gap is a float64 series. Every column
+    of the answer is then a float, including the ones with nothing missing,
+    which the gaps alone would not say.
+
+    Args:
+        frame: The frame on the other side.
+        series: The series being broadcast.
+        op: The operator's name.
+
+    Returns:
+        The inner series, cast to float64 when it is an integer series that does
+        not cover every column and `op` is arithmetic, and unchanged otherwise.
+    """
+    inner = series._inner
+    if op not in ARITHMETIC or not inner.dtype().startswith(("int", "uint")):
+        return inner
+    if set(frame._inner.names()) <= {str(label) for label in series.index.to_list()}:
+        return inner
+    return inner.cast("float64", True)
+
+
 def _filled_with_false(inner: Any) -> Any:
     """A mask with each null replaced by False, which is what pandas writes there."""
     from ._frame import Series
@@ -5214,12 +5308,14 @@ class DataFrameMixin:
                     return DataFrame._wrap(
                         _two_valued_frame(self._inner.compare_frame(other._inner, op), op)
                     )
+                answer = self._inner.binary_frame(other._inner, op, flip, None)
                 return DataFrame._wrap(
-                    _two_valued_frame(self._inner.binary_frame(other._inner, op, flip, None), op)
+                    _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
             if isinstance(other, SeriesMixin):
+                answer = self._inner.binary_series(_broadcast_widened(self, other, op), op, 1, flip)
                 return DataFrame._wrap(
-                    _two_valued_frame(self._inner.binary_series(other._inner, op, 1, flip), op)
+                    _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
@@ -5247,15 +5343,16 @@ class DataFrameMixin:
         number = _axis_number(axis, "DataFrame", 1, (0, 1))
         try:
             if isinstance(other, DataFrameMixin):
+                answer = self._inner.binary_frame(other._inner, op, flip, fill_value)
                 return DataFrame._wrap(
-                    _two_valued_frame(
-                        self._inner.binary_frame(other._inner, op, flip, fill_value), op
-                    )
+                    _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
             if isinstance(other, SeriesMixin):
                 _no_fill_against_a_series(fill_value)
+                along = _broadcast_widened(self, other, op) if number == 1 else other._inner
+                answer = self._inner.binary_series(along, op, number, flip)
                 return DataFrame._wrap(
-                    _two_valued_frame(self._inner.binary_series(other._inner, op, number, flip), op)
+                    _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other, number)
                 )
             return DataFrame._wrap(_two_valued_frame(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
@@ -7289,9 +7386,8 @@ class SeriesMixin:
                     return Series._wrap(
                         _two_valued(self._inner.compare_series(other._inner, op), op)
                     )
-                return Series._wrap(
-                    _two_valued(self._inner.binary_series(other._inner, op, flip, None), op)
-                )
+                answer = self._inner.binary_series(other._inner, op, flip, None)
+                return Series._wrap(_nan_over_gaps(_two_valued(answer, op), op, self, other))
             return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None
@@ -7315,9 +7411,8 @@ class SeriesMixin:
         _axis_number(axis, "Series", 0, (0,))
         try:
             if isinstance(other, SeriesMixin):
-                return Series._wrap(
-                    _two_valued(self._inner.binary_series(other._inner, op, flip, fill_value), op)
-                )
+                answer = self._inner.binary_series(other._inner, op, flip, fill_value)
+                return Series._wrap(_nan_over_gaps(_two_valued(answer, op), op, self, other))
             return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
             raise translate(error) from None

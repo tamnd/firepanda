@@ -8,10 +8,11 @@ a frame or a constant, whether a reflected form went the way round it claims, an
 whether the arguments pandas declares are honoured, ignored or refused in the
 same places pandas honours, ignores and refuses them.
 
-The values are read back with `tolist` because that is the only way to see a null
-from Python. A null matters here more than it does elsewhere: alignment is what
-arithmetic between two differently labelled operands does, and a row that only
-one side has is exactly the thing being tested.
+The values are read back with `tolist`, with a NaN read back as None by `_rows`
+so a list can be compared with `==`. A gap matters here more than it does
+elsewhere: alignment is what arithmetic between two differently labelled operands
+does, and a row that only one side has is exactly the thing being tested. It is
+a NaN, as it is in pandas, and an integer column widens to float64 to hold it.
 
 `python/tests/test_bindings.py` already holds the other half of this, which is
 that every name exists on the extension, on the Python class and in pandas with
@@ -24,11 +25,12 @@ known gap with an issue rather than something this file is choosing:
 
   - Integer division by zero answers null. pandas answers zero with a warning.
 
-There used to be two more. A comparison against a row only one side has answered
-null where pandas answers False, and it answers False now, because every
-comparison fills the rows it had no answer for with pandas' answer. The other was
-that two series whose names differ produced a series named `""` where pandas
-produces one named `None`. A name is an
+There used to be three more. A row only one side has answered null and kept an
+integer column an integer, and it answers NaN in float64 now. A comparison
+against a row only one side has answered null where pandas answers False, and it
+answers False now, because every comparison fills the rows it had no answer for
+with pandas' answer. The last was that two series whose names differ produced
+a series named `""` where pandas produces one named `None`. A name is an
 `Optional[String]` now and that one is gone.
 
 Asserting the current answer is deliberate. A test that skipped them would let
@@ -48,14 +50,19 @@ import pytest
 # than computed, because computing the expectation with the same operator the
 # code under test uses tests nothing at all.
 ARITHMETIC = [
-    ("add", lambda a, b: a + b, [11, 22, None]),
-    ("sub", lambda a, b: a - b, [-9, -18, None]),
-    ("mul", lambda a, b: a * b, [10, 40, None]),
+    ("add", lambda a, b: a + b, [11.0, 22.0, None]),
+    ("sub", lambda a, b: a - b, [-9.0, -18.0, None]),
+    ("mul", lambda a, b: a * b, [10.0, 40.0, None]),
     ("truediv", lambda a, b: a / b, [0.1, 0.1, None]),
-    ("floordiv", lambda a, b: a // b, [0, 0, None]),
-    ("mod", lambda a, b: a % b, [1, 2, None]),
-    ("pow", lambda a, b: a**b, [1, 1048576, None]),
+    ("floordiv", lambda a, b: a // b, [0.0, 0.0, None]),
+    ("mod", lambda a, b: a % b, [1.0, 2.0, None]),
+    ("pow", lambda a, b: a**b, [1.0, 1048576.0, None]),
 ]
+
+
+def _rows(column: object) -> list[object]:
+    """The values of a column, with each NaN read back as None."""
+    return [None if value != value else value for value in column.tolist()]  # type: ignore[attr-defined]
 
 
 def _pair(firepanda: ModuleType) -> tuple[object, object]:
@@ -84,12 +91,12 @@ def test_each_arithmetic_operator_reaches_the_kernel(
     nothing else here would find.
     """
     left, right = _pair(firepanda)
-    assert operator(left, right).tolist() == expected  # type: ignore[operator]
-    assert getattr(left, name)(right).tolist() == expected
+    assert _rows(operator(left, right)) == expected  # type: ignore[operator]
+    assert _rows(getattr(left, name)(right)) == expected
 
 
 def test_arithmetic_between_two_series_aligns_on_the_labels(firepanda: ModuleType) -> None:
-    """The union of the labels, and a null where only one side had a row.
+    """The union of the labels, and a NaN where only one side had a row.
 
     This is the behaviour that makes a series a series rather than an array. Row
     2 is in the left operand and not in the right, so the answer has a row 2 and
@@ -98,7 +105,8 @@ def test_arithmetic_between_two_series_aligns_on_the_labels(firepanda: ModuleTyp
     left, right = _pair(firepanda)
     total = left + right
     assert total.index.tolist() == [0, 1, 2]
-    assert total.tolist() == [11, 22, None]
+    assert _rows(total) == [11.0, 22.0, None]
+    assert total.dtype == "float64"
     assert len(total) == 3
 
 
@@ -222,17 +230,18 @@ def test_a_series_hands_a_frame_back_to_the_frame(firepanda: ModuleType) -> None
 
 
 def test_a_frame_aligns_on_both_axes(firepanda: ModuleType) -> None:
-    """Rows and columns, and a column only one side has is null all the way down."""
+    """Rows and columns, and a column only one side has is NaN all the way down."""
     left = firepanda.DataFrame({"x": [1, 2], "y": [3, 4]})
     right = firepanda.DataFrame({"y": [10, 20], "z": [5, 6]})
 
     total = left + right
     assert total.columns == ["x", "y", "z"]
-    assert [total[name].tolist() for name in total.columns] == [
+    assert [_rows(total[name]) for name in total.columns] == [
         [None, None],
         [13, 24],
         [None, None],
     ]
+    assert [total[name].dtype for name in total.columns] == ["float64", "int64", "float64"]
 
     filled = left.add(right, fill_value=0)
     assert [filled[name].tolist() for name in filled.columns] == [[1, 2], [13, 24], [5, 6]]
@@ -307,7 +316,7 @@ def test_an_axis_that_does_not_exist_says_so_the_way_pandas_does(
     with pytest.raises(ValueError, match="No axis named 1 for object type Series"):
         left.add(right, axis=1)
 
-    assert left.add(right, axis=None).tolist() == [11, 22, None]
+    assert _rows(left.add(right, axis=None)) == [11.0, 22.0, None]
     assert frame.add(frame, axis=None)["x"].tolist() == [2, 4]
 
 
