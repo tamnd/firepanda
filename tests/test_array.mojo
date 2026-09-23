@@ -20,9 +20,14 @@ from std.testing import (
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.array.data import ColumnData
+from firepanda.array.encoding import Encoding
 from firepanda.array.chunked import ChunkedArray
 from firepanda.array.nested import NestedNode
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.dtype.lists import ALL, NUMERIC
 from firepanda.dtype.logical import LogicalType, logical_for
 
@@ -593,9 +598,25 @@ def test_a_column_has_no_trailing_padding() raises:
         + size_of[LogicalType]()
         + 2 * size_of[Optional[StringArray]]()
         + size_of[List[NestedNode]]()
-        + size_of[UInt64]()
+        + size_of[Encoding]()
     )
     assert_equal(fields, size_of[AnyArray]())
+
+
+def test_every_column_is_flat() raises:
+    # Issue #979 adds a second encoding later. Until then every way of making a
+    # column has to land on flat, including a copy, and a string or dictionary
+    # column is still flat underneath, since dictionary here is a logical type
+    # and not yet an encoding.
+    var ints = AnyArray(from_list[DType.int64]([1, 2, 3]))
+    assert_true(ints.is_flat())
+    assert_true(AnyArray(copy=ints).encoding == Encoding.FLAT)
+    var text = AnyArray(strings_from_list(["a", "b"]))
+    assert_true(text.is_flat())
+    var codes = from_list[DType.int32]([0, 1, 0])
+    var dict = AnyArray.dictionary(codes^, strings_from_list(["x", "y"]))
+    assert_true(dict.is_flat())
+    assert_equal(String(Encoding.FLAT), "flat")
 
 
 def main() raises:

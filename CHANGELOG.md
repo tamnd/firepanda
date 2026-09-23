@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a column carries its encoding apart from its logical type
+
+`AnyArray` has an `encoding` field and an `is_flat` method, and `firepanda.array` exports `Encoding`. Flat is the only encoding there is, so every column says flat and nothing reads the field yet. This is the first box of #979, which is about holding a low cardinality string column as dictionary codes while it still answers `dtype` string, and later about a filter handing back positions instead of a copy. Both of those are a different layout of the same logical type, so the layout needed a field of its own before either could land.
+
+The field takes the eight bytes `_slack` used to occupy, and it is eight bytes wide for that reason. Those bytes keep `AnyArray` from ending short of its alignment, which Mojo miscompiles when the struct is held in an `Optional` (#286). The struct is the same size it was, and `test_a_column_has_no_trailing_padding` now counts the encoding where it counted the slack.
+
 ### Changed: a pull request runs the tests its change can reach, not all 162
 
 The test shards on a pull request now run `tools/run_tests.sh --changed`, which picks the test files that import something the branch touched and falls back to the whole suite whenever it cannot tell. A push to main still runs everything, so main is gated exactly as before. Over the last eight merged branches this runs nothing for the three that only touched the Python package, 30 files for a planner change, 135 for a kernel change, and the whole suite for the three that touched `tools/bindings.py` or the manifests. The shards still all start, since the selection is made inside each one, but a shard with nothing to run now finishes green in the time it takes to set up instead of failing.

@@ -48,6 +48,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind, logical_for
 
 from .array import Array
 from .data import ColumnData
+from .encoding import Encoding
 from .nested import (
     ROOT,
     NestedNode,
@@ -114,9 +115,11 @@ struct AnyArray(Copyable, Movable, Sized):
     and these are the nodes below it.
     """
 
-    var _slack: UInt64
-    """Eight bytes nothing reads, here to keep the fields above from stopping
-    short of the struct's own alignment.
+    var encoding: Encoding
+    """How the values are laid out, which is flat for every column today.
+
+    `encoding.mojo` says what the field is for. What this docstring carries is
+    why it is eight bytes wide and where it sits, because both are load bearing.
 
     Mojo miscompiles an `Optional` of a struct that has trailing padding. The
     value goes in and the `Optional` still answers that it is empty, so a column
@@ -125,13 +128,16 @@ struct AnyArray(Copyable, Movable, Sized):
     index in the library silently became the range 0, 1, 2 the moment this struct
     grew a field that left it eight bytes short of sixteen.
 
-    The fields above come to 472 bytes and the alignment is 16, so this is the 8
-    that make it 480 and land on the boundary. `test_a_column_has_no_trailing
-    _padding` fails if a later field breaks that again, which is the only warning
-    there is: nothing about the miscompile happens at compile time.
+    The fields above come to 472 bytes and the alignment is 16. This field used
+    to be `_slack`, eight bytes nothing read, there only to make that 480 and
+    land on the boundary. It is now the encoding, at the same width and in the
+    same place, so the sum is unchanged and the padding the slack was guarding
+    against is still absent. `test_a_column_has_no_trailing_padding` fails if a
+    later field breaks that again, which is the only warning there is: nothing
+    about the miscompile happens at compile time.
 
-    Issue #286 carries the bisection and takes this field back out when a
-    toolchain lands that does not need it.
+    Issue #286 carries the bisection. When a toolchain lands that does not need
+    this, the encoding can shrink to one byte.
     """
 
     def __init__(out self, var data: ColumnData, type: LogicalType):
@@ -146,7 +152,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.text = None
         self.dict_values = None
         self.nested = List[NestedNode]()
-        self._slack = 0
+        self.encoding = Encoding.FLAT
 
     def __init__[dt: DType](out self, var typed: Array[dt]):
         """Erases the dtype of a typed array, taking ownership of its buffers.
@@ -162,7 +168,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.text = None
         self.dict_values = None
         self.nested = List[NestedNode]()
-        self._slack = 0
+        self.encoding = Encoding.FLAT
 
     def __init__(out self, var strings: StringArray):
         """Erases a string column, taking ownership of its buffers.
@@ -176,7 +182,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.text = strings^
         self.dict_values = None
         self.nested = List[NestedNode]()
-        self._slack = 0
+        self.encoding = Encoding.FLAT
 
     @staticmethod
     def dictionary[
@@ -288,7 +294,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.text = Optional[StringArray](copy=copy.text)
         self.dict_values = Optional[StringArray](copy=copy.dict_values)
         self.nested = List[NestedNode](copy=copy.nested)
-        self._slack = 0
+        self.encoding = copy.encoding
 
     def __len__(self) -> Int:
         """Returns the number of values.
@@ -454,6 +460,19 @@ struct AnyArray(Copyable, Movable, Sized):
             )
         var held = self.text^
         return held.take()
+
+    def is_flat(self) -> Bool:
+        """Reports whether the values are one per row in row order.
+
+        True of every column today, so nothing asks it yet. It is here for the
+        change that adds a second encoding, where a kernel that has only been
+        taught the flat layout has to ask before it reads, so that it decodes
+        first rather than reading codes as values.
+
+        Returns:
+            True if the column's encoding is flat.
+        """
+        return self.encoding == Encoding.FLAT
 
     def is_dictionary(self) -> Bool:
         """Reports whether the column stores positions into a category list.
