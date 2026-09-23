@@ -8,17 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Added: a column carries its encoding apart from its logical type
+## [0.8.28] - 2026-09-24
 
-`AnyArray` has an `encoding` field and an `is_flat` method, and `firepanda.array` exports `Encoding`. Flat is the only encoding there is, so every column says flat and nothing reads the field yet. This is the first box of #979, which is about holding a low cardinality string column as dictionary codes while it still answers `dtype` string, and later about a filter handing back positions instead of a copy. Both of those are a different layout of the same logical type, so the layout needed a field of its own before either could land.
+Built against Mojo 1.0.0 (ed45d567).
 
-The field takes the eight bytes `_slack` used to occupy, and it is eight bytes wide for that reason. Those bytes keep `AnyArray` from ending short of its alignment, which Mojo miscompiles when the struct is held in an `Optional` (#286). The struct is the same size it was, and `test_a_column_has_no_trailing_padding` now counts the encoding where it counted the slack.
-
-### Changed: a pull request runs the tests its change can reach, not all 162
-
-The test shards on a pull request now run `tools/run_tests.sh --changed`, which picks the test files that import something the branch touched and falls back to the whole suite whenever it cannot tell. A push to main still runs everything, so main is gated exactly as before. Over the last eight merged branches this runs nothing for the three that only touched the Python package, 30 files for a planner change, 135 for a kernel change, and the whole suite for the three that touched `tools/bindings.py` or the manifests. The shards still all start, since the selection is made inside each one, but a shard with nothing to run now finishes green in the time it takes to set up instead of failing.
-
-`tools/affected.py` no longer treats `CHANGELOG.md`, `docs/`, or the Python package as reasons to run the whole suite. No Mojo test reads any of them, which was checked rather than assumed, and without this nearly every branch touched the changelog and selected everything. A `.mojo` file under `python/` still selects the whole suite.
+A patch release. A positional column such as `#2` and a subscript or slice of text such as `s[2:-2]` run in SQL. On the pandas side, a comparison, a string question or arithmetic on a row with a missing value now answers what pandas answers, `quantile` takes the four other interpolation rules and a list, the series reductions take `skipna=False` and `min_count`, a category column reduces the way pandas does, `DataFrame.from_arrow` is there, and the zoned roundings take `ambiguous` and `nonexistent`. `median` and `quantile` agree with pandas to the last bit, `!=` against a NaN answers True in the vector loops, and the ClickBench driver builds again after a compiler hang that a zone file read had set off. A column now carries an encoding field, which is groundwork for dictionary coded strings, and a pull request runs only the tests its change can reach.
 
 ### Added
 
@@ -36,6 +30,18 @@ The test shards on a pull request now run `tools/run_tests.sh --changed`, which 
 - `DataFrame.from_arrow`, pandas' door from an Arrow table, which reads it into the types pandas reads it into. An integer column with a missing row comes back as float64 with a NaN in the gap, a float column holds its gap as a NaN and keeps its width, and a column with nothing missing keeps its type, all measured against `pandas.DataFrame.from_arrow` in pandas 3.0.3. `firepanda.from_arrow` is unchanged and still keeps Arrow's types, so there is a door with pandas' name and pandas' meaning and a door with firepanda's own. The widening is the `widen_for_missing` that `read_csv` already did, now reachable from Python as `_widened_for_missing`. (Issue #8)
 
 - `tz_localize`, `floor`, `ceil` and `round` take pandas' `ambiguous` and `nonexistent` on a zoned column, on a series and on a `DatetimeIndex`, where every value but `"raise"` used to be refused. `ambiguous` takes `"NaT"`, `True`, `False` and a list of flags with one per row, and `nonexistent` takes `"NaT"`, `"shift_forward"`, `"shift_backward"` and a timedelta. The shifts go by the whole hour of the clock rather than by where the gap ends, because that is what pandas does, so on Lord Howe, where the clock goes forward half an hour, a shift forward lands on the hour after the gap. A timedelta that leaves the reading in the same hour raises pandas' own `ValueError` naming the timedelta. The policy crosses the boundary once as two words and a shift, through a new `temporal_placed` method beside `temporal_part`, and a list of flags is answered by asking twice and taking each row from the side its flag names. `ambiguous="infer"` is still refused, since it reads the order of the rows rather than being told. (Issue #349)
+
+### Added: a column carries its encoding apart from its logical type
+
+`AnyArray` has an `encoding` field and an `is_flat` method, and `firepanda.array` exports `Encoding`. Flat is the only encoding there is, so every column says flat and nothing reads the field yet. This is the first box of #979, which is about holding a low cardinality string column as dictionary codes while it still answers `dtype` string, and later about a filter handing back positions instead of a copy. Both of those are a different layout of the same logical type, so the layout needed a field of its own before either could land.
+
+The field takes the eight bytes `_slack` used to occupy, and it is eight bytes wide for that reason. Those bytes keep `AnyArray` from ending short of its alignment, which Mojo miscompiles when the struct is held in an `Optional` (#286). The struct is the same size it was, and `test_a_column_has_no_trailing_padding` now counts the encoding where it counted the slack.
+
+### Changed: a pull request runs the tests its change can reach, not all 162
+
+The test shards on a pull request now run `tools/run_tests.sh --changed`, which picks the test files that import something the branch touched and falls back to the whole suite whenever it cannot tell. A push to main still runs everything, so main is gated exactly as before. Over the last eight merged branches this runs nothing for the three that only touched the Python package, 30 files for a planner change, 135 for a kernel change, and the whole suite for the three that touched `tools/bindings.py` or the manifests. The shards still all start, since the selection is made inside each one, but a shard with nothing to run now finishes green in the time it takes to set up instead of failing.
+
+`tools/affected.py` no longer treats `CHANGELOG.md`, `docs/`, or the Python package as reasons to run the whole suite. No Mojo test reads any of them, which was checked rather than assumed, and without this nearly every branch touched the changelog and selected everything. A `.mojo` file under `python/` still selects the whole suite.
 
 ### Fixed
 
@@ -9293,7 +9299,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.24...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.28...HEAD
+[0.8.28]: https://github.com/tamnd/firepanda/releases/tag/v0.8.28
 [0.8.27]: https://github.com/tamnd/firepanda/releases/tag/v0.8.27
 [0.8.26]: https://github.com/tamnd/firepanda/releases/tag/v0.8.26
 [0.8.25]: https://github.com/tamnd/firepanda/releases/tag/v0.8.25
