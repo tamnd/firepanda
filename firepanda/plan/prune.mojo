@@ -84,7 +84,7 @@ opinion about which of the two was meant.
 
 from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
-from firepanda.plan.bind import Bound, bind, bind_all
+from firepanda.plan.bind import INDEX_FROM, Bound, bind, bind_all
 from firepanda.plan.expr import ExprKind
 from firepanda.plan.node import (
     SET_UNION,
@@ -491,10 +491,17 @@ def _distinct(names: List[String]) -> Bool:
     Returns:
         True when no two of them are the same.
     """
+    if len(names) < INDEX_FROM:
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                if names[i] == names[j]:
+                    return False
+        return True
+    var seen = Dict[String, Bool]()
     for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            if names[i] == names[j]:
-                return False
+        if names[i] in seen:
+            return False
+        seen[names[i]] = True
     return True
 
 
@@ -505,6 +512,11 @@ def _want(mut set: List[Int], at: Int):
         set: The set, ascending and without repeats.
         at: The position.
     """
+    # Positions mostly arrive in order, so the end is the place to look first,
+    # and a walk from the front for each of a hundred columns is quadratic.
+    if len(set) == 0 or set[len(set) - 1] < at:
+        set.append(at)
+        return
     var to = 0
     while to < len(set) and set[to] < at:
         to += 1
