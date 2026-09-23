@@ -352,7 +352,12 @@ jobs:
         os: ${{ fromJSON(needs.guard.outputs.os_matrix) }}
         shard: ${{ fromJSON(needs.guard.outputs.shards) }}
     steps:
+      # The whole history, because on a pull request the test step diffs the
+      # branch against its merge base with main and a shallow clone has no merge
+      # base. The pack is under twenty megabytes, a few seconds of a shard.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # One compiler cache entry per shard, because a shard compiles its own
       # eighth of the test files and sharing one entry between all eight would
@@ -364,10 +369,21 @@ jobs:
       - name: Toolchain versions
         run: pixi run mojo --version
 
+      # A pull request runs only the test files that import something it
+      # changed, which tools/affected.py works out from the import graph and
+      # which is the whole suite whenever it cannot tell. Over the last eight
+      # merged branches that was nothing at all for the three that only touched
+      # the Python package, 30 files for a planner change and 135 for a kernel
+      # one, and the whole suite for the three that touched tools/bindings.py
+      # or the manifests, against 162 every time before. A push to main still
+      # runs everything, so main is gated on the full suite exactly as it was
+      # and what this saves is the runner time that was making every branch
+      # queue behind every other one.
       - name: Unit and docstring tests
         env:
           FIREPANDA_TEST_SHARDS: ${{ needs.guard.outputs.shard_count }}
           FIREPANDA_TEST_SHARD: ${{ matrix.shard }}
+          FIREPANDA_TEST_CHANGED: ${{ github.event_name == 'pull_request' && '1' || '' }}
         run: pixi run test
 
   # The extension, once per platform rather than once per shard.
