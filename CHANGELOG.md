@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `numeric_only=True` on the frame reductions, which keeps the integer, float and boolean columns and drops the rest before reducing, as pandas does. It used to be refused by name. A boolean column is kept because numpy files `bool_` beside the integers, so `df.sum(numeric_only=True)` counts the flags. A span column is not kept, though `select_dtypes` calls it a number, because pandas asks a different question in the two places.
+
+### Changed
+
+- A quantile over a boolean column, on a series or a frame, now raises numpy's `TypeError` about boolean subtraction instead of answering. pandas hands the values to `numpy.quantile`, which cannot subtract two booleans to interpolate, and an answer where pandas raises is code that works here and breaks on the library it was written against. This is what closes `errors/quantile-on-boolean` on the conformance board.
+
 ## [0.8.26] - 2026-09-23
 
 Built against Mojo 1.0.0 (ed45d567).
