@@ -33,7 +33,7 @@ import operator
 import re
 import sys
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _firepanda
@@ -785,6 +785,96 @@ def _spelled(value: Any, allowed: tuple[str, ...], message: str) -> None:
     """
     if value not in allowed:
         raise InvalidArgumentError(message)
+
+
+def _nanoseconds(delta: datetime.timedelta) -> int:
+    """How many nanoseconds a timedelta is, counting pandas' own ones too."""
+    whole = (delta.days * 86400 + delta.seconds) * 1_000_000_000
+    return whole + delta.microseconds * 1000 + int(getattr(delta, "nanoseconds", 0))
+
+
+def _is_default(policy: Any) -> bool:
+    """Whether a zone policy is pandas' `raise`, asked without comparing an array."""
+    return isinstance(policy, str) and policy == "raise"
+
+
+def _on_the_clock[Answer](
+    place: Callable[[str, str, int], Answer],
+    ambiguous: Any,
+    nonexistent: Any,
+    height: int,
+    pick: Callable[[list[bool], Answer, Answer], Answer],
+) -> Answer:
+    """Puts readings on a clock under pandas' `ambiguous` and `nonexistent`.
+
+    `place` makes the one call that crosses, with the two policies as words the
+    Mojo side reads. `ambiguous` is `raise`, `NaT`, `True` or `False` there,
+    and any other string is `raise`, because pandas carries a string it does not
+    know down to the repeated hour and raises the ordinary error about the hour
+    rather than about the argument. `nonexistent` is the four words pandas
+    takes, or `timedelta` with the shift crossing beside it in nanoseconds.
+
+    A list of flags for `ambiguous` is one choice per row, and it is answered by
+    asking twice, once as though every flag were True and once as though every
+    one were False, and taking each row from the side its flag names. A row that
+    is not repeated answers the same both ways, so only the repeated ones can
+    tell the difference. That is twice the work for the one case that needs it,
+    against a third kind of argument crossing the boundary for every other call.
+
+    `infer` is still refused, since it reads the order of the rows to decide
+    where the clock went back rather than being told.
+
+    Args:
+        place: Makes the call, given the fold word, the gap word and the shift.
+        ambiguous: pandas' argument, as passed.
+        nonexistent: pandas' argument, as passed.
+        height: How many rows there are, for a list of flags to be checked
+            against.
+        pick: Takes each row from the first answer where its flag is True and
+            from the second where it is False.
+
+    Returns:
+        Whatever `place` answers.
+
+    Raises:
+        InvalidArgumentError: If `nonexistent` is not one pandas takes, if a
+            list of flags is the wrong length, or if a shift out of a gap lands
+            back in the same hour.
+        NotImplementedError: For `ambiguous="infer"`.
+    """
+    if isinstance(nonexistent, datetime.timedelta):
+        gap, shift = "timedelta", _nanoseconds(nonexistent)
+    else:
+        _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
+        gap, shift = str(nonexistent), 0
+
+    def placed(fold: str) -> Answer:
+        try:
+            return place(fold, gap, shift)
+        except InvalidArgumentError as error:
+            if str(error).endswith("will relocalize on a nonexistent time"):
+                raise InvalidArgumentError(f"{error}: {nonexistent}") from None
+            raise
+
+    if isinstance(ambiguous, str):
+        if ambiguous == "infer":
+            raise NotImplementedError(
+                "ambiguous='infer' is not supported yet, because it reads the"
+                " order of the rows to find where the clock went back rather"
+                " than being told, and True, False, 'NaT' and a list of flags"
+                " are the ones written"
+            )
+        return placed("NaT" if ambiguous == "NaT" else "raise")
+    if not hasattr(ambiguous, "__iter__"):
+        return placed("True" if ambiguous else "False")
+    flags = [bool(flag) for flag in ambiguous]
+    if len(flags) != height:
+        raise InvalidArgumentError("Length of ambiguous bool-array must be the same size as vals")
+    if all(flags):
+        return placed("True")
+    if not any(flags):
+        return placed("False")
+    return pick(flags, placed("True"), placed("False"))
 
 
 def _reducing_axis(axis: Any, owner: str) -> None:
@@ -7379,31 +7469,36 @@ class DatetimeMixin:
         asked for only when one of the two is not the default, since asking is a
         boundary crossing and the default changes no answer either way.
         """
-        if (ambiguous != "raise" or nonexistent != "raise") and self._zone() is not None:
-            _held_at(
-                "ambiguous",
-                ambiguous,
-                "raise",
-                "picking which of the two readings a repeated wall clock hour means"
-                " needs the zone's transition table, which is the same work"
-                " tz_localize over a fold needs",
-            )
-            if not isinstance(nonexistent, datetime.timedelta):
-                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
-            _held_at(
-                "nonexistent",
-                nonexistent,
-                "raise",
-                "shifting a wall clock time that a spring forward skipped needs the"
-                " zone's transition table",
-            )
         if not isinstance(freq, str):
             raise NotImplementedError(
                 "freq has to be a string for now, because an offset object carries"
                 " the whole frequency vocabulary and firepanda parses the string"
                 " spelling only"
             )
-        return self._part(kind, freq)
+        if (_is_default(ambiguous) and _is_default(nonexistent)) or self._zone() is None:
+            return self._part(kind, freq)
+        return self._placed(kind, freq, ambiguous, nonexistent)
+
+    def _placed(self, kind: str, arg: str, ambiguous: Any, nonexistent: Any) -> Series:
+        """Reads a part that puts the readings back on a clock, under a policy.
+
+        `_on_the_clock` reads the two arguments, and a list of flags for
+        `ambiguous` is answered with `where`, which lines the two answers up by
+        label, and both answers carry this column's labels.
+        """
+        from ._frame import Series
+
+        def place(fold: str, gap: str, shift: int) -> Series:
+            try:
+                inner = self._series._inner.temporal_placed(kind, arg, fold, gap, shift)
+            except Exception as error:
+                raise translate(error) from None
+            return Series._wrap(inner)
+
+        def pick(flags: list[bool], if_true: Series, if_false: Series) -> Series:
+            return if_true.where(flags, if_false)
+
+        return _on_the_clock(place, ambiguous, nonexistent, len(self._series), pick)
 
     def _as_unit(self, unit: str, round_ok: bool) -> Series:
         """Restates the column in another resolution."""
@@ -7444,32 +7539,22 @@ class DatetimeMixin:
         `None` is a different operation rather than an absent argument, which is
         why it crosses as its own word. Naming a zone keeps the readings and
         changes what they mean, and passing None keeps the instants and drops
-        what they were read against.
+        what they were read against, so the two policies have nothing to say
+        about it, though a misspelled `nonexistent` is still refused because
+        pandas refuses it there too.
         """
-        _held_at(
-            "ambiguous",
-            ambiguous,
-            "raise",
-            "a wall clock hour that a fall back repeats is two instants and"
-            " choosing between them needs the zone's transition table",
-        )
-        if not isinstance(nonexistent, datetime.timedelta):
-            _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
-        _held_at(
-            "nonexistent",
-            nonexistent,
-            "raise",
-            "a wall clock time that a spring forward skipped is no instant at"
-            " all and shifting it needs the zone's transition table",
-        )
         if tz is None:
+            if not isinstance(nonexistent, datetime.timedelta):
+                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
             return self._part("tz_localize_none", "")
         if not isinstance(tz, str):
             raise NotImplementedError(
                 "tz has to be a zone name for now, because a tzinfo object is a"
                 " Python object and the kernel reads the zone out of a string"
             )
-        return self._part("tz_localize", tz)
+        if _is_default(ambiguous) and _is_default(nonexistent):
+            return self._part("tz_localize", tz)
+        return self._placed("tz_localize", tz, ambiguous, nonexistent)
 
     def _isocalendar(self) -> DataFrame:
         """The ISO 8601 week date fields, as a frame of three columns.

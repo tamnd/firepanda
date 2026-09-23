@@ -92,6 +92,42 @@ comptime DAYS_TO_MARCH = 719468
 """How many days are between 0000-03-01 and 1970-01-01. Adding this moves the
 epoch to the start of a four hundred year cycle whose year begins in March."""
 
+comptime ON_A_FOLD_RAISE = 0
+"""What `tz_localize` does by default with a reading a fall back repeats, which
+is to raise pandas' own error naming it."""
+
+comptime ON_A_FOLD_NULL = 1
+"""`ambiguous="NaT"`, which answers null for a repeated reading."""
+
+comptime ON_A_FOLD_EARLIER = 2
+"""`ambiguous=True`, which takes the first of the two instants, the one still on
+daylight saving time."""
+
+comptime ON_A_FOLD_LATER = 3
+"""`ambiguous=False`, which takes the second of the two instants, the one back
+on standard time."""
+
+comptime IN_A_GAP_RAISE = 0
+"""What `tz_localize` does by default with a reading a spring forward skipped,
+which is to raise pandas' own error naming it."""
+
+comptime IN_A_GAP_NULL = 1
+"""`nonexistent="NaT"`, which answers null for a skipped reading."""
+
+comptime IN_A_GAP_FORWARD = 2
+"""`nonexistent="shift_forward"`, which moves a skipped reading on to the next
+whole hour of the clock and reads it on the offset after the change."""
+
+comptime IN_A_GAP_BACKWARD = 3
+"""`nonexistent="shift_backward"`, which moves a skipped reading back to one
+unit before its whole hour and reads it on the offset before the change."""
+
+comptime IN_A_GAP_SHIFT = 4
+"""`nonexistent` given as a timedelta, which moves a skipped reading by that
+much and reads it on the offset after the change when the shift is forward and
+the one before when it is back."""
+
+
 comptime FIELD_YEAR = 0
 """Field code for `dt.year`."""
 
@@ -959,8 +995,40 @@ def _read_by_rules(
     return out^
 
 
+@fieldwise_init
+struct ZonePolicy(Copyable, ImplicitlyCopyable, Movable):
+    """What to do with a reading a zone's clock skipped or showed twice.
+
+    These are pandas' `ambiguous` and `nonexistent` arguments, taken as one
+    value so that every kernel which puts readings back on a clock can be
+    handed them without growing three parameters. The default raises on both,
+    which is what pandas does when it is not told.
+    """
+
+    var ambiguous: Int
+    """One of the `ON_A_FOLD_` codes."""
+
+    var nonexistent: Int
+    """One of the `IN_A_GAP_` codes."""
+
+    var shift: Int64
+    """How far to move a skipped reading, in nanoseconds, for
+    `IN_A_GAP_SHIFT` and ignored otherwise."""
+
+    def __init__(out self):
+        """Constructs the policy that raises on both."""
+        self.ambiguous = ON_A_FOLD_RAISE
+        self.nonexistent = IN_A_GAP_RAISE
+        self.shift = 0
+
+
 def _placed(
-    reading: Int64, rules: ZoneRules, per_second: Int64, naive: LogicalType
+    reading: Int64,
+    rules: ZoneRules,
+    per_second: Int64,
+    naive: LogicalType,
+    policy: ZonePolicy,
+    mut present: Bool,
 ) raises -> Int64:
     """Returns the one instant at which a zone's clock showed a reading.
 
@@ -971,18 +1039,29 @@ def _placed(
     a spring forward skipped and two for a reading in the hour a fall back
     repeats. This is the same test pandas makes and the messages are its own.
 
+    The shifts out of a gap are pandas' too, and they go by the whole hour of
+    the clock rather than by where the gap ends. On Lord Howe, where the clock
+    goes forward half an hour, a shift forward lands on the hour after the gap
+    rather than on the half hour the gap ends at, because that is what pandas
+    answers.
+
     Args:
         reading: The wall clock reading, in the column's units.
         rules: The zone.
         per_second: How many of the column's units make a second.
         naive: The naive type the reading is in, for the message.
+        policy: What to do with a reading that is no instant or two.
+        present: Set to false when the policy answers null for this reading.
 
     Returns:
-        The instant, in the same units.
+        The instant, in the same units, and nothing that means anything when
+        `present` comes back false.
 
     Raises:
-        Error: If the reading denotes no instant or two.
+        Error: If the reading denotes no instant or two and the policy says
+            to raise, or if a shift out of a gap lands in the same hour.
     """
+    present = True
     var seconds = reading // per_second
     var early = rules.offset_at(seconds - SECONDS_PER_DAY)
     var late = rules.offset_at(seconds + SECONDS_PER_DAY)
@@ -991,6 +1070,13 @@ def _placed(
     var first_holds = rules.offset_at(first // per_second) == early
     var second_holds = rules.offset_at(second // per_second) == late
     if first_holds and second_holds and first != second:
+        if policy.ambiguous == ON_A_FOLD_EARLIER:
+            return first
+        if policy.ambiguous == ON_A_FOLD_LATER:
+            return second
+        if policy.ambiguous == ON_A_FOLD_NULL:
+            present = False
+            return 0
         raise Error(
             "temporal: Cannot infer dst time from "
             + temporal_text(naive, reading)
@@ -1000,6 +1086,25 @@ def _placed(
         return first
     if second_holds:
         return second
+    var hour = Int64(3600) * per_second
+    var into_the_hour = reading - (reading // hour) * hour
+    if policy.nonexistent == IN_A_GAP_FORWARD:
+        return reading + (hour - into_the_hour) - late * per_second
+    if policy.nonexistent == IN_A_GAP_BACKWARD:
+        return reading - into_the_hour - 1 - early * per_second
+    if policy.nonexistent == IN_A_GAP_SHIFT:
+        var shift = policy.shift // (NANOS_PER_SECOND // per_second)
+        var landed = shift + into_the_hour
+        if landed >= 0 and landed < hour:
+            raise Error(
+                "temporal: The provided timedelta will relocalize on a"
+                " nonexistent time"
+            )
+        var offset = late if shift > 0 else early
+        return reading + shift - offset * per_second
+    if policy.nonexistent == IN_A_GAP_NULL:
+        present = False
+        return 0
     raise Error(
         "temporal: "
         + temporal_text(naive, reading)
@@ -1013,6 +1118,7 @@ def _place_by_rules(
     rules: ZoneRules,
     per_second: Int64,
     naive: LogicalType,
+    policy: ZonePolicy,
 ) raises -> Array[DType.int64]:
     """Turns a zone's wall clock readings into the UTC instants they denote.
 
@@ -1027,33 +1133,43 @@ def _place_by_rules(
         rules: The zone.
         per_second: How many of the column's units make a second.
         naive: The naive type the readings are in, for the message.
+        policy: What to do with a reading that is no instant or two.
 
     Returns:
-        The instants, null wherever the input is null.
+        The instants, null wherever the input is null and wherever the policy
+        answers null.
 
     Raises:
-        Error: Naming the first reading that denotes no instant or two.
+        Error: Naming the first reading that denotes no instant or two, when
+            the policy says to raise.
     """
     var n = len(a)
     var out = Array[DType.int64](overwritten=n)
     var validity = Bitmap(copy=a.data.validity)
+    # Every morsel starts on a multiple of 64 rows, so no two of them write the
+    # same word of this, but they all write it, so it has to be ours first.
+    validity.make_private()
 
-    def compute(start: Int, stop: Int) raises {mut out, imm}:
+    def compute(start: Int, stop: Int) raises {mut out, mut validity, imm}:
         var source = a.unsafe_ptr()
         var target = out.unsafe_mut_ptr()
+        var present = True
         for i in range(start, stop):
             if not a.is_valid(i):
                 continue
             var value = source.unsafe_offset(i).unsafe_load()
             target.unsafe_offset(i).unsafe_store(
-                _placed(value, rules, per_second, naive)
+                _placed(value, rules, per_second, naive, policy, present)
             )
+            if not present:
+                validity.set(i, False)
         repair_range(out, validity, start, stop)
 
     try:
         parallel_morsels(compute, n)
     except e:
         var source = a.unsafe_ptr()
+        var present = True
         for i in range(n):
             if a.is_valid(i):
                 _ = _placed(
@@ -1061,6 +1177,8 @@ def _place_by_rules(
                     rules,
                     per_second,
                     naive,
+                    policy,
+                    present,
                 )
         raise e
     out.data.validity = validity^
@@ -1105,18 +1223,20 @@ def local_readings(a: AnyArray) raises -> AnyArray:
 
 
 def _back_on_the_clock(
-    var readings: AnyArray, t: LogicalType
+    var readings: AnyArray, t: LogicalType, policy: ZonePolicy = ZonePolicy()
 ) raises -> AnyArray:
     """Puts a column of readings back on the clock it was read from.
 
     On a rule zone this is where the hard questions live. A reading in the
     hour a clock skips forward denotes no instant at all and a reading in the
-    hour it repeats denotes two, and both are refused with the message pandas
-    raises when it is not told what to do with them.
+    hour it repeats denotes two, and the policy says what to do with each.
+    By default both are refused with the message pandas raises when it is not
+    told what to do with them.
 
     Args:
         readings: A naive timestamp column, at the same resolution as `t`.
         t: The type it is going back to.
+        policy: What to do with a reading that is no instant or two.
 
     Returns:
         A column of that type.
@@ -1133,6 +1253,7 @@ def _back_on_the_clock(
                 rules,
                 t.unit.per_second(),
                 readings.type,
+                policy,
             ).into_data(),
             t,
         )
@@ -1196,7 +1317,9 @@ def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
     return out^
 
 
-def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
+def temporal_tz_localize(
+    a: AnyArray, zone: StringSlice, policy: ZonePolicy = ZonePolicy()
+) raises -> AnyArray:
     """Puts a clock on a column of readings.
 
     This is `dt.tz_localize` with a name, and it is the operation `tz_convert`
@@ -1208,12 +1331,13 @@ def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
     that names a rule comes out of the zone database row by row. Those zones
     are also where the hard questions live, since a reading in the hour a
     clock skips forward denotes no instant at all and a reading in the hour it
-    repeats denotes two, and both are refused the way pandas refuses them when
-    it is not told what to do.
+    repeats denotes two. The policy says what to do with each, and by default
+    both are refused the way pandas refuses them when it is not told.
 
     Args:
         a: A naive timestamp column.
         zone: The name to put on it.
+        policy: What to do with a reading that is no instant or two.
 
     Returns:
         A column on that clock, denoting instants that are the readings less
@@ -1237,7 +1361,7 @@ def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
             + ", and tz_convert is the one that reads it against another clock"
         )
     var wanted = LogicalType.timestamp(a.type.unit, TimeZone(zone))
-    return _back_on_the_clock(AnyArray(copy=a), wanted)
+    return _back_on_the_clock(AnyArray(copy=a), wanted, policy)
 
 
 def temporal_tz_localize_none(a: AnyArray) raises -> AnyArray:
@@ -1982,7 +2106,10 @@ def round_to_period[
 
 
 def temporal_round(
-    a: AnyArray, freq: StringSlice, mode: Int
+    a: AnyArray,
+    freq: StringSlice,
+    mode: Int,
+    policy: ZonePolicy = ZonePolicy(),
 ) raises -> AnyArray:
     """Rounds a timestamp column to a multiple of a frequency.
 
@@ -2000,6 +2127,8 @@ def temporal_round(
         a: A naive timestamp column.
         freq: The frequency, as pandas spells it.
         mode: `ROUND_DOWN`, `ROUND_UP` or `ROUND_HALF_EVEN`.
+        policy: What to do with a rounded reading that lands where a zoned
+            column's clock skipped or repeated itself.
 
     Returns:
         A column of the same type, null wherever the input is null.
@@ -2014,7 +2143,7 @@ def temporal_round(
         # are UTC, and in a zone that is not on a whole hour offset those are
         # two different answers rather than the same answer written twice.
         return _back_on_the_clock(
-            temporal_round(local_readings(a), freq, mode), a.type
+            temporal_round(local_readings(a), freq, mode), a.type, policy
         )
 
     var period = frequency_period(freq, a.type)

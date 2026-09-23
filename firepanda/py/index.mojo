@@ -57,7 +57,7 @@ from firepanda.py.errors import (
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
-from firepanda.py.temporal import word_part
+from firepanda.py.temporal import word_part, zone_policy
 from firepanda.py.values import python_list, python_value
 
 
@@ -1278,6 +1278,54 @@ struct PyIndex(Movable, Writable):
         try:
             var column = Series(String("labels"), held[].materialize())
             var answer = temporal_part(column, name, argument)
+            return Self._wrap(Index(answer^.into_values(), labels^))
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def temporal_placed(
+        py_self: PythonObject,
+        kind: PythonObject,
+        arg: PythonObject,
+        ambiguous: PythonObject,
+        nonexistent: PythonObject,
+        shift: PythonObject,
+    ) raises -> PythonObject:
+        """Reads a part that puts the labels back on a clock, with a policy.
+
+        `temporal_part` with pandas' `ambiguous` and `nonexistent` beside it,
+        for the reason `PySeries.temporal_placed` gives.
+
+        Args:
+            py_self: The index.
+            kind: The part, one of `floor`, `ceil`, `round` and
+                `tz_localize`.
+            arg: The frequency or the zone.
+            ambiguous: `raise`, `NaT`, `True` or `False`.
+            nonexistent: `raise`, `NaT`, `shift_forward`, `shift_backward` or
+                `timedelta`.
+            shift: The shift in nanoseconds, for `timedelta`.
+
+        Returns:
+            A new index of the same height.
+
+        Raises:
+            Error: Tagged `value` for a word that is not one of these or a
+                label the policy says to raise on, and tagged `dtype` when the
+                labels have no such part.
+        """
+        var name = column_part(words(kind, "kind"))
+        var argument = words(arg, "arg")
+        var policy = zone_policy(
+            words(ambiguous, "ambiguous"),
+            words(nonexistent, "nonexistent"),
+            whole(shift, "shift"),
+        )
+        var held = Pointer(to=Self._held(py_self)[].index[])
+        var labels = Optional[String](copy=held[].name)
+        try:
+            var column = Series(String("labels"), held[].materialize())
+            var answer = temporal_part(column, name, argument, policy)
             return Self._wrap(Index(answer^.into_values(), labels^))
         except cause:
             raise retagged(DTYPE, cause)

@@ -3172,6 +3172,19 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.temporal_placed",
+            name="temporal_placed",
+            doc="A part that puts readings back on a clock, with a policy.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("ambiguous", "str"),
+                ("nonexistent", "str"),
+                ("shift", "int"),
+            ),
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.temporal_word",
             name="temporal_word",
             doc="The clock or the resolution of a temporal column, as a string.",
@@ -3702,6 +3715,19 @@ INDEX = Exposed(
             name="temporal_part",
             doc="One part of temporal labels, as another index.",
             params=(("kind", "str"), ("arg", "str")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.temporal_placed",
+            name="temporal_placed",
+            doc="A part that puts labels back on a clock, with a policy.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("ambiguous", "str"),
+                ("nonexistent", "str"),
+                ("shift", "int"),
+            ),
             returns="Index",
         ),
         Binding(

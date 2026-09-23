@@ -34,7 +34,9 @@ from ._pandas import (
     _NONEXISTENT_REFUSAL,
     NO_DEFAULT,
     _held_at,
+    _is_default,
     _label_of,
+    _on_the_clock,
     _spelled,
     to_datetime,
 )
@@ -89,9 +91,8 @@ class DatetimeIndex(Index):
             freq: Refused. Frequency inference is document 33 section 6.
             tz: Refused. Attaching a clock as the values are read is
                 `tz_localize` after the fact, which is written.
-            ambiguous: Refused away from its default, since choosing between
-                the two readings of a repeated wall clock hour needs the zone's
-                transition table.
+            ambiguous: Refused away from its default, since it only means
+                something alongside `tz=`, which is refused.
             dayfirst: Refused. Only ISO 8601 is guessed and it has one order.
             yearfirst: Refused, for the same reason.
             dtype: Refused. The unit comes off the values and `as_unit` changes
@@ -120,8 +121,7 @@ class DatetimeIndex(Index):
             "ambiguous",
             ambiguous,
             "raise",
-            "picking which of the two readings a repeated wall clock hour means"
-            " needs the zone's transition table",
+            "it only means something alongside tz=, which is tz_localize after the fact",
         )
         _held_at("dayfirst", dayfirst, False, "only ISO 8601 is guessed and it has one order")
         _held_at("yearfirst", yearfirst, False, "only ISO 8601 is guessed and it has one order")
@@ -182,6 +182,30 @@ class DatetimeIndex(Index):
         except Exception as error:
             raise translate(error) from None
 
+    def _placed(self, kind: str, arg: str, ambiguous: Any, nonexistent: Any) -> DatetimeIndex:
+        """Moves every label back onto a clock, under pandas' two policies.
+
+        A list of flags for `ambiguous` is answered by asking twice, and the
+        two answers are put side by side as columns on the same row numbers so
+        that `where` lines them up by position whatever the labels are.
+        """
+
+        def place(fold: str, gap: str, shift: int) -> DatetimeIndex:
+            try:
+                inner = self._inner.temporal_placed(kind, arg, fold, gap, shift)
+            except Exception as error:
+                raise translate(error) from None
+            return cast(DatetimeIndex, DatetimeIndex._wrap(inner))
+
+        def pick(
+            flags: list[bool], if_true: DatetimeIndex, if_false: DatetimeIndex
+        ) -> DatetimeIndex:
+            rows = list(range(len(flags)))
+            chosen = if_true.to_series(index=rows).where(flags, if_false.to_series(index=rows))
+            return DatetimeIndex(chosen, name=self.name)
+
+        return _on_the_clock(place, ambiguous, nonexistent, len(self), pick)
+
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> DatetimeIndex:
         """Moves every label to a frequency, one of three ways.
 
@@ -191,30 +215,15 @@ class DatetimeIndex(Index):
         looking at it, and refusing what pandas accepts is the direction of
         difference this library does not get to have.
         """
-        if (ambiguous != "raise" or nonexistent != "raise") and self.tz is not None:
-            _held_at(
-                "ambiguous",
-                ambiguous,
-                "raise",
-                "picking which of the two readings a repeated wall clock hour"
-                " means needs the zone's transition table",
-            )
-            if not isinstance(nonexistent, datetime.timedelta):
-                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
-            _held_at(
-                "nonexistent",
-                nonexistent,
-                "raise",
-                "shifting a wall clock time that a spring forward skipped needs"
-                " the zone's transition table",
-            )
         if not isinstance(freq, str):
             raise NotImplementedError(
                 "freq has to be a string for now, because an offset object"
                 " carries the whole frequency vocabulary and firepanda parses"
                 " the string spelling only"
             )
-        return self._moved(kind, freq)
+        if (_is_default(ambiguous) and _is_default(nonexistent)) or self.tz is None:
+            return self._moved(kind, freq)
+        return self._placed(kind, freq, ambiguous, nonexistent)
 
     def _named(self, kind: str, locale: Any) -> Index:
         """Writes out the name of the day or the month."""
@@ -447,27 +456,15 @@ class DatetimeIndex(Index):
         self, tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise"
     ) -> DatetimeIndex:
         """Puts the labels on a clock, or takes them off one."""
-        _held_at(
-            "ambiguous",
-            ambiguous,
-            "raise",
-            "a wall clock hour that a fall back repeats is two instants and"
-            " choosing between them needs the zone's transition table",
-        )
-        if not isinstance(nonexistent, datetime.timedelta):
-            _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
-        _held_at(
-            "nonexistent",
-            nonexistent,
-            "raise",
-            "a wall clock time that a spring forward skipped is no instant at"
-            " all and shifting it needs the zone's transition table",
-        )
         if tz is None:
+            if not isinstance(nonexistent, datetime.timedelta):
+                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
             return self._moved("tz_localize_none", "")
         if not isinstance(tz, str):
             raise NotImplementedError(
                 "tz has to be a zone name for now, because a tzinfo object is a"
                 " Python object and the kernel reads the zone out of a string"
             )
+        if not (_is_default(ambiguous) and _is_default(nonexistent)):
+            return self._placed("tz_localize", tz, ambiguous, nonexistent)
         return self._moved("tz_localize", tz)

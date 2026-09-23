@@ -14,6 +14,16 @@ from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.kernel.temporal import (
+    IN_A_GAP_BACKWARD,
+    IN_A_GAP_FORWARD,
+    IN_A_GAP_NULL,
+    IN_A_GAP_RAISE,
+    IN_A_GAP_SHIFT,
+    ON_A_FOLD_EARLIER,
+    ON_A_FOLD_LATER,
+    ON_A_FOLD_NULL,
+    ON_A_FOLD_RAISE,
+    ZonePolicy,
     temporal_tz_convert,
     temporal_tz_localize,
     temporal_tz_localize_none,
@@ -233,6 +243,147 @@ def test_etc_zones_carry_their_inverted_sign() raises:
     """`Etc/GMT+5` is five hours behind UTC, the opposite of what its name
     reads as, which is why the fixed offset reader leaves it to the database."""
     assert_equal(reading(0, "Etc/GMT+5"), -18000)
+
+
+comptime SKIPPED = Int64(1710037800)
+"""Half past two on 10 March 2024, which New York skipped."""
+
+comptime REPEATED = Int64(1730597400)
+"""Half past one on 3 November 2024, which New York showed twice."""
+
+
+def placed_under(
+    value: Int64, zone: String, policy: ZonePolicy
+) raises -> AnyArray:
+    """Localises one reading in seconds under a policy.
+
+    Args:
+        value: The reading.
+        zone: The zone.
+        policy: The policy.
+
+    Returns:
+        The one row column.
+    """
+    return temporal_tz_localize(
+        column([value], TimeUnit.SECOND, ""), zone, policy
+    )
+
+
+def instant(placed: AnyArray) raises -> Int64:
+    """Returns the one row of a column, which the caller knows is present.
+
+    Args:
+        placed: The column.
+
+    Returns:
+        Its first row.
+    """
+    return placed.as_typed_view[DType.int64]()[0]
+
+
+def test_a_skipped_reading_can_be_null() raises:
+    var placed = placed_under(
+        SKIPPED,
+        "America/New_York",
+        ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_NULL, 0),
+    )
+    assert_true(not placed.as_typed_view[DType.int64]().is_valid(0))
+
+
+def test_a_skipped_reading_shifts_to_the_hours_either_side() raises:
+    """Forward lands on three o'clock daylight time and back on the last
+    second of standard time, both measured against pandas."""
+    var forward = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_FORWARD, 0)
+    var backward = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_BACKWARD, 0)
+    assert_equal(
+        instant(placed_under(SKIPPED, "America/New_York", forward)),
+        1710054000,
+    )
+    assert_equal(
+        instant(placed_under(SKIPPED, "America/New_York", backward)),
+        1710053999,
+    )
+
+
+def test_a_half_hour_gap_still_shifts_by_the_hour() raises:
+    """Lord Howe skips from two to half past, and pandas shifts forward to
+    three and back to one second before two, so this does too."""
+    var forward = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_FORWARD, 0)
+    var backward = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_BACKWARD, 0)
+    assert_equal(
+        instant(placed_under(1728180900, "Australia/Lord_Howe", forward)),
+        1728144000,
+    )
+    assert_equal(
+        instant(placed_under(1728180900, "Australia/Lord_Howe", backward)),
+        1728142199,
+    )
+
+
+def test_a_skipped_reading_shifts_by_a_timedelta() raises:
+    """An hour on from half past two is half past three daylight time."""
+    var hour = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_SHIFT, 3_600_000_000_000)
+    assert_equal(
+        instant(placed_under(SKIPPED, "America/New_York", hour)), 1710055800
+    )
+
+
+def test_a_shift_that_stays_in_the_hour_is_refused() raises:
+    var twenty = ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_SHIFT, 1_200_000_000_000)
+    with assert_raises(
+        contains="The provided timedelta will relocalize on a nonexistent time"
+    ):
+        _ = placed_under(SKIPPED, "America/New_York", twenty)
+
+
+def test_a_repeated_reading_takes_the_side_it_is_told() raises:
+    """True is the first instant, still on daylight time, and False the
+    second, back on standard time."""
+    var earlier = ZonePolicy(ON_A_FOLD_EARLIER, IN_A_GAP_RAISE, 0)
+    var later = ZonePolicy(ON_A_FOLD_LATER, IN_A_GAP_RAISE, 0)
+    var null = ZonePolicy(ON_A_FOLD_NULL, IN_A_GAP_RAISE, 0)
+    assert_equal(
+        instant(placed_under(REPEATED, "America/New_York", earlier)),
+        1730611800,
+    )
+    assert_equal(
+        instant(placed_under(REPEATED, "America/New_York", later)), 1730615400
+    )
+    assert_true(
+        not placed_under(REPEATED, "America/New_York", null)
+        .as_typed_view[DType.int64]()
+        .is_valid(0)
+    )
+
+
+def test_a_policy_for_one_leaves_the_other_raising() raises:
+    """Telling it what to do with a fold says nothing about a gap."""
+    with assert_raises(contains="is a nonexistent time"):
+        _ = placed_under(
+            SKIPPED,
+            "America/New_York",
+            ZonePolicy(ON_A_FOLD_NULL, IN_A_GAP_RAISE, 0),
+        )
+
+
+def test_the_nulls_a_policy_makes_land_on_their_own_rows() raises:
+    """Across several morsels, every skipped row is null and every other one
+    is placed, so no morsel wrote another's part of the bitmap."""
+    var rows = List[Int64]()
+    for i in range(300_000):
+        rows.append(SKIPPED if i % 3 == 0 else Int64(1704110400))
+    var placed = temporal_tz_localize(
+        column(rows, TimeUnit.SECOND, ""),
+        "America/New_York",
+        ZonePolicy(ON_A_FOLD_RAISE, IN_A_GAP_NULL, 0),
+    )
+    ref view = placed.as_typed_view[DType.int64]()
+    for i in range(300_000):
+        if i % 3 == 0:
+            assert_true(not view.is_valid(i), "a skipped row is null")
+        else:
+            assert_equal(view[i], 1704110400 + 18000, "and the rest placed")
 
 
 def main() raises:

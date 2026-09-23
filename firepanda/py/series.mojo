@@ -59,7 +59,7 @@ from firepanda.py.text import translate as text_translate
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
-from firepanda.py.temporal import word_part
+from firepanda.py.temporal import word_part, zone_policy
 from firepanda.py.transform import masked, transformation, transformed
 from firepanda.py.window import window as window_agg
 from firepanda.py.window import window_settings
@@ -1772,6 +1772,62 @@ struct PySeries(Movable, Writable):
                             Self._held(py_self)[].series[],
                             wanted,
                             words(arg, "arg"),
+                        )
+                    )
+                )
+            )
+        except e:
+            raise retagged(DTYPE, e)
+
+    @staticmethod
+    def temporal_placed(
+        py_self: PythonObject,
+        kind: PythonObject,
+        arg: PythonObject,
+        ambiguous: PythonObject,
+        nonexistent: PythonObject,
+        shift: PythonObject,
+    ) raises -> PythonObject:
+        """Reads a part that puts readings back on a clock, with a policy.
+
+        The same door as `temporal_part` for `floor`, `ceil`, `round` and
+        `tz_localize`, with pandas' `ambiguous` and `nonexistent` crossing
+        beside the name. A separate method rather than three more arguments
+        on every call to `temporal_part`, since the other thirty parts have
+        no clock to put anything back on.
+
+        Args:
+            py_self: The series.
+            kind: The part, one of the four.
+            arg: The frequency or the zone.
+            ambiguous: `raise`, `NaT`, `True` or `False`.
+            nonexistent: `raise`, `NaT`, `shift_forward`, `shift_backward` or
+                `timedelta`.
+            shift: The shift in nanoseconds, for `timedelta`.
+
+        Returns:
+            A new series.
+
+        Raises:
+            Error: Tagged `value` for a word that is not one of these or a
+                reading the policy says to raise on, and tagged `dtype` if the
+                column has a type with no such part.
+        """
+        var wanted = column_part(words(kind, "kind"))
+        var policy = zone_policy(
+            words(ambiguous, "ambiguous"),
+            words(nonexistent, "nonexistent"),
+            whole(shift, "shift"),
+        )
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        temporal_part(
+                            Self._held(py_self)[].series[],
+                            wanted,
+                            words(arg, "arg"),
+                            policy,
                         )
                     )
                 )
