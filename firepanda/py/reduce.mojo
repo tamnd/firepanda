@@ -45,9 +45,20 @@ written once and both doors get it.
 A name that is not on either list is a bug in the generated table rather than
 something a user typed, because the Python layer holds the pandas vocabulary and
 never passes a word a user wrote straight through.
+
+### Where a median lands
+
+Both doors mark `median` and `quantile` with how they land between two values,
+because pandas answers the same question with different arithmetic depending on
+which door it is. A whole column goes to numpy, whose median is the mean of the
+two middle values and whose quantile switches formula at a fraction of a half,
+and a group goes to pandas' own Cython, which halves the sum for a median and
+takes the lower value plus the fraction of the gap for a quantile. The SQL
+aggregates build their kinds elsewhere and keep the formula they always had.
+The three are the `LAND_` constants in `firepanda/kernel/group.mojo`.
 """
 
-from firepanda.kernel.group import AggKind
+from firepanda.kernel.group import AggKind, LAND_COLUMN, LAND_GROUPED
 from firepanda.py.errors import VALUE, tagged
 
 
@@ -77,7 +88,7 @@ def reduction(name: String, param: Float64) raises -> AggKind:
     if name == "count":
         return AggKind.COUNT
     if name == "median":
-        return AggKind.MEDIAN
+        return AggKind.MEDIAN.landed(LAND_COLUMN)
     if name == "nunique":
         return AggKind.NUNIQUE
     if name == "skew":
@@ -95,7 +106,7 @@ def reduction(name: String, param: Float64) raises -> AggKind:
     if name == "sem":
         return AggKind(AggKind.SEM.code, param)
     if name == "quantile":
-        return AggKind(AggKind.QUANTILE.code, param)
+        return AggKind(AggKind.QUANTILE.code, param).landed(LAND_COLUMN)
     raise tagged(VALUE, String("unknown reduction ", name))
 
 
@@ -129,4 +140,4 @@ def grouped_reduction(name: String, param: Float64) raises -> AggKind:
         return AggKind.FIRST
     if name == "last":
         return AggKind.LAST
-    return reduction(name, param)
+    return reduction(name, param).landed(LAND_GROUPED)

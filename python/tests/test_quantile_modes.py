@@ -4,9 +4,8 @@
 halfway between two of them, so they have to match pandas exactly, including
 `nearest` rounding a half to the even position the way `numpy.around` does. A
 list of quantiles answers a Series labelled by the quantiles on a Series and a
-frame with a row per quantile on a frame. `linear` is compared with a tolerance,
-because the kernel weights the two values with one formula and numpy with two
-and they can part in the last bit.
+frame with a row per quantile on a frame. `linear` is the kernel's, and it lands
+the way numpy does, so it is exact too.
 """
 
 from __future__ import annotations
@@ -69,14 +68,14 @@ def test_a_list_of_picked_quantiles_is_a_series(
     assert got.name == want.name
 
 
-def test_a_list_of_linear_quantiles_is_close(firepanda: ModuleType) -> None:
-    """The kernel answers each one, so this is the shape more than the values."""
+def test_a_list_of_linear_quantiles_is_exactly_pandas(firepanda: ModuleType) -> None:
+    """The kernel answers each one, the way numpy lands."""
     import pandas as pd
 
     rows = COLUMNS[0]
     got = firepanda.Series(rows).quantile(QS)
     want = pd.Series(rows).quantile(QS)
-    assert got.tolist() == pytest.approx(want.tolist())
+    assert same(got.tolist(), want.tolist())
     assert got.index.tolist() == want.index.tolist()
 
 
@@ -111,7 +110,7 @@ def test_a_frame_answers_a_row_per_quantile(firepanda: ModuleType, how: str) -> 
     assert list(got.columns) == list(want.columns)
     assert got.index.tolist() == want.index.tolist()
     for name in want.columns:
-        assert got[name].tolist() == pytest.approx(want[name].tolist())
+        assert same(got[name].tolist(), want[name].tolist())
 
 
 @pytest.mark.parametrize("how", PICKED)

@@ -30,6 +30,7 @@ The test shards on a pull request now run `tools/run_tests.sh --changed`, which 
 
 ### Fixed
 
+- `median` and a `linear` `quantile` now agree with pandas to the last bit, on a series, down the columns of a frame and on a groupby. The value between two neighbours was `low + gap * part`, which LLVM fused into one multiply add, so it could land one unit in the last place away from pandas. A median now averages its two middle values the way pandas does, a whole column quantile lands the way numpy's `_lerp` does, from the high side past a half, and a grouped quantile keeps the multiply apart from the add the way pandas' Cython does on x86. The SQL engine keeps its own rule. The rule a reduction lands by rides on `AggKind` as `landing`, which is not part of which reduction it is. (Issue #8)
 - `!=` against a NaN answered False in the vector loops of `kernel/compare.mojo`, both between two columns and against a constant, where IEEE, numpy and pandas all answer True. `SIMD.ne` lowers to the ordered compare, which is false on a NaN lane, while the scalar form of the same method is true, so the answer depended on whether the row landed in the vector body or the tail. The loops now take the inverse of equality.
 
 ## [0.8.27] - 2026-09-23

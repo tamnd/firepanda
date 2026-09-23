@@ -106,6 +106,7 @@ covers both.
 from std.collections.span import Span
 from std.math import isnan, nan, sqrt
 from std.sys.info import simd_width_of, size_of
+from std.sys.intrinsics import llvm_intrinsic
 
 from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
@@ -598,6 +599,25 @@ def _merge_sums[
     return _merge_tables[dt](partials, 0, groups, workers)
 
 
+comptime LAND_SQL = UInt8(0)
+"""A median or a quantile is the lower value plus the fraction of the gap, the
+median included. This is what the SQL aggregates have always answered."""
+
+comptime LAND_GROUPED = UInt8(1)
+"""The lower value plus the fraction of the gap for a quantile, rounded after
+the multiply and again after the add, and the two middle values added and
+halved for a median. pandas' grouped kernels are written that way in Cython.
+On arm64 its compiler fuses the quantile's multiply and add, so pandas itself
+answers the last bit differently there, and this follows the x86 build."""
+
+comptime LAND_COLUMN = UInt8(2)
+"""The median as `LAND_GROUPED`, and a quantile the way numpy's `_lerp` writes
+it, which is the lower value plus the fraction of the gap below a half and the
+upper value less the rest of the gap from a half up. pandas hands a whole
+column's quantile to numpy, so the two formulas are what makes the last bit
+agree. The two only differ in rounding, which is also why they need a flag."""
+
+
 struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Which reduction a grouped aggregation should run.
 
@@ -628,6 +648,11 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """The delta degrees of freedom for `VAR` and `STD`, the quantile for
     `QUANTILE` and `MEDIAN`, and zero for everything else."""
 
+    var landing: UInt8
+    """How `MEDIAN` and `QUANTILE` land between two values, one of `LAND_SQL`,
+    `LAND_GROUPED` and `LAND_COLUMN`. Like `param` it is not part of equality,
+    and every other reduction ignores it."""
+
     def __init__(out self, code: UInt8):
         """Constructs a kind with the reduction's own default parameter.
 
@@ -636,6 +661,7 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         self.code = code
         self.param = Self._default_param(code)
+        self.landing = LAND_SQL
 
     def __init__(out self, code: UInt8, param: Float64):
         """Constructs a kind with an explicit parameter.
@@ -646,6 +672,7 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         self.code = code
         self.param = param
+        self.landing = LAND_SQL
 
     @staticmethod
     def _default_param(code: UInt8) -> Float64:
@@ -732,6 +759,19 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             The kind.
         """
         return Self(11, q)
+
+    def landed(self, landing: UInt8) -> Self:
+        """Returns the same kind landing between two values another way.
+
+        Args:
+            landing: One of `LAND_SQL`, `LAND_GROUPED` and `LAND_COLUMN`.
+
+        Returns:
+            The kind, with its code and parameter unchanged.
+        """
+        var out = self
+        out.landing = landing
+        return out
 
     comptime SUM = Self(0)
     """Adds the non-null values. Zero for a group with none."""
@@ -3116,6 +3156,26 @@ def _fill_slab[
     parallel_for(settle, parts)
 
 
+@always_inline
+def _rounded(product: Float64) -> Float64:
+    """Rounds a product to a double before anything is added to it.
+
+    LLVM is allowed to fuse a multiply and the add after it into one
+    instruction that rounds once, and it does, so `low + gap * part` answers
+    the fused number. numpy's `_lerp` is two separate ufuncs and rounds twice,
+    and pandas' grouped quantile rounds twice on x86, where its C compiler does
+    not fuse by default. The fence is what keeps the two roundings apart, and
+    it costs nothing but the fusion.
+
+    Args:
+        product: The product, as computed.
+
+    Returns:
+        The same value, with the add after it kept from fusing with it.
+    """
+    return llvm_intrinsic["llvm.arithmetic.fence", Float64](product)
+
+
 def _quantile_core[
     dt: DType, //, origin: ImmOrigin
 ](
@@ -3125,8 +3185,17 @@ def _quantile_core[
     codes: Array[DType.uint32],
     groups: Int,
     q: Float64,
+    landing: UInt8 = LAND_SQL,
+    middle: Bool = False,
 ) raises -> Array[DType.float64]:
-    """Sorts each group's values and reads the position `q` falls at."""
+    """Sorts each group's values and reads the position `q` falls at.
+
+    `middle` says this is a median rather than a quantile at a half, and
+    `landing` picks the arithmetic between the two values either side, as the
+    three `LAND_` constants describe. The median and the quantile at a half
+    land on the same number with different rounding, which is why a median has
+    to say it is one.
+    """
     var counts = _count_core(source, validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
     # Every element of the slab is a present row and the fill writes all of them,
@@ -3179,9 +3248,18 @@ def _quantile_core[
                 .unsafe_load()
                 .cast[DType.float64]()
             )
-            target.unsafe_offset(g).unsafe_store(
-                low + (high - low) * (position - Float64(lower))
-            )
+            var part = position - Float64(lower)
+            var gap = high - low
+            var landed = low + gap * part
+            if middle and landing != LAND_SQL:
+                # numpy's median is the mean of the middle one or two values,
+                # and pandas' grouped median adds the two and halves them.
+                landed = low if part == 0.0 else (low + high) / 2.0
+            elif landing == LAND_COLUMN and part >= 0.5:
+                landed = high - _rounded(gap * (1.0 - part))
+            elif landing != LAND_SQL:
+                landed = low + _rounded(gap * part)
+            target.unsafe_offset(g).unsafe_store(landed)
 
     parallel_for(one, blocks)
     return out^
@@ -4111,7 +4189,14 @@ def _dispatch_core[
             )
         return AnyArray(
             _quantile_core(
-                source, validity, has_null, codes, groups, kind.param
+                source,
+                validity,
+                has_null,
+                codes,
+                groups,
+                kind.param,
+                kind.landing,
+                kind == AggKind.MEDIAN,
             )
         )
     if kind == AggKind.PROD:
