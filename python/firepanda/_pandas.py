@@ -1232,6 +1232,49 @@ _FLOATING: frozenset[str] = frozenset({"float16", "float32", "float64"})
 """The three float widths."""
 
 
+def _counts_as_numeric(printed: str) -> bool:
+    """Whether `numeric_only=True` keeps a column of this type.
+
+    The nullable spellings are kept as well, since pandas marks its masked
+    arrays numeric, and so is a nullable boolean.
+
+    Args:
+        printed: The type as `dtype` spells it.
+
+    Returns:
+        True for an integer, a float or a boolean of any width or spelling.
+    """
+    lowered = printed.lower()
+    return (
+        lowered in _SIGNED
+        or lowered in _UNSIGNED
+        or lowered in _FLOATING
+        or lowered in ("bool", "boolean")
+    )
+
+
+def _no_boolean_quantile(printed: list[str]) -> None:
+    """Raises numpy's error when a quantile is asked of a column of booleans.
+
+    pandas hands the values to `numpy.quantile`, which subtracts two of them to
+    interpolate and cannot subtract booleans, so a quantile over flags is a
+    TypeError in pandas whatever the quantile is. firepanda could answer it and
+    does not, because an answer where pandas raises is code that works here and
+    breaks on the library it was written against.
+
+    Args:
+        printed: The type of every column the quantile reads.
+
+    Raises:
+        DTypeError: If any of them is the numpy boolean.
+    """
+    if "bool" in printed:
+        raise DTypeError(
+            "numpy boolean subtract, the `-` operator, is not supported, use the"
+            " bitwise_xor, the `^` operator, or the logical_xor function instead."
+        )
+
+
 def _dtype_family(printed: str) -> frozenset[str]:
     """Every word a column's type answers to, which is its branch of the tree.
 
@@ -4934,20 +4977,39 @@ class DataFrameMixin:
             " there is no second pass that lets one through",
         )
         _held_at(
-            "numeric_only",
-            numeric_only,
-            False,
-            "dropping the columns a reduction cannot read is a choice about the"
-            " shape of the answer rather than about the reduction",
-        )
-        _held_at(
             "min_count",
             min_count,
             0,
             "a floor on how many values a sum needs before it answers at all is"
             " a rule about the result rather than about the sum",
         )
-        return self._per_column(kind, param)
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        if kind == "quantile":
+            _no_boolean_quantile(read._inner.dtypes())
+        return read._per_column(kind, param)
+
+    def _numeric_part(self) -> DataFrameMixin:
+        """The columns `numeric_only=True` keeps, which are the numbers and the booleans.
+
+        A bool counts as a number here because pandas asks numpy, and numpy
+        puts `bool_` beside the integers. That is why `numeric_only=True` keeps
+        a column of flags and a quantile over it then fails, which is pandas'
+        answer as well. A column of spans is not kept, though `select_dtypes`
+        calls it a number, because pandas asks a different question in the two
+        places.
+        """
+        from ._frame import DataFrame
+
+        names = self._inner.names()
+        kept = [
+            name
+            for name, printed in zip(names, self._inner.dtypes(), strict=True)
+            if _counts_as_numeric(printed)
+        ]
+        try:
+            return DataFrame._wrap(self._inner.select(kept))
+        except Exception as error:
+            raise translate(error) from None
 
     def _fold(
         self,
@@ -6986,6 +7048,7 @@ class SeriesMixin:
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
         """Runs the quantile over the whole column."""
+        _no_boolean_quantile([self._inner.dtype()])
         return self._reduce("quantile", _quantile_wanted(q, interpolation), 0, True, False, 0)
 
     def _nunique(self, axis: Any, dropna: bool) -> Any:

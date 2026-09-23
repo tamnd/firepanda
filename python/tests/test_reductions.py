@@ -165,6 +165,58 @@ def test_an_empty_frame_reduces_to_an_empty_series(firepanda: ModuleType) -> Non
     assert out.tolist() == []
 
 
+MIXED = {
+    "key": [1, 2, 3],
+    "value": [1.0, 2.5, 3.0],
+    "flag": [True, False, True],
+    "s": ["a", "b", "c"],
+}
+"""A frame with an integer, a float, a flag and a string, which `numeric_only` splits."""
+
+
+@needs_pandas
+@pytest.mark.parametrize("name", ["sum", "mean", "median", "std", "var"])
+def test_numeric_only_keeps_the_numbers_and_the_flags(firepanda: ModuleType, name: str) -> None:
+    """The string column is dropped and the boolean one is kept, as pandas keeps it.
+
+    `min` and `max` are not here. Over an integer, a float and a flag pandas
+    answers an object series holding one of each, and that is the refusal
+    `test_a_mix_with_nothing_in_common_says_so` covers rather than a question
+    about which columns are read.
+    """
+    import pandas as pd
+
+    mine = getattr(firepanda.DataFrame(MIXED), name)(numeric_only=True)
+    theirs = getattr(pd.DataFrame(MIXED), name)(numeric_only=True)
+    assert list(mine.index) == list(theirs.index) == ["key", "value", "flag"]
+    assert mine.tolist() == pytest.approx(theirs.tolist())
+
+
+def test_numeric_only_over_no_numbers_is_an_empty_answer(firepanda: ModuleType) -> None:
+    """Rather than an error, since dropping every column leaves nothing to reduce."""
+    assert firepanda.DataFrame({"s": ["a", "b"]}).sum(numeric_only=True).tolist() == []
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda m: m.DataFrame(MIXED).quantile(0.5, numeric_only=True),
+        lambda m: m.DataFrame(MIXED)[["flag"]].quantile(0.5),
+        lambda m: m.Series([True, False, True]).quantile(0.5),
+    ],
+)
+def test_a_quantile_over_flags_raises_what_numpy_raises(
+    firepanda: ModuleType, call: object
+) -> None:
+    """pandas interpolates with a subtraction that numpy refuses on booleans."""
+    import pandas as pd
+
+    for module in (firepanda, pd):
+        with pytest.raises(TypeError, match="numpy boolean subtract"):
+            call(module)  # type: ignore[operator]
+
+
 @pytest.mark.parametrize(
     ("call", "arguments", "expected"),
     [
