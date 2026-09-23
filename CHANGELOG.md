@@ -10,9 +10,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Fixed
 
+- `FILTER` on `list`, `array_agg` and `arbitrary` answered the wrong question. The clause is read as a `CASE` around the argument, which is exact for a fold that passes over a null, and these three keep one, so `list(a) FILTER (WHERE a > 1)` came out as `[NULL, 2, NULL, 3]` where DuckDB says `[2, 3]`. They now refuse as `aggregate-filter`, the same as `first` and `last` always did.
+
 - `skew` over an integer column whose values are far from zero. The deviations from each group's mean used to be taken after the values were converted to float64, which rounds an int64 above two to the fifty third to the nearest representable float and can round away every difference in the column, so pandas answers 0.0 for a column whose true skewness is 2.19. The deviations are now taken as integers against an integer anchor near the mean, in 128 bits so the int64 edges cannot overflow, and only then converted, which answers the true skewness. This is a place where firepanda is now more accurate than pandas rather than equal to it, and firepanda-compat records it as the `engine/integer-moments` divergence.
 
 ### Added
+
+- `FILTER` on a fold of two arguments or more, such as `string_agg(s, ',')`, `covar_pop(a, b)`, `arg_min(s, a)` and the quantiles. The `CASE` goes around the first argument and the rest stay as they were, which is exact for the folds that drop a row when its first argument is null. Each one on the list was checked against DuckDB with the dropped rows holding the extremes and with a filter that keeps nothing. `arg_min_null` and its kind keep that row, so they still refuse, as does a name that is not a fold.
 
 - `numeric_only=True` on the frame reductions, which keeps the integer, float and boolean columns and drops the rest before reducing, as pandas does. It used to be refused by name. A boolean column is kept because numpy files `bool_` beside the integers, so `df.sum(numeric_only=True)` counts the flags. A span column is not kept, though `select_dtypes` calls it a number, because pandas asks a different question in the two places.
 

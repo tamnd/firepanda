@@ -154,6 +154,35 @@ from .unsupported import (
     not_implemented,
 )
 
+comptime KEEPS_NULLS: StringSlice[ImmStaticOrigin] = (
+    ",arbitrary,array_agg,first,last,list,"
+)
+"""The folds that read a null as a value, folded and comma delimited.
+
+A `FILTER` on one of these cannot be a `CASE` around its argument, because the
+rows the `CASE` turns into nulls are rows these still count. Each was checked
+against DuckDB by writing the filter both ways over the same table.
+"""
+
+comptime WRAPS_FIRST: StringSlice[ImmStaticOrigin] = (
+    ",approx_quantile,approx_top_k,arg_max,arg_min,argmax,argmin,corr,"
+    "covar_pop,covar_samp,group_concat,histogram_exact,listagg,max_by,min_by,"
+    "quantile,quantile_cont,quantile_disc,regr_avgx,regr_avgy,regr_count,"
+    "regr_intercept,regr_r2,regr_slope,regr_sxx,regr_sxy,regr_syy,"
+    "reservoir_quantile,string_agg,"
+)
+"""The folds of more than one argument a `FILTER` can be a `CASE` in.
+
+Each passes over a row whose first argument is null, whatever the rest of the
+row holds, so the `CASE` goes around the first argument and the rest are left
+as they were. For the quantiles, `approx_top_k`, `histogram_exact` and the
+separator of `string_agg` the rest have to be constants anyway, and DuckDB
+refuses a `CASE` there. `arg_min_null` and its kind are not here because they
+keep a row whose first argument is null, which is the reason they exist. Each
+was checked against DuckDB with the rows the filter drops holding the extremes,
+and with a filter that keeps nothing.
+"""
+
 comptime _NO_CASE: UInt8 = 0
 """No case for this rule, so it refuses and names itself.
 
@@ -3096,9 +3125,11 @@ struct Transform(Movable):
 
         A fold that passes over a null answers the same number whether the rows
         it is not meant to see are taken away or handed to it as nulls, so the
-        clause is a `CASE` with no `ELSE` around the argument. That is exact for
-        every fold this engine has bar three, and the three say so by name, as
-        does a name that is not a fold at all.
+        clause is a `CASE` with no `ELSE` around the argument. The folds that
+        keep a null say so by name, as does a name that is not a fold at all.
+        A fold of more than one argument takes the `CASE` around its first one
+        when a null there makes it pass over the whole row, which is what
+        `WRAPS_FIRST` lists, and refuses otherwise.
 
         Args:
             tree: The parse.
@@ -3125,15 +3156,15 @@ struct Transform(Movable):
             # the name may be a macro the catalog defines, and whether that is
             # a fold is not something this pass can know.
             raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
-        if name == "first" or name == "last":
-            # These two read a null as a value rather than passing over it, so
-            # a row the predicate drops and a row it turns into a null are not
+        if String(",", name, ",") in KEEPS_NULLS:
+            # These read a null as a value rather than passing over it, so a
+            # row the predicate drops and a row it turns into a null are not
             # the same row to them, and the rewrite would answer a different
-            # question. There is nothing else to rewrite it into. `any_value`
-            # used to be refused here alongside them and is not, because it
-            # skips nulls, so a row turned into a null and a row taken away are
-            # the same row to it and the `CASE` says what the filter said. See
-            # #888, which is where the three stopped being one thing.
+            # question. `list(a) FILTER (WHERE a > 1)` is `[2, 3]` in DuckDB
+            # and the `CASE` would have made it `[NULL, 2, NULL, 3]`. There is
+            # nothing else to rewrite it into. `any_value` used to be refused
+            # here alongside `first` and `last` and is not, because it skips
+            # nulls. See #888, which is where the three stopped being one thing.
             raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
         if flags & CALL_STAR != 0:
             var arms = List[UInt32]()
@@ -3142,15 +3173,17 @@ struct Transform(Movable):
             var counted = List[UInt32]()
             counted.append(ast.case(arms, NO_NODE, NO_NODE, at))
             return counted^
-        if len(arguments) != 1:
-            # Every fold here reads one argument, so there is no case where
-            # wrapping several of them has been thought about.
+        if len(arguments) == 0:
+            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
+        if len(arguments) > 1 and String(",", name, ",") not in WRAPS_FIRST:
             raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
         var arms = List[UInt32]()
         arms.append(predicate)
         arms.append(arguments[0])
         var out = List[UInt32]()
         out.append(ast.case(arms, NO_NODE, NO_NODE, at))
+        for i in range(1, len(arguments)):
+            out.append(arguments[i])
         return out^
 
     def _substring(

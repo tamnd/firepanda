@@ -707,6 +707,49 @@ def test_a_filter_on_something_it_cannot_be_rewritten_into_refuses() raises:
         _ = _printed("first(a) FILTER (WHERE b > 1)", g, rules)
     with assert_raises(contains="FILTER on last"):
         _ = _printed("last(a) FILTER (WHERE b > 1)", g, rules)
+    with assert_raises(contains="FILTER on arg_min_null"):
+        _ = _printed("arg_min_null(a, b) FILTER (WHERE b > 1)", g, rules)
+    with assert_raises(contains="FILTER on my_sum"):
+        _ = _printed("my_sum(a, b) FILTER (WHERE b > 1)", g, rules)
+
+
+def test_a_filter_on_a_fold_that_keeps_a_null_refuses() raises:
+    # DuckDB answers [2, 3] for the filter and [NULL, 2, NULL, 3] for the
+    # `CASE`, so these used to be rewritten into a different question.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="FILTER on list"):
+        _ = _printed("list(a) FILTER (WHERE a > 1)", g, rules)
+    with assert_raises(contains="FILTER on array_agg"):
+        _ = _printed("array_agg(a) FILTER (WHERE a > 1)", g, rules)
+    with assert_raises(contains="FILTER on arbitrary"):
+        _ = _printed("arbitrary(a) FILTER (WHERE a > 1)", g, rules)
+
+
+def test_a_filter_on_a_fold_of_two_arguments_wraps_the_first() raises:
+    # A null first argument drops the whole row for these, so the `CASE` goes
+    # there and the rest stay what they were. A separator or a quantile has to
+    # be a constant, so that is also the only place it could go.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("string_agg(s, ',') FILTER (WHERE b > 1)", g, rules),
+        "string_agg(CASE WHEN (b > 1) THEN s END, ',')",
+    )
+    assert_equal(
+        _printed("covar_pop(a, b) FILTER (WHERE b > 1)", g, rules),
+        "covar_pop(CASE WHEN (b > 1) THEN a END, b)",
+    )
+    assert_equal(
+        _printed("arg_min(s, a, 2) FILTER (WHERE b > 1)", g, rules),
+        "arg_min(CASE WHEN (b > 1) THEN s END, a, 2)",
+    )
+    assert_equal(
+        _printed(
+            "string_agg(s, ',' ORDER BY a) FILTER (WHERE b > 1)", g, rules
+        ),
+        "string_agg(CASE WHEN (b > 1) THEN s END, ',' ORDER BY a)",
+    )
 
 
 def test_a_filter_on_any_value_is_rewritten_like_the_rest() raises:

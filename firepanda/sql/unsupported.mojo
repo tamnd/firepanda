@@ -584,10 +584,11 @@ def sql_support() -> List[Refusal]:
             "FILTER on {}",
             (
                 "A filter is read as a CASE around the argument, which answers"
-                " the same number for a fold that passes over a null. first,"
-                " last and any_value read a null as a value, so it would not,"
-                " no fold here reads more than one argument, and a name that is"
-                " not a fold has nothing for the CASE to go inside."
+                " the same thing for a fold that passes over a null. first,"
+                " last, arbitrary, list and array_agg keep a null, so it would"
+                " not. A fold of two arguments takes the CASE around its first"
+                " when a null there drops the row, and a name that is not a"
+                " fold has nothing for the CASE to go inside."
             ),
             SQL_ISSUE,
         ),
