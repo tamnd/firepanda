@@ -578,8 +578,18 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 )
             )
         if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
+            # A subscript on text is lowered as this call, so a subscript on
+            # a list is refused here, and the message says so for the query
+            # that wrote brackets and not a substring.
             raise Error(
-                String("'substring' reads text and argument 0 is ", args[0])
+                String(
+                    "'substring' reads text and argument 0 is ",
+                    args[0],
+                    (
+                        ". Text is also the one thing firepanda takes a"
+                        " subscript or a slice of so far"
+                    ),
+                )
             )
         for i in range(1, len(args)):
             if not args[i].is_integer() and args[i] != LogicalType.NULL:

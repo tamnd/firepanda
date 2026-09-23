@@ -124,7 +124,7 @@ def test_a_refusal_names_the_feature_the_position_and_the_way_out() raises:
     )
     assert_true("LINE 1: SELECT a[1]" in text, text)
     assert_true("^" in text, text)
-    assert_true("brackets" in text, text)
+    assert_true("substring it means" in text, text)
     assert_true("https://github.com/tamnd/firepanda/issues/" in text, text)
 
 
