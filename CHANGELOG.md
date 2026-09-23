@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed
+
+- `skew` over an integer column whose values are far from zero. The deviations from each group's mean used to be taken after the values were converted to float64, which rounds an int64 above two to the fifty third to the nearest representable float and can round away every difference in the column, so pandas answers 0.0 for a column whose true skewness is 2.19. The deviations are now taken as integers against an integer anchor near the mean, in 128 bits so the int64 edges cannot overflow, and only then converted, which answers the true skewness. This is a place where firepanda is now more accurate than pandas rather than equal to it, and firepanda-compat records it as the `engine/integer-moments` divergence.
+
 ### Added
 
 - `numeric_only=True` on the frame reductions, which keeps the integer, float and boolean columns and drops the rest before reducing, as pandas does. It used to be refused by name. A boolean column is kept because numpy files `bool_` beside the integers, so `df.sum(numeric_only=True)` counts the flags. A span column is not kept, though `select_dtypes` calls it a number, because pandas asks a different question in the two places.
