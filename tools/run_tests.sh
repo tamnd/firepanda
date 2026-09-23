@@ -496,7 +496,7 @@ if [ -n "${FIREPANDA_TEST_WRITE_COSTS:-}" ]; then
   # being readable rather than about it working.
   {
     echo "# Seconds per test file, written by \`pixi run test-costs\` on $(uname -m),"
-    echo "# $jobs files at a time. The ten test shards in .github/workflows/ci.yml"
+    echo "# $jobs files at a time. The eight test shards in .github/workflows/ci.yml"
     echo "# divide the list up on these numbers."
     echo "#"
     echo "# Prefer \`tools/test_costs_from_ci.sh\` when there is a CI run to read."
