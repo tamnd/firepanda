@@ -223,6 +223,73 @@ def test_an_exclude_naming_a_column_twice_over_a_join_drops_both() raises:
     )
 
 
+def test_a_qualified_exclude_drops_one_side_of_a_join() raises:
+    # Which is the point of writing the dot. The bare spelling above drops both
+    # columns called `b`, because a modifier name is a name and not a reference,
+    # and this is how a query says it meant one of them.
+    assert_equal(
+        _plan("SELECT * EXCLUDE (t.b) FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, g, f, b, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT * EXCLUDE (u.b) FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, b, g, f, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_a_qualified_rename_renames_one_side_of_a_join() raises:
+    assert_equal(
+        _plan("SELECT * RENAME (u.b AS q) FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, b, g, f, b as q, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_a_modifier_qualifier_is_the_name_the_from_gave_it() raises:
+    # An alias replaces the table's own name for the whole query, so the table
+    # name stops being something a modifier may write, the same way it stops
+    # being something a column reference may write.
+    assert_equal(
+        _plan("SELECT * EXCLUDE (x.b) FROM t AS x"),
+        "PROJECT [a, g, f]\n  SCAN t []\n",
+    )
+    with assert_raises(contains='Column "t.b" in EXCLUDE list not found'):
+        _ = _plan("SELECT * EXCLUDE (t.b) FROM t AS x")
+
+
+def test_a_modifier_qualifier_naming_nothing_reads_as_naming_nothing() raises:
+    # There is no separate error for a qualifier the FROM did not bring, which
+    # is DuckDB's: the whole name matched no column, so EXCLUDE says so with the
+    # whole name in it and RENAME says nothing at all.
+    with assert_raises(contains='Column "nosuch.b" in EXCLUDE list not found'):
+        _ = _plan("SELECT * EXCLUDE (nosuch.b) FROM t")
+    assert_equal(
+        _plan("SELECT * RENAME (nosuch.a AS q) FROM t"),
+        "PROJECT [a, b, g, f]\n  SCAN t []\n",
+    )
+
+
+def test_a_modifier_qualified_by_a_subquery_is_refused() raises:
+    # The same wall a qualified star stops at, and for the same reason: the
+    # columns of a derived table arrive with no number saying where from.
+    with assert_raises(contains="is not a relation"):
+        _ = _plan("SELECT * EXCLUDE (v.a) FROM (SELECT a FROM t) v")
+
+
 def test_a_replace_stands_an_expression_in_for_a_column() raises:
     # The column keeps its place and its name and the expression is what the
     # projection computes there.

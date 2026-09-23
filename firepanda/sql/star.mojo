@@ -69,6 +69,22 @@ struct Target(Copyable, ImplicitlyCopyable, Movable):
             return self.column
         return String(self.table, ".", self.column)
 
+    def names(self, column: StringSlice) -> Bool:
+        """Whether this modifier names that column, whatever it belongs to.
+
+        The half of `matches` a caller that has already settled the binding
+        some other way is left with. Lowering is one: it holds a number saying
+        which relation a column came from rather than the name the query wrote
+        for it, so it compares numbers and then asks this.
+
+        Args:
+            column: The column's name.
+
+        Returns:
+            True if it does, folding both sides.
+        """
+        return fold(self.column) == fold(column)
+
     def matches(self, table: StringSlice, column: StringSlice) -> Bool:
         """Whether this modifier names that column of that binding.
 
@@ -79,7 +95,7 @@ struct Target(Copyable, ImplicitlyCopyable, Movable):
         Returns:
             True if it does, folding both sides.
         """
-        if fold(self.column) != fold(column):
+        if not self.names(column):
             return False
         if self.table.byte_length() == 0:
             return True

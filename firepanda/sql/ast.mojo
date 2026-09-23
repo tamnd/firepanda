@@ -72,10 +72,19 @@ comptime EXPR_STAR: UInt8 = 3
 """`*`, or `t.*`, with the three modifiers DuckDB allows on it.
 
 `children` is a run of name parts qualifying the star, empty for a bare one.
-`a` is a run of interned names for `EXCLUDE`. `b` is a run of alternating name
-and expression for `REPLACE`. `payload` is a run of alternating name and name
-for `RENAME`. All four are runs and all four may be empty, which is the whole
-of `SELECT * EXCLUDE (a) REPLACE (x + 1 AS b) RENAME (c AS d)`.
+`a` is a run of alternating qualifier and name for `EXCLUDE`. `b` is a run of
+alternating name and expression for `REPLACE`. `payload` is a run of
+qualifier, name and new name, three at a time, for `RENAME`. All four are runs
+and all four may be empty, which is the whole of `SELECT * EXCLUDE (a) REPLACE
+(x + 1 AS b) RENAME (c AS d)`.
+
+A qualifier is the interned empty string where the modifier was written bare,
+which is most of the time. Two of the three take one because DuckDB does:
+`EXCLUDE (t.a)` and `RENAME (t.a AS b)` both run there and name the column of
+one binding rather than the column of whichever binding has it. `REPLACE (1 AS
+t.a)` does not, it is a syntax error in DuckDB's own parser, so there is one
+name in that run and not two. The new name in a `RENAME` is never qualified
+either, for the same reason and with the same evidence.
 """
 
 comptime EXPR_FUNCTION: UInt8 = 4
@@ -2021,15 +2030,16 @@ struct Ast(Movable):
         exclude: List[String] = List[String](),
         token: UInt32 = 0,
     ) -> UInt32:
-        """Builds `*`, or `t.*`, with an optional `EXCLUDE`.
+        """Builds `*`, or `t.*`, with an optional bare `EXCLUDE`.
 
         `REPLACE` and `RENAME` are the other two modifiers the node has room
         for. They take expressions and name pairs rather than plain names, so
-        they are built directly rather than through this.
+        they are built directly rather than through this, and so is an
+        `EXCLUDE` with a qualifier on one of its names.
 
         Args:
             qualifier: The name parts before the star, empty for a bare one.
-            exclude: The names to leave out.
+            exclude: The names to leave out, none of them qualified.
             token: The token the star is at.
 
         Returns:
@@ -2040,6 +2050,7 @@ struct Ast(Movable):
             parts.append(self.intern(part))
         var excluded = List[UInt32]()
         for name in exclude:
+            excluded.append(self.intern(""))
             excluded.append(self.intern(name))
         return self.add(
             Expr(
