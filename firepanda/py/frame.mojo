@@ -302,6 +302,28 @@ struct PyDataFrame(Movable, Writable):
         )
 
     @staticmethod
+    def widened_for_missing(py_self: PythonObject) raises -> PythonObject:
+        """Returns the frame as pandas would have read it from Arrow.
+
+        This is what `DataFrame.from_arrow` does after the frame comes across,
+        and it is not what `firepanda.from_arrow` does, which keeps Arrow's
+        types. The two are separate doors on purpose: one has pandas' name and
+        pandas' meaning, and the other is firepanda's own.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A new frame, with every numeric column that has a missing row
+            carrying it as a NaN.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(Self._frame(py_self)[].frame[].widen_for_missing())
+            )
+        )
+
+    @staticmethod
     def tail(py_self: PythonObject, n: PythonObject) raises -> PythonObject:
         """Takes the last `n` rows.
 

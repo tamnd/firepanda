@@ -109,6 +109,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.head](
         "head", docstring="The first n rows."
     )
+    _ = dataframe.def_method[PyDataFrame.widened_for_missing](
+        "_widened_for_missing",
+        docstring="The frame as pandas would have read it from Arrow.",
+    )
     _ = dataframe.def_method[PyDataFrame.tail](
         "tail", docstring="The last n rows."
     )

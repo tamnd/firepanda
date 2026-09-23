@@ -439,3 +439,71 @@ def test_a_category_nobody_used_survives_the_round_trip(firepanda: ModuleType) -
     theirs = pd.Series(pd.Categorical(["low", "high"], categories=["low", "high", "unused"]))
     returned = pa.table(firepanda.from_arrow(pa.table({"g": theirs}))).to_pandas()["g"]
     assert list(returned.cat.categories) == ["low", "high", "unused"]
+
+
+def mixed_gaps() -> object:
+    """A table with a gap in every kind of column pandas treats differently.
+
+    `whole` is the one column with nothing missing, and it is there because it is
+    the column pandas does not touch.
+    """
+    import pyarrow as pa
+
+    return pa.table(
+        {
+            "count": pa.array([1, None, 3], pa.int64()),
+            "small": pa.array([1, None, 3], pa.int8()),
+            "ratio": pa.array([1.5, None, 2.0], pa.float64()),
+            "narrow": pa.array([1.5, None, 2.0], pa.float32()),
+            "word": pa.array(["a", None, "c"]),
+            "flag": pa.array([True, None, False]),
+            "whole": pa.array([1, 2, 3], pa.int64()),
+        }
+    )
+
+
+@needs["pandas"]
+@needs["pyarrow"]
+def test_the_pandas_door_reads_the_types_pandas_reads(firepanda: ModuleType) -> None:
+    """`DataFrame.from_arrow` widens a gap the way `pandas.DataFrame.from_arrow` does.
+
+    Every integer width goes to float64, a float column keeps its width and holds
+    the gap as a NaN, and a column with nothing missing keeps the type it had.
+    The text and flag columns keep a real missing value, so they are left alone.
+    """
+    import pandas as pd
+    import pyarrow as pa
+
+    table = mixed_gaps()
+    ours = pa.table(firepanda.DataFrame.from_arrow(table))
+    theirs = pd.DataFrame.from_arrow(table)
+    for name in ("count", "small", "ratio", "narrow", "whole"):
+        assert ours.column(name).type.to_pandas_dtype() == theirs[name].dtype, name
+    for name in ("count", "small", "ratio", "narrow"):
+        column = ours.column(name)
+        assert column.null_count == 0, name
+        assert [value != value for value in column.to_pylist()] == [False, True, False], name
+    assert ours.column("whole").to_pylist() == [1, 2, 3]
+    assert ours.column("word").to_pylist() == ["a", None, "c"]
+    assert ours.column("flag").to_pylist() == [True, None, False]
+
+
+@needs["pyarrow"]
+def test_the_firepanda_door_keeps_arrow_types(firepanda: ModuleType) -> None:
+    """`firepanda.from_arrow` is the other door, and nothing in it is widened."""
+    import pyarrow as pa
+
+    table = mixed_gaps()
+    ours = pa.table(firepanda.from_arrow(table))
+    for name in ("count", "small", "ratio", "narrow", "whole"):
+        assert ours.column(name).type == table.column(name).type, name
+        assert ours.column(name).to_pylist() == table.column(name).to_pylist(), name
+
+
+@needs["pyarrow"]
+def test_the_pandas_door_refuses_what_the_firepanda_door_refuses(
+    firepanda: ModuleType,
+) -> None:
+    """Something with no Arrow in it is refused with the sentence naming the protocol."""
+    with pytest.raises(NotImplementedError, match="__arrow_c_stream__"):
+        firepanda.DataFrame.from_arrow([1, 2, 3])
