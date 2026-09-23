@@ -259,9 +259,9 @@ def sql_support() -> List[Refusal]:
             "subscript",
             "a slice or a subscript",
             (
-                "firepanda reads a subscript or a slice of text whose bounds are"
-                " whole numbers, as the substring it means. A bound that is an"
-                " expression, a step, and a slice from the back to the front"
+                "firepanda reads a subscript or a slice of text whose bounds"
+                " are whole numbers, as the substring it means. A bound that is"
+                " an expression, a step, and a slice from the back to the front"
                 " have no substring that answers them."
             ),
             STAGE_ISSUE,
