@@ -264,7 +264,6 @@ def test_an_empty_column_transforms_to_an_empty_column(firepanda: ModuleType) ->
         ("Series", "cumsum", {"skipna": False}, "skipna"),
         ("Series", "dropna", {"ignore_index": True}, "ignore_index"),
         ("DataFrame", "cumsum", {"numeric_only": True}, "numeric_only"),
-        ("DataFrame", "dropna", {"how": "all"}, "how"),
         ("DataFrame", "dropna", {"thresh": 1}, "thresh"),
         ("DataFrame", "cumsum", {"axis": 1}, "axis=1"),
     ],

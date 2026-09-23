@@ -220,13 +220,10 @@ def test_a_quantile_over_flags_raises_what_numpy_raises(
 @pytest.mark.parametrize(
     ("call", "arguments", "expected"),
     [
-        ("sum", {"skipna": False}, "skipna"),
-        ("sum", {"min_count": 1}, "min_count"),
         ("mean", {"numeric_only": True}, "numeric_only"),
         ("std", {"numeric_only": True}, "numeric_only"),
         ("quantile", {"interpolation": "lower"}, "interpolation"),
         ("quantile", {"q": [0.1, 0.9]}, "single quantile"),
-        ("nunique", {"dropna": False}, "dropna"),
     ],
 )
 def test_a_declared_argument_that_is_not_implemented_refuses(

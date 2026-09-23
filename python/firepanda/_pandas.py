@@ -5223,15 +5223,23 @@ class DataFrameMixin:
         )
 
     def _nunique(self, axis: Any, dropna: bool) -> Series:
-        """Counts the distinct values in every column."""
-        _held_at(
-            "dropna",
-            dropna,
-            True,
-            "counting a missing value as one more distinct value needs the count"
-            " to know it saw one, and the kernel skips them before it counts",
-        )
-        return self._reduce("nunique", 0.0, axis, True, False, 0)
+        """Counts the distinct values in every column.
+
+        `dropna=False` adds one to each column that has a missing value, which
+        is the same rule the series follows, and a frame with none missing
+        answers straight from the kernel.
+        """
+        counts = self._reduce("nunique", 0.0, axis, True, False, 0)
+        if _flag("dropna", dropna):
+            return counts
+        gaps = self._inner.null_counts()
+        if not any(gaps):
+            return counts
+        names = self._inner.names()
+        bumped = [
+            int(count) + (1 if gap else 0) for count, gap in zip(counts.tolist(), gaps, strict=True)
+        ]
+        return _labelled(names, bumped).rename(None).rename_axis(None)
 
     def _set_index(
         self, keys: Any, drop: bool, append: bool, inplace: bool, verify_integrity: Any
@@ -5961,13 +5969,10 @@ class DataFrameMixin:
         from ._frame import DataFrame
 
         _transforming_axis(axis, "DataFrame")
-        _held_at(
-            "how",
-            how,
-            NO_DEFAULT,
-            "dropping a row only when every column is missing is the other rule and"
-            " the kernel implements the one where any column disqualifies it",
-        )
+        if how is not NO_DEFAULT and thresh is not NO_DEFAULT:
+            raise TypeError("You cannot set both the how and thresh arguments at the same time.")
+        if how is not NO_DEFAULT:
+            _spelled(how, ("any", "all"), f"invalid how option: {how}")
         _held_at(
             "thresh",
             thresh,
@@ -5987,9 +5992,30 @@ class DataFrameMixin:
         if subset is not None:
             names = [subset] if isinstance(subset, str) else [str(one) for one in subset]
         try:
+            if how == "all":
+                return _settled(self, self._dropped_when_all_missing(names), inplace)
             return _settled(self, DataFrame._wrap(self._inner.dropna(names)), inplace)
         except Exception as error:
             raise translate(error) from None
+
+    def _dropped_when_all_missing(self, names: list[str]) -> DataFrame:
+        """The frame without the rows where every column looked at is missing.
+
+        A row survives when any one of the columns has a value in it. The core
+        has no `or` between two masks yet, so the rows are joined here and taken
+        by position, which keeps the labels whatever they are, and a frame with
+        nothing missing in the columns looked at is handed back without reading
+        a row.
+        """
+        from ._frame import DataFrame, Series
+
+        looked_at = names or self._inner.names()
+        columns = [self._inner.column(name) for name in looked_at]
+        if not columns or not any(column.null_count() for column in columns):
+            return DataFrame._wrap(self._inner)
+        gaps = [Series._wrap(column).isna().tolist() for column in columns]
+        kept = [at for at, row in enumerate(zip(*gaps, strict=True)) if not all(row)]
+        return DataFrame._wrap(self._inner.take(kept))
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> DataFrame:
         """Converts some or all of the columns and hands back a new frame.
@@ -7109,15 +7135,17 @@ class SeriesMixin:
         leaves here as a float NaN, because that is what pandas gives for the
         mean of nothing and a caller comparing against it will be using `isnan`
         rather than `is None`.
+
+        `skipna=False` and `min_count` are both rules about the answer rather
+        than about the reduction, so the kernel runs as it always does and the
+        rule is applied to what comes back. pandas answers NaN for either one,
+        on an integer column as well, and runs the reduction first, so a column
+        the reduction cannot read still raises the reduction's own error. The
+        one gap left is a temporal column with `skipna=False`, where pandas
+        answers `NaT` and firepanda has no `NaT` to hand back.
         """
         _reducing_axis(axis, "Series")
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped by every reduction in the library and"
-            " there is no second pass that lets one through",
-        )
+        skipna = _flag("skipna", skipna)
         _held_at(
             "numeric_only",
             numeric_only,
@@ -7125,17 +7153,20 @@ class SeriesMixin:
             "refusing a column a reduction cannot read is what the reduction"
             " already does, and it says so with the dtype in the message",
         )
-        _held_at(
-            "min_count",
-            min_count,
-            0,
-            "a floor on how many values a sum needs before it answers at all is"
-            " a rule about the result rather than about the sum",
-        )
         try:
             answer = self._inner.reduce(kind, param)
         except Exception as error:
             raise translate(error) from None
+        if not skipna and self.hasnans:
+            if self.dtype.startswith(("datetime", "timedelta")):
+                raise UnsupportedError(
+                    "skipna=False is not supported yet on a temporal column with a"
+                    " missing value, because pandas answers NaT there and firepanda"
+                    " has no NaT to hand back"
+                )
+            return float("nan")
+        if min_count > 0 and self.count() < min_count:
+            return float("nan")
         return float("nan") if answer is None else answer
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
@@ -7170,15 +7201,17 @@ class SeriesMixin:
         return self._reduce("quantile", _quantile_wanted(q, interpolation), 0, True, False, 0)
 
     def _nunique(self, axis: Any, dropna: bool) -> Any:
-        """Counts the distinct values in the column."""
-        _held_at(
-            "dropna",
-            dropna,
-            True,
-            "counting a missing value as one more distinct value needs the count"
-            " to know it saw one, and the kernel skips them before it counts",
-        )
-        return self._reduce("nunique", 0.0, axis, True, False, 0)
+        """Counts the distinct values in the column.
+
+        The kernel skips a missing value before it counts, so `dropna=False`
+        adds one when the column has one. That is pandas' answer however many
+        missing values there are and whichever spelling they have, since a
+        None and a NaN in the same column count as one value between them.
+        """
+        count = self._reduce("nunique", 0.0, axis, True, False, 0)
+        if not _flag("dropna", dropna) and self.hasnans:
+            return count + 1
+        return count
 
     def _transform(
         self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
