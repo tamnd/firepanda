@@ -4105,3 +4105,43 @@ def test_the_windows_with_no_operator_yet_each_say_which_one() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_a_positional_column_is_the_column_of_the_from_it_counts_to() raises:
+    # `#5` is the first column of `u`, which is called `b` the same as the
+    # second column of `t`. Binding would refuse a bare `b` as ambiguous, so a
+    # plan coming back at all is the relation having been kept.
+    assert_equal(_plan("SELECT #2 FROM t"), "PROJECT [b]\n  SCAN t []\n")
+    assert_equal(
+        _plan("SELECT #5, #2 FROM t JOIN u ON t.a = u.k"),
+        "PROJECT [b, b]\n  JOIN inner [a = k]\n    SCAN t []\n    SCAN u []\n",
+    )
+    assert_equal(
+        _plan("SELECT #1, count(*) FROM t GROUP BY #1"),
+        _plan("SELECT a, count(*) FROM t GROUP BY a"),
+    )
+
+
+def test_a_bare_positional_in_order_by_is_an_output_position() raises:
+    # Bare, it is the same as `ORDER BY 2`. Inside an expression it is a column
+    # of the FROM again, which is what DuckDB reads too.
+    assert_equal(
+        _plan("SELECT b, a FROM t ORDER BY #2"),
+        _plan("SELECT b, a FROM t ORDER BY 2"),
+    )
+
+
+def test_a_positional_column_refuses_where_it_cannot_be_counted() raises:
+    with assert_raises(contains="Positional reference 5 out of range (total 4"):
+        _ = _plan("SELECT #5 FROM t")
+    with assert_raises(contains="Positional reference 1 out of range (total 0"):
+        _ = _plan("SELECT #1")
+    # DuckDB counts both copies of a merged column and the join here keeps one.
+    with assert_raises(contains="a column written as #1 here"):
+        _ = _plan("SELECT #1 FROM t JOIN u USING (b)")
+    with assert_raises(contains="a column written as #1 here"):
+        _ = _plan("SELECT a FROM t JOIN u ON #1 = u.k")
+    with assert_raises(contains="a column written as #1 here"):
+        _ = _plan(
+            "SELECT a FROM t WHERE b = (SELECT max(#1) FROM u WHERE u.k = t.a)"
+        )

@@ -63,6 +63,7 @@ from .ast import (
     EXPR_LITERAL,
     EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
+    EXPR_POSITIONAL,
     EXPR_QUANTIFIED,
     EXPR_ROW,
     EXPR_STAR,
@@ -179,7 +180,12 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
     ref item = ast.exprs[Int(node)]
     var kind = item.kind
 
-    if kind == EXPR_LITERAL or kind == EXPR_PARAMETER or kind == EXPR_COLUMN:
+    if (
+        kind == EXPR_LITERAL
+        or kind == EXPR_PARAMETER
+        or kind == EXPR_COLUMN
+        or kind == EXPR_POSITIONAL
+    ):
         return out^
     if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS or kind == EXPR_ARRAY:
         return out^
@@ -732,6 +738,8 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(item.b, "/", ast.text(item.payload))
     if kind == EXPR_PARAMETER:
         return String(ast.text(item.b), "/", ast.text(item.payload))
+    if kind == EXPR_POSITIONAL:
+        return String(item.a)
     if kind == EXPR_BETWEEN or kind == EXPR_IN or kind == EXPR_IN_SUBQUERY:
         return String(item.payload)
     if kind == EXPR_SUBSCRIPT or kind == EXPR_ROW:

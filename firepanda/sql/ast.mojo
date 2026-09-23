@@ -388,6 +388,12 @@ different kind from `EXPR_SUBQUERY` for the other reason: a scalar subquery has
 to give back one row and this one takes however many there are.
 """
 
+comptime EXPR_POSITIONAL: UInt8 = 30
+"""`#n`, the nth column of the FROM clause it is written over.
+
+`a` is n, which is never 0.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -2023,6 +2029,18 @@ struct Ast(Movable):
                 payload=self.intern(name),
             )
         )
+
+    def positional(mut self, n: UInt32, token: UInt32 = 0) -> UInt32:
+        """Builds `#n`.
+
+        Args:
+            n: Which column, counting from 1.
+            token: The token the `#` is at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(Expr(kind=EXPR_POSITIONAL, token=token, a=n))
 
     def star(
         mut self,

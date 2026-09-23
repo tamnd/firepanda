@@ -53,6 +53,7 @@ from .ast import (
     EXPR_LITERAL,
     EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
+    EXPR_POSITIONAL,
     EXPR_QUANTIFIED,
     EXPR_ROW,
     EXPR_STAR,
@@ -975,6 +976,11 @@ def _write_step(
     if kind == EXPR_PARAMETER:
         out += ast.text(item.b)
         out += ast.text(item.payload)
+        return
+
+    if kind == EXPR_POSITIONAL:
+        out += "#"
+        out += String(item.a)
         return
 
     if kind == EXPR_SUBQUERY:

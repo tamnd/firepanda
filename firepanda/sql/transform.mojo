@@ -140,7 +140,6 @@ from .unsupported import (
     NOT_SUBQUERY,
     NO_CASE,
     OPERATOR,
-    POSITIONAL,
     POSTFIX_OPERATOR,
     QUANTIFIED_VALUE,
     QUOTED_NAME,
@@ -288,6 +287,9 @@ comptime _UNPACK: UInt8 = 87
 
 comptime _OVERLAY: UInt8 = 88
 """`OverlayExpression`, which is a call with two ways of spelling it."""
+
+comptime _POSITIONAL: UInt8 = 89
+"""`PositionalExpression`, `#n`, which is a column of the FROM by where it is."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -994,13 +996,13 @@ struct Transform(Movable):
         self._set(names, "LambdaExpression", _LAMBDA)
         self._set(names, "ListComprehensionExpression", _COMPREHENSION)
         self._set(names, "ColumnsExpression", _COLUMNS)
+        self._set(names, "PositionalExpression", _POSITIONAL)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
         self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "GroupingExpression", GROUPING)
-        self._refuse(names, "PositionalExpression", POSITIONAL)
         self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
 
         # The last three the grammar gives a rule of their own. All three read
@@ -1848,6 +1850,9 @@ struct Transform(Movable):
 
         if action == _PARAMETER:
             return self._parameter(tree, sql, node, ast)
+
+        if action == _POSITIONAL:
+            return self._positional(tree, sql, node, ast)
 
         if action == _COALESCE:
             # `COALESCE Parens(List(Expression))`.
@@ -4146,6 +4151,56 @@ struct Transform(Movable):
         return ast.parameter(
             sigil, _identifier(sql, tree.tokens[Int(at) + 1]), at
         )
+
+    def _positional(
+        self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
+    ) raises -> UInt32:
+        """Builds `#n`.
+
+        The grammar takes any number after the `#`, and DuckDB takes only a
+        whole one with no sign that fits in 32 bits. The rest fail the way
+        DuckDB fails them, as a syntax error at the part it would not read.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `PositionalExpression` node.
+            ast: Where to put the nodes.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the number is not one DuckDB takes.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var end = tree.nodes[Int(node)].token_end
+        var text = String()
+        for i in range(Int(at) + 1, Int(end)):
+            text += _number_value(sql, tree.tokens[i])
+        var n = 0
+        var digits = text.as_bytes()
+        for i in range(len(digits)):
+            var byte = digits[i]
+            if byte < UInt8(ord("0")) or byte > UInt8(ord("9")):
+                var near = text
+                if i == 0 and (
+                    byte == UInt8(ord("-")) or byte == UInt8(ord("+"))
+                ):
+                    near = String(chr(Int(byte)))
+                raise Error(
+                    String('Parser Error: syntax error at or near "', near, '"')
+                )
+            n = n * 10 + Int(byte - UInt8(ord("0")))
+            if n > 2147483647:
+                raise Error(
+                    String('Parser Error: syntax error at or near "', text, '"')
+                )
+        if n == 0:
+            raise Error(
+                "Parser Error: Positional reference node needs to be >= 1"
+            )
+        return ast.positional(UInt32(n), at)
 
     def _negate(
         self, tree: Parse, node: UInt32, mut ast: Ast, operand: UInt32

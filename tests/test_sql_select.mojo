@@ -875,8 +875,24 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
         _ = _printed("SELECT MAP {'a': 1}", g, rules)
     with assert_raises(contains="GROUPING"):
         _ = _printed("SELECT GROUPING(a) FROM t GROUP BY a", g, rules)
-    with assert_raises(contains="a column written as #1"):
-        _ = _printed("SELECT #1 FROM t", g, rules)
+
+
+def test_a_positional_column_prints_back_as_it_was_written() raises:
+    # DuckDB takes only a whole number with no sign that fits in 32 bits after
+    # the `#`, and says so as a syntax error at the part it would not read.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("SELECT #1 FROM t", g, rules), "SELECT #1 FROM t")
+    assert_equal(
+        _printed("SELECT # 2 + #01 FROM t WHERE #1 > 0", g, rules),
+        "SELECT (#2 + #1) FROM t WHERE (#1 > 0)",
+    )
+    with assert_raises(contains="needs to be >= 1"):
+        _ = _printed("SELECT #0 FROM t", g, rules)
+    with assert_raises(contains='syntax error at or near "1.5"'):
+        _ = _printed("SELECT #1.5 FROM t", g, rules)
+    with assert_raises(contains='syntax error at or near "2147483648"'):
+        _ = _printed("SELECT #2147483648 FROM t", g, rules)
 
 
 def test_the_keyword_calls_that_no_longer_refuse() raises:
