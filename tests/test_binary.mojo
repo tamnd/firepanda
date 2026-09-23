@@ -24,6 +24,7 @@ they exist to answer what a query asked rather than what a frame asked, and the
 pandas answer sits beside each one so that the difference is readable.
 """
 
+from std.math import nan
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 
 from firepanda.array.any import AnyArray
@@ -1344,6 +1345,37 @@ def test_a_text_literal_against_a_text_column_is_still_text() raises:
     assert_true(not got[0], "a")
     assert_true(got[1], "b")
     assert_true(got[2], "c")
+
+
+def test_not_equal_is_true_on_a_nan_at_every_position() raises:
+    """`!=` against a NaN is true, which the vector compare got wrong.
+
+    Sixteen rows so the NaN sits in the vector loop as well as in the tail,
+    and against a column and a constant, since those are two loops.
+    """
+    var hole = nan[DType.float64]()
+    var values = List[Float64]()
+    var others = List[Float64]()
+    for i in range(16):
+        values.append(hole if i % 5 == 2 else Float64(i))
+        others.append(Float64(i))
+    var paired = binary_any(
+        typed[DType.float64](values), typed[DType.float64](others), BinaryOp.NE
+    )
+    var constant = binary_value_any(
+        typed[DType.float64](values), Value(Float64(3.0)), BinaryOp.NE
+    )
+    var equal = binary_value_any(
+        typed[DType.float64](values), Value(hole), BinaryOp.EQ
+    )
+    var a = read[DType.bool](paired)
+    var b = read[DType.bool](constant)
+    var c = read[DType.bool](equal)
+    for i in range(16):
+        var is_nan = i % 5 == 2
+        assert_equal(a[i], is_nan, "column, row " + String(i))
+        assert_equal(b[i], is_nan or i != 3, "constant, row " + String(i))
+        assert_true(not c[i], "nothing equals a NaN, row " + String(i))
 
 
 def main() raises:

@@ -196,22 +196,21 @@ def test_the_ordering_follows_the_categories_and_not_the_words(
 
 
 @needs_pandas
-def test_a_missing_row_answers_missing_where_pandas_answers_false(
+def test_a_missing_row_answers_what_pandas_answers(
     firepanda: ModuleType,
 ) -> None:
-    """The one asserted divergence, and it is the library wide one rather than a new one.
+    """False for `==` and True for `!=`, on a category and on text alike.
 
-    A comparison against a value that is not there has no answer. pandas has to
-    say false because its result is a numpy bool array with no room for absence,
-    and firepanda says None the way it already does for text and for numbers.
+    The orderings are left out because an unordered category refuses them in both
+    libraries, and `test_compare_missing.py` has them on text and on numbers.
     """
     mine = firepanda.Series(["bolt", None, "anchor"]).astype("category")
     them = theirs(["bolt", None, "anchor"])
-    assert mine.eq("bolt").tolist() == [True, None, False]
-    assert them.eq("bolt").tolist() == [True, False, False]
+    for op in ("eq", "ne"):
+        assert getattr(mine, op)("bolt").tolist() == getattr(them, op)("bolt").tolist(), op
     assert firepanda.Series(["bolt", None, "anchor"]).eq("bolt").tolist() == [
         True,
-        None,
+        False,
         False,
     ]
 
