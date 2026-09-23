@@ -8,29 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Fixed
+## [0.8.27] - 2026-09-23
 
-- `FILTER` on `list`, `array_agg` and `arbitrary` answered the wrong question. The clause is read as a `CASE` around the argument, which is exact for a fold that passes over a null, and these three keep one, so `list(a) FILTER (WHERE a > 1)` came out as `[NULL, 2, NULL, 3]` where DuckDB says `[2, 3]`. They now refuse as `aggregate-filter`, the same as `first` and `last` always did.
+Built against Mojo 1.0.0 (ed45d567).
 
-- `skew` over an integer column whose values are far from zero. The deviations from each group's mean used to be taken after the values were converted to float64, which rounds an int64 above two to the fifty third to the nearest representable float and can round away every difference in the column, so pandas answers 0.0 for a column whose true skewness is 2.19. The deviations are now taken as integers against an integer anchor near the mean, in 128 bits so the int64 edges cannot overflow, and only then converted, which answers the true skewness. This is a place where firepanda is now more accurate than pandas rather than equal to it, and firepanda-compat records it as the `engine/integer-moments` divergence.
-
-### Changed
-
-- `read_csv` declares pandas' whole signature, the path and forty eight keyword only parameters with pandas' defaults, where it used to declare the path alone. It is written by hand in `_pandas.py` now, over a private `_read_csv` on the extension. `usecols` and `index_col` are implemented after the read, since pandas infers each column on its own and dropping or moving the others changes nothing about the ones kept, and `usecols` keeps the file's order as pandas does. `engine`, `low_memory`, `memory_map` and `cache_dates` are accepted at every value, as are `sep` and `delimiter` at a comma and `encoding` at any spelling of UTF-8, because they choose how the answer is reached rather than what it is. Every other parameter is refused by name at anything but its default. `nrows` and `dtype` are refused rather than applied afterwards, because both change what pandas infers: an integer column whose only gap is below the cut is int64 under `nrows` and float64 when the whole file is read and then cut. A path object reads like a string, and a buffer is refused. `sep` with `delimiter`, an unknown `engine`, an unknown `dtype_backend` and a `usecols` naming a missing column raise pandas' `ValueError` with pandas' words. This is what closes `signature/pandas.read_csv` on the conformance board.
+A patch release. Columns on a zone that names a rule, such as `America/New_York`, are read against a time zone database now rather than refused. `FILTER` works on folds of two arguments and says no on the folds that keep a null, and its answer on `list`, `array_agg` and `arbitrary` is fixed. A star modifier can name the table it means, `numeric_only=True` works on the frame reductions, and `read_csv` declares pandas' whole signature. The optimizer stopped doing work that grew with the square of a node's width, which on a 105 column `SELECT *` more than halves what a statement costs before it reads a row. Two fixes are to the test harness: the cost table the shards balance on, and where the shard count is written down.
 
 ### Added
 
 - A time zone database. A column on a zone that names a rule, such as `America/New_York`, is now read against it: the calendar fields, `strftime`, `day_name`, `month_name`, `date`, `normalize`, the three roundings, `tz_localize` and `tz_localize(None)` all answer where they used to refuse with a sentence about a missing database. The zones are read from the TZif files under `/usr/share/zoneinfo`, which is the data Python's `zoneinfo` reads and so what pandas answers from, and the rule in each file's footer is written out for one four hundred year Gregorian cycle so that an instant past the file's table is answered exactly however far out it is. A reading the clock skipped raises pandas' `ValueError` saying it is a nonexistent time due to daylight savings time, a reading it repeated raises pandas' `Cannot infer dst time from` one, and both name the first such row. `tz_convert` and `tz_localize` now refuse a zone name the database does not hold, with the `No time zone found with key` sentence `zoneinfo` uses, where `tz_convert` used to accept any name. The `ambiguous` and `nonexistent` arguments are still refused away from `"raise"`. Issue #349.
 
-### Added
-
 - `FILTER` on a fold of two arguments or more, such as `string_agg(s, ',')`, `covar_pop(a, b)`, `arg_min(s, a)` and the quantiles. The `CASE` goes around the first argument and the rest stay as they were, which is exact for the folds that drop a row when its first argument is null. Each one on the list was checked against DuckDB with the dropped rows holding the extremes and with a filter that keeps nothing. `arg_min_null` and its kind keep that row, so they still refuse, as does a name that is not a fold.
 
 - `numeric_only=True` on the frame reductions, which keeps the integer, float and boolean columns and drops the rest before reducing, as pandas does. It used to be refused by name. A boolean column is kept because numpy files `bool_` beside the integers, so `df.sum(numeric_only=True)` counts the flags. A span column is not kept, though `select_dtypes` calls it a number, because pandas asks a different question in the two places.
-
-### Changed
-
-- A quantile over a boolean column, on a series or a frame, now raises numpy's `TypeError` about boolean subtraction instead of answering. pandas hands the values to `numpy.quantile`, which cannot subtract two booleans to interpolate, and an answer where pandas raises is code that works here and breaks on the library it was written against. This is what closes `errors/quantile-on-boolean` on the conformance board.
 
 ### Added: a star modifier says which of the tables it meant
 
@@ -46,6 +36,20 @@ Three parts or more is refused by name, as `modifier-schema`. `EXCLUDE (s.t.a)` 
 
 In DuckDB's corpus, `dotted-name` was thirty four statements, twenty four `EXCLUDE` and ten `RENAME`. It is now none, and `modifier-schema` is nine, so twenty five statements that were refused now parse, transform and print back to the same text twice.
 
+### Changed
+
+- `read_csv` declares pandas' whole signature, the path and forty eight keyword only parameters with pandas' defaults, where it used to declare the path alone. It is written by hand in `_pandas.py` now, over a private `_read_csv` on the extension. `usecols` and `index_col` are implemented after the read, since pandas infers each column on its own and dropping or moving the others changes nothing about the ones kept, and `usecols` keeps the file's order as pandas does. `engine`, `low_memory`, `memory_map` and `cache_dates` are accepted at every value, as are `sep` and `delimiter` at a comma and `encoding` at any spelling of UTF-8, because they choose how the answer is reached rather than what it is. Every other parameter is refused by name at anything but its default. `nrows` and `dtype` are refused rather than applied afterwards, because both change what pandas infers: an integer column whose only gap is below the cut is int64 under `nrows` and float64 when the whole file is read and then cut. A path object reads like a string, and a buffer is refused. `sep` with `delimiter`, an unknown `engine`, an unknown `dtype_backend` and a `usecols` naming a missing column raise pandas' `ValueError` with pandas' words. This is what closes `signature/pandas.read_csv` on the conformance board.
+
+- A quantile over a boolean column, on a series or a frame, now raises numpy's `TypeError` about boolean subtraction instead of answering. pandas hands the values to `numpy.quantile`, which cannot subtract two booleans to interpolate, and an answer where pandas raises is code that works here and breaks on the library it was written against. This is what closes `errors/quantile-on-boolean` on the conformance board.
+
+- The optimizer no longer does work proportional to the square of a node's width. Binding looked up every column reference by walking the input schema, so a node reading all 105 columns of the ClickBench table did about eleven thousand string compares, and every pass binds the plan again, about ten times a statement. `push` asked of each output whether its name appeared twice by walking the outputs again, `prune` checked a list of names for repeats with a nested loop and inserted each wanted position with a walk from the front. Each of these now reads a wide list once into a map, from sixteen columns up, and below that keeps the walk, which costs less than building anything. Binding also waits for a node's fourth lookup before it builds the map, because a filter over a wide table asks for one column and a map of all of them costs more than the one walk it saves. The map is only ever a shortcut: a name it cannot answer on its own, missing or ambiguous or from the wrong input, goes to the same resolver as before, so every refusal and message is unchanged. On a 105 column table, with medians of nine interleaved rounds against 0.8.26, `SELECT * FROM t LIMIT 10` went from 5.33 to 2.22 ms, a filter and sort over it from 6.65 to 3.37 ms and a grouped count from 1.10 to 1.04 ms, and a one column statement stayed at 0.21 ms. Nothing in the API changes.
+
+### Fixed
+
+- `FILTER` on `list`, `array_agg` and `arbitrary` answered the wrong question. The clause is read as a `CASE` around the argument, which is exact for a fold that passes over a null, and these three keep one, so `list(a) FILTER (WHERE a > 1)` came out as `[NULL, 2, NULL, 3]` where DuckDB says `[2, 3]`. They now refuse as `aggregate-filter`, the same as `first` and `last` always did.
+
+- `skew` over an integer column whose values are far from zero. The deviations from each group's mean used to be taken after the values were converted to float64, which rounds an int64 above two to the fifty third to the nearest representable float and can round away every difference in the column, so pandas answers 0.0 for a column whose true skewness is 2.19. The deviations are now taken as integers against an integer anchor near the mean, in 128 bits so the int64 edges cannot overflow, and only then converted, which answers the true skewness. This is a place where firepanda is now more accurate than pandas rather than equal to it, and firepanda-compat records it as the `engine/integer-moments` divergence.
+
 ### Fixed: a cost table measured with the compiler cache warm, and the shard count that rested on it
 
 `tools/test_costs_from_ci.sh` rebuilds the table the test shards balance on out of a CI run's logs, and it would take any run whose shards all passed. That is not enough. The time a shard prints beside a file is wall clock for compiling and running it, the compiler cache is restored per shard slot, and on a run where the slots already held the right files most of that number is a cache hit rather than a compile. A table built from one of those is a record of what was cached rather than of what the files cost.
@@ -59,7 +63,6 @@ The reason this is worth an entry rather than a quiet fix is what was nearly bui
 ### Fixed: the shard count is derived in one place instead of written in two
 
 The matrix fanned out over a list of shard numbers and the runner was told separately how many shards there were, and the first edit to one of them put the two out of step: the matrix said four and the runner still said eight, so four jobs ran shards one to four of eight, 86 of the 162 test files were never run, and CI went green. That failure cannot announce itself, because every shard that does run passes and no shard is told what the others were given. The count is now written once in the guard job and read from there by the matrix, the job name and the runner.
-- The optimizer no longer does work proportional to the square of a node's width. Binding looked up every column reference by walking the input schema, so a node reading all 105 columns of the ClickBench table did about eleven thousand string compares, and every pass binds the plan again, about ten times a statement. `push` asked of each output whether its name appeared twice by walking the outputs again, `prune` checked a list of names for repeats with a nested loop and inserted each wanted position with a walk from the front. Each of these now reads a wide list once into a map, from sixteen columns up, and below that keeps the walk, which costs less than building anything. Binding also waits for a node's fourth lookup before it builds the map, because a filter over a wide table asks for one column and a map of all of them costs more than the one walk it saves. The map is only ever a shortcut: a name it cannot answer on its own, missing or ambiguous or from the wrong input, goes to the same resolver as before, so every refusal and message is unchanged. On a 105 column table, with medians of nine interleaved rounds against 0.8.26, `SELECT * FROM t LIMIT 10` went from 5.33 to 2.22 ms, a filter and sort over it from 6.65 to 3.37 ms and a grouped count from 1.10 to 1.04 ms, and a one column statement stayed at 0.21 ms. Nothing in the API changes.
 
 ## [0.8.26] - 2026-09-23
 
@@ -9256,6 +9259,7 @@ Install it and you get a library with no public API to speak of. The point of th
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
 [Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.24...HEAD
+[0.8.27]: https://github.com/tamnd/firepanda/releases/tag/v0.8.27
 [0.8.26]: https://github.com/tamnd/firepanda/releases/tag/v0.8.26
 [0.8.25]: https://github.com/tamnd/firepanda/releases/tag/v0.8.25
 [0.8.24]: https://github.com/tamnd/firepanda/releases/tag/v0.8.24
