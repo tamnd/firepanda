@@ -20,6 +20,8 @@ timestamp in seconds reaches.
 See docs/specs/03-dtype-dispatch.md.
 """
 
+from std.ffi import external_call
+
 comptime ZONEINFO_ROOT = "/usr/share/zoneinfo/"
 """Where every platform this library targets keeps the database."""
 
@@ -652,6 +654,54 @@ def parse_zone(var data: List[UInt8]) raises -> ZoneRules:
     return out^
 
 
+comptime _READ_CHUNK = 1 << 12
+"""How many bytes `_read_file` asks for at a time. A zone file is a few
+kilobytes, so most zones come back in one read."""
+
+
+def _read_file(path: String) raises -> List[UInt8]:
+    """Returns the bytes of a file, read through the C library's stdio.
+
+    The standard library's `open` is the obvious way to do this and it is what
+    this used to call. It works in the tests, but a program that also reaches
+    the readers in `firepanda.io` stops the Mojo 1.0.0 compiler: every thread
+    parks on a semaphore and the build never finishes, before any LLVM is
+    emitted. The ClickBench driver is one such program. Calling `open` from the
+    C library directly does not get that far either, since the standard library
+    already declares it with another signature. `fopen`, `fread` and `fclose`
+    are declared nowhere else, and the driver builds with them.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        Every byte in the file.
+
+    Raises:
+        Error: If the file cannot be opened.
+    """
+    var name = List[UInt8](path.as_bytes())
+    name.append(0)
+    var mode = List[UInt8]([UInt8(ord("r")), UInt8(ord("b")), UInt8(0)])
+    # A `FILE *` is only ever handed back to the C library, so it is held as
+    # the address it is.
+    var file = external_call["fopen", Int](name.unsafe_ptr(), mode.unsafe_ptr())
+    if file == 0:
+        raise Error(String("cannot open ", path))
+    var out = List[UInt8]()
+    var chunk = List[UInt8](length=_READ_CHUNK, fill=0)
+    while True:
+        var got = external_call["fread", Int](
+            chunk.unsafe_ptr(), Int(1), Int(_READ_CHUNK), file
+        )
+        for i in range(got):
+            out.append(chunk[i])
+        if got < _READ_CHUNK:
+            break
+    _ = external_call["fclose", Int32](file)
+    return out^
+
+
 def load_zone(name: StringSlice) raises -> ZoneRules:
     """Reads a zone out of the system's database by its IANA name.
 
@@ -669,9 +719,7 @@ def load_zone(name: StringSlice) raises -> ZoneRules:
         raise Error(String("No time zone found with key ", name))
     var data: List[UInt8]
     try:
-        var handle = open(String(ZONEINFO_ROOT, name), "r")
-        data = handle.read_bytes()
-        handle.close()
+        data = _read_file(String(ZONEINFO_ROOT, name))
     except:
         raise Error(String("No time zone found with key ", name))
     try:
