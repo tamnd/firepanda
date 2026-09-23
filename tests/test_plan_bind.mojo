@@ -902,6 +902,130 @@ def _keyed(name: String) -> Schema:
     return out^
 
 
+def _wide(name: String, width: Int) -> Schema:
+    """Returns a `key` then `width - 1` columns named after one prefix.
+
+    Wide enough, at 16 or more, that binding looks names up in a map built
+    once per node instead of walking the schema for every reference.
+
+    Args:
+        name: The prefix for every column after the key.
+        width: How many columns in all.
+
+    Returns:
+        A `key` followed by `name0`, `name1` and so on.
+    """
+    var out = Schema()
+    out.append(Field("key", LogicalType.INT64, False))
+    for i in range(width - 1):
+        out.append(Field(name + String(i), LogicalType.INT64, True))
+    return out^
+
+
+def _asking(mut plan: Plan, prefix: String) -> List[Int]:
+    """Returns column references enough to make a wide node build its map.
+
+    The first few lookups on a node walk the schema, so a test of what the map
+    answers asks for these first and the name it is about after them.
+
+    Args:
+        plan: The plan whose arena gets the references.
+        prefix: The prefix of the names to ask for.
+
+    Returns:
+        Five references, to the prefix's columns 0 through 4.
+    """
+    var out = List[Int]()
+    for i in range(5):
+        out.append(plan.exprs.column(prefix + String(i)))
+    return out^
+
+
+def _labels(count: Int) -> List[String]:
+    """Returns `count` distinct output names.
+
+    Args:
+        count: How many.
+
+    Returns:
+        `o0`, `o1` and so on.
+    """
+    var out = List[String]()
+    for i in range(count):
+        out.append("o" + String(i))
+    return out^
+
+
+def test_a_wide_input_finds_each_name_where_it_sits() raises:
+    var plan = Plan()
+    var scan = plan.scan("w", List[String](), 0)
+    var cols = _asking(plan, "c")
+    var first = plan.exprs.column("key")
+    var middle = plan.exprs.column("c9")
+    var last = plan.exprs.column("c38")
+    cols.append(first)
+    cols.append(middle)
+    cols.append(last)
+    var root = plan.project(scan, cols.copy(), _labels(len(cols)))
+    _ = bind(plan, root, [_wide("c", 40)])
+    assert_equal(plan.exprs.nodes[first].at, 0, "the key comes first")
+    assert_equal(plan.exprs.nodes[middle].at, 10, "c9 is after the key")
+    assert_equal(plan.exprs.nodes[last].at, 39, "c38 is the last one")
+
+
+def test_a_wide_input_scans_only_the_columns_asked_for() raises:
+    var plan = Plan()
+    var scan = plan.scan("w", ["c0", "c1", "c2", "c3", "c30", "key"], 0)
+    var out = plan.exprs.column("key")
+    var root = plan.project(scan, [out], ["key"])
+    var schema = bind(plan, root, [_wide("c", 40)])
+    assert_equal(len(schema), 1, "one column comes out")
+    assert_equal(plan.exprs.nodes[out].at, 5, "the key is last in the list")
+
+
+def test_a_wide_input_still_says_what_is_missing_and_what_is_close() raises:
+    var plan = Plan()
+    var scan = plan.scan("w", List[String](), 0)
+    var cols = _asking(plan, "c")
+    cols.append(plan.exprs.column("c99x"))
+    var root = plan.project(scan, cols.copy(), _labels(len(cols)))
+    with assert_raises(contains="there is no column named 'c99x'"):
+        _ = bind(plan, root, [_wide("c", 40)])
+
+
+def test_a_wide_join_still_refuses_a_name_both_inputs_have() raises:
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var cols = _asking(plan, "a")
+    cols.append(plan.exprs.column("key"))
+    var root = plan.project(joined, cols.copy(), _labels(len(cols)))
+    with assert_raises(contains="more than one column here, at 0 and at 20"):
+        _ = bind(plan, root, [_wide("a", 20), _wide("b", 20)])
+
+
+def test_a_wide_join_binds_a_name_to_the_input_it_says() raises:
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var cols = _asking(plan, "a")
+    var theirs = plan.exprs.column_of(1, "key")
+    var only = plan.exprs.column("b7")
+    cols.append(theirs)
+    cols.append(only)
+    var root = plan.project(joined, cols.copy(), _labels(len(cols)))
+    _ = bind(plan, root, [_wide("a", 20), _wide("b", 20)])
+    assert_equal(plan.exprs.nodes[theirs].at, 20, "the right arm's key")
+    assert_equal(plan.exprs.nodes[theirs].table, 1, "from the right arm")
+    assert_equal(plan.exprs.nodes[only].at, 28, "b7 is on the right only")
+
+
 def test_a_name_two_inputs_both_have_is_refused_rather_than_guessed() raises:
     # The reason this is an error and not a first match. A join puts its two
     # inputs end to end, so joining two tables that both have a `key` gives a

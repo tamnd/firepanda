@@ -231,6 +231,88 @@ def _near(schema: Schema, name: String) -> String:
     return out^
 
 
+comptime INDEX_FROM = 16
+"""How wide a schema has to be before a name is looked up through a map.
+
+Below this a walk down the list is a handful of compares and costs less than
+building anything. Above it the walk is what binding costs: every reference
+walks the whole list, so a node reading all 105 columns of the ClickBench table
+does eleven thousand compares, and every pass in the optimizer binds the plan
+again. Sixteen is where the two cost about the same on the M4 and the answer
+does not move much either side of it."""
+
+
+comptime INDEX_AFTER = 4
+"""How many names a node looks up by walking before it builds the map.
+
+A wide input is not enough on its own. A filter over the ClickBench table reads
+one column of 105, and building a map of all 105 to answer one lookup costs
+more than the walk it saves, so the first few lookups walk and the map is built
+only for a node that keeps asking."""
+
+
+struct _Names(Movable):
+    """Where each name in a schema is, for a schema wide enough to want it.
+
+    Only ever a shortcut. A name that is in the schema exactly once, and from
+    the right input when the reference says which, is answered from the map.
+    Everything else goes to `_resolve`, which is the one place that decides
+    what an ambiguous or missing name means and what the message says, so the
+    map can be wrong about nothing except how fast the common case is.
+    """
+
+    var at: Dict[String, Int]
+    """Each name's position, or -1 for a name the schema holds more than
+    once. Empty until the map is built."""
+
+    var wide: Bool
+    """Whether the schema is wide enough to be worth the map at all."""
+
+    var asked: Int
+    """How many names have been looked up so far."""
+
+    def __init__(out self, schema: Schema):
+        """Notes how wide a schema is, and builds nothing yet.
+
+        Args:
+            schema: The columns that are visible.
+        """
+        self.at = Dict[String, Int]()
+        self.wide = len(schema) >= INDEX_FROM
+        self.asked = 0
+
+    def find(
+        mut self, schema: Schema, origin: List[Int], name: String, pin: Int
+    ) raises -> Int:
+        """Returns the position of a column, the same one `_resolve` would.
+
+        Args:
+            schema: The columns the map is read from.
+            origin: Where each of those columns came from.
+            name: What was written.
+            pin: The input the name is to be looked for in, or `UNBOUND`.
+
+        Returns:
+            The position.
+
+        Raises:
+            Whatever `_resolve` raises, for every name the map cannot answer.
+        """
+        if self.wide:
+            self.asked += 1
+            if self.asked == INDEX_AFTER:
+                for i in range(len(schema)):
+                    if schema[i].name in self.at:
+                        self.at[schema[i].name] = -1
+                    else:
+                        self.at[schema[i].name] = i
+            if self.asked >= INDEX_AFTER:
+                var got = self.at.get(name, -1)
+                if got >= 0 and (pin == UNBOUND or origin[got] == pin):
+                    return got
+        return _resolve(schema, origin, name, pin)
+
+
 def _resolve(
     schema: Schema, origin: List[Int], name: String, pin: Int
 ) raises -> Int:
@@ -794,6 +876,32 @@ def bind_expr(
         If a name does not resolve, or an operation has no answer for the types
         it was handed.
     """
+    var names = _Names(schema)
+    _bind_expr(exprs, root, schema, origin, names, whole_column)
+
+
+def _bind_expr(
+    mut exprs: Expressions,
+    root: Int,
+    schema: Schema,
+    origin: List[Int],
+    mut names: _Names,
+    whole_column: Bool,
+) raises:
+    """`bind_expr` with the name map read once for the node rather than once
+    per expression.
+
+    Args:
+        exprs: The arena, written through.
+        root: The expression.
+        schema: The columns that are visible.
+        origin: Where each of those columns came from.
+        names: The map read from `schema`.
+        whole_column: As `bind_expr` has it.
+
+    Raises:
+        As `bind_expr` does.
+    """
     exprs.check(root)
     var kind = exprs.nodes[root].kind
 
@@ -803,7 +911,7 @@ def bind_expr(
         # write afterwards is the same number again in that case, and the one
         # binding worked out when there was nothing there.
         var pin = exprs.nodes[root].table
-        var at = _resolve(schema, origin, exprs.nodes[root].name, pin)
+        var at = names.find(schema, origin, exprs.nodes[root].name, pin)
         exprs.nodes[root].at = at
         exprs.nodes[root].table = origin[at]
         exprs.nodes[root].type = schema[at].dtype
@@ -811,7 +919,7 @@ def bind_expr(
 
     var kids = exprs.nodes[root].children.copy()
     for i in range(len(kids)):
-        bind_expr(exprs, kids[i], schema, origin, whole_column)
+        _bind_expr(exprs, kids[i], schema, origin, names, whole_column)
     var below = List[LogicalType]()
     for i in range(len(kids)):
         below.append(exprs.nodes[kids[i]].type)
@@ -931,10 +1039,11 @@ def _scan(
     if len(node_names) == 0:
         return Bound(Schema(copy=src), table)
     var one = List[Int](length=len(src), fill=table)
+    var names = _Names(src)
     var out = Schema()
     for i in range(len(node_names)):
         try:
-            out.append(src[_resolve(src, one, node_names[i], UNBOUND)].copy())
+            out.append(src[names.find(src, one, node_names[i], UNBOUND)].copy())
         except e:
             raise Error(String("scan of ", source, ": ", e))
     return Bound(out^, table)
@@ -1108,8 +1217,11 @@ def _bind_node(
     # one thing about a node rather than about an expression that an aggregate's
     # type depends on. `parts` is the group key count on this kind.
     var whole = kind == NodeKind.AGGREGATE and plan.nodes[at].parts == 0
+    var names = _Names(input.schema)
     for i in range(len(exprs)):
-        bind_expr(plan.exprs, exprs[i], input.schema, input.origin, whole)
+        _bind_expr(
+            plan.exprs, exprs[i], input.schema, input.origin, names, whole
+        )
 
     if kind == NodeKind.FILTER:
         var t = plan.exprs.nodes[exprs[0]].type
@@ -1187,10 +1299,14 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
     ref right = done[plan.nodes[at].inputs[1]]
     var exprs = plan.nodes[at].exprs.copy()
     var keys = plan.nodes[at].parts
+    var lefts = _Names(left.schema)
+    var rights = _Names(right.schema)
     for i in range(keys):
-        bind_expr(plan.exprs, exprs[i], left.schema, left.origin)
+        _bind_expr(plan.exprs, exprs[i], left.schema, left.origin, lefts, False)
     for i in range(keys, len(exprs)):
-        bind_expr(plan.exprs, exprs[i], right.schema, right.origin)
+        _bind_expr(
+            plan.exprs, exprs[i], right.schema, right.origin, rights, False
+        )
     for i in range(keys):
         var a = plan.exprs.nodes[exprs[i]].type
         var b = plan.exprs.nodes[exprs[keys + i]].type

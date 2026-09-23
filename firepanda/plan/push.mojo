@@ -197,7 +197,7 @@ refusal and it is quiet, so it is written down here.
 from firepanda.dtype.schema import Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
-from firepanda.plan.bind import Bound, bind, bind_all
+from firepanda.plan.bind import INDEX_FROM, Bound, bind, bind_all
 from firepanda.plan.cse import shape_of
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NodeKind, Plan, PlanNode
@@ -423,6 +423,11 @@ def _split(
             here.append(carried[i])
         return
 
+    if len(carried) == 0:
+        # Nothing to sort, and working out what passes through reads every
+        # output name of the node, which on a `SELECT *` over a wide table is
+        # the most expensive thing this pass would otherwise do.
+        return
     var through = _through(plan, old)
     for i in range(len(carried)):
         var names = plan.exprs.names(carried[i])
@@ -476,6 +481,7 @@ def _through(mut plan: Plan, old: Int) raises -> List[String]:
     var upto = len(plan.nodes[old].exprs)
     if kind == NodeKind.AGGREGATE:
         upto = plan.nodes[old].parts
+    var twice = _repeated(plan.nodes[old].names)
     for i in range(upto):
         var at = plan.nodes[old].exprs[i]
         if plan.exprs.nodes[at].kind != ExprKind.COLUMN:
@@ -484,7 +490,7 @@ def _through(mut plan: Plan, old: Int) raises -> List[String]:
             # Renamed, so the name above is not the name below and moving the
             # predicate unchanged would have it read something else or nothing.
             continue
-        if _twice(plan.nodes[old].names, plan.nodes[old].names[i]):
+        if twice[i]:
             # Two outputs of one name, and deciding which was meant is not this
             # pass's decision to make. The same refusal `prune` makes.
             continue
@@ -988,18 +994,33 @@ def _shared(plan: Plan, root: Int) raises -> Bool:
     return False
 
 
-def _twice(names: List[String], name: String) -> Bool:
-    """Whether a name appears more than once in a list.
+def _repeated(names: List[String]) -> List[Bool]:
+    """Which entries of a list share their name with another entry.
+
+    Read once for the whole list rather than asked once per entry, since asking
+    per entry walks the list per entry and a projection of a wide table has a
+    hundred of them.
 
     Args:
         names: The list.
-        name: The name.
 
     Returns:
-        True if two or more entries match.
+        One flag per entry, true where two or more entries have that name.
     """
-    var count = 0
+    var out = List[Bool](length=len(names), fill=False)
+    if len(names) < INDEX_FROM:
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                if names[i] == names[j]:
+                    out[i] = True
+                    out[j] = True
+        return out^
+    var first = Dict[String, Int]()
     for i in range(len(names)):
-        if names[i] == name:
-            count += 1
-    return count > 1
+        var seen = first.get(names[i], -1)
+        if seen == -1:
+            first[names[i]] = i
+        else:
+            out[seen] = True
+            out[i] = True
+    return out^
