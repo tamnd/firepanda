@@ -128,15 +128,21 @@ def test_bool_only_is_accepted_on_a_series_and_does_nothing(firepanda: ModuleTyp
 
 
 def test_the_arguments_that_are_held_are_still_held(firepanda: ModuleType) -> None:
-    """`skipna=False` and a `min_count` above zero refuse rather than being dropped."""
+    """`skipna=False` on a truth test and `bool_only` refuse rather than being dropped."""
     with pytest.raises(NotImplementedError, match="skipna"):
         firepanda.Series(VALUES).any(skipna=False)
-    with pytest.raises(NotImplementedError, match="skipna"):
-        firepanda.Series(VALUES).prod(skipna=False)
-    with pytest.raises(NotImplementedError, match="min_count"):
-        firepanda.Series(VALUES).prod(min_count=1)
     with pytest.raises(NotImplementedError, match="bool_only"):
         firepanda.DataFrame(MIXED).any(bool_only=True)
+
+
+@needs_pandas
+def test_the_product_takes_skipna_and_min_count(firepanda: ModuleType) -> None:
+    """The two flags every reduction on a column answers now, the product among them."""
+    import pandas as pd
+
+    mine, theirs = firepanda.Series(VALUES), pd.Series(VALUES)
+    assert mine.prod(skipna=False) == theirs.prod(skipna=False)
+    assert mine.prod(min_count=1) == theirs.prod(min_count=1)
 
 
 @needs_pandas
