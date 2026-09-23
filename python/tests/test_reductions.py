@@ -222,8 +222,7 @@ def test_a_quantile_over_flags_raises_what_numpy_raises(
     [
         ("mean", {"numeric_only": True}, "numeric_only"),
         ("std", {"numeric_only": True}, "numeric_only"),
-        ("quantile", {"interpolation": "lower"}, "interpolation"),
-        ("quantile", {"q": [0.1, 0.9]}, "single quantile"),
+        ("quantile", {"interpolation": "hazen"}, "interpolation"),
     ],
 )
 def test_a_declared_argument_that_is_not_implemented_refuses(
@@ -253,9 +252,9 @@ def test_a_quantile_outside_the_interval_is_a_value_error(firepanda: ModuleType)
 
 
 def test_a_misspelled_quantile_rule_is_a_typo_and_not_a_gap(firepanda: ModuleType) -> None:
-    """`interpolation='lower'` and `interpolation='lowr'` are two different mistakes.
+    """`interpolation='hazen'` and `interpolation='lowr'` are two different mistakes.
 
-    The first is one of the twelve rules pandas has and firepanda has not written,
+    The first is one of the eight rules pandas has and firepanda has not written,
     and it comes back a `NotImplementedError` saying so. The second is not a rule
     in either library, and pandas answers it with a `ValueError` listing the
     thirteen names, so this does too. Handing the second caller a
@@ -269,7 +268,7 @@ def test_a_misspelled_quantile_rule_is_a_typo_and_not_a_gap(firepanda: ModuleTyp
     with pytest.raises(ValueError, match="is not a valid method"):
         firepanda.Series(VALUES).quantile(0.5, interpolation="lowr")
     with pytest.raises(NotImplementedError, match="interpolation"):
-        firepanda.Series(VALUES).quantile(0.5, interpolation="lower")
+        firepanda.Series(VALUES).quantile(0.5, interpolation="hazen")
     with pytest.raises(ValueError, match="Method must be in"):
         firepanda.DataFrame({"a": VALUES}).quantile(0.5, method="tabel")
     with pytest.raises(NotImplementedError, match="method"):
