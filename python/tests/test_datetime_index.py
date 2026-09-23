@@ -300,11 +300,9 @@ def test_putting_the_labels_on_a_clock_matches(firepanda: ModuleType) -> None:
 def test_reading_the_labels_against_another_clock_matches(firepanda: ModuleType) -> None:
     """`tz_convert` keeps the instants and changes what they read as.
 
-    Against a fixed offset rather than against a named zone, because a named
-    zone is ahead of UTC by an amount that changes twice a year and firepanda
-    has no time zone database to look that up in yet, which is issue #349. The
-    two spell the offset differently once it is on, pandas as `UTC+09:00` and
-    this as `+09:00`, so what is held here is that the hours agree.
+    Against a fixed offset, which the two spell differently once it is on,
+    pandas as `UTC+09:00` and this as `+09:00`, so what is held here is that
+    the hours agree.
     """
     mine = made(firepanda).tz_localize("UTC").tz_convert("+09:00")
     them = theirs().tz_localize("UTC").tz_convert("+09:00")

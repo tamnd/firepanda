@@ -270,8 +270,11 @@ def test_a_column_with_no_calendar_in_it_has_no_names() raises:
         zoned^.into_data(),
         LogicalType.timestamp(TimeUnit.SECOND, TimeZone("Asia/Tokyo")),
     )
-    with assert_raises(contains="time zone database"):
-        _ = temporal_month_name(col, "")
+    assert_equal(
+        temporal_month_name(col, "")[0],
+        "January",
+        "the epoch was nine in the morning of the first of January in Tokyo",
+    )
 
 
 def test_the_iso_year_is_not_the_calendar_year() raises:

@@ -18,6 +18,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- A time zone database. A column on a zone that names a rule, such as `America/New_York`, is now read against it: the calendar fields, `strftime`, `day_name`, `month_name`, `date`, `normalize`, the three roundings, `tz_localize` and `tz_localize(None)` all answer where they used to refuse with a sentence about a missing database. The zones are read from the TZif files under `/usr/share/zoneinfo`, which is the data Python's `zoneinfo` reads and so what pandas answers from, and the rule in each file's footer is written out for one four hundred year Gregorian cycle so that an instant past the file's table is answered exactly however far out it is. A reading the clock skipped raises pandas' `ValueError` saying it is a nonexistent time due to daylight savings time, a reading it repeated raises pandas' `Cannot infer dst time from` one, and both name the first such row. `tz_convert` and `tz_localize` now refuse a zone name the database does not hold, with the `No time zone found with key` sentence `zoneinfo` uses, where `tz_convert` used to accept any name. The `ambiguous` and `nonexistent` arguments are still refused away from `"raise"`. Issue #349.
+
+### Added
+
 - `numeric_only=True` on the frame reductions, which keeps the integer, float and boolean columns and drops the rest before reducing, as pandas does. It used to be refused by name. A boolean column is kept because numpy files `bool_` beside the integers, so `df.sum(numeric_only=True)` counts the flags. A span column is not kept, though `select_dtypes` calls it a number, because pandas asks a different question in the two places.
 
 ### Changed

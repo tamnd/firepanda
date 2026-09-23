@@ -470,20 +470,20 @@ def test_a_date_column_answers_the_calendar_and_no_clock() raises:
     assert_equal(numbers(col, TemporalField.MICROSECOND)[0], 0, "microsecond")
 
 
-def test_a_zoned_column_is_refused_rather_than_answered_in_utc() raises:
+def test_a_zoned_column_is_answered_on_its_own_clock() raises:
     """The stored integers are UTC, so answering from them would give an hour
-    that is silently seven off in New York. Refusing is the honest answer until
-    there is a zone database. See issue 287."""
+    that is silently off in New York. The epoch was seven in the evening on the
+    last day of 1969 there. See issues 287 and 349."""
     var col = Array[DType.int64](1)
     col.set_valid(0, Int64(0))
     var zoned = AnyArray(
         col^.into_data(),
         LogicalType.timestamp(TimeUnit.SECOND, TimeZone("America/New_York")),
     )
-    with assert_raises(contains="time zone database"):
-        _ = temporal_field(zoned, TemporalField.HOUR)
-    with assert_raises(contains="time zone database"):
-        _ = temporal_date(zoned)
+    assert_equal(numbers(zoned, TemporalField.HOUR)[0], 19, "the hour")
+    var day = temporal_date(zoned)
+    ref view = day.as_typed_view[DType.int32]()
+    assert_equal(Int(view[0]), -1, "and the date is the day before the epoch")
 
 
 def test_a_column_that_is_not_temporal_has_no_calendar_in_it() raises:
