@@ -443,20 +443,28 @@ def test_a_null_row_stays_null_and_is_not_rounded_into_a_value() raises:
     assert_equal(view[2], 0, "row 2")
 
 
-def test_a_zoned_column_is_refused_rather_than_rounded_in_utc() raises:
+def test_a_zoned_column_is_rounded_on_its_own_clock() raises:
     """The local reading is what pandas rounds and the stored instants are UTC.
 
     In a zone whose offset is not a whole number of hours those are two
     different answers, so answering from the stored instants would be wrong
-    rather than approximate."""
+    rather than approximate. Lord Howe Island is ten and a half hours ahead in
+    its winter, which is why it is the zone here."""
     var col = Array[DType.int64](1)
-    col.set_valid(0, 5401)
+    col.set_valid(0, 1717200000)
     var zoned = AnyArray(
         col^.into_data(),
         LogicalType.timestamp(TimeUnit.SECOND, TimeZone("Australia/Lord_Howe")),
     )
-    with assert_raises(contains="time zone database"):
-        _ = temporal_round(zoned, "h", ROUND_DOWN)
+    var floored = temporal_round(zoned, "h", ROUND_DOWN)
+    assert_equal(
+        floored.as_typed_view[DType.int64]()[0],
+        1717198200,
+        (
+            "midnight UTC on the first of June is half past ten on Lord Howe"
+            " Island, which floors to ten, half an hour before midnight UTC"
+        ),
+    )
 
 
 def test_a_column_that_is_not_a_timestamp_has_no_frequency_in_it() raises:

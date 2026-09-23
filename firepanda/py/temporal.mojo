@@ -199,6 +199,41 @@ def frequency(spelling: String) raises -> String:
 def part(column: Series, kind: String, arg: String) raises -> Series:
     """Reads one part of a temporal column, and hands back a column.
 
+    The zone database's three refusals are tagged `value` here, which is what
+    pandas raises for each of them. A reading the clock skipped, a reading it
+    repeated and a zone name that is not in the database are all a problem
+    with the values or the name a caller passed rather than with the column's
+    type, which is what anything untagged from the kernel becomes further up.
+
+    Args:
+        column: The column to read.
+        kind: The part, as pandas spells the attribute.
+        arg: The frequency, unit, format, zone or locale, and the empty string
+            for the twenty five that take none.
+
+    Returns:
+        A new column, as tall as the one it read.
+
+    Raises:
+        Error: Tagged `value` for the zone database's refusals, and otherwise
+            whatever `_part` raises.
+    """
+    try:
+        return _part(column, kind, arg)
+    except e:
+        var message = String(e)
+        if (
+            "is a nonexistent time" in message
+            or "Cannot infer dst time" in message
+            or "No time zone found with key" in message
+        ):
+            raise tagged(VALUE, message)
+        raise e
+
+
+def _part(column: Series, kind: String, arg: String) raises -> Series:
+    """Reads one part of a temporal column, and hands back a column.
+
     Args:
         column: The column to read.
         kind: The part, as pandas spells the attribute.

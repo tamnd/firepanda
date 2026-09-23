@@ -1,4 +1,4 @@
-"""Tests for the zones that need no database.
+"""Tests for reading a column against its zone.
 
 A zone name is either a rule or a number. `America/New_York` is a rule, and what
 it is ahead of UTC changes twice a year, changed on different days before 2007,
@@ -7,16 +7,15 @@ needs the IANA database. `UTC` and `+05:30` are numbers. They state the whole
 answer in themselves and no database can tell you anything about them the name
 does not.
 
-That is the line these tests draw. Everything on the number side works and
-everything on the rule side is refused with a sentence saying why, and the split
-is a property of the name rather than a list of zones somebody has to keep up to
-date.
+The number side is one constant per column and the rule side is looked up in
+the zone database row by row. Most of the tests here are on the number side,
+where the answer can be worked out by hand, with one rule zone each to show it
+takes the same path. tests/test_zoneinfo.mojo has the database itself.
 
 The other half is that converting and localising are opposite operations that
 sound like the same one. Converting keeps the instant and moves the reading, so
-it needs no offset at all and works for every zone there is. Localising keeps
-the reading and moves the instant, so it needs the offset and is where the rule
-zones are refused. Half the tests here are that pair being told apart.
+it needs no offset at all. Localising keeps the reading and moves the instant,
+so it needs the offset. Half the tests here are that pair being told apart.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -213,8 +212,12 @@ def test_localising_moves_the_instant_and_not_the_reading() raises:
 
     with assert_raises(contains="already on"):
         _ = temporal_tz_localize(utc, "Asia/Kolkata")
-    with assert_raises(contains="time zone database"):
-        _ = temporal_tz_localize(naive, "America/New_York")
+    var york = temporal_tz_localize(naive, "America/New_York")
+    assert_equal(
+        row(york, 0),
+        1704110400 + 18000,
+        "and midday in New York in January is five hours after midday in UTC",
+    )
 
 
 def test_taking_the_clock_off_keeps_the_reading() raises:
@@ -231,10 +234,16 @@ def test_taking_the_clock_off_keeps_the_reading() raises:
 
     with assert_raises(contains="carries no zone"):
         _ = temporal_tz_localize_none(stamps(noon(), TimeUnit.SECOND, ""))
-    with assert_raises(contains="time zone database"):
-        _ = temporal_tz_localize_none(
-            stamps(noon(), TimeUnit.SECOND, "America/New_York")
-        )
+    assert_equal(
+        row(
+            temporal_tz_localize_none(
+                stamps(noon(), TimeUnit.SECOND, "America/New_York")
+            ),
+            0,
+        ),
+        1704110400 - 18000,
+        "and a rule zone reads its offset out of the zone database",
+    )
 
 
 def test_a_field_is_read_off_the_local_clock() raises:
@@ -272,8 +281,11 @@ def test_a_field_is_read_off_the_local_clock() raises:
         "midnight on New Year's Day is still December in California",
     )
 
-    with assert_raises(contains="time zone database"):
-        _ = field(stamps(noon(), TimeUnit.SECOND, "America/New_York"), "hour")
+    assert_equal(
+        field(stamps(noon(), TimeUnit.SECOND, "America/New_York"), "hour"),
+        7,
+        "midday UTC in January is seven in the morning in New York",
+    )
 
 
 def test_the_other_readers_go_through_the_same_clock() raises:
@@ -287,10 +299,10 @@ def test_the_other_readers_go_through_the_same_clock() raises:
     var text = temporal_strftime(india, "%H:%M")
     assert_equal(text[0], "17:30", "the format string reads the local clock")
 
-    with assert_raises(contains="time zone database"):
-        _ = temporal_strftime(
-            stamps(noon(), TimeUnit.SECOND, "America/New_York"), "%H:%M"
-        )
+    var york = temporal_strftime(
+        stamps(noon(), TimeUnit.SECOND, "America/New_York"), "%H:%M"
+    )
+    assert_equal(york[0], "07:00", "and so does a rule zone")
 
 
 def test_a_result_that_is_still_a_time_goes_back_on_the_clock() raises:
@@ -320,10 +332,16 @@ def test_a_result_that_is_still_a_time_goes_back_on_the_clock() raises:
         ),
     )
 
-    with assert_raises(contains="time zone database"):
-        _ = temporal_normalize(
-            stamps(noon(), TimeUnit.SECOND, "America/New_York")
-        )
+    assert_equal(
+        row(
+            temporal_normalize(
+                stamps(noon(), TimeUnit.SECOND, "America/New_York")
+            ),
+            0,
+        ),
+        1704067200 + 18000,
+        "local midnight in New York is five in the morning UTC",
+    )
 
 
 def test_the_two_zone_refusals_carry_the_words_pandas_uses() raises:

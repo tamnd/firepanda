@@ -61,6 +61,7 @@ from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.exec import parallel_morsels
 
 from .mask import repair_range
+from .zoneinfo import ZoneRules, load_zone
 
 comptime NANOS_PER_SECOND = Int64(1_000_000_000)
 """How many nanoseconds are in a second. The frequency parser works in these
@@ -842,8 +843,8 @@ def zone_offset(t: LogicalType) raises -> Int64:
     A zoned column holds UTC and a name. The number a person reads off it is the
     instant plus whatever the zone is ahead of UTC at that moment, and for a
     zone that names its own offset that is one constant for the whole column.
-    For a zone that names a rule it is not a constant at all, and there is no
-    honest answer here without the IANA database.
+    For a zone that names a rule it is not a constant at all, and the callers
+    below read those row by row out of the zone database before they get here.
 
     Args:
         t: The column type.
@@ -853,19 +854,19 @@ def zone_offset(t: LogicalType) raises -> Int64:
         reading, which is zero for a naive column and for UTC.
 
     Raises:
-        Error: If the column is on a clock whose offset is a rule rather than a
-            number.
+        Error: If the column is on a clock whose offset is a rule, which has
+            no one number and is a bug in the caller.
     """
     if t.kind != TypeKind.TIMESTAMP or t.zone.is_naive():
         return 0
     var seconds = t.zone.fixed_offset()
     if not seconds:
         raise Error(
-            "temporal: reading a wall clock in "
+            "temporal: "
             + String(t.zone)
-            + " needs a time zone database firepanda does not have yet, since"
-            " what that zone is ahead of UTC changes twice a year and the"
-            " stored instants are UTC"
+            + " is a rule rather than one offset, so its offset has to be"
+            " looked up row by row, which is a bug in firepanda rather than in"
+            " the call"
         )
     return seconds.value() * t.unit.per_second()
 
@@ -904,13 +905,176 @@ def _shifted(a: Array[DType.int64], by: Int64) raises -> Array[DType.int64]:
     return out^
 
 
+def _names_a_rule(t: LogicalType) -> Bool:
+    """Returns whether a column is on a clock whose offset changes.
+
+    Args:
+        t: The column type.
+
+    Returns:
+        True for a zoned timestamp whose zone is an IANA rule rather than a
+        number.
+    """
+    return (
+        t.kind == TypeKind.TIMESTAMP
+        and not t.zone.is_naive()
+        and not t.zone.fixed_offset()
+    )
+
+
+def _read_by_rules(
+    a: Array[DType.int64], rules: ZoneRules, per_second: Int64
+) raises -> Array[DType.int64]:
+    """Turns UTC instants into the readings a zone's clock showed at them.
+
+    Each row looks its own offset up, which is a bisection over the zone's
+    transitions, so this is a scalar loop where `_shifted` is a vector one.
+
+    Args:
+        a: The instants, in units of which `per_second` make a second.
+        rules: The zone.
+        per_second: How many of the column's units make a second.
+
+    Returns:
+        The readings, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var value = source.unsafe_offset(i).unsafe_load()
+            var offset = rules.offset_at(value // per_second)
+            target.unsafe_offset(i).unsafe_store(value + offset * per_second)
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def _placed(
+    reading: Int64, rules: ZoneRules, per_second: Int64, naive: LogicalType
+) raises -> Int64:
+    """Returns the one instant at which a zone's clock showed a reading.
+
+    The two offsets in force a day either side are the only candidates, since
+    no zone has changed its clock twice inside two days. Each candidate is kept
+    when the zone really was on that offset at the instant it gives, and that
+    leaves one instant for an ordinary reading, none for a reading in the hour
+    a spring forward skipped and two for a reading in the hour a fall back
+    repeats. This is the same test pandas makes and the messages are its own.
+
+    Args:
+        reading: The wall clock reading, in the column's units.
+        rules: The zone.
+        per_second: How many of the column's units make a second.
+        naive: The naive type the reading is in, for the message.
+
+    Returns:
+        The instant, in the same units.
+
+    Raises:
+        Error: If the reading denotes no instant or two.
+    """
+    var seconds = reading // per_second
+    var early = rules.offset_at(seconds - SECONDS_PER_DAY)
+    var late = rules.offset_at(seconds + SECONDS_PER_DAY)
+    var first = reading - early * per_second
+    var second = reading - late * per_second
+    var first_holds = rules.offset_at(first // per_second) == early
+    var second_holds = rules.offset_at(second // per_second) == late
+    if first_holds and second_holds and first != second:
+        raise Error(
+            "temporal: Cannot infer dst time from "
+            + temporal_text(naive, reading)
+            + ", try using the 'ambiguous' argument"
+        )
+    if first_holds:
+        return first
+    if second_holds:
+        return second
+    raise Error(
+        "temporal: "
+        + temporal_text(naive, reading)
+        + " is a nonexistent time due to daylight savings time. Try using the"
+        " 'nonexistent' argument."
+    )
+
+
+def _place_by_rules(
+    a: Array[DType.int64],
+    rules: ZoneRules,
+    per_second: Int64,
+    naive: LogicalType,
+) raises -> Array[DType.int64]:
+    """Turns a zone's wall clock readings into the UTC instants they denote.
+
+    The morsels run in parallel, so the first of them to meet a reading with
+    no instant or two is not necessarily the first such row. When one does,
+    the rows are walked again in order, which is slow and only ever happens on
+    the way to an error, so that the row named in the message is the one
+    pandas would name.
+
+    Args:
+        a: The readings.
+        rules: The zone.
+        per_second: How many of the column's units make a second.
+        naive: The naive type the readings are in, for the message.
+
+    Returns:
+        The instants, null wherever the input is null.
+
+    Raises:
+        Error: Naming the first reading that denotes no instant or two.
+    """
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            if not a.is_valid(i):
+                continue
+            var value = source.unsafe_offset(i).unsafe_load()
+            target.unsafe_offset(i).unsafe_store(
+                _placed(value, rules, per_second, naive)
+            )
+        repair_range(out, validity, start, stop)
+
+    try:
+        parallel_morsels(compute, n)
+    except e:
+        var source = a.unsafe_ptr()
+        for i in range(n):
+            if a.is_valid(i):
+                _ = _placed(
+                    source.unsafe_offset(i).unsafe_load(),
+                    rules,
+                    per_second,
+                    naive,
+                )
+        raise e
+    out.data.validity = validity^
+    return out^
+
+
 def local_readings(a: AnyArray) raises -> AnyArray:
     """Returns a zoned column as the naive readings it stands for.
 
     This is what every calendar kernel below wants, since each of them reads the
     integers as they are stored and the integers are UTC. A naive column comes
-    back unchanged, which is the case that matters for speed, and a zoned one
-    pays one pass.
+    back unchanged, which is the case that matters for speed, a column on a
+    fixed offset pays one vector pass, and a column on a rule zone looks each
+    row's offset up in the zone database.
 
     Args:
         a: A timestamp column, on a clock or not.
@@ -919,10 +1083,18 @@ def local_readings(a: AnyArray) raises -> AnyArray:
         A naive timestamp column at the same resolution.
 
     Raises:
-        Error: If the column is on a clock whose offset is a rule.
+        Error: If the column is on a zone the database does not have.
     """
-    var shift = zone_offset(a.type)
     var naive = LogicalType.timestamp(a.type.unit, TimeZone())
+    if _names_a_rule(a.type):
+        var rules = load_zone(String(a.type.zone))
+        return AnyArray(
+            _read_by_rules(
+                a.as_typed_view[DType.int64](), rules, a.type.unit.per_second()
+            ).into_data(),
+            naive,
+        )
+    var shift = zone_offset(a.type)
     if shift == 0:
         var same = AnyArray(copy=a)
         same.type = naive
@@ -937,6 +1109,11 @@ def _back_on_the_clock(
 ) raises -> AnyArray:
     """Puts a column of readings back on the clock it was read from.
 
+    On a rule zone this is where the hard questions live. A reading in the
+    hour a clock skips forward denotes no instant at all and a reading in the
+    hour it repeats denotes two, and both are refused with the message pandas
+    raises when it is not told what to do with them.
+
     Args:
         readings: A naive timestamp column, at the same resolution as `t`.
         t: The type it is going back to.
@@ -945,9 +1122,20 @@ def _back_on_the_clock(
         A column of that type.
 
     Raises:
-        Error: If the type is on a clock whose offset is a rule, which the
-            caller has already met on the way in.
+        Error: If the zone is not in the database, or if a reading denotes no
+            instant or two on its clock.
     """
+    if _names_a_rule(t):
+        var rules = load_zone(String(t.zone))
+        return AnyArray(
+            _place_by_rules(
+                readings.as_typed_view[DType.int64](),
+                rules,
+                t.unit.per_second(),
+                readings.type,
+            ).into_data(),
+            t,
+        )
     var shift = zone_offset(t)
     if shift == 0:
         readings.type = t
@@ -966,11 +1154,10 @@ def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
     denotes is the same instant before and after, which is the one sentence that
     separates this from `tz_localize`.
 
-    It follows that this works for every zone there is while localising works
-    only for the zones that name their own offset, because converting never asks
-    what the offset is. It also follows that the target name is not checked
-    against anything, since there is nothing here to check it against. pandas
-    would refuse a name its database does not hold and this does not.
+    It follows that this never asks what the offset is. The target name is
+    still checked against the zone database when it names a rule, because
+    pandas refuses a name its database does not hold and a column labelled with
+    a zone nobody can read would fail later and further from the typo.
 
     Args:
         a: A zoned timestamp column.
@@ -980,8 +1167,9 @@ def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
         A column of the same instants under the new name.
 
     Raises:
-        Error: If the column is not a timestamp, if it carries no zone, or if
-            the name is longer than any zone name is.
+        Error: If the column is not a timestamp, if it carries no zone, if the
+            name is longer than any zone name is, or if it names a rule the
+            zone database does not have.
     """
     if a.type.kind != TypeKind.TIMESTAMP:
         raise Error(
@@ -1000,8 +1188,11 @@ def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
             " read it against, and tz_localize is the one that puts a clock on"
             " a column of readings"
         )
+    var target = LogicalType.timestamp(a.type.unit, TimeZone(zone))
+    if _names_a_rule(target):
+        _ = load_zone(zone)
     var out = AnyArray(copy=a)
-    out.type = LogicalType.timestamp(a.type.unit, TimeZone(zone))
+    out.type = target
     return out^
 
 
@@ -1013,12 +1204,12 @@ def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
     reading of nine o'clock is a different moment in each zone somebody might
     have taken it in.
 
-    Moving them needs to know what the zone is ahead of UTC, so this works for
-    the zones that name their own offset and refuses the ones that name a rule.
-    The refused ones are also where the hard questions live, since a reading in
-    the hour a clock skips forward denotes no instant at all and a reading in
-    the hour it repeats denotes two, and neither can happen in a zone whose
-    offset never changes.
+    Moving them needs to know what the zone is ahead of UTC, which for a zone
+    that names a rule comes out of the zone database row by row. Those zones
+    are also where the hard questions live, since a reading in the hour a
+    clock skips forward denotes no instant at all and a reading in the hour it
+    repeats denotes two, and both are refused the way pandas refuses them when
+    it is not told what to do.
 
     Args:
         a: A naive timestamp column.
@@ -1029,8 +1220,8 @@ def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
         whatever the zone is ahead of UTC.
 
     Raises:
-        Error: If the column is not a naive timestamp, or if the zone names a
-            rule rather than a number.
+        Error: If the column is not a naive timestamp, if the zone is not in
+            the database, or if a reading denotes no instant or two.
     """
     if a.type.kind != TypeKind.TIMESTAMP:
         raise Error(
@@ -1066,7 +1257,7 @@ def temporal_tz_localize_none(a: AnyArray) raises -> AnyArray:
 
     Raises:
         Error: If the column is not a timestamp, if it carries no zone, or if
-            the zone names a rule rather than a number.
+            the zone is not in the database.
     """
     if a.type.kind != TypeKind.TIMESTAMP:
         raise Error(

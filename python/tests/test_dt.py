@@ -514,16 +514,42 @@ def test_the_temporal_refusals_share_the_words_pandas_uses(firepanda: ModuleType
 
 
 @both
-def test_naming_a_zone_with_a_transition_table_is_refused(firepanda: ModuleType) -> None:
-    """Every zone but UTC, until there is a zone database to read.
+def test_naming_a_zone_with_a_transition_table_matches(firepanda: ModuleType) -> None:
+    """A rule zone reads its offset out of the zone database, row by row.
 
-    What a named zone is ahead of UTC changes twice a year, so putting a wall
-    clock reading onto one needs the transition table for that zone. This is the
-    refusal that the `ambiguous` and `nonexistent` ones are waiting on, since
-    both of those are questions about a transition.
+    January and July are both in the rows, so a column on one offset for the
+    whole year would get one of them wrong.
     """
-    with pytest.raises(Exception, match="time zone database"):
-        stamps(firepanda).dt.tz_localize("America/New_York")
+    import pandas as pd
+
+    values = [dt.datetime(2024, 1, 1, 12), dt.datetime(2024, 7, 1, 12), None]
+    mine = stamps(firepanda, values).dt.tz_localize("America/New_York")
+    theirs = pd.Series(values, dtype="datetime64[us]").dt.tz_localize("America/New_York")
+    assert str(mine.dtype) == str(theirs.dtype)
+    assert mine.dt.tz_convert("UTC").dt.hour.tolist()[:2] == [17, 16]
+    assert mine.dt.tz_localize(None).dt.hour.tolist()[:2] == [12, 12]
+
+
+@both
+@pytest.mark.parametrize(
+    ("reading", "words"),
+    [
+        (dt.datetime(2024, 3, 10, 2, 30), "is a nonexistent time due to daylight savings time"),
+        (dt.datetime(2024, 11, 3, 1, 30), "Cannot infer dst time from 2024-11-03 01:30:00"),
+    ],
+)
+def test_a_reading_the_clock_skipped_or_repeated_is_a_value_error(
+    firepanda: ModuleType, reading: dt.datetime, words: str
+) -> None:
+    """Both are what pandas raises when it is not told what to do with them."""
+    with pytest.raises(ValueError, match=words):
+        stamps(firepanda, [reading]).dt.tz_localize("America/New_York")
+
+
+@both
+def test_a_zone_the_database_does_not_hold_is_refused(firepanda: ModuleType) -> None:
+    with pytest.raises(ValueError, match="No time zone found with key Nowhere/Land"):
+        stamps(firepanda).dt.tz_localize("Nowhere/Land")
 
 
 @both
