@@ -505,8 +505,8 @@ class Index:
         """The labels' Arrow schema and data, in two capsules."""
         ...
 
-def read_csv(path: str) -> DataFrame:
-    """Reads a CSV file into a frame."""
+def _read_csv(path: str) -> DataFrame:
+    """Reads a CSV file into a frame, behind `read_csv` in `_pandas`."""
     ...
 
 def from_arrow(source: object) -> DataFrame:

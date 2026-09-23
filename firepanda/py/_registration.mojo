@@ -32,7 +32,10 @@ def register(mut module: PythonModuleBuilder) raises:
         module: The builder to register on.
     """
     module.def_function[open_csv](
-        "read_csv", docstring="Reads a CSV file into a frame."
+        "_read_csv",
+        docstring=(
+            "Reads a CSV file into a frame, behind `read_csv` in `_pandas`."
+        ),
     )
     module.def_function[open_arrow](
         "from_arrow",

@@ -42,7 +42,7 @@ needs_pandas = pytest.mark.skipif(
     importlib.util.find_spec("pandas") is None, reason="pandas is not installed"
 )
 
-HAND_WRITTEN = ("to_datetime",)
+HAND_WRITTEN = ("to_datetime", "read_csv")
 """The module level names that are written by hand rather than generated.
 
 They are here so the signature parity walk still reaches them. A name goes on

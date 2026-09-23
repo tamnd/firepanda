@@ -36,8 +36,8 @@ from __future__ import annotations
 
 from . import _firepanda, api, errors
 from ._datetime import DatetimeIndex
-from ._frame import DataFrame, Index, Series, from_arrow, read_csv
-from ._pandas import to_datetime
+from ._frame import DataFrame, Index, Series, from_arrow
+from ._pandas import read_csv, to_datetime
 from ._scalars import Timedelta, Timestamp
 
 __all__ = [

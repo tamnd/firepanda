@@ -4142,10 +4142,10 @@ class Index(IndexMixin):
             raise translate(error) from None
 
 
-def read_csv(filepath_or_buffer: str) -> DataFrame:
-    """Reads a CSV file into a frame."""
+def _read_csv(path: str) -> DataFrame:
+    """Reads a CSV file into a frame, behind `read_csv` in `_pandas`."""
     try:
-        return DataFrame._wrap(_firepanda.read_csv(filepath_or_buffer))
+        return DataFrame._wrap(_firepanda._read_csv(path))
     except Exception as error:
         raise translate(error) from None
 
