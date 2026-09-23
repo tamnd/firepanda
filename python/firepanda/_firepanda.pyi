@@ -346,6 +346,11 @@ class Series:
     def temporal_part(self, kind: str, arg: str) -> Series:
         """One part of a temporal column, as a column."""
         ...
+    def temporal_placed(
+        self, kind: str, arg: str, ambiguous: str, nonexistent: str, shift: int
+    ) -> Series:
+        """A part that puts readings back on a clock, with a policy."""
+        ...
     def temporal_word(self, kind: str) -> str:
         """The clock or the resolution of a temporal column, as a string."""
         ...
@@ -458,6 +463,11 @@ class Index:
         ...
     def temporal_part(self, kind: str, arg: str) -> Index:
         """One part of temporal labels, as another index."""
+        ...
+    def temporal_placed(
+        self, kind: str, arg: str, ambiguous: str, nonexistent: str, shift: int
+    ) -> Index:
+        """A part that puts labels back on a clock, with a policy."""
         ...
     def temporal_word(self, kind: str) -> str:
         """The one part of temporal labels that is a word."""

@@ -46,7 +46,17 @@ from firepanda.frame import DataFrame
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.temporal import (
+    IN_A_GAP_BACKWARD,
+    IN_A_GAP_FORWARD,
+    IN_A_GAP_NULL,
+    IN_A_GAP_RAISE,
+    IN_A_GAP_SHIFT,
+    ON_A_FOLD_EARLIER,
+    ON_A_FOLD_LATER,
+    ON_A_FOLD_NULL,
+    ON_A_FOLD_RAISE,
     TemporalField,
+    ZonePolicy,
     field_named,
     frequency_period,
     temporal_field,
@@ -196,7 +206,59 @@ def frequency(spelling: String) raises -> String:
     return spelling
 
 
-def part(column: Series, kind: String, arg: String) raises -> Series:
+def zone_policy(
+    ambiguous: String, nonexistent: String, shift: Int
+) raises -> ZonePolicy:
+    """Reads pandas' `ambiguous` and `nonexistent` arguments into a policy.
+
+    Both cross as words rather than as the Python values pandas takes, since
+    `True` and a timedelta are not strings. `ambiguous` is `raise`, `NaT`,
+    `True` or `False`, and a boolean array per row is answered in Python by
+    asking twice. `nonexistent` is `raise`, `NaT`, `shift_forward`,
+    `shift_backward` or `timedelta`, and for the last one the shift crosses
+    beside it in nanoseconds.
+
+    Args:
+        ambiguous: What to do with a repeated reading.
+        nonexistent: What to do with a skipped reading.
+        shift: How far to move a skipped reading, in nanoseconds, when
+            `nonexistent` is `timedelta`.
+
+    Returns:
+        The policy.
+
+    Raises:
+        Error: Tagged `value` if either word is not one of its five or four.
+    """
+    var policy = ZonePolicy()
+    if ambiguous == "NaT":
+        policy.ambiguous = ON_A_FOLD_NULL
+    elif ambiguous == "True":
+        policy.ambiguous = ON_A_FOLD_EARLIER
+    elif ambiguous == "False":
+        policy.ambiguous = ON_A_FOLD_LATER
+    elif ambiguous != "raise":
+        raise tagged(VALUE, String("unknown ambiguous policy ", ambiguous))
+    if nonexistent == "NaT":
+        policy.nonexistent = IN_A_GAP_NULL
+    elif nonexistent == "shift_forward":
+        policy.nonexistent = IN_A_GAP_FORWARD
+    elif nonexistent == "shift_backward":
+        policy.nonexistent = IN_A_GAP_BACKWARD
+    elif nonexistent == "timedelta":
+        policy.nonexistent = IN_A_GAP_SHIFT
+        policy.shift = Int64(shift)
+    elif nonexistent != "raise":
+        raise tagged(VALUE, String("unknown nonexistent policy ", nonexistent))
+    return policy
+
+
+def part(
+    column: Series,
+    kind: String,
+    arg: String,
+    policy: ZonePolicy = ZonePolicy(),
+) raises -> Series:
     """Reads one part of a temporal column, and hands back a column.
 
     The zone database's three refusals are tagged `value` here, which is what
@@ -210,6 +272,8 @@ def part(column: Series, kind: String, arg: String) raises -> Series:
         kind: The part, as pandas spells the attribute.
         arg: The frequency, unit, format, zone or locale, and the empty string
             for the twenty five that take none.
+        policy: What `floor`, `ceil`, `round` and `tz_localize` do with a
+            reading the clock skipped or repeated.
 
     Returns:
         A new column, as tall as the one it read.
@@ -219,19 +283,22 @@ def part(column: Series, kind: String, arg: String) raises -> Series:
             whatever `_part` raises.
     """
     try:
-        return _part(column, kind, arg)
+        return _part(column, kind, arg, policy)
     except e:
         var message = String(e)
         if (
             "is a nonexistent time" in message
             or "Cannot infer dst time" in message
             or "No time zone found with key" in message
+            or "will relocalize on a nonexistent time" in message
         ):
             raise tagged(VALUE, message)
         raise e
 
 
-def _part(column: Series, kind: String, arg: String) raises -> Series:
+def _part(
+    column: Series, kind: String, arg: String, policy: ZonePolicy
+) raises -> Series:
     """Reads one part of a temporal column, and hands back a column.
 
     Args:
@@ -239,6 +306,7 @@ def _part(column: Series, kind: String, arg: String) raises -> Series:
         kind: The part, as pandas spells the attribute.
         arg: The frequency, unit, format, zone or locale, and the empty string
             for the twenty five that take none.
+        policy: What to do with a reading the clock skipped or repeated.
 
     Returns:
         A new column, as tall as the one it read.
@@ -259,11 +327,11 @@ def _part(column: Series, kind: String, arg: String) raises -> Series:
     if kind == "total_seconds":
         return column.dt_total_seconds()
     if kind == "floor":
-        return column.dt_floor(arg)
+        return column.dt_floor(arg, policy)
     if kind == "ceil":
-        return column.dt_ceil(arg)
+        return column.dt_ceil(arg, policy)
     if kind == "round":
-        return column.dt_round(arg)
+        return column.dt_round(arg, policy)
     if kind == "as_unit":
         return column.dt_as_unit(arg)
     if kind == "day_name":
@@ -275,7 +343,7 @@ def _part(column: Series, kind: String, arg: String) raises -> Series:
     if kind == "tz_convert":
         return column.dt_tz_convert(arg)
     if kind == "tz_localize":
-        return column.dt_tz_localize(arg)
+        return column.dt_tz_localize(arg, policy)
     if kind == "tz_localize_none":
         return column.dt_tz_localize_none()
     return column.dt(kind)

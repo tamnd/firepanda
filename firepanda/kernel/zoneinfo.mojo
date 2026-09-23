@@ -667,7 +667,7 @@ def load_zone(name: StringSlice) raises -> ZoneRules:
     """
     if not _valid_name(name):
         raise Error(String("No time zone found with key ", name))
-    var data = List[UInt8]()
+    var data: List[UInt8]
     try:
         var handle = open(String(ZONEINFO_ROOT, name), "r")
         data = handle.read_bytes()

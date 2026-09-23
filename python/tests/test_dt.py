@@ -38,6 +38,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import inspect
+import re
 from types import ModuleType
 from typing import Any
 
@@ -397,12 +398,8 @@ def test_the_five_unwritten_names_are_absent_rather_than_refusing(
 @pytest.mark.parametrize(
     ("call", "expected"),
     [
-        (lambda s: zoned(s).dt.floor("h", ambiguous="NaT"), "ambiguous="),
-        (lambda s: zoned(s).dt.ceil("h", nonexistent="shift_forward"), "nonexistent="),
         (lambda s: zoned(s).dt.round("h", ambiguous="infer"), "ambiguous="),
         (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
-        (lambda s: s.dt.tz_localize("UTC", ambiguous="NaT"), "ambiguous="),
-        (lambda s: s.dt.tz_localize("UTC", nonexistent="NaT"), "nonexistent="),
         (lambda s: s.dt.tz_convert(None), r"tz_convert\(None\)"),
         (lambda s: s.dt.floor(1), "freq has to be a string"),
         (lambda s: s.dt.tz_localize(3), "tz has to be a zone name"),
@@ -411,17 +408,17 @@ def test_the_five_unwritten_names_are_absent_rather_than_refusing(
 def test_a_declared_argument_that_is_not_written_says_so(
     firepanda: ModuleType, call: Any, expected: str
 ) -> None:
-    """Nine refusals, one test each, so none of them can be dropped by a tidy up.
+    """Five refusals, one test each, so none of them can be dropped by a tidy up.
 
     The argument document 26 makes for the reductions and document 27 repeats
     for the transformations. A parameter that is accepted and ignored is right at
     its default and wrong everywhere else, and where it is wrong is where a real
     program uses it.
 
-    The first three rounding rows put a zone on the column before they call,
-    because pandas reads the two daylight saving policies there only when there
-    is one, and a naive column comes back rounded with them unread. That is what
-    the test below this one is about.
+    The `infer` row puts a zone on the column before it calls, because pandas
+    reads the two daylight saving policies there only when there is one, and a
+    naive column comes back rounded with them unread. That is what the test
+    below this one is about.
     """
     with pytest.raises(NotImplementedError, match=expected):
         call(stamps(firepanda))
@@ -544,6 +541,108 @@ def test_a_reading_the_clock_skipped_or_repeated_is_a_value_error(
     """Both are what pandas raises when it is not told what to do with them."""
     with pytest.raises(ValueError, match=words):
         stamps(firepanda, [reading]).dt.tz_localize("America/New_York")
+
+
+GAP = [
+    dt.datetime(2024, 3, 10, 2, 30),
+    dt.datetime(2024, 3, 10, 2, 0),
+    dt.datetime(2024, 3, 10, 2, 59, 59, 999999),
+    dt.datetime(2024, 3, 10, 1, 30),
+    None,
+]
+"""Readings in the hour New York skipped in 2024, one either side of it, and a null."""
+
+FOLD = [dt.datetime(2024, 11, 3, 1, 30), dt.datetime(2024, 11, 3, 0, 30), None]
+"""A reading in the hour New York repeated in 2024, one before it, and a null."""
+
+
+def instants(series: Any) -> list[Any]:
+    """The UTC instants a zoned column holds, with the zone taken off."""
+    return list(series.dt.tz_convert("UTC").dt.tz_localize(None))
+
+
+@both
+@pytest.mark.parametrize(
+    ("zone", "values", "policies"),
+    [
+        ("America/New_York", GAP, {"nonexistent": "NaT"}),
+        ("America/New_York", GAP, {"nonexistent": "shift_forward"}),
+        ("America/New_York", GAP, {"nonexistent": "shift_backward"}),
+        ("America/New_York", GAP, {"nonexistent": dt.timedelta(hours=1)}),
+        ("America/New_York", GAP, {"nonexistent": dt.timedelta(hours=-1)}),
+        ("America/New_York", GAP, {"nonexistent": dt.timedelta(hours=2)}),
+        (
+            "Australia/Lord_Howe",
+            [dt.datetime(2024, 10, 6, 2, 15)],
+            {"nonexistent": "shift_forward"},
+        ),
+        (
+            "Australia/Lord_Howe",
+            [dt.datetime(2024, 10, 6, 2, 15)],
+            {"nonexistent": "shift_backward"},
+        ),
+        ("America/New_York", FOLD, {"ambiguous": "NaT"}),
+        ("America/New_York", FOLD, {"ambiguous": True}),
+        ("America/New_York", FOLD, {"ambiguous": False}),
+        ("America/New_York", FOLD, {"ambiguous": [True, False, True]}),
+        ("America/New_York", FOLD, {"ambiguous": [False, True, False]}),
+        (
+            "America/New_York",
+            [*FOLD, dt.datetime(2024, 11, 3, 1, 45)],
+            {"ambiguous": [True, True, False, False]},
+        ),
+        ("Australia/Sydney", [dt.datetime(2024, 4, 7, 2, 30)], {"ambiguous": True}),
+        ("Australia/Sydney", [dt.datetime(2024, 4, 7, 2, 30)], {"ambiguous": False}),
+        ("Europe/London", [dt.datetime(2024, 10, 27, 1, 30)], {"ambiguous": True}),
+    ],
+)
+def test_a_policy_for_a_skipped_or_repeated_reading_matches(
+    firepanda: ModuleType, zone: str, values: list[Any], policies: dict[str, Any]
+) -> None:
+    """Every word pandas takes for the two policies, against pandas.
+
+    The shifts out of a gap go by the whole hour of the clock rather than by
+    where the gap ends, which Lord Howe is here to show, since its clock goes
+    forward half an hour and pandas still shifts forward to the hour after it.
+    """
+    mine = stamps(firepanda, values).dt.tz_localize(zone, **policies)
+    them = theirs(values).dt.tz_localize(zone, **policies)
+    assert str(mine.dtype) == str(them.dtype)
+    assert like(read(mine.dt.tz_convert("UTC").dt.tz_localize(None)), instants(them))
+
+
+@both
+def test_a_policy_holds_when_a_zoned_column_is_rounded(firepanda: ModuleType) -> None:
+    """Rounding reads the local clock and puts the answer back on it, where a fold can be."""
+    values = [dt.datetime(2024, 11, 3, 5, 40), dt.datetime(2024, 11, 3, 6, 40)]
+    for ambiguous in ("NaT", True, False, [True, False]):
+        mine = stamps(firepanda, values).dt.tz_localize("UTC").dt.tz_convert("America/New_York")
+        them = theirs(values).dt.tz_localize("UTC").dt.tz_convert("America/New_York")
+        got = mine.dt.floor("h", ambiguous=ambiguous)
+        want = them.dt.floor("h", ambiguous=ambiguous)
+        assert like(read(got.dt.tz_convert("UTC").dt.tz_localize(None)), instants(want))
+
+
+@both
+@pytest.mark.parametrize("shift", [dt.timedelta(minutes=20), dt.timedelta(minutes=-20)])
+def test_a_shift_that_stays_in_the_skipped_hour_is_refused(
+    firepanda: ModuleType, shift: dt.timedelta
+) -> None:
+    """pandas checks that a shift leaves the hour, and names the shift when it does not."""
+    words = f"The provided timedelta will relocalize on a nonexistent time: {shift}"
+    with pytest.raises(ValueError, match=re.escape(words)):
+        stamps(firepanda, GAP).dt.tz_localize("America/New_York", nonexistent=shift)
+    with pytest.raises(ValueError, match=re.escape(words)):
+        theirs(GAP).dt.tz_localize("America/New_York", nonexistent=shift)
+
+
+@both
+def test_a_list_of_flags_of_the_wrong_length_is_refused(firepanda: ModuleType) -> None:
+    words = "Length of ambiguous bool-array must be the same size as vals"
+    with pytest.raises(ValueError, match=words):
+        stamps(firepanda, FOLD).dt.tz_localize("America/New_York", ambiguous=[True])
+    with pytest.raises(ValueError, match=words):
+        theirs(FOLD).dt.tz_localize("America/New_York", ambiguous=[True])
 
 
 @both

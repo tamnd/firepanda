@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `tz_localize`, `floor`, `ceil` and `round` take pandas' `ambiguous` and `nonexistent` on a zoned column, on a series and on a `DatetimeIndex`, where every value but `"raise"` used to be refused. `ambiguous` takes `"NaT"`, `True`, `False` and a list of flags with one per row, and `nonexistent` takes `"NaT"`, `"shift_forward"`, `"shift_backward"` and a timedelta. The shifts go by the whole hour of the clock rather than by where the gap ends, because that is what pandas does, so on Lord Howe, where the clock goes forward half an hour, a shift forward lands on the hour after the gap. A timedelta that leaves the reading in the same hour raises pandas' own `ValueError` naming the timedelta. The policy crosses the boundary once as two words and a shift, through a new `temporal_placed` method beside `temporal_part`, and a list of flags is answered by asking twice and taking each row from the side its flag names. `ambiguous="infer"` is still refused, since it reads the order of the rows rather than being told. (Issue #349)
+
 ## [0.8.27] - 2026-09-23
 
 Built against Mojo 1.0.0 (ed45d567).

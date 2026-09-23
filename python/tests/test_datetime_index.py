@@ -15,6 +15,7 @@ arguments pandas declares are the arguments this declares.
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 from types import ModuleType
 from typing import Any
@@ -317,6 +318,32 @@ def test_taking_the_clock_off_matches(firepanda: ModuleType) -> None:
     mine = made(firepanda).tz_localize("UTC").tz_localize(None)
     assert mine.tz is None
     instants(mine, theirs().tz_localize("UTC").tz_localize(None))
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "policies",
+    [
+        {"ambiguous": True, "nonexistent": "shift_forward"},
+        {"ambiguous": False, "nonexistent": "shift_backward"},
+        {"ambiguous": [True, False, False, True], "nonexistent": datetime.timedelta(hours=1)},
+    ],
+)
+def test_the_labels_go_on_a_clock_under_a_policy(
+    firepanda: ModuleType, policies: dict[str, Any]
+) -> None:
+    """A repeated reading and a skipped one, under the policies pandas takes.
+
+    None of these answers a missing label, which `test_dt.py` covers on a
+    column, because the comparison here goes through `strftime` and the two
+    libraries write a missing label differently.
+    """
+    readings = ["2024-11-03 01:30", "2024-11-03 00:30", "2024-11-03 01:45", "2024-03-10 02:30"]
+    mine = made(firepanda, readings, name="t").tz_localize("America/New_York", **policies)
+    them = theirs(readings, name="t").tz_localize("America/New_York", **policies)
+    assert isinstance(mine, firepanda.DatetimeIndex)
+    assert mine.name == "t"
+    instants(mine.tz_convert("UTC").tz_localize(None), them.tz_convert("UTC").tz_localize(None))
 
 
 @needs_pandas

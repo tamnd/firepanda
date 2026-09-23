@@ -406,6 +406,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.temporal_part](
         "temporal_part", docstring="One part of a temporal column, as a column."
     )
+    _ = series.def_method[PySeries.temporal_placed](
+        "temporal_placed",
+        docstring="A part that puts readings back on a clock, with a policy.",
+    )
     _ = series.def_method[PySeries.temporal_word](
         "temporal_word",
         docstring=(
@@ -537,6 +541,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = index.def_method[PyIndex.temporal_part](
         "temporal_part",
         docstring="One part of temporal labels, as another index.",
+    )
+    _ = index.def_method[PyIndex.temporal_placed](
+        "temporal_placed",
+        docstring="A part that puts labels back on a clock, with a policy.",
     )
     _ = index.def_method[PyIndex.temporal_word](
         "temporal_word",

@@ -137,6 +137,7 @@ from firepanda.kernel.temporal import (
     ROUND_HALF_EVEN,
     ROUND_UP,
     TemporalField,
+    ZonePolicy,
     field_named,
     temporal_as_unit,
     temporal_date,
@@ -2812,7 +2813,9 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name.copy(), temporal_normalize(self.values)
         )
 
-    def dt_floor(self, freq: StringSlice) raises -> Self:
+    def dt_floor(
+        self, freq: StringSlice, policy: ZonePolicy = ZonePolicy()
+    ) raises -> Self:
         """Returns the series with every instant moved back to a whole period.
 
         Args:
@@ -2820,6 +2823,8 @@ struct Series(Copyable, Movable, Sized, Writable):
                 any of `D`, `s`, `ms`, `us` and `ns`, each with an optional
                 count in front of it.
 
+            policy: What to do with a rounded reading that lands where a
+                zoned series' clock skipped or repeated itself.
         Returns:
             A timestamp series of the same type and height.
 
@@ -2828,15 +2833,20 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name.copy(), temporal_round(self.values, freq, ROUND_DOWN)
+            self.name.copy(),
+            temporal_round(self.values, freq, ROUND_DOWN, policy),
         )
 
-    def dt_ceil(self, freq: StringSlice) raises -> Self:
+    def dt_ceil(
+        self, freq: StringSlice, policy: ZonePolicy = ZonePolicy()
+    ) raises -> Self:
         """Returns the series with every instant moved on to a whole period.
 
         Args:
             freq: The frequency, spelled as `dt_floor` spells it.
 
+            policy: What to do with a rounded reading that lands where a
+                zoned series' clock skipped or repeated itself.
         Returns:
             A timestamp series of the same type and height.
 
@@ -2845,10 +2855,13 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name.copy(), temporal_round(self.values, freq, ROUND_UP)
+            self.name.copy(),
+            temporal_round(self.values, freq, ROUND_UP, policy),
         )
 
-    def dt_round(self, freq: StringSlice) raises -> Self:
+    def dt_round(
+        self, freq: StringSlice, policy: ZonePolicy = ZonePolicy()
+    ) raises -> Self:
         """Returns the series with every instant moved to the nearest period.
 
         A row exactly halfway between two periods goes to the even one, which is
@@ -2860,6 +2873,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Args:
             freq: The frequency, spelled as `dt_floor` spells it.
 
+            policy: What to do with a rounded reading that lands where a
+                zoned series' clock skipped or repeated itself.
         Returns:
             A timestamp series of the same type and height.
 
@@ -2868,7 +2883,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             one that has a fixed length.
         """
         return self._relabelled(
-            self.name.copy(), temporal_round(self.values, freq, ROUND_HALF_EVEN)
+            self.name.copy(),
+            temporal_round(self.values, freq, ROUND_HALF_EVEN, policy),
         )
 
     def dt_as_unit(self, unit: StringSlice) raises -> Self:
@@ -2927,25 +2943,29 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name.copy(), temporal_tz_convert(self.values, zone)
         )
 
-    def dt_tz_localize(self, zone: StringSlice) raises -> Self:
+    def dt_tz_localize(
+        self, zone: StringSlice, policy: ZonePolicy = ZonePolicy()
+    ) raises -> Self:
         """Returns the series with a clock put on its readings.
 
         The readings stay and the instants move, which is the opposite of what
-        `dt_tz_convert` does. It works for a zone that names its own offset,
-        such as `UTC` or `+05:30`, and refuses one that names a rule.
+        `dt_tz_convert` does. A zone that names a rule is read out of the
+        system's zone database.
 
         Args:
             zone: The name to put on the series.
+            policy: What to do with a reading the clock skipped or repeated.
 
         Returns:
             A timestamp series of the same height on that clock.
 
         Raises:
-            If the series is not a naive timestamp, or if the zone names a rule
-            rather than a number.
+            If the series is not a naive timestamp, if the zone is not in the
+            database, or if a reading is no instant or two and the policy says
+            to raise.
         """
         return self._relabelled(
-            self.name.copy(), temporal_tz_localize(self.values, zone)
+            self.name.copy(), temporal_tz_localize(self.values, zone, policy)
         )
 
     def dt_tz_localize_none(self) raises -> Self:
