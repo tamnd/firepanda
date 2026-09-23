@@ -192,16 +192,16 @@ def test_an_empty_row_answers_no_to_all_five(firepanda: ModuleType) -> None:
         assert getattr(column.str, name)().tolist() == [False], name
 
 
-def test_all_five_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
-    """Which is the difference from pandas that `engine/string-predicate-null` names.
+def test_all_five_answer_false_on_a_missing_row(firepanda: ModuleType) -> None:
+    """Which is what pandas answers when it holds the column the way it does by default.
 
-    pandas holding the column the way it holds it by default answers a numpy
-    array of bools and has nowhere to put a missing answer, so a missing row
-    comes back False and cannot be told from a row that was really not a letter.
-    This library answers None, the same way it does for the case questions.
+    A missing row comes back False and cannot be told from a row that was really
+    not a letter, and `isna` is the way to tell them apart in both libraries.
+    This used to answer None, which was the `engine/string-predicate-null`
+    divergence.
     """
     column = made(firepanda, ["abc", None])
     for name in NAMES:
-        assert getattr(column.str, name)().tolist()[1] is None, name
-    assert column.str.isalpha().tolist() == [True, None]
-    assert column.str.isdigit().tolist() == [False, None]
+        assert getattr(column.str, name)().tolist()[1] is False, name
+    assert column.str.isalpha().tolist() == [True, False]
+    assert column.str.isdigit().tolist() == [False, False]

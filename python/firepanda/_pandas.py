@@ -2412,6 +2412,15 @@ def _two_valued(inner: Any, op: str) -> Any:
     return inner.fill_null(Series([COMPARISON_ON_A_GAP[op]])._inner)
 
 
+def _filled_with_false(inner: Any) -> Any:
+    """A mask with each null replaced by False, which is what pandas writes there."""
+    from ._frame import Series
+
+    if inner.null_count() == 0:
+        return inner
+    return inner.fill_null(Series([False])._inner)
+
+
 def _two_valued_frame(inner: Any, op: str) -> Any:
     """`_two_valued` over every column of a frame of comparisons."""
     from ._frame import Series
@@ -8980,14 +8989,27 @@ class StringMixin:
         except Exception as error:
             raise translate(error) from None
 
-    def _flag(self, kind: str, arg: str, flags: int = 0) -> Series:
-        """Runs a method that answers a mask."""
+    def _flag(self, kind: str, arg: str, flags: int = 0, gaps: bool = False) -> Series:
+        """Runs a method that answers a mask.
+
+        The kernel answers null on a missing row, since the question has no
+        answer there, and pandas answers False. pandas gets there by filling
+        rather than by numpy: its default `str` dtype carries a missing row as
+        NaN and every predicate fills those rows with False on purpose, even
+        with `na=None` written out. So the fill is here, once, for every mask
+        the accessor answers. `gaps=True` hands back the kernel's answer with
+        the nulls still in it, for a caller that fills them with its own `na`
+        or folds several answers together first.
+        """
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.string_flag(kind, arg, flags))
+            inner = self._series._inner.string_flag(kind, arg, flags)
         except Exception as error:
             raise translate(error) from None
+        if not gaps:
+            inner = _filled_with_false(inner)
+        return Series._wrap(inner)
 
     def _number(
         self,
@@ -9134,7 +9156,9 @@ class StringMixin:
         A tuple is Python's signature for these two and it is the only place in
         the accessor where one argument stands for several questions. An empty
         tuple is False on every row that is not missing, which is what Python's
-        `startswith(())` says.
+        `startswith(())` says, and a missing row is `na` whatever the tuple
+        holds, so the fold starts from which rows are missing rather than from
+        what the first prefix answered.
 
         The fold over the tuple and the filling of `na` both happen over plain
         lists here, because `Series` has neither `|` nor `fillna` yet. Both are
@@ -9143,21 +9167,17 @@ class StringMixin:
         would call.
         """
         if not isinstance(pat, tuple):
-            answer = self._flag(kind, pat)
             if na is None:
-                return answer
+                return self._flag(kind, pat)
+            answer = self._flag(kind, pat, gaps=True)
             return self._as_mask([na if one is None else one for one in answer.tolist()])
-        rows = self._series._inner.length()
-        held: list[Any] = [False] * rows
+        held: list[Any] = [None if gap else False for gap in self._series.isna().tolist()]
         for one in pat:
-            for at, value in enumerate(self._flag(kind, one).tolist()):
-                if value is None:
-                    held[at] = None
-                elif value:
+            for at, value in enumerate(self._flag(kind, one, gaps=True).tolist()):
+                if value:
                     held[at] = True
-        if na is not None:
-            held = [na if one is None else one for one in held]
-        return self._as_mask(held)
+        fill = False if na is None else na
+        return self._as_mask([fill if one is None else one for one in held])
 
     def _as_mask(self, values: list[Any]) -> Series:
         """Builds a boolean column out of a plain list, carrying the name across."""
@@ -9318,16 +9338,23 @@ class StringMixin:
         pat = self._a_pattern(pat)
         folded, argued, python = self._folding(kind, case, flags, regex)
         fold = "_folded" if folded else ""
+        gaps = na is not None
         if python or _needs_an_engine(pat, regex):
-            answer = self._matched(kind, pat, folded, argued, python)
+            answer = self._matched(kind, pat, folded, argued, python, gaps)
         else:
-            answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind))
-        if na is None:
+            answer = self._flag(f"{kind}{fold}", self._literal(pat, regex, kind), gaps=gaps)
+        if not gaps:
             return answer
         return self._as_mask([na if one is None else one for one in answer.tolist()])
 
     def _matched(
-        self, kind: str, pat: str, folded: bool, argued: int = 0, python: bool = False
+        self,
+        kind: str,
+        pat: str,
+        folded: bool,
+        argued: int = 0,
+        python: bool = False,
+        gaps: bool = False,
     ) -> Series:
         """Runs a pattern through the regular expression engine.
 
@@ -9364,7 +9391,7 @@ class StringMixin:
             word = f"{kind}_regex_folded"
         else:
             word = f"{kind}_regex"
-        return self._flag(word, pat, argued)
+        return self._flag(word, pat, argued, gaps)
 
     def _counted(self, pat: Any, flags: Any) -> Series:
         """How many times a pattern matches in every row.

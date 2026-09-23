@@ -250,18 +250,18 @@ def test_na_fills_the_missing_row_in_the_three_that_take_it(
 
 
 @needs_pandas
-def test_all_four_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
+def test_a_missing_row_answers_false_to_the_masks_and_is_missing_in_the_count(
+    firepanda: ModuleType,
+) -> None:
     """Where pandas answers False for the three masks and a missing number for the count.
 
-    The masks are the divergence the board records as
-    `engine/string-predicate-null`, which every question the accessor asks about
-    a row already sits inside. The count is the other one: pandas widens an
-    int64 column to float64 to make room for the missing row and this library
-    keeps it int64 and holds the row missing, which is the same disagreement the
-    whole library has with pandas about where a missing integer lives.
+    The masks agree with pandas now. The count does not: pandas widens an int64
+    column to float64 to make room for the missing row and this library keeps it
+    int64 and holds the row missing, which is `engine/string-count-width`.
     """
     mine = made(firepanda)
-    for name in ("contains", "match", "fullmatch", "count"):
-        assert getattr(mine.str, name)("ab").tolist()[-1] is None, name
-    assert theirs().str.contains("ab").tolist()[-1] is False
+    for name in ("contains", "match", "fullmatch"):
+        assert getattr(mine.str, name)("ab").tolist()[-1] is False, name
+        assert getattr(theirs().str, name)("ab").tolist()[-1] is False, name
+    assert mine.str.count("ab").tolist()[-1] is None
     assert str(theirs().str.count("ab").dtype) == "float64"
