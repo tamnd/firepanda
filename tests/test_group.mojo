@@ -1967,6 +1967,34 @@ def test_the_skewness_of_a_column_does_not_change_when_the_column_is_shifted() r
     assert_almost_equal(out[0], 1.3253147098134046, atol=1e-12)
 
 
+def test_the_skewness_of_large_integers_is_taken_before_they_are_rounded() raises:
+    # Two to the sixty second below zero, where neighbouring float64 values are
+    # a thousand and twenty four apart, so all five of these become the same
+    # float the moment they are cast. pandas casts first and answers 0.0, a
+    # column with no shape at all. The deviations are taken as integers here,
+    # which are exact, and the answer is the one the same five offsets give
+    # near zero.
+    var base = Int64(-4_611_686_018_427_387_904)
+    var far = ints([base + 1, base + 3, base + 7, base + 100, base + 1000])
+    var near = ints([1, 3, 7, 100, 1000])
+    var flat = codes_of([0, 0, 0, 0, 0])
+    assert_almost_equal(
+        group_skew(near, flat, 1)[0], 2.186784069707506, atol=1e-12
+    )
+    assert_almost_equal(
+        group_skew(far, flat, 1)[0], 2.186784069707506, atol=1e-12
+    )
+
+
+def test_the_skewness_of_the_int64_edges_does_not_overflow() raises:
+    # The smallest value, zero and the largest, whose differences from the mean
+    # do not fit in an int64. The true skewness is a hair below zero, and a
+    # difference taken in 64 bits would wrap round and answer something large.
+    var col = ints([Int64.MIN, 0, Int64.MAX])
+    var out = group_skew(col, codes_of([0, 0, 0]), 1)
+    assert_almost_equal(out[0], 0.0, atol=1e-9)
+
+
 def test_median_interpolates_between_two_middle_values() raises:
     var out = group_median(sample_values(), sample_codes(), 3)
     assert_almost_equal(out[0], 20.0, atol=1e-9)
