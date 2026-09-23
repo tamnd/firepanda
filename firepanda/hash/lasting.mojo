@@ -89,14 +89,17 @@ running table on every chunk. ClickBench's q18 and q39 group on three and five
 keys with hundreds of thousands of groups, and that term was most of what they
 cost.
 
-`LastingTuple` makes the tuple exact by writing it out. The chunk is grouped on
-its own first, which is the pass the stacking route made anyway, and each of
-its distinct tuples is then written as bytes, a presence byte per key and then
-the value's own bytes, with a length in front of text. Two tuples are equal
-exactly when their bytes are, so the bytes go into a `LastingText`, whose hash
-match is only a candidate the bytes settle. Only the chunk's distinct tuples
-are written and looked up, not its rows, and each row takes its group's
-ordinal from the chunk's own grouping.
+`LastingTuple` makes the tuple exact by writing it out. Every row's tuple is
+written as bytes, a presence byte per key and then the value's own bytes, with
+a length in front of text, in two passes on the cores: one to size each row and
+one to write it where a prefix sum put it. Two tuples are equal exactly when
+their bytes are, so the rows go into a `LastingText`, whose hash match is only
+a candidate the bytes settle, and each row comes back with its group's ordinal.
+
+Grouping the chunk on its own first and writing only its distinct tuples was
+tried, and was slower: the chunk's grouping pass costs about what the writing
+saves. The route only pays when there is text among the keys and more than one
+chunk, and `Group` in `exec/node` is where that is decided.
 
 A null is a presence byte of zero and nothing else, so a tuple with a null in
 it is a tuple like any other here and does not send the query off this route,

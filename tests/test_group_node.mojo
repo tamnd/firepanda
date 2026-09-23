@@ -1329,6 +1329,26 @@ def test_a_tuple_with_text_in_it_agrees_with_the_frame_method() raises:
     hand each one back the ordinal it got the first time, and the group order
     the frame method gives is the order the node has to match.
     """
+    check_a_text_tuple(False, "a tuple with text and nulls in it")
+
+
+def test_a_tuple_with_text_in_one_chunk_agrees_with_the_frame_method() raises:
+    """The same table arriving whole, which never builds the map.
+
+    The first chunk of a tuple waits for a second one, and when `finish` comes
+    first the waiting chunk is grouped the one pass way. That is a different
+    route to the same answer, so it is held to the same answer.
+    """
+    check_a_text_tuple(True, "a tuple with text in one chunk")
+
+
+def check_a_text_tuple(whole: Bool, what: String) raises:
+    """Groups the three key table either in one chunk or in uneven ones.
+
+    Args:
+        whole: True to hand the node the table as one chunk.
+        what: What to call the check when it fails.
+    """
     var rng = Rng(20260924)
     var words: List[String] = ["", "a", "ab", "b", "abc", "a long phrase here"]
     var firsts = ChunkedArray(LogicalType.INT64)
@@ -1338,7 +1358,7 @@ def test_a_tuple_with_text_in_it_agrees_with_the_frame_method() raises:
     var total = 0
     while total < 12000:
         var rows = 50 + rng.next_below(500)
-        if total + rows > 12000:
+        if whole or total + rows > 12000:
             rows = 12000 - total
         var one = List[Int64](capacity=rows)
         var said = List[String](capacity=rows)
@@ -1383,7 +1403,7 @@ def test_a_tuple_with_text_in_it_agrees_with_the_frame_method() raises:
     aggs.append(GroupAgg(3, AggKind.SIZE, "v_size"))
     var got = run_group(frame^, [0, 1, 2], aggs^)
     assert_true(len(want) > 300, "enough tuples to mean something")
-    same_rows(got, want, "a tuple with text and nulls in it")
+    same_rows(got, want, what)
 
 
 def test_a_tuple_tells_apart_the_same_bytes_split_differently() raises:

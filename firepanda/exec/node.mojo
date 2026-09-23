@@ -5532,6 +5532,13 @@ struct Group(Movable):
     var _fast: Bool
     """Whether chunks are still going through `_push` rather than `_absorb`."""
 
+    var _waiting: List[AnyArray]
+    """The first chunk of a tuple, held until a second one says the map is
+    worth building. Empty when nothing is held."""
+
+    var _waiting_rows: Int
+    """The height of `_waiting`, and zero when nothing is held."""
+
     var _values: List[AnyArray]
     """The running table's state columns on the `_push` route, without the key
     beside them. `_gather` puts the two back together into `state`."""
@@ -5572,6 +5579,8 @@ struct Group(Movable):
         self._tuple = LastingTuple()
         self._tupled = False
         self._fast = False
+        self._waiting = List[AnyArray]()
+        self._waiting_rows = 0
         self._values = List[AnyArray]()
         self._room = 0
 
@@ -5744,12 +5753,23 @@ struct Group(Movable):
         #
         # A tuple of keys takes the route too when every key is a type
         # `LastingTuple` can write out as bytes, which is the integers, the
-        # temporal types and text. A float key keeps the tuple on `_absorb`.
+        # temporal types and text, and at least one of them is text. A float
+        # key keeps the tuple on `_absorb`, and so does a tuple of integers
+        # alone, because grouping those is a pass of fixed width hashing on the
+        # cores that the byte map's serial insert only makes slower. q35 of
+        # ClickBench, four integer keys over eight chunks, went from 21 to 28
+        # ms on the map.
         self._tupled = len(self.keys) > 1
         self._fast = True
+        var texts = False
         for k in range(len(self.keys)):
-            if self._tupled and not tuple_holds(self.input[self.keys[k]].dtype):
+            var type = self.input[self.keys[k]].dtype
+            if self._tupled and not tuple_holds(type):
                 self._fast = False
+            if type.is_variable_width():
+                texts = True
+        if self._tupled and not texts:
+            self._fast = False
         for s in range(len(self._source)):
             if (
                 self.input[self._source[s]].dtype.is_variable_width()
@@ -5817,10 +5837,28 @@ struct Group(Movable):
             for h in range(len(self._kept)):
                 self.held[h].append(AnyArray(copy=columns[self._kept[h]]))
 
+        if self._fast and self._tupled:
+            # The tuple map writes a null as a byte like any other, so nothing
+            # about the data sends a tuple off the route. What it does not do
+            # is win on one chunk: the map inserts its groups one at a time in
+            # the order they were first seen, and a table that arrives whole is
+            # grouped faster by one pass on the cores. So the first chunk
+            # waits, and the map is only built once a second one turns up.
+            if not self.started and self._waiting_rows == 0:
+                self._waiting = columns^
+                self._waiting_rows = rows
+                return None
+            if self._waiting_rows > 0:
+                var first = List[AnyArray]()
+                swap(first, self._waiting)
+                var height = self._waiting_rows
+                self._waiting_rows = 0
+                self._push(first, height)
+            self._push(columns, rows)
+            return None
+
         if self._fast:
-            # The tuple map writes a null as a byte like any other, so only
-            # the single key maps have a reason to leave the route.
-            if self._tupled or columns[self.keys[0]].null_count() == 0:
+            if columns[self.keys[0]].null_count() == 0:
                 self._push(columns, rows)
                 return None
             # A null arrived. Hand what the table has built to the running
@@ -5828,6 +5866,19 @@ struct Group(Movable):
             # that puts a null group where its first null was.
             self._demote()
 
+        self._fold(columns, rows)
+        return None
+
+    def _fold(mut self, columns: List[AnyArray], rows: Int) raises:
+        """Groups one chunk on its own and merges it through `_absorb`.
+
+        Args:
+            columns: The chunk's columns, borrowed.
+            rows: The chunk's height.
+
+        Raises:
+            If a reduction fails on the chunk's data.
+        """
         var refs = borrow_columns(columns)
         var local = group_ordinals(refs, self.keys, rows)
         var made = List[AnyArray](capacity=len(self.keys) + len(self._source))
@@ -5845,7 +5896,6 @@ struct Group(Movable):
                 )
             )
         self._absorb(made^)
-        return None
 
     def _push(mut self, columns: List[AnyArray], rows: Int) raises:
         """Adds one chunk to the running table through the persistent map.
@@ -6123,6 +6173,15 @@ struct Group(Movable):
             held columns cannot be grouped and reduced.
         """
         self.width = len(self.keys) + len(self.aggs)
+        if self._waiting_rows > 0:
+            # The only chunk there was. It goes the one pass way, and the map
+            # was never built.
+            self._fast = False
+            var only = List[AnyArray]()
+            swap(only, self._waiting)
+            var height = self._waiting_rows
+            self._waiting_rows = 0
+            self._fold(only, height)
         if self._fast:
             self._fast = False
             self._gather()
