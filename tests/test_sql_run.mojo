@@ -2542,6 +2542,21 @@ def test_a_substring_of_a_number_is_refused() raises:
         _ = run("SELECT substring(n, 1, 2) FROM words", session())
 
 
+def test_a_subscript_of_text_answers_what_duckdb_answers() raises:
+    # The answers are DuckDB's for the same seven words.
+    var one = cuts("SELECT word[1] AS piece FROM words")
+    assert_equal(one[0], "a", "the first letter")
+    assert_equal(one[4], "", "the empty string has no first letter")
+    assert_equal(one[5], "null", "and a null stays a null")
+    var last = cuts("SELECT word[-1] AS piece FROM words")
+    assert_equal(last[1], "t", "a negative index counts from the back")
+    var middle = cuts("SELECT word[2:-2] AS piece FROM words")
+    assert_equal(middle[0], "ppl", "the two cuts")
+    assert_equal(middle[6], "ineappl", "on a longer word")
+    var front = cuts("SELECT word[:-3] AS piece FROM words")
+    assert_equal(front[1], "apric", "all but the last two")
+
+
 def test_a_coalesce_fills_the_gaps_from_the_second_argument() raises:
     same(
         read_back(

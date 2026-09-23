@@ -154,9 +154,9 @@ from .unsupported import (
     not_implemented,
 )
 
-comptime KEEPS_NULLS: StringSlice[ImmStaticOrigin] = (
-    ",arbitrary,array_agg,first,last,list,"
-)
+comptime KEEPS_NULLS: StringSlice[
+    ImmStaticOrigin
+] = ",arbitrary,array_agg,first,last,list,"
 """The folds that read a null as a value, folded and comma delimited.
 
 A `FILTER` on one of these cannot be a `CASE` around its argument, because the

@@ -1137,6 +1137,142 @@ def _lower_is(
     )
 
 
+comptime _BEFORE_THE_FRONT = -(1 << 40)
+"""A length that runs a `substring` back past the front of any string.
+
+A negative length runs the window backwards from its start, so this one covers
+everything from the start to the front. It is what lets `s[:-3]` be a single
+cut, which it otherwise could not be without knowing how long each element is.
+"""
+
+
+def _subscript_bound(ast: Ast, at: UInt32) raises -> Optional[Int]:
+    """Reads one bound of a subscript, which has to be a whole number.
+
+    Args:
+        ast: The arenas.
+        at: The bound, or the null node for one the query left out.
+
+    Returns:
+        The number, or nothing for a bound that was left out.
+
+    Raises:
+        Error: The subscript refusal, if the bound is anything other than a
+            whole number written in the query.
+    """
+    if at == NO_NODE:
+        return None
+    var exact = _exact_of(ast, at)
+    if not exact.ok or exact.scale != 0:
+        raise not_implemented(SUBSCRIPT, "", "")
+    return Int(exact.unscaled)
+
+
+def _lower_subscript(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Builds `s[i]` and `s[i:j]` as the `substring` they mean for text.
+
+    DuckDB reads brackets on text as `array_extract` and `array_slice`, and for
+    text both are a cut, so this writes the cut rather than giving them names of
+    their own. `s[i]` is `substring(s, i, 1)`, including a zero or an `i` past
+    either end, which both answer the empty string.
+
+    A slice counts from one and takes both of its ends, and a negative end
+    counts back from the last character. When both ends count the same way the
+    cut starts at the first and runs for the difference. A start from the front
+    and an end from the back is two cuts: the inner one keeps everything up to
+    the end, and `_BEFORE_THE_FRONT` is what lets it do that without knowing the
+    length, and the outer one starts at the start. A start from the back and an
+    end from the front has no such pair, so it is refused. Every shape here was
+    checked against DuckDB for strings of up to six characters and every pair
+    of bounds from minus eight to eight.
+
+    Only text gets this far. The operand's type is not known until binding, and
+    a list under the brackets is refused there, by `substring` saying it reads
+    text. So is a bound that is an expression, because a cut's positions are
+    constants, and so is a step, which DuckDB does not take on text either.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_SUBSCRIPT` node.
+        plan: The plan, added to.
+        walk: The walk, for the operand.
+        scope: What the operand can name.
+        grouped: Whether this is above an aggregate.
+
+    Returns:
+        The expression.
+
+    Raises:
+        Error: The subscript refusal, for a shape with no cut that answers it.
+    """
+    var node = ast.exprs[Int(at)]
+    if ast.at(node.children, 2) != NO_NODE:
+        raise not_implemented(SUBSCRIPT, "", "")
+    var start = _subscript_bound(ast, ast.at(node.children, 0))
+    var end = _subscript_bound(ast, ast.at(node.children, 1))
+    var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
+
+    if node.payload != 1:
+        if not start:
+            raise not_implemented(SUBSCRIPT, "", "")
+        return _cut(plan, over, start.value(), 1)
+
+    # A start left out is the front, and so is a zero, since a slice has no
+    # position zero to start at.
+    var first = start.value() if start else 1
+    if first == 0:
+        first = 1
+    if not end:
+        return plan.exprs.call(
+            "substring", [over, plan.exprs.literal(Value(Int64(first)))], True
+        )
+    var last = end.value()
+    if (first > 0) == (last >= 0):
+        if last < first:
+            return _cut(plan, over, 1, 0)
+        return _cut(plan, over, first, last - first + 1)
+    if first < 0:
+        raise not_implemented(SUBSCRIPT, "", "")
+    if last == -1:
+        return plan.exprs.call(
+            "substring", [over, plan.exprs.literal(Value(Int64(first)))], True
+        )
+    var kept = _cut(plan, over, last + 1, _BEFORE_THE_FRONT)
+    return plan.exprs.call(
+        "substring", [kept, plan.exprs.literal(Value(Int64(first)))], True
+    )
+
+
+def _cut(mut plan: Plan, over: Int, start: Int, length: Int) raises -> Int:
+    """A three argument `substring` with its two numbers written in.
+
+    Args:
+        plan: The plan, added to.
+        over: The text being cut.
+        start: The first character, counting from one.
+        length: How many characters.
+
+    Returns:
+        The call.
+    """
+    return plan.exprs.call(
+        "substring",
+        [
+            over,
+            plan.exprs.literal(Value(Int64(start))),
+            plan.exprs.literal(Value(Int64(length))),
+        ],
+        True,
+    )
+
+
 def _lower_nullif(mut plan: Plan, args: List[Int]) raises -> Int:
     """Builds what a `NULLIF` means.
 
@@ -3085,7 +3221,7 @@ def _lower_expr(
     if node.kind == EXPR_INTERVAL:
         raise not_implemented(INTERVAL, "", "")
     if node.kind == EXPR_SUBSCRIPT:
-        raise not_implemented(SUBSCRIPT, "", "")
+        return _lower_subscript(ast, at, plan, walk, scope, grouped)
     if node.kind == EXPR_ROW:
         raise not_implemented(ROW_VALUE, "", "")
     if node.kind == EXPR_NAMED_ARGUMENT:

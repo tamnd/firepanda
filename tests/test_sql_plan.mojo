@@ -1428,14 +1428,67 @@ def test_a_list_written_out_is_refused_by_name() raises:
         _ = _plan("SELECT [] FROM t")
 
 
-def test_a_subscript_is_refused_here_and_not_in_the_transformer() raises:
-    # Which of the three families a subscript belongs to, a list, an array or a
-    # string, depends on what the operand holds, so this is the first stage
-    # with anything to say about it and it says the refusal instead.
+def test_a_subscript_of_text_is_the_substring_it_means() raises:
+    # The names print a negative bound in parentheses where DuckDB does not,
+    # which is the negation difference `_name_of` already lists.
+    # Checked against DuckDB for every pair of bounds from minus eight to eight,
+    # so these are the shapes rather than the arithmetic.
+    assert_equal(
+        _plan("SELECT g[2] FROM t"),
+        "PROJECT [substring(g, 2, 1) as g[2]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[-1] FROM t"),
+        "PROJECT [substring(g, -1, 1) as g[(-1)]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[2:3] FROM t"),
+        "PROJECT [substring(g, 2, 2) as g[2:3]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[2:] FROM t"),
+        "PROJECT [substring(g, 2) as g[2:]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[:3] FROM t"),
+        "PROJECT [substring(g, 1, 3) as g[:3]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[-3:-2] FROM t"),
+        "PROJECT [substring(g, -3, 2) as g[(-3):(-2)]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[4:2] FROM t"),
+        "PROJECT [substring(g, 1, 0) as g[4:2]]\n  SCAN t []\n",
+    )
+
+
+def test_a_slice_from_the_front_to_the_back_is_two_cuts() raises:
+    assert_equal(
+        _plan("SELECT g[2:-1] FROM t"),
+        "PROJECT [substring(g, 2) as g[2:(-1)]]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT g[2:-3] FROM t"),
+        (
+            "PROJECT [substring(substring(g, -2, -1099511627776), 2)"
+            " as g[2:(-3)]]\n"
+            "  SCAN t []\n"
+        ),
+    )
+
+
+def test_a_subscript_with_no_substring_behind_it_is_refused() raises:
     with assert_raises(contains="a slice or a subscript"):
-        _ = _plan("SELECT g[1] FROM t")
-    with assert_raises(contains="rather than with brackets"):
-        _ = _plan("SELECT g[1:2] FROM t")
+        _ = _plan("SELECT g[a] FROM t")
+    with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[1:3:1] FROM t")
+    with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[-3:2] FROM t")
+    with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[1.5] FROM t")
+    with assert_raises(contains="subscript or a slice of so far"):
+        _ = _plan("SELECT a[1] FROM t")
 
 
 def test_an_interval_is_refused_here_and_not_in_the_transformer() raises:
