@@ -135,6 +135,7 @@ from .unsupported import (
     JOIN_FORM,
     LIKE_ESCAPE,
     MAP_LITERAL,
+    MODIFIER_SCHEMA,
     NAMED_ARGUMENT,
     NOT_SUBQUERY,
     NO_CASE,
@@ -3610,13 +3611,11 @@ struct Transform(Movable):
             if lead == "EXCLUDE" or lead == "EXCEPT":
                 var holder = tree.children(part)
                 for name in self._entries(tree, sql, holder[len(holder) - 1]):
-                    exclude.append(
-                        ast.intern(
-                            self._plain(
-                                tree, sql, name, "a column EXCLUDE names"
-                            )
-                        )
+                    var parts = self._qualified(
+                        tree, sql, name, "a column EXCLUDE names"
                     )
+                    exclude.append(ast.intern(parts[0]))
+                    exclude.append(ast.intern(parts[1]))
                 continue
 
             if lead == "REPLACE":
@@ -3641,13 +3640,11 @@ struct Transform(Movable):
             if lead == "RENAME":
                 for entry in self._entries(tree, sql, self._only(tree, part)):
                     var pair = tree.children(entry)
-                    rename.append(
-                        ast.intern(
-                            self._plain(
-                                tree, sql, pair[0], "the column RENAME renames"
-                            )
-                        )
+                    var parts = self._qualified(
+                        tree, sql, pair[0], "the column RENAME renames"
                     )
+                    rename.append(ast.intern(parts[0]))
+                    rename.append(ast.intern(parts[1]))
                     rename.append(
                         ast.intern(
                             self._plain(
@@ -4168,6 +4165,53 @@ struct Transform(Movable):
             raise _malformed(tree, sql, node, "a name with no parts")
         return out^
 
+    def _qualified(
+        self, tree: Parse, sql: StringSlice, node: UInt32, what: StringSlice
+    ) raises -> List[String]:
+        """Reads a star modifier's name, which may name the binding as well.
+
+        `EXCLUDE` and the left side of a `RENAME` are the two positions that
+        take one, because they are the two DuckDB accepts a qualifier in:
+        `SELECT * EXCLUDE (t.a)` and `SELECT * RENAME (t.a AS b)` both run
+        there. `REPLACE` does not, `SELECT * REPLACE (1 AS t.a)` is a syntax
+        error in DuckDB's own parser even though the published grammar reads as
+        if it were not, so that one still takes a plain name.
+
+        The rule is `DottedIdentifier <- Identifier DotColLabel*`, so the node
+        covers name, dot, name, dot, name and every other token is a part. That
+        holds for a quoted part too, since a quoted identifier is one token
+        however many dots are inside the quotes, which is what makes
+        `EXCLUDE ("t.x"."c.y")` two parts and not four.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ExcludeName` node.
+            what: The position, for the refusal, as a noun phrase that reads
+                after "where" and before "goes".
+
+        Returns:
+            Two parts, the qualifier and then the column. The qualifier is the
+            empty string for a name written bare, which is most of them.
+
+        Raises:
+            Error: If the name has three parts or more, which starts at a
+                schema or a struct and needs the catalog to tell those apart.
+        """
+        var start = Int(tree.nodes[Int(node)].token_start)
+        var end = Int(tree.nodes[Int(node)].token_end)
+        var parts = List[String]()
+        for at in range(start, end, 2):
+            parts.append(_identifier(sql, tree.tokens[at]))
+        if len(parts) == 0:
+            raise _malformed(tree, sql, node, "a name with no parts")
+        if len(parts) > 2:
+            raise _unsupported(tree, sql, node, MODIFIER_SCHEMA, what)
+        if len(parts) == 1:
+            var bare: List[String] = ["", parts[0]]
+            return bare^
+        return parts^
+
     def _plain(
         self, tree: Parse, sql: StringSlice, node: UInt32, what: StringSlice
     ) raises -> String:
@@ -4179,14 +4223,13 @@ struct Transform(Movable):
         with several names in it, and the position is the one thing the refusal
         table cannot know and the caller always does.
 
-        Three of the twenty five can reach the raise, and they are the three
-        modifiers on a star: `EXCLUDE`, `REPLACE` and the left side of a
-        `RENAME`. Everywhere else the grammar will not put a dot in the node at
-        all, so the query stops at the parser one step earlier and never gets
-        here. That is measured rather than assumed, by asking each position for
-        a dotted name and reading what came back, and it agrees with the
-        corpus: all thirty four statements that hit this are `EXCLUDE` or
-        `RENAME`, twenty four and ten. The other twenty two calls are not dead
+        One of the twenty five can reach the raise, and it is the name a
+        `REPLACE` on a star gives its value. Everywhere else the grammar will
+        not put a dot in the node at all, so the query stops at the parser one
+        step earlier and never gets here, and the two positions that used to
+        reach it read a qualifier now through `_qualified` above. That is
+        measured rather than assumed, by asking each position for a dotted name
+        and reading what came back. The other twenty four calls are not dead
         weight, they are what keeps a widening of the grammar from turning into
         a name quietly losing its qualification, but nothing written today
         reaches them.

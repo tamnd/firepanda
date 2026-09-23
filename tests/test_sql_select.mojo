@@ -1110,14 +1110,15 @@ def test_a_dotted_name_says_which_position_turned_it_down() raises:
     # refuse the same six words. In a statement with several names in it that
     # is true and no help at all, since the reader is left to work out which of
     # the names was the one. The position is the part only the caller knows.
+    # One position is left that can reach it, which is the name a REPLACE gives
+    # its value, because that is the one of the three DuckDB's own parser will
+    # not take a dot in either.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="where a column EXCLUDE names goes"):
-        _ = _printed("SELECT * EXCLUDE (a.b) FROM t", g, rules)
     with assert_raises(contains="where a column REPLACE names goes"):
         _ = _printed("SELECT * REPLACE (1 AS a.b) FROM t", g, rules)
-    with assert_raises(contains="where the column RENAME renames goes"):
-        _ = _printed("SELECT * RENAME (a.b AS c) FROM t", g, rules)
+    with assert_raises(contains="Write the last part on its own"):
+        _ = _printed("SELECT * REPLACE (1 AS a.b) FROM t", g, rules)
 
 
 def test_only_the_star_modifiers_can_reach_the_dotted_name_refusal() raises:
@@ -1138,13 +1139,45 @@ def test_only_the_star_modifiers_can_reach_the_dotted_name_refusal() raises:
         _ = _printed("WITH a.b AS (SELECT 1) SELECT 1", g, rules)
 
 
-def test_the_dotted_name_refusal_still_says_what_to_write_instead() raises:
-    # The position is what was added. The advice was the point of the entry and
-    # it is the same advice wherever it is raised from.
+def test_a_star_modifier_keeps_the_binding_it_named() raises:
+    # EXCLUDE and the left of a RENAME are the two DuckDB takes a qualifier in,
+    # and the printer has to put it back where the query had it, because a
+    # modifier that came out bare would name the column of whichever binding
+    # has it and that is a different query.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="Write the last part on its own"):
-        _ = _printed("SELECT * EXCLUDE (a.b) FROM t", g, rules)
+    assert_equal(
+        _printed("SELECT * EXCLUDE (t.a) FROM t, u", g, rules),
+        "SELECT * EXCLUDE (t.a) FROM t, u",
+    )
+    assert_equal(
+        _printed("SELECT * RENAME (u.c AS d) FROM t, u", g, rules),
+        "SELECT * RENAME (u.c AS d) FROM t, u",
+    )
+    assert_equal(
+        _printed('SELECT * EXCLUDE ("t.x"."c.y") FROM t', g, rules),
+        'SELECT * EXCLUDE ("t.x"."c.y") FROM t',
+    )
+    # A bare one still prints bare, which is the empty qualifier coming back
+    # out as nothing rather than as a leading dot.
+    assert_equal(
+        _printed("SELECT * EXCLUDE (a) RENAME (b AS c) FROM t", g, rules),
+        "SELECT * EXCLUDE (a) RENAME (b AS c) FROM t",
+    )
+
+
+def test_a_star_modifier_of_three_parts_says_it_needs_the_catalog() raises:
+    # Two parts are a binding and a column. Three start at a schema or at a
+    # struct and nothing short of the catalog tells those apart, which is the
+    # same wall the star's own qualifier stops at.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="a name of three parts or more"):
+        _ = _printed("SELECT * EXCLUDE (s.t.a) FROM t", g, rules)
+    with assert_raises(contains="where the column RENAME renames goes"):
+        _ = _printed("SELECT * RENAME (s.t.a AS b) FROM t", g, rules)
+    with assert_raises(contains="telling those apart needs the catalog"):
+        _ = _printed("SELECT * EXCLUDE (a.b.c.d) FROM t", g, rules)
 
 
 def main() raises:

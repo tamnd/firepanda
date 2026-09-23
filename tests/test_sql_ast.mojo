@@ -224,7 +224,7 @@ def test_a_star_prints_replace_and_rename() raises:
         "+", ast.column(_parts("x")), ast.literal(LITERAL_NUMBER, "1")
     )
     var replace = ast.run([ast.intern("b"), sum])
-    var rename = ast.run([ast.intern("c"), ast.intern("d")])
+    var rename = ast.run([ast.intern(""), ast.intern("c"), ast.intern("d")])
     var node = ast.add(Expr(kind=EXPR_STAR, token=0, b=replace, payload=rename))
     assert_equal(
         print_expr(ast, node, g), "* REPLACE ((x + 1) AS b) RENAME (c AS d)"
@@ -542,14 +542,37 @@ def test_a_star_with_every_modifier_parses() raises:
         Expr(
             kind=EXPR_STAR,
             token=0,
-            a=ast.run([ast.intern("a")]),
+            a=ast.run([ast.intern(""), ast.intern("a")]),
             b=ast.run([ast.intern("b"), sum]),
-            payload=ast.run([ast.intern("c"), ast.intern("d")]),
+            payload=ast.run([ast.intern(""), ast.intern("c"), ast.intern("d")]),
         )
     )
     assert_equal(
         _round_trips(ast, node, g),
         "* EXCLUDE (a) REPLACE ((x + 1) AS b) RENAME (c AS d)",
+    )
+
+
+def test_a_star_modifier_prints_the_binding_it_named() raises:
+    # The qualifier is what `EXCLUDE (t.a)` has that `EXCLUDE (a)` does not, and
+    # both runs carry a slot for one whether or not the query wrote it, so the
+    # empty string in that slot has to come back out as a bare name rather than
+    # as a leading dot.
+    var g = Grammar()
+    var ast = Ast()
+    var node = ast.add(
+        Expr(
+            kind=EXPR_STAR,
+            token=0,
+            a=ast.run([ast.intern("t"), ast.intern("a")]),
+            payload=ast.run(
+                [ast.intern("u"), ast.intern("c"), ast.intern("d")]
+            ),
+        )
+    )
+    assert_equal(
+        _round_trips(ast, node, g),
+        "* EXCLUDE (t.a) RENAME (u.c AS d)",
     )
 
 

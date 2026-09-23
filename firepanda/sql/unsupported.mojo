@@ -201,6 +201,9 @@ comptime AGGREGATE_FILTER: UInt16 = 37
 comptime LIST_VALUE: UInt16 = 38
 """A list written out, `[1, 2]` or `ARRAY[1, 2]`."""
 
+comptime MODIFIER_SCHEMA: UInt16 = 39
+"""A star modifier naming a column by three parts or more."""
+
 
 def sql_support() -> List[Refusal]:
     """Everything firepanda's SQL front end refuses, in one list.
@@ -598,6 +601,17 @@ def sql_support() -> List[Refusal]:
                 " type."
             ),
             STAGE_ISSUE,
+        ),
+        Refusal(
+            "modifier-schema",
+            "a name of three parts or more where {} goes",
+            (
+                "A star modifier names a column of one of the things the FROM"
+                " brought, so firepanda reads two parts as that thing and that"
+                " column. Three parts starts at a schema or at a struct, and"
+                " telling those apart needs the catalog."
+            ),
+            SQL_ISSUE,
         ),
     ]
 

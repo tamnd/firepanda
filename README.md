@@ -173,6 +173,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `aggregate-filter` | FILTER on {} | A filter is read as a CASE around the argument, which answers the same number for a fold that passes over a null. first, last and any_value read a null as a value, so it would not, no fold here reads more than one argument, and a name that is not a fold has nothing for the CASE to go inside. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `list-value` | a list written out | A literal in the plan is one scalar, and a list is a value with a length. LIST is a type firepanda has and a column can hold one, so what is missing is the constant rather than the type. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `modifier-schema` | a name of three parts or more where {} goes | A star modifier names a column of one of the things the FROM brought, so firepanda reads two parts as that thing and that column. Three parts starts at a schema or at a struct, and telling those apart needs the catalog. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 
 <!-- end sql-support -->
 

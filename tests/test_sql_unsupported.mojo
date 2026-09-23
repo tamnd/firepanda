@@ -16,6 +16,7 @@ from firepanda.sql.unsupported import (
     AGGREGATE_FILTER,
     CALL_MODIFIER,
     LIST_VALUE,
+    MODIFIER_SCHEMA,
     NO_CASE,
     NO_REFUSAL,
     OPERATOR,
@@ -39,10 +40,11 @@ def test_the_constants_line_up_with_the_table() raises:
     assert_equal(refusal(NO_CASE).feature, "no-case")
     assert_equal(refusal(AGGREGATE_FILTER).feature, "aggregate-filter")
     assert_equal(refusal(LIST_VALUE).feature, "list-value")
+    assert_equal(refusal(MODIFIER_SCHEMA).feature, "modifier-schema")
 
 
 def test_the_last_constant_is_the_last_entry() raises:
-    assert_equal(Int(LIST_VALUE) + 1, len(sql_support()))
+    assert_equal(Int(MODIFIER_SCHEMA) + 1, len(sql_support()))
 
 
 def test_no_two_entries_share_a_name() raises:

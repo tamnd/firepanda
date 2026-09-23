@@ -2034,24 +2034,51 @@ def _write_list(
         _write(ast, ast.at(run, i), grammar, out)
 
 
-def _write_exclude(ast: Ast, run: UInt32, grammar: Grammar, mut out: String):
+def _write_exclude(
+    ast: Ast, run: UInt32, grammar: Grammar, mut out: String
+) raises:
     """Appends the `EXCLUDE` modifier of a star, if it has one.
 
     Args:
         ast: The AST.
-        run: A run of interned names, which may be empty.
+        run: A run of alternating interned qualifier and name, which may be
+            empty. A qualifier is the empty string for a name written bare.
         grammar: A loaded grammar.
         out: The buffer.
+
+    Raises:
+        Error: If the run has an odd length.
     """
     var count = ast.length(run)
     if count == 0:
         return
+    if count % 2 != 0:
+        raise Error(String("a star EXCLUDE with ", count, " entries in it"))
     out += " EXCLUDE ("
-    for i in range(count):
+    for i in range(0, count, 2):
         if i > 0:
             out += ", "
-        out += quote_name(ast.text(ast.at(run, i)), grammar)
+        _write_target(ast, ast.at(run, i), ast.at(run, i + 1), grammar, out)
     out += ")"
+
+
+def _write_target(
+    ast: Ast, qualifier: UInt32, name: UInt32, grammar: Grammar, mut out: String
+):
+    """Appends the name a star modifier picks a column by.
+
+    Args:
+        ast: The AST.
+        qualifier: The interned binding it names, empty for a bare name.
+        name: The interned column.
+        grammar: A loaded grammar.
+        out: The buffer.
+    """
+    var table = ast.text(qualifier)
+    if table.byte_length() > 0:
+        out += quote_name(table, grammar)
+        out += "."
+    out += quote_name(ast.text(name), grammar)
 
 
 def _write_replace(
@@ -2096,24 +2123,25 @@ def _write_rename(
 
     Args:
         ast: The AST.
-        run: A run of alternating interned old name and new name, which may be
-            empty.
+        run: A run of interned qualifier, old name and new name, three at a
+            time, which may be empty. A qualifier is the empty string for a
+            name written bare, and the new name never has one.
         grammar: A loaded grammar.
         out: The buffer.
 
     Raises:
-        Error: If the run has an odd length.
+        Error: If the run's length is not a multiple of three.
     """
     var count = ast.length(run)
     if count == 0:
         return
-    if count % 2 != 0:
+    if count % 3 != 0:
         raise Error(String("a star RENAME with ", count, " entries in it"))
     out += " RENAME ("
-    for i in range(0, count, 2):
+    for i in range(0, count, 3):
         if i > 0:
             out += ", "
-        out += quote_name(ast.text(ast.at(run, i)), grammar)
+        _write_target(ast, ast.at(run, i), ast.at(run, i + 1), grammar, out)
         out += " AS "
-        out += quote_name(ast.text(ast.at(run, i + 1)), grammar)
+        out += quote_name(ast.text(ast.at(run, i + 2)), grammar)
     out += ")"

@@ -20,6 +20,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 - A quantile over a boolean column, on a series or a frame, now raises numpy's `TypeError` about boolean subtraction instead of answering. pandas hands the values to `numpy.quantile`, which cannot subtract two booleans to interpolate, and an answer where pandas raises is code that works here and breaks on the library it was written against. This is what closes `errors/quantile-on-boolean` on the conformance board.
 
+### Added: a star modifier says which of the tables it meant
+
+`SELECT * EXCLUDE (t.b) FROM t JOIN u ON t.a = u.k` runs. So does `RENAME (u.b AS q)`. Both used to be refused as a dotted name in a position with nowhere to put the two halves, and the position had nowhere to put them because the AST held one interned name per modifier entry and a qualified name is two.
+
+The qualifier is not decoration. A modifier name is a name and not a column reference, so a bare `EXCLUDE (b)` over a join of two tables that both have a column called `b` drops both of them, which is DuckDB's rule and is tested. Writing the dot is the only way a query says it meant one of them, and without it there was no way to ask for that at all.
+
+Two of the three modifiers take one, because two of the three are the ones DuckDB takes one in. `EXCLUDE (t.a)` and `RENAME (t.a AS b)` both run there and `REPLACE (1 AS t.a)` is a syntax error in DuckDB's own parser, even though the published grammar reads as if it were not, so the `REPLACE` name stays a plain name and keeps the refusal it had.
+
+A qualifier is matched against the name the FROM gave the table rather than against the table's own name, which is the rule a column reference already follows: `EXCLUDE (x.b) FROM t AS x` runs and `EXCLUDE (t.b) FROM t AS x` does not. A qualifier naming nothing the FROM brought is not a separate error. The whole name matched no column, so `EXCLUDE` says `Column "nosuch.b" in EXCLUDE list not found in FROM clause` with the whole name in it and `RENAME` says nothing at all, which is DuckDB on both counts and is the one modifier that lets a typo through.
+
+Three parts or more is refused by name, as `modifier-schema`. `EXCLUDE (s.t.a)` starts at a schema or at a struct and nothing short of the catalog tells those apart, which is the same wall the star's own qualifier stops at. A modifier qualified by the alias of a subquery is refused for the reason a qualified star over one is: a derived table is not a relation and its columns arrive with no number saying which source they came from.
+
+In DuckDB's corpus, `dotted-name` was thirty four statements, twenty four `EXCLUDE` and ten `RENAME`. It is now none, and `modifier-schema` is nine, so twenty five statements that were refused now parse, transform and print back to the same text twice.
+
 ## [0.8.26] - 2026-09-23
 
 Built against Mojo 1.0.0 (ed45d567).

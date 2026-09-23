@@ -1775,6 +1775,21 @@ table has neither: its columns are computed by the nodes under it. So the alias
 of one is a name that says which columns are meant rather than a number a column
 can carry, and this is the value that says so."""
 
+comptime ANY_BINDING = -3
+"""Which relation a star modifier written with no dot in front of it means.
+
+A bare `EXCLUDE (a)` drops the column called `a` wherever it came from, so what
+it names is not a relation at all. This is what stands in for one, so that the
+qualified and the bare case are the one comparison rather than two."""
+
+comptime NO_BINDING = -4
+"""What a star modifier qualified by a name the FROM did not bring means.
+
+A number no column carries, so the comparison runs and nothing matches, which
+leaves `EXCLUDE (x.a)` to be refused by the same check that refuses
+`EXCLUDE (zzz)` and with the same message, and leaves `RENAME (x.a AS b)` alone
+the way DuckDB leaves `RENAME (zzz AS b)` alone."""
+
 
 struct _Scope(Movable):
     """What the `FROM` put in reach, and which relation each name is.
@@ -7925,6 +7940,48 @@ def _group_by_all(
         key_names.append(_name_of(ast, grammar, item.a, len(key_names), scope))
 
 
+def _binding(target: Target, scope: _Scope) raises -> Int:
+    """Which relation a star modifier's qualifier means.
+
+    A qualifier the FROM did not bring is not refused here, it comes back as a
+    number no column carries and so matches nothing, which is what leaves the
+    two lists free to disagree about it the way DuckDB does. An `EXCLUDE` that
+    matched nothing is an error and the caller raises it at the end with the
+    whole name in it, and a `RENAME` that matched nothing is not an error at
+    all, which is the one modifier that lets a typo through.
+
+    Args:
+        target: The name the modifier wrote.
+        scope: What the FROM put in reach.
+
+    Returns:
+        The relation, `ANY_BINDING` for a name written with no dot in it, or
+        `NO_BINDING` for a qualifier nothing in reach is called.
+
+    Raises:
+        If the qualifier names a subquery, whose columns arrive with no number
+        on them.
+    """
+    if target.table.byte_length() == 0:
+        return ANY_BINDING
+    var found = scope.find(target.table)
+    if found == DERIVED:
+        raise Error(
+            String(
+                "firepanda does not lower '",
+                target.written(),
+                (
+                    "' yet, because a subquery in a FROM is not a relation and"
+                    " its columns arrive with no number saying which source"
+                    " they came from"
+                ),
+            )
+        )
+    if found == NOT_IN_REACH:
+        return NO_BINDING
+    return found
+
+
 def _expand(
     ast: Ast,
     at: UInt32,
@@ -7950,7 +8007,8 @@ def _expand(
     What this does not take is a qualified star in front of a subquery's name.
     A derived table is not a relation and its columns come through with no
     number on them, so there is nothing here to keep them apart from the
-    columns of the source beside them.
+    columns of the source beside them. A modifier qualified by one is turned
+    down for the same reason and with the same words.
 
     Args:
         ast: The arenas.
@@ -7971,14 +8029,20 @@ def _expand(
     """
     var node = ast.exprs[Int(at)]
 
-    # Every modifier name is one identifier. A dotted one is refused while the
-    # AST is built, since the node has nowhere to put the two halves, so
-    # nothing here has a qualifier to match and every `Target` is written bare.
+    # `EXCLUDE` and `RENAME` name a column of one binding when they are written
+    # with a dot in them, so both runs carry a qualifier and it is the empty
+    # string for the bare names, which is most of them. `REPLACE` does not,
+    # because DuckDB's parser will not take a dot there, so its run is the name
+    # and the value and every `Target` it builds is bare.
     var excluded = List[Target]()
-    for i in range(ast.length(node.a)):
-        excluded.append(Target("", ast.text(ast.at(node.a, i))))
-    var replaced = List[Replacement]()
     var i = 0
+    while i + 1 < ast.length(node.a):
+        excluded.append(
+            Target(ast.text(ast.at(node.a, i)), ast.text(ast.at(node.a, i + 1)))
+        )
+        i += 2
+    var replaced = List[Replacement]()
+    i = 0
     while i + 1 < ast.length(node.b):
         replaced.append(
             Replacement(
@@ -7988,14 +8052,17 @@ def _expand(
         i += 2
     var renamed = List[Renaming]()
     i = 0
-    while i + 1 < ast.length(node.payload):
+    while i + 2 < ast.length(node.payload):
         renamed.append(
             Renaming(
-                Target("", ast.text(ast.at(node.payload, i))),
-                ast.text(ast.at(node.payload, i + 1)),
+                Target(
+                    ast.text(ast.at(node.payload, i)),
+                    ast.text(ast.at(node.payload, i + 1)),
+                ),
+                ast.text(ast.at(node.payload, i + 2)),
             )
         )
-        i += 2
+        i += 3
     check(excluded, replaced, renamed)
 
     var qualified = False
@@ -8034,6 +8101,16 @@ def _expand(
         qualified = True
         only = found
 
+    # A modifier written with a dot in it names a column of one binding, so the
+    # binding is looked up once here rather than per column, and what the
+    # comparison below is left with is two relation numbers.
+    var exclude_at = List[Int]()
+    for entry in excluded:
+        exclude_at.append(_binding(entry, scope))
+    var rename_at = List[Int]()
+    for entry in renamed:
+        rename_at.append(_binding(entry.target, scope))
+
     var used_exclude = List[Bool](length=len(excluded), fill=False)
     var used_replace = List[Bool](length=len(replaced), fill=False)
     for at_column in range(len(schema)):
@@ -8043,7 +8120,10 @@ def _expand(
 
         var dropped = False
         for entry in range(len(excluded)):
-            if excluded[entry].matches("", column):
+            if exclude_at[entry] != ANY_BINDING:
+                if exclude_at[entry] != origin[at_column]:
+                    continue
+            if excluded[entry].names(column):
                 used_exclude[entry] = True
                 dropped = True
         if dropped:
@@ -8066,9 +8146,12 @@ def _expand(
             continue
 
         var called = String(column)
-        for entry in renamed:
-            if entry.target.matches("", column):
-                called = String(entry.name)
+        for entry in range(len(renamed)):
+            if rename_at[entry] != ANY_BINDING:
+                if rename_at[entry] != origin[at_column]:
+                    continue
+            if renamed[entry].target.names(column):
+                called = String(renamed[entry].name)
 
         if stood != NOT_REPLACED:
             outputs.append(_lower_expr(ast, stood, plan, walk, scope, grouped))
