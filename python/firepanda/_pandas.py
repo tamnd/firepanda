@@ -1000,6 +1000,43 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
     return float(q)
 
 
+def _category_reduction(kind: str, ordered: bool) -> None:
+    """Refuses a reduction of a category column the way pandas does.
+
+    A category column is reduced through its codes, which are positions in the
+    category order, so the smallest code is the smallest value when the order
+    means something and a count of distinct codes is a count of the categories
+    in use. pandas answers `min` and `max` only when the categories are ordered,
+    answers `count` and `nunique` either way, and refuses the rest with a
+    `TypeError` naming the operation, because a sum of positions is not a sum of
+    anything. A quantile is refused here as well, and not by pandas, which reads
+    one off the codes: that is a rule this layer has not written yet.
+
+    Args:
+        kind: The reduction, as the kernel spells it.
+        ordered: Whether the column's categories are ordered.
+
+    Raises:
+        TypeError: With pandas' sentence, for the reductions pandas refuses.
+        NotImplementedError: For a quantile.
+    """
+    if kind in ("min", "max"):
+        if not ordered:
+            raise TypeError(
+                f"Categorical is not ordered for operation {kind}\n"
+                "you can use .as_ordered() to change the Categorical to an ordered one\n"
+            )
+        return
+    if kind in ("count", "nunique"):
+        return
+    if kind == "quantile":
+        raise NotImplementedError(
+            "quantile over a category column is not supported yet, because pandas"
+            " reads it off the codes under a rule of its own"
+        )
+    raise TypeError(f"'Categorical' with dtype category does not support operation '{kind}'")
+
+
 def _quantiles_asked(q: Any) -> tuple[list[float], bool]:
     """Reads the quantiles a series or a frame was asked for.
 
@@ -7343,8 +7380,17 @@ class SeriesMixin:
             "refusing a column a reduction cannot read is what the reduction"
             " already does, and it says so with the dtype in the message",
         )
+        category = self.dtype == "category"
         try:
-            answer = self._inner.reduce(kind, param)
+            if category:
+                _category_reduction(kind, self._inner.ordered())
+                answer = self._inner.codes().reduce(kind, param)
+                if kind in ("min", "max") and answer is not None:
+                    answer = self._inner.categories().to_list()[answer]
+            else:
+                answer = self._inner.reduce(kind, param)
+        except (TypeError, NotImplementedError):
+            raise
         except Exception as error:
             raise translate(error) from None
         if not skipna and self.hasnans:
@@ -7380,6 +7426,8 @@ class SeriesMixin:
             " and pandas' other reading of it, where a gap counts as true,"
             " is a second pass rather than a flag on this one",
         )
+        if self.dtype == "category":
+            _category_reduction(kind, False)
         try:
             return self._inner.reduce(kind, 0.0)
         except Exception as error:
