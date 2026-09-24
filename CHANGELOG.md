@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `round` on `Series` and `DataFrame`
+
+`Series.round(decimals)` and `DataFrame.round(decimals)` round every number the way numpy does, which is to scale by a power of ten, round half to even and scale back, all in the column's own floating point type, so `2.5` rounds to `2.0`, `2.675` to two places is `2.67` and a float32 column stays float32. An integer column is unchanged unless `decimals` is negative, and then it rounds to the nearest ten, hundred and so on and keeps its width. A column of text, bools, categories or times comes back as it was, as in pandas. The frame's method also takes a mapping or a series of places by column name and leaves the columns it does not name alone. Python's own `round` works on both, numpy's `out` is accepted empty and refused otherwise, and every mistake raises pandas' class with pandas' message.
+
 ### Added: grouped `diff` and `transform` by name
 
 `diff` on `DataFrameGroupBy` and `SeriesGroupBy` answers each row less the row that many before it in its group, taking whole numbers to float32 for the two narrow signed widths and to float64 otherwise, as pandas does. `transform` takes the name of a reduction and puts each group's value on every one of its rows, through a new core `group_broadcast` that reduces the groups once and gathers by ordinal, and it casts the answer back to float32 or to the column's own integer width where pandas does. It also takes the name of a scan. A Python function, the names pandas takes that are not written yet, and a bool column's `diff`, which pandas answers with an object column, are refused by name, and an unknown name gets pandas' `ValueError`.

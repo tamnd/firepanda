@@ -2596,6 +2596,13 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.round",
+            name="round",
+            doc="Some columns rounded to some decimal places, half to even.",
+            params=(("at", "list[int]"), ("decimals", "list[int]")),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.arrow_c_schema",
             name="arrow_c_schema",
             doc="The frame's Arrow schema, in a capsule.",
@@ -3410,6 +3417,13 @@ SERIES = Exposed(
             name="unary",
             doc="One of the four unary operations, over every row.",
             params=(("op", "str"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.round",
+            name="round",
+            doc="Every row rounded to some decimal places, half to even.",
+            params=(("decimals", "int"),),
             returns="Series",
         ),
         Binding(

@@ -36,12 +36,13 @@ unsigned one answers the wrapped complement, so `-Series([1], dtype='uint8')` is
 divergence rather than a fix.
 """
 
+from std.math import floor
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.lists import ALL
+from firepanda.dtype.lists import ALL, NUMERIC
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.exec import parallel_morsels
 
@@ -326,3 +327,128 @@ def unary_any(a: AnyArray, op: UnaryOp) raises -> AnyArray:
                 )
             return out^
     raise Error("unary: unsupported dtype")
+
+
+def power_of_ten(n: Int) -> Float64:
+    """Ten to a whole power, the way numpy works it out for `round`.
+
+    A product of tens rather than `pow`, because numpy multiplies and the two
+    can differ in the last place for a large power, and a round that is one
+    place off numpy's is a divergence nobody would ever find. Past the largest
+    power a double can hold the answer is infinity, which is numpy's answer too
+    and is what makes a huge `decimals` come back as NaN rather than raising.
+
+    Args:
+        n: The power. Must not be negative.
+
+    Returns:
+        The power of ten, or infinity.
+    """
+    var ret = 1.0
+    # Three hundred and nine tens is already past the largest double, so a
+    # million of them would only spend the time it takes to multiply infinity.
+    for _ in range(min(n, 400)):
+        ret *= 10.0
+    return ret
+
+
+@always_inline
+def _half_to_even[dt: DType, width: Int](y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Rounds to the nearest whole number and settles a tie on the even one.
+
+    A tie is exactly half way, and half of it is a quarter past something, which
+    is never a tie, so the even neighbour is twice the rounded half. Everything
+    else rounds the ordinary way whichever way the builtin settles its ties.
+
+    Args:
+        y: The values.
+
+    Parameters:
+        dt: A floating point dtype.
+        width: The register width.
+
+    Returns:
+        The rounded values.
+    """
+    var tie = (y - floor(y)).eq(SIMD[dt, width](0.5))
+    return tie.select(round(y * 0.5) * 2, round(y))
+
+
+def _rounded[dt: DType](a: Array[dt], decimals: Int) raises -> Array[dt]:
+    """Rounds a column to some number of decimal places, numpy's way.
+
+    numpy scales, rounds half to even and scales back, all in the column's own
+    floating point type, so `2.675` rounds to `2.67` in float64 because it was
+    never quite `2.675`, and `0.125` rounds to `0.12`. An integer column only
+    gets here with a negative `decimals`, and numpy does its arithmetic in
+    float64 and casts back, so `25` to the nearest ten is `20`.
+
+    Args:
+        a: The column.
+        decimals: The places to keep, negative for tens, hundreds and so on.
+
+    Parameters:
+        dt: A numeric dtype.
+
+    Returns:
+        A column of the same type, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime work = dt if dt.is_floating_point() else DType.float64
+    comptime width = simd_width_of[dt]()
+
+    var n = len(a)
+    var out = Array[dt](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+    var factor = SIMD[work, width](power_of_ten(abs(decimals)))
+    var up = decimals >= 0
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var src = a.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var x = src.unsafe_offset(i).unsafe_load[width=width]().cast[work]()
+            var y: SIMD[work, width]
+            if up:
+                y = _half_to_even(x * factor) / factor
+            else:
+                y = _half_to_even(x / factor) * factor
+            dst.unsafe_offset(i).unsafe_store(y.cast[dt]())
+            i += width
+
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def round_any(a: AnyArray, decimals: Int) raises -> AnyArray:
+    """Rounds a column to some number of decimal places, as pandas does.
+
+    Only a number is rounded. pandas hands back a bool, text, category or
+    temporal column unchanged rather than refusing it, and an integer column
+    has nothing to lose to a `decimals` that is zero or more, so all of those
+    are a copy.
+
+    Args:
+        a: The column.
+        decimals: The places to keep, negative for tens, hundreds and so on.
+
+    Returns:
+        A column of the same type, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var kind = a.type.kind
+    if kind != TypeKind.FLOAT_KIND and (kind != TypeKind.INT or decimals >= 0):
+        return AnyArray(copy=a)
+
+    comptime for target in NUMERIC:
+        if a.type.physical == target:
+            return AnyArray(_rounded(a.as_typed_view[target](), decimals))
+    return AnyArray(copy=a)

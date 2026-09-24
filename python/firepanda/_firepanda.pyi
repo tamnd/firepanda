@@ -184,6 +184,9 @@ class DataFrame:
     def unary(self, op: str) -> DataFrame:
         """One of the four unary operations, over every column."""
         ...
+    def round(self, at: list[int], decimals: list[int]) -> DataFrame:
+        """Some columns rounded to some decimal places, half to even."""
+        ...
     def arrow_c_schema(self) -> object:
         """The frame's Arrow schema, in a capsule."""
         ...
@@ -392,6 +395,9 @@ class Series:
         ...
     def unary(self, op: str) -> Series:
         """One of the four unary operations, over every row."""
+        ...
+    def round(self, decimals: int) -> Series:
+        """Every row rounded to some decimal places, half to even."""
         ...
     def arrow_c_schema(self) -> object:
         """The column's Arrow schema, in a capsule."""

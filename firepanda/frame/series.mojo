@@ -155,7 +155,7 @@ from firepanda.kernel.temporal import (
     temporal_tz_localize_none,
     unit_named,
 )
-from firepanda.kernel.unary import UnaryOp, unary_any
+from firepanda.kernel.unary import UnaryOp, round_any, unary_any
 from firepanda.kernel.ewm import EwmOp, EwmSpec, ewm_agg
 from firepanda.kernel.window import (
     Shape,
@@ -4396,6 +4396,23 @@ struct Series(Copyable, Movable, Sized, Writable):
                 and `abs` on a text column and `~` on a float one.
         """
         return self._relabelled(self.name.copy(), unary_any(self.values, op))
+
+    def rounded(self, decimals: Int) raises -> Self:
+        """Rounds every row to some number of decimal places, half to even.
+
+        Args:
+            decimals: The places to keep, negative for tens, hundreds and so on.
+
+        Returns:
+            A series of the same type, under the same labels and the same name.
+            A column that is not a number comes back unchanged, as in pandas.
+
+        Raises:
+            Error: Only what the kernel's runtime raises.
+        """
+        return self._relabelled(
+            self.name.copy(), round_any(self.values, decimals)
+        )
 
     def __neg__(self) raises -> Self:
         """Flips the sign of every row.

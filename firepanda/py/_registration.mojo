@@ -251,6 +251,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "unary",
         docstring="One of the four unary operations, over every column.",
     )
+    _ = dataframe.def_method[PyDataFrame.round](
+        "round",
+        docstring="Some columns rounded to some decimal places, half to even.",
+    )
     _ = dataframe.def_method[PyDataFrame.arrow_c_schema](
         "arrow_c_schema", docstring="The frame's Arrow schema, in a capsule."
     )
@@ -459,6 +463,10 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.unary](
         "unary", docstring="One of the four unary operations, over every row."
+    )
+    _ = series.def_method[PySeries.round](
+        "round",
+        docstring="Every row rounded to some decimal places, half to even.",
     )
     _ = series.def_method[PySeries.arrow_c_schema](
         "arrow_c_schema", docstring="The column's Arrow schema, in a capsule."

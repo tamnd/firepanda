@@ -106,7 +106,7 @@ from firepanda.kernel.sort import (
 )
 from firepanda.kernel.temporal import TemporalField, temporal_field
 from firepanda.kernel.topn import group_top_rows_any, top_rows
-from firepanda.kernel.unary import UnaryOp, unary_any
+from firepanda.kernel.unary import UnaryOp, round_any, unary_any
 
 from .align import (
     fill_one_sided,
@@ -3856,6 +3856,45 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 )
             )
         return self._rebuilt(made^, Index(copy=self.index))
+
+    def rounded(self, at: List[Int], decimals: List[Int]) raises -> Self:
+        """Rounds some columns to some number of decimal places, half to even.
+
+        Positions rather than names, because a frame can carry two columns of
+        one name and pandas rounds both of them.
+
+        Args:
+            at: The positions of the columns to round.
+            decimals: The places to keep for each of them, in the same order.
+
+        Returns:
+            A frame of the same shape and types, on the same labels.
+
+        Raises:
+            Error: If the two lists differ in length or a position is outside
+                the frame.
+        """
+        if len(at) != len(decimals):
+            raise Error(
+                "round was given a different number of places and columns"
+            )
+        var columns = List[ChunkedArray](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            columns.append(ChunkedArray(copy=self.columns[i]))
+        for j in range(len(at)):
+            if at[j] < 0 or at[j] >= len(self.columns):
+                raise Error(
+                    "round names column "
+                    + String(at[j])
+                    + ", which is not in the frame"
+                )
+            columns[at[j]] = ChunkedArray(
+                round_any(self.columns[at[j]].only(), decimals[j])
+            )
+        var out = Self(Schema(copy=self.schema), columns^)
+        out.rows = self.rows
+        out.index = Index(copy=self.index)
+        return out^
 
     def add(
         self,
