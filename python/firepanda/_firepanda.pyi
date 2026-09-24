@@ -145,6 +145,11 @@ class DataFrame:
     ) -> DataFrame:
         """One reduction applied to every column that is not a key."""
         ...
+    def join_on(
+        self, other: DataFrame, left_on: list[str], right_on: list[str], how: str, suffix: str
+    ) -> DataFrame:
+        """The rows of two frames paired on key columns."""
+        ...
     def labels(self) -> Index:
         """The row labels, as an index."""
         ...

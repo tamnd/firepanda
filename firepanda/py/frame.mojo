@@ -28,6 +28,7 @@ from firepanda.frame import DataFrame
 from firepanda.frame.concat import concat_series
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
+from firepanda.join import JoinKind
 from firepanda.kernel.reduce import reduce_any
 from firepanda.io.arrow_c import (
     ArrowArray,
@@ -1535,6 +1536,76 @@ struct PyDataFrame(Movable, Writable):
                 raise retagged(VALUE, cause)
             raise retagged(COLUMN, cause)
         return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
+    def join_on(
+        py_self: PythonObject,
+        other: PythonObject,
+        left_on: PythonObject,
+        right_on: PythonObject,
+        how: PythonObject,
+        suffix: PythonObject,
+    ) raises -> PythonObject:
+        """Joins this frame to another on key columns, which is `pd.merge`.
+
+        The core's `join_on` does the pairing and the gathering, and this reads
+        the arguments and names the join. The pandas rules the core does not
+        share are the Python layer's: both suffixes, the sort of an outer join,
+        and a null key matching another null key.
+
+        Args:
+            py_self: The left frame.
+            other: The right frame.
+            left_on: The left key columns.
+            right_on: The right key columns, paired with the left by position.
+            how: `inner`, `left`, `right` or `outer`.
+            suffix: Appended to a right column whose name is taken.
+
+        Returns:
+            A new frame, with the left columns first and then the right ones
+            that are not a key shared by name.
+
+        Raises:
+            Error: Tagged `value`, if `how` is not one of the four or the key
+                lists differ in length, and tagged `column` if a key is missing
+                or named twice, or the two keys of a pair have different types.
+        """
+        var right = Self._other(other, "other")
+        var lefts = List[String](capacity=Int(len(left_on)))
+        for name in left_on:
+            lefts.append(String(name))
+        var rights = List[String](capacity=Int(len(right_on)))
+        for name in right_on:
+            rights.append(String(name))
+        var spelling = words(how, "how")
+        var kind: JoinKind
+        if spelling == "inner":
+            kind = JoinKind.INNER
+        elif spelling == "left":
+            kind = JoinKind.LEFT
+        elif spelling == "right":
+            kind = JoinKind.RIGHT
+        elif spelling == "outer":
+            kind = JoinKind.OUTER
+        else:
+            raise tagged(
+                VALUE, "join: how has to be inner, left, right or outer"
+            )
+        var tail = words(suffix, "suffix")
+        if len(lefts) != len(rights):
+            raise tagged(VALUE, "len(right_on) must equal len(left_on)")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .join_on(right[], lefts, rights, kind, tail)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
 
     @staticmethod
     def dropna(

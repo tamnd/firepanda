@@ -2402,6 +2402,19 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.join_on",
+            name="join_on",
+            doc="The rows of two frames paired on key columns.",
+            params=(
+                ("other", "DataFrame"),
+                ("left_on", "list[str]"),
+                ("right_on", "list[str]"),
+                ("how", "str"),
+                ("suffix", "str"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.labels",
             name="labels",
             doc="The row labels, as an index.",

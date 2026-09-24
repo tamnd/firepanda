@@ -77,7 +77,19 @@ needs_a_build = pytest.mark.skipif(
 # Eleven mebibytes leaves 741,112 bytes above the measured figure, which is
 # still under the megabyte the smallest wrongly vendored library weighs, so the
 # first paragraph is still true.
-SIZE_BUDGET = 11 * 1024 * 1024
+#
+# Raised again from eleven, measured the same way. `merge` crossed it at
+# 11,805,016 bytes on x86-64, and main at the commit it branched from, 0e8bf943,
+# builds to 11,399,512 on the same machine, so the change costs 405,504 bytes.
+# The four files are the same four and the three runtime libraries did not move
+# by a byte, so all of it is in the extension, whose text went from 9,427,600
+# bytes to 9,834,298. That is the price of the `join_on` binding: nothing the
+# extension reached before called the frame join, so the hash join and the
+# gather behind it are in the binary for the first time.
+#
+# Twelve mebibytes leaves 777,896 bytes above the measured figure, which is
+# still under the megabyte the smallest wrongly vendored library weighs.
+SIZE_BUDGET = 12 * 1024 * 1024
 
 
 def _stripped_environment() -> dict[str, str]:

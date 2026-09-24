@@ -42,6 +42,7 @@ from .errors import (
     DTypeError,
     FirepandaError,
     InvalidArgumentError,
+    MergeError,
     OutOfBoundsError,
     UnsupportedError,
     translate,
@@ -5948,6 +5949,42 @@ class DataFrameMixin:
             return _settled(self, DataFrame._wrap(self._inner.sort_index(bool(ascending))), inplace)
         except Exception as error:
             raise translate(error) from None
+
+    def merge(
+        self,
+        right: Any,
+        how: str = "inner",
+        on: Any = None,
+        left_on: Any = None,
+        right_on: Any = None,
+        left_index: bool = False,
+        right_index: bool = False,
+        sort: bool = False,
+        suffixes: Any = ("_x", "_y"),
+        copy: Any = NO_DEFAULT,
+        indicator: Any = False,
+        validate: Any = None,
+    ) -> DataFrame:
+        """`merge` with this frame on the left, which is all the method is.
+
+        Written here rather than generated, because the generated body is one
+        call on one line and twelve arguments do not fit on it.
+        """
+        return merge(
+            self,
+            right,
+            how,
+            on,
+            left_on,
+            right_on,
+            left_index,
+            right_index,
+            sort,
+            suffixes,
+            copy,
+            indicator,
+            validate,
+        )
 
     def _sort_values(
         self,
@@ -11947,6 +11984,324 @@ def _unwrap(value: Any, name: str) -> Any:
     if isinstance(value, (list, tuple)):
         return _firepanda.Index(list(value), None)
     raise TypeError(f"{name} must be an Index or a list of labels, not a {type(value).__name__}")
+
+
+MERGE_HOWS = ("inner", "left", "right", "outer")
+"""The four joins `merge` answers, in the words `how` spells them."""
+
+MERGE_VALIDATE = {
+    "1:1": ("one-to-one", True, True),
+    "one_to_one": ("one-to-one", True, True),
+    "1:m": ("one-to-many", True, False),
+    "one_to_many": ("one-to-many", True, False),
+    "m:1": ("many-to-one", False, True),
+    "many_to_one": ("many-to-one", False, True),
+    "m:m": ("many-to-many", False, False),
+    "many_to_many": ("many-to-many", False, False),
+}
+"""What each `validate` word checks: its name in the message, and whether the
+left keys and the right keys have to be unique."""
+
+
+def _merge_side(value: Any) -> DataFrame:
+    """One side of a merge as a frame, which is what a named series becomes.
+
+    Raises:
+        InvalidArgumentError: For a series with no name, in pandas' words.
+        TypeError: For anything that is neither, in pandas' words.
+    """
+    from ._frame import DataFrame, Series
+
+    if isinstance(value, DataFrame):
+        return value
+    if isinstance(value, Series):
+        if value.name is None:
+            raise InvalidArgumentError("Cannot merge a Series without a name")
+        return value.to_frame()
+    raise TypeError(f"Can only merge Series or DataFrame objects, a {type(value)} was passed")
+
+
+def _merge_keys(
+    left: DataFrame, right: DataFrame, on: Any, left_on: Any, right_on: Any
+) -> tuple[list[str], list[str]]:
+    """The left and right key columns, read the way pandas reads the three.
+
+    With none of them given the keys are the columns the two frames share, in
+    the left frame's order.
+
+    Raises:
+        MergeError: For keys given in a combination pandas refuses, or no
+            shared column to fall back on.
+        InvalidArgumentError: If the two lists differ in length.
+        KeyError: For a key that is not a column of its side.
+    """
+    if on is not None:
+        if left_on is not None or right_on is not None:
+            raise MergeError(
+                'Can only pass argument "on" OR "left_on" and "right_on", not a'
+                " combination of both."
+            )
+        lefts = rights = _sequence(on)
+    elif left_on is None and right_on is None:
+        lefts = rights = [name for name in left.columns if name in right.columns]
+        if not lefts:
+            raise MergeError(
+                "No common columns to perform merge on. Merge options: left_on=None,"
+                " right_on=None, left_index=False, right_index=False"
+            )
+    elif right_on is None:
+        raise MergeError('Must pass "right_on" OR "right_index".')
+    elif left_on is None:
+        raise MergeError('Must pass "left_on" OR "left_index".')
+    else:
+        lefts, rights = _sequence(left_on), _sequence(right_on)
+    if len(lefts) != len(rights):
+        raise InvalidArgumentError("len(right_on) must equal len(left_on)")
+    for names, frame in ((lefts, left), (rights, right)):
+        for name in names:
+            if name not in frame.columns:
+                raise KeyError(name)
+    return list(lefts), list(rights)
+
+
+def _merge_validated(
+    left: DataFrame, right: DataFrame, lefts: list[str], rights: list[str], validate: Any
+) -> None:
+    """Checks the keys are as unique as `validate` says, left side first.
+
+    Raises:
+        InvalidArgumentError: For a word that is not one of the eight.
+        MergeError: For a side whose keys repeat where they may not.
+    """
+    if validate is None:
+        return
+    if validate not in MERGE_VALIDATE:
+        words = "\n".join(f'- "{word}"' for word in MERGE_VALIDATE)
+        raise InvalidArgumentError(
+            f'"{validate}" is not a valid argument. Valid arguments are:\n{words}'
+        )
+    kind, left_unique, right_unique = MERGE_VALIDATE[validate]
+    for side, frame, names, unique in (
+        ("left", left, lefts, left_unique),
+        ("right", right, rights, right_unique),
+    ):
+        if unique and bool(frame.duplicated(subset=names).any()):
+            raise MergeError(f"Merge keys are not unique in {side} dataset; not a {kind} merge")
+
+
+def _merge_suffixed(
+    left: DataFrame,
+    right: DataFrame,
+    lefts: list[str],
+    rights: list[str],
+    suffixes: Any,
+) -> tuple[Any, Any, list[str], list[str]]:
+    """Both sides with every overlapping column that is not a shared key renamed.
+
+    pandas puts a suffix on both sides, where the core puts one on the right
+    only when a name is taken, so the renaming happens here, first, and the
+    core never sees a collision. A key named the same on both sides is kept
+    once and is the one overlap that is not renamed.
+
+    Returns:
+        The two inner frames and the two key lists under the new names.
+
+    Raises:
+        InvalidArgumentError: If columns overlap and neither suffix is given.
+    """
+    shared = {lk for lk, rk in zip(lefts, rights, strict=True) if lk == rk}
+    overlap = [name for name in left.columns if name in right.columns and name not in shared]
+    left_inner, right_inner = left._inner, right._inner
+    if not overlap:
+        return left_inner, right_inner, lefts, rights
+    if not isinstance(suffixes, (list, tuple)) or len(suffixes) != 2:
+        raise TypeError(
+            f"Passing 'suffixes' as a {type(suffixes)}, is not supported. Provide"
+            " 'suffixes' as a tuple instead."
+        )
+    left_suffix, right_suffix = suffixes
+    if not left_suffix and not right_suffix:
+        raise InvalidArgumentError(
+            f"columns overlap but no suffix specified: Index({overlap!r}, dtype='str')"
+        )
+    if left_suffix:
+        news = [f"{name}{left_suffix}" for name in overlap]
+        left_inner = left_inner.renamed_columns(overlap, news)
+        lefts = [f"{name}{left_suffix}" if name in overlap else name for name in lefts]
+    if right_suffix:
+        news = [f"{name}{right_suffix}" for name in overlap]
+        right_inner = right_inner.renamed_columns(overlap, news)
+        rights = [f"{name}{right_suffix}" if name in overlap else name for name in rights]
+    return left_inner, right_inner, lefts, rights
+
+
+def _merge_key_types(
+    left_inner: Any, right_inner: Any, lefts: list[str], rights: list[str]
+) -> tuple[Any, Any]:
+    """Both sides with each pair of keys brought to one type, as pandas does.
+
+    An integer key against a float key is a float key on both sides and two
+    integer widths are int64. Anything else that differs is pandas' ValueError.
+
+    Raises:
+        InvalidArgumentError: For two key types pandas will not merge.
+    """
+    left_types = dict(zip(left_inner.names(), left_inner.dtypes(), strict=True))
+    right_types = dict(zip(right_inner.names(), right_inner.dtypes(), strict=True))
+    for lk, rk in zip(lefts, rights, strict=True):
+        mine, theirs = left_types[lk], right_types[rk]
+        if mine == theirs:
+            continue
+        if _counts_as_numeric(mine) and _counts_as_numeric(theirs) and "bool" not in (mine, theirs):
+            wanted = "float64" if "float" in mine + theirs else "int64"
+            left_inner = left_inner.cast([lk], [wanted], True)
+            right_inner = right_inner.cast([rk], [wanted], True)
+            continue
+        spelled = [kind if kind != "string" else "str" for kind in (mine, theirs)]
+        raise InvalidArgumentError(
+            f"You are trying to merge on {spelled[0]} and {spelled[1]} columns for key"
+            f" '{lk}'. If you wish to proceed you should use pd.concat"
+        )
+    return left_inner, right_inner
+
+
+def _merge_stand_in(left: Any, right: Any, printed: str) -> Any:
+    """A value neither key column holds, to stand for a missing key on both sides.
+
+    pandas pairs a missing key with a missing key and the core pairs it with
+    nothing, which is the SQL rule, so a key missing on both sides is filled
+    with this before the join and emptied again after it.
+
+    Raises:
+        UnsupportedError: For a key type there is no stand in for yet.
+    """
+    if _counts_as_numeric(printed) and printed != "bool":
+        highest = [side.max() for side in (left, right)]
+        present = [value for value in highest if value is not None and value == value]
+        return max(present) + 1 if present else 0
+    if printed == "string":
+        taken = set(left.dropna().tolist()) | set(right.dropna().tolist())
+        stand_in = "\x00firepanda missing key"
+        while stand_in in taken:
+            stand_in += "\x00"
+        return stand_in
+    raise UnsupportedError(
+        f"a missing {printed} key on both sides of a merge, which pandas pairs with"
+        " each other and firepanda has no stand in for yet"
+    )
+
+
+def _merge_sorted(out: Any, lefts: list[str], rights: list[str], how: str) -> Any:
+    """The joined frame sorted on its keys, stably, with a missing key last.
+
+    A key named differently on each side is two columns, and an outer join
+    fills each from the other side where one is missing, which is the value
+    pandas sorts that row by.
+    """
+    from ._frame import DataFrame
+
+    by = list(lefts)
+    if how == "outer" and lefts != rights:
+        filled = out
+        for lk, rk in zip(lefts, rights, strict=True):
+            if lk != rk:
+                filled = filled.fill_null(lk, filled.column(rk))
+        # The join answers the default index, so resetting it is a column of
+        # positions, and it goes in first whatever it ends up called.
+        positions = DataFrame._wrap(filled.select(lefts)).reset_index()
+        first = positions.columns[0]
+        return out.take(positions.sort_values(lefts)[first].tolist())
+    if how == "right":
+        by = list(rights)
+    count = len(by)
+    return out.sort_values(by, [False] * count, [False] * count)
+
+
+def merge(
+    left: Any,
+    right: Any,
+    how: str = "inner",
+    on: Any = None,
+    left_on: Any = None,
+    right_on: Any = None,
+    left_index: bool = False,
+    right_index: bool = False,
+    sort: bool = False,
+    suffixes: Any = ("_x", "_y"),
+    copy: Any = NO_DEFAULT,
+    indicator: Any = False,
+    validate: Any = None,
+) -> DataFrame:
+    """Joins two frames on key columns, the way `pandas.merge` does.
+
+    The core pairs the rows and gathers the columns in one call, in left row
+    order for every join but a right one, which is right row order, and that is
+    the order pandas gives. What the core does not share with pandas is done
+    here around the call: both suffixes, the key types brought to one, a
+    missing key paired with a missing key, the sort an outer join always has,
+    and an integer column with a gap in it read back as float64 with NaN.
+
+    `left_index`, `right_index`, `indicator` and the joins other than the four
+    are refused by name. `copy` is accepted and does nothing, as it does in
+    pandas 3.
+
+    Returns:
+        A new frame with the default index.
+
+    Raises:
+        MergeError: For keys that are missing, given in a combination pandas
+            refuses, or fail `validate`.
+        InvalidArgumentError: For a `how` that is not a join, two key lists of
+            different lengths, overlapping columns and no suffix, or two key
+            types pandas will not merge.
+        KeyError: For a key that is not a column.
+        UnsupportedError: For what is not written yet.
+    """
+    from ._frame import DataFrame, Series
+
+    left, right = _merge_side(left), _merge_side(right)
+    if how not in MERGE_HOWS:
+        if how in ("left_anti", "right_anti", "cross", "asof"):
+            raise UnsupportedError(f"merge(how={how!r}) is not written yet")
+        raise InvalidArgumentError(
+            f"'{how}' is not a valid Merge type: left, right, inner, outer, left_anti,"
+            " right_anti, cross, asof"
+        )
+    if left_index or right_index:
+        raise UnsupportedError(
+            "merge on the index is not written yet, so the keys have to be columns"
+        )
+    if indicator is not False:
+        raise UnsupportedError("merge(indicator=) is not written yet")
+    lefts, rights = _merge_keys(left, right, on, left_on, right_on)
+    _merge_validated(left, right, lefts, rights, validate)
+    left_inner, right_inner, lefts, rights = _merge_suffixed(left, right, lefts, rights, suffixes)
+    left_inner, right_inner = _merge_key_types(left_inner, right_inner, lefts, rights)
+    stand_ins: list[tuple[list[str], Any]] = []
+    types = dict(zip(left_inner.names(), left_inner.dtypes(), strict=True))
+    for lk, rk in zip(lefts, rights, strict=True):
+        mine, theirs = left_inner.column(lk), right_inner.column(rk)
+        if mine.null_count() == 0 or theirs.null_count() == 0:
+            continue
+        stand_in = _merge_stand_in(Series._wrap(mine), Series._wrap(theirs), types[lk])
+        filler = Series([stand_in], dtype=types[lk])._inner
+        left_inner = left_inner.fill_null(lk, filler)
+        right_inner = right_inner.fill_null(rk, filler)
+        stand_ins.append(([lk] if lk == rk else [lk, rk], filler))
+    try:
+        out = left_inner.join_on(right_inner, lefts, rights, how, "_y")
+    except Exception as error:
+        raise translate(error) from None
+    for names, filler in stand_ins:
+        for name in names:
+            column = out.column(name)
+            out = out.pick(name, column.is_in(filler).unary("invert"), column.missing_row())
+    if sort or how == "outer":
+        # The sort carries the labels along, and pandas numbers the rows again.
+        out = _merge_sorted(out, lefts, rights, how).reset_index(True)
+    if any(out.null_counts()):
+        out = out._widened_for_missing()
+    return DataFrame._wrap(out)
 
 
 def to_datetime(
