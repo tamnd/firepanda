@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -238,3 +239,37 @@ def test_the_same_literal_means_the_same_thing_in_both(firepanda: ModuleType) ->
         # which is the Arrow name and is what pyarrow and Polars both use.
         theirs_dtype = str(theirs[name].dtype)
         assert str(ours[name].dtype) == ("string" if theirs_dtype == "str" else theirs_dtype)
+
+
+MAPPINGS: list[dict[str, Any]] = [
+    {"data": {"a": 1, "b": 2}},
+    {"data": {1: 1.5, 2: None}},
+    {"data": {"a": "x", "b": "y"}},
+    {"data": {True: 1, False: 0}},
+    {"data": {"a": 1, "b": 2}, "index": ["b", "c"]},
+    {"data": {"a": 1, "b": 2}, "index": ["b", "a"]},
+    {"data": {"a": 1}, "name": "n", "dtype": "float32"},
+    {"data": {"b": 2.5, "a": 1.5}, "name": "v"},
+]
+
+
+@needs_pandas
+@pytest.mark.parametrize("kwargs", MAPPINGS)
+def test_a_mapping_is_labels_and_values(firepanda: ModuleType, kwargs: dict[str, Any]) -> None:
+    """The keys become the labels in the mapping's order, and `index=` picks them out."""
+    import pandas as pd
+
+    ours = firepanda.Series(**kwargs)
+    theirs = pd.Series(**kwargs)
+
+    def printed(dtype: Any) -> str:
+        return "string" if str(dtype) == "str" else str(dtype)
+
+    assert list(ours.index) == list(theirs.index)
+    assert ours.index.dtype == printed(theirs.index.dtype)
+    assert ours.dtype == printed(theirs.dtype)
+    assert ours.name == theirs.name
+    assert ours.index.name == theirs.index.name
+    assert [None if v != v else v for v in ours.tolist()] == [
+        None if v != v else v for v in theirs.tolist()
+    ]
