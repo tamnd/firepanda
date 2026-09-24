@@ -372,6 +372,12 @@ def is_in_any(a: AnyArray, values: AnyArray) raises -> Array[DType.bool]:
     Raises:
         If the two are not the same type, or the type has no physical layout.
     """
+    if not values.is_flat():
+        return is_in_any(a, values.decoded())
+    if not a.is_flat():
+        return a.through_codes(
+            AnyArray(is_in_any(a.distinct(), values))
+        ).as_typed[DType.bool]()
     if a.is_string() != values.is_string():
         raise Error(
             "is_in: cannot look up "

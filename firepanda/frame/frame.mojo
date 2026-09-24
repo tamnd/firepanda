@@ -2389,8 +2389,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var columns = List[AnyArray]()
         for k in range(len(at)):
             fields.append(Field(by[k], self.columns[at[k]].type))
+            # One row a group, so a key held encoded comes out flat: the
+            # saving is gone at this size and the sort after this reads text.
             columns.append(
-                take_any(self.columns[at[k]].only(), grouping.rows_at)
+                take_any(self.columns[at[k]].only(), grouping.rows_at).decoded()
             )
 
         # The names are settled before anything is reduced, because the

@@ -629,18 +629,21 @@ struct AnyArray(Copyable, Movable, Sized):
         out.type = self.type
         return out^
 
-    def _codes(self) -> Self:
+    def code_column(self) -> Self:
         """Views a dictionary encoded column's codes as an int32 column.
 
-        Shares the buffers. It is how `slice` and `window` reuse the fixed
-        width path for the codes rather than having a second copy of it.
+        Shares the buffers. It is how a kernel that only moves rows, `slice`
+        and `window` here and the take, gather and filter in
+        `kernel/select.mojo`, reuses the fixed width path for the codes rather
+        than having a second copy of it, and how a group by factorizes the
+        codes instead of the strings.
 
         Returns:
             A flat int32 column over the codes.
         """
         return Self(ColumnData(copy=self.data), logical_for(DType.int32))
 
-    def _with_categories(self, var codes: Self) -> Self:
+    def with_codes(self, var codes: Self) -> Self:
         """Puts the categories and the encoding back on a run of codes.
 
         A run of rows is still a run of positions into the same categories, so
@@ -648,8 +651,8 @@ struct AnyArray(Copyable, Movable, Sized):
         do in `slice`.
 
         Args:
-            codes: The codes, as `_codes` hands them out and a slice or window
-                of that returns them.
+            codes: The codes, as `code_column` hands them out and a kernel that
+                moves rows returns them.
 
         Returns:
             The run as a dictionary encoded string column.
@@ -658,6 +661,102 @@ struct AnyArray(Copyable, Movable, Sized):
         codes.text = StringArray(copy=self.text.value())
         codes.encoding = self.encoding
         return codes^
+
+    def distinct(self) -> Self:
+        """The distinct values of a dictionary encoded column, as a flat column.
+
+        Shares the bytes. Anything a row's value alone decides can be worked out
+        once per category here and spread over the rows with `through_codes`,
+        which on a column of seventeen strings is seventeen comparisons instead
+        of six million.
+
+        Returns:
+            One row per category, with the column's logical type.
+        """
+        var out = Self(StringArray(copy=self.text.value()))
+        out.type = self.type
+        return out^
+
+    def through_codes(self, per_category: Self) raises -> Self:
+        """Spreads a fixed width answer per category over the rows.
+
+        Row `i` gets `per_category[codes[i]]`, and is null where the row is
+        null or where the answer for its category is.
+
+        Args:
+            per_category: One value per category, as a kernel run over
+                `categories` returned it.
+
+        Returns:
+            One value per row, with `per_category`'s type.
+
+        Raises:
+            If this column is not dictionary encoded, or the answer is not
+            fixed width or not one per category.
+        """
+        if self.encoding != Encoding.DICTIONARY:
+            raise Error(
+                "through_codes: column is held " + String(self.encoding)
+            )
+        if per_category.is_string() or per_category.is_nested():
+            raise Error(
+                "through_codes: an answer of "
+                + String(per_category.type)
+                + " is not fixed width"
+            )
+        var count = len(self.text.value())
+        if len(per_category) != count:
+            raise Error(
+                String(
+                    "through_codes: ",
+                    len(per_category),
+                    " answers for ",
+                    count,
+                    " categories",
+                )
+            )
+        var rows = self.data.length
+        var width = dtype_size(per_category.type.physical)
+        var values = Buffer(rows * width)
+        var validity = Bitmap(copy=self.data.validity)
+        validity.make_private()
+        var codes = self.data.values.bitcast[DType.int32]()
+        var src = per_category.data.values.unsafe_ptr()
+        var dst = values.unsafe_mut_ptr()
+        var holes = per_category.null_count() > 0
+        var all_valid = self.data.validity.all_valid()
+        # The usual case is a comparison or a lookup: one byte an answer and no
+        # null among them. Then there is nothing to decide per row, so the loop
+        # is a load, a clamp and a store. The clamp is what lets a null row's
+        # code be anything at all, since its answer is masked out regardless.
+        if width == 1 and not holes and count > 0:
+            var top = UInt32(count - 1)
+            for i in range(rows):
+                var code = min(
+                    UInt32(codes.unsafe_offset(i).unsafe_load()), top
+                )
+                dst.unsafe_offset(i).unsafe_write(
+                    src.unsafe_offset(Int(code)).unsafe_load()
+                )
+            return Self(ColumnData(values^, validity^, rows), per_category.type)
+        for i in range(rows):
+            if not all_valid and not self.data.validity.get(i):
+                continue
+            var code = Int(codes.unsafe_offset(i).unsafe_load())
+            if holes and not per_category.data.validity.get(code):
+                validity.set(i, False)
+                continue
+            if width == 1:
+                dst.unsafe_offset(i).unsafe_write(
+                    src.unsafe_offset(code).unsafe_load()
+                )
+            else:
+                unsafe_memcpy(
+                    dest=dst.unsafe_offset(i * width),
+                    src=src.unsafe_offset(code * width),
+                    count=width,
+                )
+        return Self(ColumnData(values^, validity^, rows), per_category.type)
 
     def is_dictionary(self) -> Bool:
         """Reports whether the column stores positions into a category list.
@@ -1036,7 +1135,7 @@ struct AnyArray(Copyable, Movable, Sized):
             If the range is outside a string column.
         """
         if self.encoding == Encoding.DICTIONARY:
-            return self._with_categories(self._codes().slice(start, end))
+            return self.with_codes(self.code_column().slice(start, end))
         if self.is_string():
             return Self(self.strings().slice(start, end))
         if self.is_nested():
@@ -1121,7 +1220,7 @@ struct AnyArray(Copyable, Movable, Sized):
                 + " and windowing a nested column is not implemented yet"
             )
         if self.encoding == Encoding.DICTIONARY:
-            return self._with_categories(self._codes().window(at, length))
+            return self.with_codes(self.code_column().window(at, length))
         if self.is_string():
             return Self(self.strings().window(at, length)).retyped(self.type)
         var out = Self(

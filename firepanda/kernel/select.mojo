@@ -290,6 +290,10 @@ def take_any(
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    # Moving rows does not change what a code means, so an encoded column moves
+    # its four byte codes and keeps its categories, and stays encoded.
+    if not col.is_flat():
+        return col.with_codes(take_any(col.code_column(), indices, spread))
     if col.is_string():
         return AnyArray(_take_strings(col.strings(), indices, spread)).retyped(
             col.type
@@ -706,6 +710,8 @@ def gather_any(
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    if not col.is_flat():
+        return col.with_codes(gather_any(col.code_column(), picks, spread))
     if col.is_string():
         var widened = List[Int](capacity=len(picks))
         for i in range(len(picks)):
@@ -919,6 +925,10 @@ def filter_counted(
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    if not col.is_flat():
+        return col.with_codes(
+            filter_counted(col.code_column(), mask, offsets, spread)
+        )
     if col.is_string():
         return AnyArray(_filter_strings(col.strings(), mask, spread)).retyped(
             col.type
