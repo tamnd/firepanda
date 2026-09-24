@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: an inner or semi join steps over probe rows that matched nothing
+
+When the built side of an inner or semi join is small, most probe rows usually find nothing: TPC-H q8 probes six million lines against about 1,300 parts and under one in a hundred hits. The pairing walk still visited every row, twice, once to count and once to write. It now reads sixteen probe codes at a time and steps past the block in one go when all sixteen are the miss code, which has no rows behind it. Left, outer and anti joins walk every row as before, since a miss there still makes a row. On a busy 8 core VM this cut the instructions per run by about a fifth on q8 and a sixth on q5. The load on that box was too high for the wall clock to show it cleanly.
+
 ### Added: merge_asof
 
 - `firepanda.merge_asof` pairs each left row with the last right row at or before its key, or with `direction="forward"` or `"nearest"` the first at or after it or the closer one, only among right rows with the same `by` values and within `tolerance`, the way `pandas.merge_asof` does. Keys can be integers, floats or instants, as columns on both sides or as the labels of both sides, and `allow_exact_matches=False` skips equal keys. Unsorted keys, keys with gaps, mismatched key types and bad tolerances raise pandas' errors in pandas' words. A key on the labels of one side and a column of the other is refused for now.
