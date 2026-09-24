@@ -51,7 +51,7 @@ from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import StringArray
 from firepanda.array.strview import VIEW_SIZE, StringView, make_long_at
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
@@ -374,26 +374,17 @@ def _take_strings(
         of the workers the parallel route starts cannot be run.
     """
     var n = len(indices)
+    # A gather too small to split runs the same two passes as one worker on the
+    # calling thread, rather than through `StringBuilder`, which grows two lists
+    # a row and then copies both into the finished column.
     var workers = worker_count()
-    if n < PARALLEL_TAKE_TEXT_ROWS or workers <= 1 or not spread:
-        var builder = StringBuilder(capacity=n)
-        for k in range(n):
-            var at = indices[k]
-            if at >= len(col):
-                raise Error(
-                    String(
-                        "take index ", at, " is outside a column of ", len(col)
-                    )
-                )
-            if at < 0 or not col.is_valid(at):
-                builder.append_null()
-            else:
-                builder.append(col.unsafe_bytes(at))
-        return builder^.finish()
-
-    var most = n // PARALLEL_MIN_TAKE_SLICE
-    if workers > most:
-        workers = most
+    var serial = n < PARALLEL_TAKE_TEXT_ROWS or workers <= 1 or not spread
+    if serial:
+        workers = 1
+    else:
+        var most = n // PARALLEL_MIN_TAKE_SLICE
+        if workers > most:
+            workers = most
     var bounds = _take_bounds(n, workers)
     var height = len(col)
     var source_views = col.views.unsafe_ptr().unsafe_bitcast[StringView]()
@@ -427,7 +418,10 @@ def _take_strings(
                 Int64(wide)
             )
 
-        parallel_for(measure, workers)
+        if serial:
+            measure(0)
+        else:
+            parallel_for(measure, workers)
 
         var counted = totals.bitcast[DType.int64]()
         for w in range(workers):
@@ -491,7 +485,10 @@ def _take_strings(
         if stop & 63 != 0 and stop > bounds[w]:
             built.unsafe_set_word(stop >> 6, word)
 
-    parallel_for(gather, workers)
+    if serial:
+        gather(0)
+    else:
+        parallel_for(gather, workers)
     return StringArray(views^, payload^, built^, n)
 
 
@@ -998,23 +995,19 @@ def _filter_strings(
         )
     var n = len(col)
     var values = mask.unsafe_ptr()
+    # A filter too small to split still takes the count and copy route, as one
+    # worker on the calling thread. It used to go through `StringBuilder`, which
+    # on forty thousand short labels cost fifteen nanoseconds a row against two
+    # and a half for a column of integers, because every kept row grew two lists
+    # and the finished column copied both again.
     var workers = worker_count()
-    if n < PARALLEL_FILTER_ROWS or workers <= 1 or not spread:
-        var builder = StringBuilder(capacity=n)
-        for i in range(n):
-            if not mask.data.validity.get(i):
-                continue
-            if not Bool(values.unsafe_offset(i).unsafe_load()):
-                continue
-            if col.is_valid(i):
-                builder.append(col.unsafe_bytes(i))
-            else:
-                builder.append_null()
-        return builder^.finish()
-
-    var most = n // PARALLEL_FILTER_ROWS
-    if workers > most:
-        workers = most
+    var serial = n < PARALLEL_FILTER_ROWS or workers <= 1 or not spread
+    if serial:
+        workers = 1
+    else:
+        var most = n // PARALLEL_FILTER_ROWS
+        if workers > most:
+            workers = most
     var bounds = _take_bounds(n, workers)
     var source_views = col.views.unsafe_ptr().unsafe_bitcast[StringView]()
     var source_bytes = col.payload.unsafe_ptr()
@@ -1048,7 +1041,10 @@ def _filter_strings(
             Int64(wide)
         )
 
-    parallel_for(measure, workers)
+    if serial:
+        measure(0)
+    else:
+        parallel_for(measure, workers)
 
     var rows_before = List[Int](length=workers + 1, fill=0)
     var bytes_before = List[Int](length=workers + 1, fill=0)
@@ -1101,7 +1097,10 @@ def _filter_strings(
                     cursor += count
             at += 1
 
-    parallel_for(compact, workers)
+    if serial:
+        compact(0)
+    else:
+        parallel_for(compact, workers)
 
     # A worker's first output row can land in the middle of a validity word that
     # the worker before it also writes to, which is the one thing the take route
