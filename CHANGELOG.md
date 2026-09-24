@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: value_counts on a category column
+
+`Series.value_counts` answers a category column now instead of refusing. It counts by the categories as pandas does, so a category nothing uses is a row with a count of nought and the rows start in the order of the categories before the stable sort by count. The index is categorical with the column's categories and ordered flag, and a missing value is a row of its own when `dropna=False` and there is one to count. `normalize`, `sort` and `ascending` work as they do on any other column. The counting is a group by on the integer codes.
+
 ### Added: str.cat joins others row by row
 
 `Series.str.cat(others)` answers a column now instead of refusing. `others` is read the way pandas reads it: a series, a frame's columns, an index, a numpy array of one or two dimensions, a list of strings, or a list of series, indexes and arrays. The pieces meet by position when every label list is the column's own and by label under `join` otherwise, `left`, `right`, `inner` or `outer` in pandas' order. A row with a missing piece is missing unless `na_rep` stands in for it, and a piece that is not text, a list of the wrong length, a bare string and an unknown `join` raise pandas' class with pandas' message. The rows are joined in the interpreter, since the engine has no row by row concatenation yet.
