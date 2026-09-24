@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `date_range`
+
+`firepanda.date_range` builds a `DatetimeIndex` of evenly stepped instants from any three of start, end, periods and freq, with pandas' rules for the unit, the zone, `normalize`, `name` and `inclusive`. A step of days with a zone keeps to the wall clock across a transition and every other step keeps to absolute time. With start, end and periods and no freq the points are spaced evenly. Calendar offsets such as months and weeks are refused with NotImplementedError, and the mistakes pandas refuses are refused with its classes and messages.
+
 ### Added: value_counts on a category column
 
 `Series.value_counts` answers a category column now instead of refusing. It counts by the categories as pandas does, so a category nothing uses is a row with a count of nought and the rows start in the order of the categories before the stable sort by count. The index is categorical with the column's categories and ordered flag, and a missing value is a row of its own when `dropna=False` and there is one to count. `normalize`, `sort` and `ascending` work as they do on any other column. The counting is a group by on the integer codes.
