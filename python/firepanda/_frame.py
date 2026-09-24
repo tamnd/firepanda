@@ -43,6 +43,7 @@ from ._pandas import (
     _Point,
     _Positional,
     _rolling,
+    _values_of,
 )
 from .errors import translate
 
@@ -3462,7 +3463,7 @@ class Series(SeriesMixin):
     def tolist(self) -> list[object]:
         """The values as a Python list, with None where a value is missing."""
         try:
-            return list(self._inner.to_list())
+            return _values_of(self._inner)
         except Exception as error:
             raise translate(error) from None
 
@@ -4353,7 +4354,7 @@ class Index(IndexMixin):
     def values(self) -> list[object]:
         """The labels as a Python list, where pandas hands back a numpy array."""
         try:
-            return list(self._inner.to_list())
+            return _values_of(self._inner)
         except Exception as error:
             raise translate(error) from None
 
@@ -4392,14 +4393,14 @@ class Index(IndexMixin):
     def tolist(self) -> list[object]:
         """The labels as a Python list, with None where a label is missing."""
         try:
-            return list(self._inner.to_list())
+            return _values_of(self._inner)
         except Exception as error:
             raise translate(error) from None
 
     def to_list(self) -> list[object]:
         """The labels as a Python list. The pandas spelling with an underscore."""
         try:
-            return list(self._inner.to_list())
+            return _values_of(self._inner)
         except Exception as error:
             raise translate(error) from None
 

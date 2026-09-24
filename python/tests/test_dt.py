@@ -7,14 +7,11 @@ constructor spelling for a timestamp column yet, so every column here comes in
 through Arrow, which is the import path document 15 argues is the real one
 anyway.
 
-The answers go back out through Arrow as well, and that is the part worth
-knowing about. `tolist` on a temporal column hands back the stored integer
-rather than a `datetime`, because it reads the buffer and the buffer holds
-microseconds since the epoch. Reading through `pyarrow.array` gives the
-`datetime` a pandas program would compare against, and it goes through the
-library's own export rather than around it. The `tolist` gap is real and is
-filed rather than tested here, since it belongs to the value conversion and not
-to this accessor.
+The answers go back out through Arrow as well. They were written that way when
+`tolist` on a temporal column handed back the stored integer, which was #348.
+`tolist` hands out a `Timestamp` now, and `test_temporal_values.py` checks it,
+but reading through `pyarrow.array` still gives the `datetime` a pandas program
+would compare against, so these tests were left as they are.
 
 Two differences from pandas are asserted rather than worked around, because both
 are decisions.

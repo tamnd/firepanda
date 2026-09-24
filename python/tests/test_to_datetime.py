@@ -14,10 +14,8 @@ of the calendar members a `DatetimeIndex` carries, so answering one would be a
 name that resolves and then has nothing on it. That is asserted here rather than
 worked around, because it is a decision and not an accident.
 
-Values come back out through `pyarrow.array` for the same reason `test_dt.py`
-gives. `tolist` on a temporal column hands back the stored integer rather than a
-`datetime`, since it reads the buffer and the buffer holds microseconds since
-the epoch.
+Values come back out through `pyarrow.array` for the history `test_dt.py`
+gives, from before `tolist` handed out a `Timestamp`.
 
 The other thing worth knowing before reading is which strings are refused. Only
 ISO 8601 is guessed. pandas also guesses `01/02/2026` and decides for itself
@@ -185,19 +183,21 @@ def test_only_two_words_of_errors_are_accepted(firepanda: ModuleType) -> None:
 def test_an_offset_is_kept_in_the_dtype(firepanda: ModuleType) -> None:
     """A row carrying its own offset gives a column that knows which clock it is on.
 
-    The values are compared as stored integers rather than through Arrow, which
-    is the one place in this file that happens. `pa.array(...).to_pylist()` on a
+    The values are compared through `tolist` rather than through Arrow, which is
+    the one place in this file that happens. `pa.array(...).to_pylist()` on a
     fixed offset column asks pyarrow to build a Python tzinfo and it refuses
     with "The zoneinfo module or pytz package must be installed" even where
     `zoneinfo` imports fine. That is pyarrow's reading of the column and not
-    firepanda's writing of it, so the test reads the buffer instead.
+    firepanda's writing of it, so the test reads the moments firepanda hands out.
     """
     import pandas as pd
 
     zoned = ["2026-01-01T14:00:00+02:00"]
     assert firepanda.to_datetime(zoned).dtype == "datetime64[us, UTC+02:00]"
     assert str(pd.to_datetime(zoned).dtype) == "datetime64[us, UTC+02:00]"
-    assert firepanda.to_datetime(zoned).tolist() == list(pd.to_datetime(zoned).astype("int64"))
+    mine, theirs = firepanda.to_datetime(zoned).tolist(), pd.to_datetime(zoned).tolist()
+    assert mine == theirs
+    assert [value.utcoffset() for value in mine] == [value.utcoffset() for value in theirs]
 
 
 @both

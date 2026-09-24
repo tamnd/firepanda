@@ -3699,7 +3699,7 @@ SERIES = Exposed(
         Member(
             name="tolist",
             kind="method",
-            body="list(self._inner.to_list())",
+            body="_values_of(self._inner)",
             doc="The values as a Python list, with None where a value is missing.",
             returns="list[object]",
         ),
@@ -4209,7 +4209,7 @@ INDEX = Exposed(
         Member(
             name="values",
             kind="property",
-            body="list(self._inner.to_list())",
+            body="_values_of(self._inner)",
             doc="The labels as a Python list, where pandas hands back a numpy array.",
             returns="list[object]",
         ),
@@ -4244,14 +4244,14 @@ INDEX = Exposed(
         Member(
             name="tolist",
             kind="method",
-            body="list(self._inner.to_list())",
+            body="_values_of(self._inner)",
             doc="The labels as a Python list, with None where a label is missing.",
             returns="list[object]",
         ),
         Member(
             name="to_list",
             kind="method",
-            body="list(self._inner.to_list())",
+            body="_values_of(self._inner)",
             doc="The labels as a Python list. The pandas spelling with an underscore.",
             returns="list[object]",
         ),
@@ -4918,6 +4918,10 @@ def wrapper() -> str:
     for builder in ("_rolling", "_expanding", "_ewm"):
         if any(f"{builder}(" in m.body for m in every):
             mixins.add(builder)
+    # `tolist` and its neighbours read values out, and a temporal column's
+    # values have to be made moments on the way, which is hand written too.
+    if any("_values_of(" in m.body for m in every):
+        mixins.add("_values_of")
     # `df.iloc` and the three properties beside it are the same case a third
     # time. Each answers a small object that holds the frame and reads a key,
     # and the key is the whole of what they do, so the class is hand written
