@@ -33,6 +33,7 @@ import datetime
 import itertools
 import math
 import operator
+import os
 import re
 import sys
 import warnings
@@ -8507,6 +8508,63 @@ class DataFrameMixin:
             mode=mode,
         )
 
+    def to_string(
+        self,
+        buf: Any = None,
+        *,
+        columns: Any = None,
+        col_space: Any = None,
+        header: Any = True,
+        index: bool = True,
+        na_rep: str = "NaN",
+        formatters: Any = None,
+        float_format: Any = None,
+        sparsify: Any = None,
+        index_names: bool = True,
+        justify: Any = None,
+        max_rows: Any = None,
+        max_cols: Any = None,
+        show_dimensions: Any = False,
+        decimal: str = ".",
+        line_width: Any = None,
+        min_rows: Any = None,
+        max_colwidth: Any = None,
+        encoding: Any = None,
+    ) -> Any:
+        """The frame as a table of text, written to a file or answered.
+
+        A port of pandas' text formatter: floats get six digits after the point
+        with the zeros trimmed across each column, or scientific form when the
+        column needs it, instants are dates alone when every one is at
+        midnight, and every column is padded to its widest cell. The row and
+        column limits and wrapping are refused, since the text is always the
+        whole frame.
+
+        Returns:
+            The text when `buf` is None, and None otherwise.
+        """
+        _text_refused(
+            max_rows=max_rows, max_cols=max_cols, line_width=line_width, min_rows=min_rows
+        )
+        text = _text_frame(
+            self,
+            {
+                "columns": columns,
+                "col_space": col_space,
+                "header": header,
+                "index": index,
+                "na_rep": na_rep,
+                "formatters": formatters,
+                "float_format": float_format,
+                "index_names": index_names,
+                "justify": justify,
+                "show_dimensions": show_dimensions,
+                "decimal": decimal,
+                "max_colwidth": max_colwidth,
+            },
+        )
+        return _text_written(text, buf, encoding)
+
     def to_dict(self, orient: str = "dict", *, into: Any = dict, index: bool = True) -> Any:
         """The frame as Python mappings and lists, in one of pandas' seven shapes.
 
@@ -11764,6 +11822,44 @@ class SeriesMixin:
             storage_options=storage_options,
             mode=mode,
         )
+
+    def to_string(
+        self,
+        buf: Any = None,
+        *,
+        na_rep: str = "NaN",
+        float_format: Any = None,
+        header: bool = True,
+        index: bool = True,
+        length: Any = False,
+        dtype: bool = False,
+        name: bool = False,
+        max_rows: Any = None,
+        min_rows: Any = None,
+    ) -> Any:
+        """The column as text, one row per line, written to a file or answered.
+
+        Values are written the way `DataFrame.to_string` writes them, and the
+        name, length and type go in a last line when asked for. The row limits
+        are refused, since the text is always the whole column.
+
+        Returns:
+            The text when `buf` is None, and None otherwise.
+        """
+        _text_refused(max_rows=max_rows, min_rows=min_rows)
+        text = _text_series(
+            self,
+            {
+                "na_rep": na_rep,
+                "float_format": float_format,
+                "header": header,
+                "index": index,
+                "length": length,
+                "dtype": dtype,
+                "name": name,
+            },
+        )
+        return _text_written(text, buf, None)
 
     def to_dict(self, *, into: Any = dict) -> Any:
         """The column as a mapping from row label to value.
@@ -20229,6 +20325,422 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
         path_or_buf, kw["mode"], kw["encoding"], kw["errors"], kw["compression"]
     ) as handle:
         handle.write(text)
+    return None
+
+
+_TEXT_ESCAPES = (("\t", "\\t"), ("\r", "\\r"), ("\n", "\\n"))
+_TEXT_DIGITS = 6
+_TEXT_SERIES_WIDEST = 50
+_TEXT_SEQUENCE_ITEMS = 100
+
+
+def _text_plain(value: Any) -> str:
+    """A value as pandas prints a label or a cell, with tabs and newlines escaped."""
+    text = str(value)
+    for raw, escaped in _TEXT_ESCAPES:
+        text = text.replace(raw, escaped)
+    return text
+
+
+def _text_trimmed(texts: list[str], decimal: str) -> list[str]:
+    """Drops trailing zeros from every number with a point, equally, keeping one.
+
+    pandas trims the column as a whole: while every number with a point ends in
+    a zero, it drops the last character of all of them, so the points stay in
+    line. Text that is not such a number, a gap or a value in scientific form,
+    is left alone.
+    """
+    number = re.compile(rf"^\s*[\+-]?[0-9]+\{decimal}[0-9]*$")
+
+    def numbers(values: list[str]) -> list[str]:
+        return [x for x in values if number.match(x)]
+
+    trimmed = texts
+    while numbers(trimmed) and all(x.endswith("0") for x in numbers(trimmed)):
+        trimmed = [x[:-1] if number.match(x) else x for x in trimmed]
+    return [x + "0" if number.match(x) and x.endswith(decimal) else x for x in trimmed]
+
+
+def _text_floats(
+    values: list[Any],
+    formatter: Any,
+    float_format: Any,
+    na_rep: str,
+    decimal: str,
+    leading: bool,
+    justify: str,
+) -> list[str]:
+    """A float column as text, the way pandas' float formatter writes it.
+
+    With neither a formatter nor a float format, every value is written with
+    six digits after the point and the zeros are trimmed across the column. If
+    a value is below a millionth, or one is above a million and the widest text
+    is over twelve characters, the whole column is written in scientific form.
+    """
+    if formatter is None and callable(float_format):
+        formatter, float_format = float_format, None
+    if formatter is not None:
+        return [na_rep if _missing(v) else str(formatter(v)) for v in values]
+    gap = " " + na_rep if justify == "left" else na_rep
+
+    def written(pattern: str) -> list[str]:
+        texts = [gap if _missing(v) else pattern % v for v in values]
+        if decimal != ".":
+            texts = [
+                x if _missing(v) else x.replace(".", decimal, 1)
+                for x, v in zip(texts, values, strict=True)
+            ]
+        return texts
+
+    if float_format is not None:
+        return written(float_format)
+    sign = " " if leading else ""
+    texts = _text_trimmed(written(f"%{sign}.{_TEXT_DIGITS}f"), decimal)
+    present = [abs(v) for v in values if not _missing(v)]
+    too_long = bool(texts) and max(len(x) for x in texts) > _TEXT_DIGITS + 6
+    large = any(v > 1e6 for v in present)
+    small = any(0 < v < 10**-_TEXT_DIGITS for v in present)
+    if small or (too_long and large):
+        texts = _text_trimmed(written(f"%{sign}.{_TEXT_DIGITS}e"), decimal)
+    return texts
+
+
+def _text_moments(values: list[Any], formatter: Any, zoned: bool) -> list[str]:
+    """Instants as text, dates alone when every one is at midnight.
+
+    Otherwise each is written to the second, with as many digits after it as
+    the finest instant in the column needs: three, six or nine. Gaps are NaT.
+    """
+    if formatter is not None:
+        return ["NaT" if v is None else str(formatter(v)) for v in values]
+    present = [v for v in values if v is not None]
+    if zoned:
+        midnight = all(v.hour == v.minute == v.second == v.microsecond == 0 for v in present)
+        return [
+            "NaT" if v is None else v.strftime("%Y-%m-%d") if midnight else str(v) for v in values
+        ]
+    if all(v.hour == v.minute == v.second == v.microsecond == v.nanosecond == 0 for v in present):
+        return ["NaT" if v is None else v.strftime("%Y-%m-%d") for v in values]
+    nanos = any(v.nanosecond for v in present)
+    micros = any(v.microsecond % 1000 for v in present)
+    millis = any(v.microsecond for v in present)
+    texts = []
+    for v in values:
+        if v is None:
+            texts.append("NaT")
+            continue
+        text = v.strftime("%Y-%m-%d %H:%M:%S")
+        if nanos:
+            text += f".{v.microsecond * 1000 + v.nanosecond:09d}"
+        elif micros:
+            text += f".{v.microsecond:06d}"
+        elif millis:
+            text += f".{v.microsecond // 1000:03d}"
+        texts.append(text)
+    return texts
+
+
+def _text_spans(values: list[Any], formatter: Any) -> list[str]:
+    """Spans as text, days alone when no span has a part of a day. Gaps are NaT."""
+    if formatter is not None:
+        return ["NaT" if v is None else str(formatter(v)) for v in values]
+    present = [v for v in values if v is not None]
+    if all(v.seconds == v.microseconds == v.nanoseconds == 0 for v in present):
+        return ["NaT" if v is None else f"{v.days} days" for v in values]
+    return ["NaT" if v is None else str(v) for v in values]
+
+
+def _text_values(
+    column: Any,
+    formatter: Any = None,
+    float_format: Any = None,
+    na_rep: str = "NaN",
+    decimal: str = ".",
+    leading: bool = True,
+    justify: str = "right",
+) -> list[str]:
+    """Every value of a column as text, before the column is padded to one width.
+
+    Floats, instants and spans have formatters of their own. Everything else is
+    written with `str`, after a space when `leading` is set, with a gap written
+    as `na_rep` for text and as `<NA>` for integers and booleans, which is how
+    pandas writes a gap in its nullable integer and boolean columns.
+    """
+    dtype = str(column.dtype)
+    values = column.tolist()
+    if dtype.startswith("float"):
+        return _text_floats(values, formatter, float_format, na_rep, decimal, leading, justify)
+    if dtype.startswith("datetime64"):
+        return _text_moments(values, formatter, "," in dtype)
+    if dtype.startswith("timedelta64"):
+        return _text_spans(values, formatter)
+    whole = dtype.startswith(("int", "uint"))
+    if whole and formatter is not None and None not in values:
+        return [formatter(v) for v in values]
+    gap = "<NA>" if whole or dtype == "bool" else na_rep
+    space = " " if leading else ""
+    texts = []
+    for value in values:
+        if _missing(value):
+            text = gap
+        elif formatter is not None:
+            text = str(formatter(value))
+        elif whole and formatter is None:
+            text = f"{value: d}" if leading else f"{value:d}"
+            texts.append(text)
+            continue
+        elif isinstance(value, float):
+            text = f"{value: .{_TEXT_DIGITS}f}".rstrip("0")
+            text = text + "0" if text.endswith(".") else text
+            texts.append(text)
+            continue
+        else:
+            text = _text_plain(value)
+        texts.append(space + text)
+    return texts
+
+
+def _text_fixed(
+    texts: list[str], justify: str, minimum: int | None = None, widest: int | None = None
+) -> list[str]:
+    """Pads texts to one width, cutting any longer than `widest` down with dots."""
+    if not texts or justify == "all":
+        return texts
+    size = max(len(x) for x in texts)
+    if minimum is not None:
+        size = max(minimum, size)
+    if widest is not None and size > widest:
+        size = widest
+        if widest > 3:
+            texts = [x[: size - 3] + "..." if len(x) > size else x for x in texts]
+    if justify == "left":
+        return [x.ljust(size) for x in texts]
+    if justify == "center":
+        return [x.center(size) for x in texts]
+    return [x.rjust(size) for x in texts]
+
+
+def _text_adjoin(space: int, *blocks: list[str]) -> str:
+    """Glues columns of text side by side, `space` apart, shorter ones padded on top."""
+    sizes = [max(len(x) for x in block) + space for block in blocks[:-1]]
+    sizes.append(max(len(x) for x in blocks[-1]))
+    tallest = max(len(block) for block in blocks)
+    padded = [
+        [" " * size] * (tallest - len(block)) + [x.ljust(size) for x in block]
+        for block, size in zip(blocks, sizes, strict=True)
+    ]
+    return "\n".join("".join(line) for line in zip(*padded, strict=True))
+
+
+def _text_labels(index: Any, named: bool, widest: int | None) -> list[str]:
+    """The row labels as text, headed by the index name when `named` is set.
+
+    Text labels are written as they are. Other labels go through the column
+    formatter, left aligned, and then lose the spaces every one of them starts
+    with.
+    """
+    header = []
+    if named:
+        header.append("" if index.name is None else _text_plain(index.name))
+    dtype = str(index.dtype)
+    if dtype in ("string", "str", "object"):
+        texts = [" NaN" if _missing(v) else " " + _text_plain(v) for v in index.tolist()]
+    else:
+        texts = _text_fixed(_text_values(index, justify="left"), "left", None, widest)
+    if texts:
+        cut = min(len(x) - len(x.lstrip(" ")) for x in texts)
+        texts = [x[cut:] for x in texts]
+    return header + texts
+
+
+def _text_sequence(values: list[Any]) -> str:
+    """A list of labels as pandas prints one in brackets, stopping after a hundred."""
+    shown = [_text_plain(v) for v in values[:_TEXT_SEQUENCE_ITEMS]]
+    if len(values) > _TEXT_SEQUENCE_ITEMS:
+        shown.append("...")
+    return "[" + ", ".join(shown) + "]"
+
+
+def _text_float_format(float_format: Any) -> Any:
+    """Checks a float format and turns a `{}` style one into a callable, as pandas does."""
+    if float_format is None or callable(float_format):
+        return float_format
+    if isinstance(float_format, str):
+        if "%" in float_format:
+            return float_format
+        try:
+            float_format.format(1.0)
+        except (ValueError, KeyError, IndexError) as error:
+            raise ValueError(f"Invalid new-style format string {float_format!r}") from error
+        return float_format.format
+    raise ValueError("float_format must be a string or callable")
+
+
+def _text_numeric(dtype: str) -> bool:
+    """Whether pandas counts a column of this type as numbers, booleans included."""
+    return dtype.startswith(("int", "uint", "float", "complex")) or dtype == "bool"
+
+
+def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
+    """The frame as text, which is the body of `DataFrame.to_string`."""
+    if kw["columns"] is not None:
+        frame = frame[list(kw["columns"])]
+    labels = list(frame.columns)
+    formatters = kw["formatters"]
+    if formatters is None:
+        formatters = {}
+    elif not isinstance(formatters, dict) and len(formatters) != len(labels):
+        raise ValueError(
+            f"Formatters length({len(formatters)}) should match DataFrame number of "
+            f"columns({len(labels)})"
+        )
+    spaces = kw["col_space"]
+    if spaces is None:
+        spaces = {}
+    elif isinstance(spaces, (int, str)):
+        spaces = {"": spaces, **dict.fromkeys(labels, spaces)}
+    elif isinstance(spaces, dict):
+        for label in spaces:
+            if label not in labels and label != "":
+                raise ValueError(f"Col_space is defined for an unknown column: {label}")
+    else:
+        if len(spaces) != len(labels):
+            raise ValueError(
+                f"Col_space length({len(spaces)}) should match DataFrame number of "
+                f"columns({len(labels)})"
+            )
+        spaces = dict(zip(labels, spaces, strict=True))
+    justify = kw["justify"] or "right"
+    widest = kw["max_colwidth"]
+    header = kw["header"]
+    index = kw["index"]
+    float_format = _text_float_format(kw["float_format"])
+    rows = len(frame)
+    dimensions = ""
+    if kw["show_dimensions"] is True:
+        dimensions = f"\n\n[{rows} rows x {len(labels)} columns]"
+    if not rows or not labels:
+        return (
+            f"Empty DataFrame\nColumns: {_text_sequence(labels)}\n"
+            f"Index: {_text_sequence(frame.index.tolist())}{dimensions}"
+        )
+
+    def picked(position: int, label: str) -> Any:
+        if isinstance(formatters, dict):
+            return formatters.get(label)
+        return formatters[position]
+
+    named = bool(index and kw["index_names"] and frame.index.name is not None)
+    listed = _list_like(header)
+    if listed:
+        if len(header) != len(labels):
+            raise ValueError(f"Writing {len(labels)} cols but got {len(header)} aliases")
+        heads = [[str(h)] for h in header]
+    elif header:
+        heads = [
+            [
+                (" " if picked(p, c) is None and _text_numeric(str(frame[c].dtype)) else "")
+                + _text_plain(c)
+            ]
+            for p, c in enumerate(labels)
+        ]
+    else:
+        heads = [[] for _ in labels]
+    if named and (listed or header):
+        for head in heads:
+            head.append("")
+    blocks = []
+    for position, label in enumerate(labels):
+        texts = _text_values(
+            frame[label], picked(position, label), float_format, kw["na_rep"], kw["decimal"], index
+        )
+        head = heads[position]
+        width = max([int(spaces.get(label, 0)), *(len(x) for x in head)])
+        texts = _text_fixed(_text_fixed(texts, "right", None, widest), justify, width, widest)
+        size = max(*(len(x) for x in texts), width)
+        blocks.append(_text_fixed(head, justify, size) + texts)
+    if index:
+        names = _text_fixed(
+            _text_labels(frame.index, named, widest), "left", int(spaces.get("", 0)), widest
+        )
+        blocks.insert(0, ["", *names] if listed or header else names)
+    return _text_adjoin(1, *blocks) + dimensions
+
+
+def _text_categories(column: Any) -> str:
+    """The line pandas puts under a categorical column, naming its categories.
+
+    More than eight are cut to the first four and the last four, and the list
+    wraps at eighty characters, counted the way pandas counts them.
+    """
+    categories = column.cat.categories.tolist()
+    texts = [repr(c) for c in categories]
+    if len(texts) > 8:
+        texts = [*texts[:4], "...", *texts[-4:]]
+    header = f"Categories ({len(categories)}, str): "
+    step, sep = (3, " < ") if column.cat.ordered else (2, ", ")
+    listed = ""
+    size = len(header)
+    for position, text in enumerate(texts):
+        if size + step + len(text) > 80:
+            listed += sep.rstrip() + "\n" + " " * (len(header) + 1)
+            size = len(header) + 1
+        elif position:
+            listed += sep
+            size += len(text)
+        listed += text
+    return f"{header}[{listed.replace(' < ... < ', ' ... ')}]"
+
+
+def _text_series(column: Any, kw: dict[str, Any]) -> str:
+    """The column as text, which is the body of `Series.to_string`."""
+    parts = []
+    if kw["name"] and column.name is not None:
+        parts.append(f"Name: {_text_plain(column.name)}")
+    if kw["length"] is True:
+        parts.append(f"Length: {len(column)}")
+    if kw["dtype"]:
+        dtype = str(column.dtype)
+        parts.append(f"dtype: {'str' if dtype == 'string' else dtype}")
+    footer = ", ".join(parts)
+    if str(column.dtype) == "category":
+        footer += ("\n" if footer else "") + _text_categories(column)
+    if not len(column):
+        return f"Series([], {footer})"
+    labels = _text_labels(column.index, True, _TEXT_SERIES_WIDEST)
+    texts = _text_values(column, None, kw["float_format"], kw["na_rep"], ".", kw["index"])
+    texts = _text_fixed(texts, "right", None, _TEXT_SERIES_WIDEST)
+    blocks = [labels[1:], texts] if kw["index"] else [texts]
+    result = _text_adjoin(3, *blocks)
+    if kw["header"] and column.index.name is not None:
+        result = labels[0] + "\n" + result
+    return result + "\n" + footer if footer else result
+
+
+def _text_refused(**kw: Any) -> None:
+    """Refuses the row and column limits, which cut a long frame down in the middle."""
+    for name, value in kw.items():
+        if value is not None:
+            raise NotImplementedError(
+                f"{name}={value!r} is not supported yet, because the text is always the "
+                "whole frame, with no rows or columns left out and no wrapping"
+            )
+
+
+def _text_written(text: str, buf: Any, encoding: Any) -> Any:
+    """Answers the text, or writes it to a path or anything with a `write` method."""
+    if buf is None:
+        if encoding is not None:
+            raise ValueError("buf is not a file name and encoding is specified.")
+        return text
+    buf = os.fspath(buf) if isinstance(buf, os.PathLike) else buf
+    if hasattr(buf, "write"):
+        buf.write(text)
+    elif isinstance(buf, str):
+        with open(buf, "w", encoding=encoding or "utf-8", newline="") as handle:
+            handle.write(text)
+    else:
+        raise TypeError("buf is not a file name and it has no write method")
     return None
 
 
