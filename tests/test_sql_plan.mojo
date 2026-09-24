@@ -4206,3 +4206,21 @@ def test_join_by_a_type_builds_the_join_that_type_names() raises:
         _plan("SELECT count(*) FROM t JOIN BY (TYPE anti) u USING (b)"),
         _plan("SELECT count(*) FROM t ANTI JOIN u USING (b)"),
     )
+
+
+def test_any_and_all_over_a_written_list_are_one_test_per_item() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a = ANY ([1, 2])"),
+        _plan("SELECT a FROM t WHERE a = 1 OR a = 2"),
+    )
+    assert_equal(
+        _plan("SELECT a > ALL ([1, b]) AS x FROM t"),
+        _plan("SELECT a > 1 AND a > b AS x FROM t"),
+    )
+    # An empty list has no rows to test, so ANY is false and ALL is true.
+    assert_equal(
+        _plan("SELECT a = ANY ([]) AS x, a = ALL ([]) AS y FROM t"),
+        _plan("SELECT false AS x, true AS y FROM t"),
+    )
+    with assert_raises(contains="ANY or ALL over a value"):
+        _ = _plan("SELECT 1 = ANY (a) FROM t")

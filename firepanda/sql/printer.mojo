@@ -57,6 +57,7 @@ from .ast import (
     EXPR_GROUPING,
     EXPR_MAP,
     EXPR_QUANTIFIED,
+    EXPR_QUANTIFIED_VALUE,
     EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
@@ -1063,6 +1064,22 @@ def _write_step(
         # SOME comes back as ANY, which is the word DuckDB prints too.
         out += " ALL (" if item.children == 1 else " ANY ("
         _write_stmt(ast, item.b, grammar, out)
+        out += "))"
+        return
+
+    if kind == EXPR_QUANTIFIED_VALUE:
+        if phase == 0:
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += " "
+            out += ast.text(item.payload)
+            out += " ALL (" if item.children == 1 else " ANY ("
+            stack.append(_Step(node, 2))
+            stack.append(_Step(item.b, 0))
+            return
         out += "))"
         return
 

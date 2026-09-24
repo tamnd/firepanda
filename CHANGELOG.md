@@ -10,6 +10,8 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- `x = ANY ([1, 2])` and `x > ALL ([1, 2])`, a quantified comparison over a list written out, which DuckDB unnests. `ANY` becomes one comparison per item joined by OR and `ALL` joins them with AND, so a null in the list gives the same three-valued answer DuckDB gives, and an empty list answers false for `ANY` and true for `ALL`. The form now also parses and prints back when the right side is not written out, such as a list column, and only the plan refuses it there.
+
 - `JOIN BY (TYPE t)`, the spelling DuckDB gives its internal join types, for the six that are ordinary joins: inner, left, right, full (or outer), semi and anti, with an optional `_join` on the end and in any case. Each one builds and prints as the regular join it names. The mark, single, right_semi and right_anti types are still refused by name, and a name that is no join type at all is a parser error that says so.
 
 ### Added: a Parquet read can hold the string columns that repeat as codes

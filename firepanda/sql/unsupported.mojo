@@ -557,9 +557,9 @@ def sql_support() -> List[Refusal]:
             "quantified-value",
             "ANY or ALL over a value",
             (
-                "DuckDB unnests the right side when it is a list, so x = ANY"
-                " ([1, 2]) is a membership test written the long way. Write it"
-                " as IN, or put a SELECT on the right."
+                "A list written out on the right runs. Anything else there is"
+                " a list DuckDB unnests, and no firepanda column holds a list."
+                " Write the list out, or put a SELECT on the right."
             ),
             STAGE_ISSUE,
         ),

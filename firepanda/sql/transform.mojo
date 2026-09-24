@@ -139,7 +139,6 @@ from .unsupported import (
     NO_CASE,
     OPERATOR,
     POSTFIX_OPERATOR,
-    QUANTIFIED_VALUE,
     QUOTED_NAME,
     SELECT_CLAUSE,
     STATEMENT_LATER,
@@ -2308,9 +2307,9 @@ struct Transform(Movable):
         even though its grammar accepts every operator in that position, so
         that wording is used here.
 
-        The right side has to be a subquery. DuckDB also takes a list there
-        and unnests it, which is a membership test written the long way, and
-        that is refused by name rather than implemented twice.
+        The right side is a subquery or a value. DuckDB unnests a value, so
+        it is a list, and that is a node of its own because the subquery one
+        keeps a statement index where this one keeps an expression.
 
         Args:
             tree: The parse.
@@ -2327,8 +2326,7 @@ struct Transform(Movable):
             The expression node.
 
         Raises:
-            Error: If the comparison is not one of the six, or the right side
-                is not a subquery.
+            Error: If the comparison is not one of the six.
         """
         var every = _quantifier(operator) == 2
         var comparison = String(operator[byte = 0 : operator.byte_length() - 4])
@@ -2345,7 +2343,7 @@ struct Transform(Movable):
         var right = work.value(operand)
         ref item = ast.exprs[Int(right)]
         if item.kind != EXPR_SUBQUERY:
-            raise _unsupported(tree, sql, operand, QUANTIFIED_VALUE)
+            return ast.quantified_value(left, comparison, every, right, start)
         return ast.quantified(left, comparison, every, item.a, start)
 
     def _collate(

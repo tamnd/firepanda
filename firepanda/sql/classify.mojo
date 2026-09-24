@@ -67,6 +67,7 @@ from .ast import (
     EXPR_GROUPING,
     EXPR_MAP,
     EXPR_QUANTIFIED,
+    EXPR_QUANTIFIED_VALUE,
     EXPR_ROW,
     EXPR_STAR,
     EXPR_STRUCT,
@@ -220,7 +221,11 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
             if bound != NO_NODE:
                 out.append(bound)
         return out^
-    if kind == EXPR_BINARY or kind == EXPR_FRAME:
+    if (
+        kind == EXPR_BINARY
+        or kind == EXPR_FRAME
+        or kind == EXPR_QUANTIFIED_VALUE
+    ):
         out.append(item.a)
         out.append(item.b)
         return out^
@@ -787,6 +792,8 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         or kind == EXPR_MAP
     ):
         return String()
+    if kind == EXPR_QUANTIFIED_VALUE:
+        return String(ast.text(item.payload), "/", item.children)
     raise Error("an expression kind with no tag rule")
 
 
