@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DataFrame.assign` and a column read as an attribute
+
+`df.assign(**columns)` adds or replaces columns and hands back a new frame. The keywords are taken in order and each one sees the frame the earlier ones made, so `assign(c=lambda f: f.a * 2, d=lambda f: f.c + 1)` works as it does in pandas. A value can be a function of the frame, a series lined up on the row labels, a frame of one column, a mapping, a list, a tuple, a range or a numpy array as long as the frame, or one value for every row. A replaced column keeps its place and a new one goes on the end. A wrong length, a frame of several columns and a set raise pandas' errors, and `None` is refused, because pandas makes it an object column. `df.name` now reads a column as an attribute when no method has that name, and `dir(df)` lists the columns that are identifiers.
+
 ### Added: `rank` on a series, a frame and a group by
 
 `Series.rank`, `DataFrame.rank` and `groupby(...).rank()` are written, with every method pandas has (`average`, `min`, `max`, `first` and `dense`), the three placements for a missing value, both directions and `pct`. All three are one kernel in the core, a stable sort and a pass over the ties that reads equality off the factorize codes, so numbers, text, flags and times all rank the same way. An ordered category ranks by its place in the categories and an unordered one by its value, and a group by refuses the unordered one, all as pandas does. The answer is float64, as pandas' is, a row whose group key is missing ranks NaN under `dropna`, and `transform("rank")` now answers rather than being refused. A rank across a row, `axis=1` on a frame, is still refused.
