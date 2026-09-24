@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a small filter or gather of text writes its column directly
+
+A filter or gather of a text column below the size where it splits across cores went through `StringBuilder`, which grows two lists a row and then copies both into the finished column. It now runs the same count and copy the split route does, as one worker on the calling thread. Filtering 42,000 rows of TPC-H customers takes 175 us rather than 485 us for the two byte country code and 715 us rather than 1,180 us for the address, and q22 at SF1 goes from about 26 ms to 24 ms.
+
 ## [0.8.32] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
