@@ -2164,9 +2164,19 @@ def _holds(printed: str, value: Any) -> bool:
         # A float that is a whole number is a number a column of whole numbers
         # can hold, which is the one place pandas lets the two kinds meet.
         return (printed in _SIGNED or printed in _UNSIGNED) and value.is_integer()
+    if _NAIVE_INSTANTS.fullmatch(printed):
+        # pandas reads text as an instant here, and takes an instant with no zone,
+        # and anything else turns its column into objects.
+        return isinstance(value, str) or (
+            isinstance(value, datetime.datetime) and value.tzinfo is None
+        )
     if isinstance(value, str):
         return printed == "string"
     return False
+
+
+_NAIVE_INSTANTS = re.compile(r"datetime64\[(s|ms|us|ns)\]")
+"""The types of a column of instants with no zone."""
 
 
 _ISIN_SERIES = "only list-like objects are allowed to be passed to isin(), you passed a `{}`"
@@ -2407,6 +2417,12 @@ def _fallback(printed: str, value: Any, column: Any = None) -> Any:
     if not _holds(printed, value):
         raise DTypeError(f"Invalid value '{value}' for dtype '{printed}'")
     try:
+        instants = _NAIVE_INSTANTS.fullmatch(printed)
+        if instants:
+            from ._scalars import Timestamp
+
+            read = to_datetime(Series([str(Timestamp(value))]))
+            return read.dt.as_unit(instants.group(1))._inner
         return Series([value])._inner.cast(printed, True)
     except Exception as error:
         raise translate(error) from None
@@ -5673,6 +5689,11 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
     held = [f"__firepanda_column_{position}" for position in range(len(values))]
     moved = owner.rename(columns=dict(zip(current, held, strict=True)))
     return moved.rename(columns=dict(zip(held, values, strict=True)))
+
+
+def _missing(value: Any) -> bool:
+    """Whether a value read out of a column is a missing one, None or a NaN."""
+    return value is None or value != value
 
 
 class DataFrameMixin:
@@ -15403,6 +15424,110 @@ class IndexMixin:
             raise translate(error) from None
         made, positions = answer
         return Index._wrap(made), None if positions is None else list(positions)
+
+    def all(self, *args: Any, **kwargs: Any) -> Any:
+        """Whether every label is true, a missing label counting as true as numpy counts it."""
+        return all(_missing(label) or bool(label) for label in self.tolist())
+
+    def any(self, *args: Any, **kwargs: Any) -> Any:
+        """Whether any label is true, a missing label counting as true as numpy counts it."""
+        return any(_missing(label) or bool(label) for label in self.tolist())
+
+    def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
+        """The position of the first largest label."""
+        self._one_axis(axis)
+        return int(self.to_series().argmax(skipna=skipna))
+
+    def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> int:
+        """The position of the first smallest label."""
+        self._one_axis(axis)
+        return int(self.to_series().argmin(skipna=skipna))
+
+    def _one_axis(self, axis: Any) -> None:
+        """Holds that `axis` names the one axis an index has, with numpy's words."""
+        if axis is not None and axis not in (0, -1):
+            raise InvalidArgumentError("`axis` must be fewer than the number of dimensions (1)")
+
+    def item(self) -> Any:
+        """The one label, which is an error when there is not exactly one."""
+        if len(self) != 1:
+            raise InvalidArgumentError("can only convert an array of size 1 to a Python scalar")
+        return self[0]
+
+    def fillna(self, value: Any) -> Index:
+        """The labels with each missing one replaced by `value`."""
+        return self._like(self.to_series().fillna(value))
+
+    def where(self, cond: Any, other: Any = None) -> Index:
+        """The labels where `cond` holds, and `other` or a missing label elsewhere."""
+        from ._frame import Series
+
+        column = self.to_series().reset_index(drop=True)
+        held = Series([bool(each) for each in cond])
+        return self._like(column.where(held, other) if other is not None else column.where(held))
+
+    def diff(self, periods: int = 1) -> Index:
+        """Each label less the label `periods` before it."""
+        return self._like(self.to_series().diff(periods))
+
+    def round(self, decimals: int = 0) -> Index:
+        """The labels rounded to `decimals` places."""
+        return self._like(self.to_series().round(decimals))
+
+    def value_counts(
+        self,
+        normalize: bool = False,
+        sort: bool = True,
+        ascending: bool = False,
+        bins: Any = None,
+        dropna: bool = True,
+    ) -> Series:
+        """How often each label appears, as the column of labels would count it."""
+        return self.to_series().value_counts(
+            normalize=normalize, sort=sort, ascending=ascending, bins=bins, dropna=dropna
+        )
+
+    @property
+    def T(self) -> Index:
+        """The index itself, since an index has one dimension."""
+        return self
+
+    def transpose(self, *args: Any, **kwargs: Any) -> Index:
+        """The index itself, since an index has one dimension."""
+        return self
+
+    def memory_usage(self, deep: bool = False) -> int:
+        """The bytes the labels take, as the column of labels would count them."""
+        return int(self.to_series().memory_usage(index=False, deep=deep))
+
+    def astype(self, dtype: Any, copy: bool = True) -> Index:
+        """The labels as another type, keeping the name."""
+        from ._frame import Index
+
+        return Index(self.to_series().astype(dtype), name=self.name)
+
+    def droplevel(self, level: Any = 0) -> Index:
+        """A flat index has one level to drop and has to keep one, so this only takes none."""
+        levels = level if isinstance(level, (list, tuple)) else [level]
+        if not levels:
+            return self
+        raise InvalidArgumentError(
+            f"Cannot remove {len(levels)} levels from an index with 1 levels: at least one"
+            " level must be left."
+        )
+
+    def get_level_values(self, level: Any) -> Index:
+        """The labels of the one level, named by its number or its name."""
+        self._only_level(level)
+        return self
+
+    def to_flat_index(self) -> Index:
+        """The index itself, which is flat already."""
+        return self
+
+    def infer_objects(self, copy: bool = True) -> Index:
+        """The index itself, since its labels already have a type."""
+        return self.copy() if copy else self
 
     def repeat(self, repeats: Any, axis: None = None) -> Any:
         """Each label as many times as `repeats` says, in order."""

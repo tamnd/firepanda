@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: index members a column already has
+
+`Index` gains `all`, `any`, `argmax`, `argmin`, `item`, `fillna`, `where`, `diff`, `round`, `value_counts`, `T`, `transpose`, `memory_usage`, `astype`, `droplevel`, `get_level_values`, `to_flat_index` and `infer_objects`, with pandas' signatures. Each goes through the labels as a column and back, so the answer keeps the index's class and name. `all` and `any` count a missing label as true, as numpy does. `item`, `argmax` and `argmin` with a bad axis, `droplevel` and `get_level_values` raise pandas' errors. `memory_usage` is the number the labels weigh as a column, which counts the bits that mark missing values where pandas does not.
+
+### Fixed: filling a column of instants with an instant
+
+`fillna` on a column of instants with no zone now takes a `Timestamp` or a `datetime` with no zone, or text naming an instant, and keeps the column's type and unit, as pandas does. It used to refuse all three.
+
 ### Added: repeat, set_axis, DataFrame.idxmax and idxmin, and iterrows
 
 `Series.repeat` and `Index.repeat` take each value and its label as many times as one count for all or one count each says, with a fraction cut to its whole part and numpy's errors for a negative count or counts that do not match the values. `Series.set_axis` and `DataFrame.set_axis` put new labels on the rows or the columns, an index bringing its name along, with pandas' length mismatch error. `DataFrame.idxmax` and `idxmin` answer each column's label of its extreme, or across a row the column that holds it, with `skipna` and `numeric_only`. `DataFrame.iterrows` walks the rows as columns named by their labels. Across a row, `idxmax` and `idxmin` refuse columns other than numbers, and `set_axis` refuses column labels that repeat.
