@@ -35,6 +35,14 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda, api, errors
+from ._config import (
+    describe_option,
+    get_option,
+    option_context,
+    options,
+    reset_option,
+    set_option,
+)
 from ._date_range import date_range
 from ._datetime import DatetimeIndex
 from ._frame import DataFrame, Index, Series, from_arrow
@@ -70,19 +78,25 @@ __all__ = [
     "api",
     "concat",
     "date_range",
+    "describe_option",
     "errors",
     "factorize",
     "from_arrow",
     "get_dummies",
+    "get_option",
     "isna",
     "isnull",
     "melt",
     "merge",
     "notna",
     "notnull",
+    "option_context",
+    "options",
     "pivot",
     "pivot_table",
     "read_csv",
+    "reset_option",
+    "set_option",
     "to_datetime",
     "to_numeric",
     "unique",

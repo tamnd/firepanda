@@ -39,7 +39,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _firepanda
+from . import _config, _firepanda
 from ._scalars import _inward, _outward, _outward_one, _temporal
 from .errors import (
     ColumnNotFoundError,
@@ -2465,15 +2465,6 @@ def _category_fallback(column: Any, value: Any) -> Any:
     one = Series([value]).astype("category")
     return one.cat.set_categories(categories, ordered=column.cat.ordered)._inner
 
-
-MAX_INFO_COLUMNS = 100
-"""How many columns a frame may have before `info` stops listing them one by one.
-
-pandas reads this off `display.max_info_columns` and its default is 100. There is no options
-system here, so it is a constant with pandas' default in it, and a caller who wants the other
-answer passes `max_cols` the way they would have to over there anyway once the option stopped
-being the one they wanted.
-"""
 
 INFO_UNITS = ("bytes", "KB", "MB", "GB", "TB")
 """The ladder `info` prints a byte count on, which is pandas' ladder and is powers of 1024."""
@@ -6579,7 +6570,7 @@ class DataFrameMixin:
         an object column out and there is nothing here it leaves out.
 
         `verbose` chooses between the long form and the one line summary. Left
-        alone it is the long form up to `MAX_INFO_COLUMNS` columns and the
+        alone it is the long form up to `display.max_info_columns` columns and the
         summary beyond that, which is pandas' rule read off an option this
         library does not have, so `max_cols` is how a caller moves the line.
 
@@ -6596,7 +6587,7 @@ class DataFrameMixin:
             verbose: The long form, the summary, or None to decide by width.
             buf: Where to write, or None for standard output.
             max_cols: How many columns the long form is worth, or None for
-                `MAX_INFO_COLUMNS`.
+                `display.max_info_columns`.
             memory_usage: Whether to print the memory line. `"deep"` is accepted
                 and is the same number, because every number here is deep.
             show_counts: Whether to count the rows that are not missing, or None
@@ -6617,7 +6608,8 @@ class DataFrameMixin:
             _info_write(lines, buf)
             return
         printed = [str(name) for name in self._inner.dtypes()]
-        wide = len(names) > (MAX_INFO_COLUMNS if max_cols is None else max_cols)
+        limit = _config.get_option("display.max_info_columns") if max_cols is None else max_cols
+        wide = len(names) > limit
         if verbose is False or (verbose is None and wide):
             lines.append(f"Columns: {len(names)} entries, {names[0]} to {names[-1]}")
         else:
