@@ -279,6 +279,7 @@ from firepanda.exec.node import (
     Project,
     Reduce,
     Search,
+    Settle,
     Sort,
     Substitute,
     Trim,
@@ -3378,6 +3379,11 @@ def _lower_join(
     that holds it. The work is the same work in either place and it is work
     that has to finish before the first chunk of the left side is read.
 
+    A semi or an anti join with a residual is two operators rather than one.
+    The join pairs the rows the way a left join would, the residual is computed
+    over each pairing, and `Settle` keeps the probe rows that had a pairing it
+    passed, or had none, and hands out the probe side's columns alone.
+
     A join on more than one key pair hands the operator both lists of positions
     and the operator packs the tuple into one byte string per row on each side.
     It used to build the table from the first pair and ask the rest afterwards,
@@ -3455,11 +3461,17 @@ def _lower_join(
     # which is what the join binds to, and the keys are the positions binding
     # gave them rather than the first column with the name.
     var width = len(pipe.schema)
-    var wanted = List[Int](capacity=width + len(build.schema))
+    var height = len(build.schema)
+    # A residual is asked of every pairing, so the pairings have to be there to
+    # ask it of. The operator makes them the way a left join does, with the
+    # right side's columns and a column saying which probe row each came from,
+    # and `Settle` decides afterwards which probe rows had a pairing it passed.
+    var residual = len(plan.nodes[at].exprs) > 2 * parts
+    var wanted = List[Int](capacity=width + height)
     for i in range(width):
         wanted.append(i)
-    if kind.keeps_right_columns():
-        for i in range(len(build.schema)):
+    if kind.keeps_right_columns() or residual:
+        for i in range(height):
             wanted.append(width + i)
     var mark = String()
     if kind == JoinKind.MARK:
@@ -3475,13 +3487,18 @@ def _lower_join(
             right_keys.append(
                 plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].at
             )
+    var tag = String()
+    var pairing = kind
+    if residual:
+        tag = "__pair"
+        pairing = JoinKind.LEFT
     pipe.add(
         Node(
             Join(
                 build^,
                 left_on^,
                 right_on^,
-                kind,
+                pairing,
                 "_right",
                 List[String](),
                 wanted^,
@@ -3490,9 +3507,28 @@ def _lower_join(
                 mark^,
                 left_keys^,
                 right_keys^,
+                tag^,
             )
         )
     )
+    if not residual:
+        return
+
+    # The residual was bound against the two inputs end to end, which is the
+    # order the pairings above come out in, so its positions need no moving.
+    var base = len(pipe.schema)
+    var memo = Memo()
+    var tests = List[Int]()
+    for i in range(2 * parts, len(plan.nodes[at].exprs)):
+        tests.append(
+            _lower_expr(
+                plan.exprs, plan.nodes[at].exprs[i], pipe, base, "test", memo
+            )
+        )
+    var keep = List[Int](capacity=width)
+    for i in range(width):
+        keep.append(i)
+    pipe.add(Node(Settle(width + height, tests^, kind == JoinKind.ANTI, keep^)))
 
 
 def lower(

@@ -3659,6 +3659,121 @@ def test_a_correlated_not_exists_runs_as_the_anti_join() raises:
     )
 
 
+def test_an_exists_with_an_inequality_beside_its_equality_runs() raises:
+    # Each row asks whether its own shop sold something dearer. The most
+    # expensive row of each shop is the one row there with no such sale.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales s1 WHERE EXISTS"
+                " (SELECT 1 FROM sales s2 WHERE s2.shop = s1.shop"
+                " AND s2.price > s1.price) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_not_exists_with_an_inequality_keeps_the_other_rows() raises:
+    # The other answer to the same question.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales s1 WHERE NOT EXISTS"
+                " (SELECT 1 FROM sales s2 WHERE s2.shop = s1.shop"
+                " AND s2.price > s1.price) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 5],
+        "qty",
+    )
+
+
+def test_the_rest_of_an_exists_can_read_both_sides_in_one_comparison() raises:
+    # Three bands match a sale, and only the sale at band 3 has a price that
+    # clears its rate once it is scaled up.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty"
+                " AND tiers.rate < sales.price * 50) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3],
+        "qty",
+    )
+
+
+def test_a_not_exists_keeps_the_rows_whose_pairings_all_failed() raises:
+    # A row with no band at all is kept, and so are the two whose band failed.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE NOT EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty"
+                " AND tiers.rate < sales.price * 50) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_row_that_matched_nothing_is_not_asked_the_rest() raises:
+    # A row with no band pairs with nothing, and the join writes it once with
+    # a null rate. That row must not count as a match, or the null test here
+    # would keep every row with no band.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM tiers WHERE"
+                " tiers.band = sales.qty AND (tiers.rate IS NULL OR tiers.rate"
+                " < sales.price)) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        List[Int64](),
+        "qty",
+    )
+
+
+def test_a_not_exists_keeps_a_row_that_matched_nothing() raises:
+    # The same question turned round keeps every row.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE NOT EXISTS (SELECT 1 FROM tiers"
+                " WHERE tiers.band = sales.qty AND (tiers.rate IS NULL OR"
+                " tiers.rate < sales.price)) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_semi_join_asks_the_rest_of_its_condition_of_each_pairing() raises:
+    # The same question as the EXISTS above, written as the join.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales SEMI JOIN tiers ON tiers.band ="
+                " sales.qty AND tiers.rate < sales.price * 50 ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3],
+        "qty",
+    )
+
+
 def test_the_uncorrelated_half_of_an_exists_still_holds() raises:
     # Band 20 is a tier and its rate is under the bar, so the row the first of
     # these tests kept for it goes.

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a semi or anti join asks the rest of its condition, and TPC-H q21 runs
+
+A semi or an anti join, and the correlated `EXISTS` and `NOT EXISTS` that become one, now take a condition with more than equalities in it, such as `EXISTS (SELECT 1 FROM lineitem l2 WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey)`. The equalities pair the rows up and the rest is asked of each pairing, and a left row is kept when some pairing passes (semi) or none does (anti). The plan shows it as `JOIN semi [a = k] where k > b` and the JSON form writes it under `"where"`. This is the last piece TPC-H q21 needed, so all 22 TPC-H queries now answer the same as DuckDB (#816).
+
 ### Added: `DataFrame.resample`, `Series.resample` and the resampler
 
 `resample` bins a datetime index, or the column `on=` names, into fixed steps of time, from nanoseconds to days, with multiples and fractions such as `90min` and `1.5h`. It is the group by firepanda already has, keyed on the bin number of every timestamp, with every bin from the first to the last in the answer. An empty bin holds what pandas puts there: 0 for `sum`, `count`, `size` and `nunique`, 1 for `prod`, and NaN for everything else, which widens an integer column to float64. `closed`, `label` and the origins `start_day`, `start` and `epoch` place the bins the way pandas places them, and a rule in days always starts at midnight of the first day. The resampler has every reduction the group by has plus `ohlc` on a series, `agg` and `apply` by name or by a mapping of columns to names, `transform` by name, `pipe`, `asfreq`, `get_group`, a column by key or by attribute, and `groups`, `indices`, `ngroups`, `ndim`, `ax`, `binner` and `obj`. Calendar rules such as weeks and months, `offset=`, the `end` origins, zoned timestamps, functions, lists of names and upsampling are refused by name. `python/tests/test_resample.py` checks all of this against pandas.
@@ -53,7 +57,6 @@ A group by now takes `agg` in the four shapes pandas reads when every function i
 ### Changed: a text filter or gather that keeps enough of the payload shares it
 
 A filter or gather of a text column copied every kept string longer than twelve bytes into a payload of its own, one `memcpy` a row. When the rows it keeps hold at least an eighth of the input's payload bytes it now copies only the sixteen byte views and hands the output the input's payload, which is refcounted, so the bytes stay alive as long as either column needs them. Below an eighth it still copies, so a filter that keeps a handful of rows out of a large column does not hold the rest in memory. Filtering TPC-H's 42,000 q22 customers takes 136 us rather than 920 us for the comment and 127 us rather than 715 us for the address.
-
 ### Fixed: an operator against a moment or a span keeps the column's name
 
 `s - s.min()`, `s > datetime(2024, 1, 1)` and the other operators with a `Timestamp`, `datetime`, `Timedelta` or `timedelta` on one side answered a series with no name, because the scalar was lined up as an unnamed column first. It is now lined up under the column's own name, so the answer keeps it the way pandas does and the way an operator against a number already did.

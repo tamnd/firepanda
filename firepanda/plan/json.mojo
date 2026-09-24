@@ -872,8 +872,20 @@ def _node_json(
                 _expr_json(plan.exprs, node.exprs[node.parts + i], on_exprs),
                 "}",
             )
+        out += "]"
+        if len(node.exprs) > 2 * node.parts:
+            out += String(
+                ', "where": ',
+                _exprs_json(
+                    plan.exprs,
+                    node.exprs,
+                    2 * node.parts,
+                    len(node.exprs),
+                    on_exprs,
+                ),
+            )
         out += String(
-            '], "left": ',
+            ', "left": ',
             _node_json(plan, node.inputs[0], naming, on_exprs),
             ', "right": ',
             _node_json(plan, node.inputs[1], naming, on_exprs),
@@ -1677,7 +1689,21 @@ def _join_node_of(
         mark = text_of(
             bytes, members[_need(bytes, members, "mark", "a mark join")].value
         )
-    return plan.join(left, right, left_keys^, right_keys^, how, mark^)
+    # Absent rather than empty on a join with no residual, which is every join
+    # written before there was one, so an older document still reads.
+    var residual = List[Int]()
+    var rest = _at(bytes, members, "where")
+    if rest != -1:
+        residual = _expr_list(
+            bytes,
+            members[rest].value,
+            "the condition of a join",
+            plan.exprs,
+            expr_ids,
+        )
+    return plan.join(
+        left, right, left_keys^, right_keys^, how, mark^, residual^
+    )
 
 
 def _over_one_of(

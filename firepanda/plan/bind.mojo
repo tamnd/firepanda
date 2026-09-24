@@ -1291,7 +1291,8 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
     The two key lists bind against different schemas, which is the whole reason
     a join is not just another node with a list of expressions on it. The left
     keys see the left input and the right keys see the right one, and the output
-    is the two schemas end to end so that the node above can reach either.
+    is the two schemas end to end so that the node above can reach either. A
+    residual after them sees both, end to end, since it is asked of a pair.
 
     Args:
         plan: The plan, written through.
@@ -1313,10 +1314,31 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
     var rights = _Names(right.schema)
     for i in range(keys):
         _bind_expr(plan.exprs, exprs[i], left.schema, left.origin, lefts, False)
-    for i in range(keys, len(exprs)):
+    for i in range(keys, 2 * keys):
         _bind_expr(
             plan.exprs, exprs[i], right.schema, right.origin, rights, False
         )
+    if len(exprs) > 2 * keys:
+        # The residual reads a pairing rather than one side, so it binds
+        # against the two schemas end to end, which is what a filter over the
+        # inner join of the same two inputs would have bound against.
+        var both = Schema(copy=left.schema)
+        var whose = left.origin.copy()
+        for i in range(len(right.schema)):
+            both.append(right.schema[i].copy())
+            whose.append(right.origin[i])
+        var names = _Names(both)
+        for i in range(2 * keys, len(exprs)):
+            _bind_expr(plan.exprs, exprs[i], both, whose, names, False)
+            var t = plan.exprs.nodes[exprs[i]].type
+            if not _bool(t):
+                raise Error(
+                    String(
+                        "a join condition says whether a pair matches, and",
+                        " this part of one asks ",
+                        t,
+                    )
+                )
     for i in range(keys):
         var a = plan.exprs.nodes[exprs[i]].type
         var b = plan.exprs.nodes[exprs[keys + i]].type

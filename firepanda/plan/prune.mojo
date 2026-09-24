@@ -201,9 +201,19 @@ def _demand(
             elif not marks:
                 _want(need[right], p - width)
         var keys = plan.nodes[at].parts
-        for i in range(len(plan.nodes[at].exprs)):
+        for i in range(2 * keys):
             var side = left if i < keys else right
             _want_all(need[side], plan.exprs.positions(plan.nodes[at].exprs[i]))
+        # A residual reads the two inputs end to end, so a position in it is
+        # the left side's below the width and the right side's counted on from
+        # there, the same way a position asked of the join from above is.
+        for i in range(2 * keys, len(plan.nodes[at].exprs)):
+            var reads = plan.exprs.positions(plan.nodes[at].exprs[i])
+            for j in range(len(reads)):
+                if reads[j] < width:
+                    _want(need[left], reads[j])
+                else:
+                    _want(need[right], reads[j] - width)
         return
 
     var input = plan.nodes[at].inputs[0]

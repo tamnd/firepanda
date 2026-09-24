@@ -2273,13 +2273,33 @@ def test_a_semi_join_may_name_its_key_with_using() raises:
 
 
 def test_a_semi_join_needs_an_equality_between_its_two_sides() raises:
-    # DuckDB takes any predicate here. This join node carries key pairs, and the
-    # rest of a condition is ordinarily a filter above the join, which here
-    # would read columns the join did not keep.
-    with assert_raises(contains="semi join on equalities"):
+    # DuckDB takes any predicate here. This join node pairs rows up by its keys,
+    # so a condition with no equality in it has nothing to pair them by.
+    with assert_raises(contains="no equality between its two sides"):
         _ = _plan("SELECT a FROM t SEMI JOIN u ON t.b > u.b")
-    with assert_raises(contains="anti join on equalities"):
-        _ = _plan("SELECT a FROM t ANTI JOIN u ON t.b = u.b AND t.a > u.k")
+
+
+def test_the_rest_of_a_semi_join_condition_rides_on_the_join() raises:
+    # It cannot be a filter above the join, which keeps none of the right side,
+    # so the join asks it of each pairing its keys make.
+    assert_equal(
+        _plan("SELECT a FROM t SEMI JOIN u ON t.b = u.b AND u.k > t.a"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = b] where k > a\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT a FROM t ANTI JOIN u ON t.b = u.b AND t.a > u.k"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN anti [b = b] where a > k\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
 
 
 def test_an_in_over_a_subquery_is_a_semi_join() raises:
@@ -3055,6 +3075,30 @@ def test_a_correlation_that_is_not_an_equality_is_refused() raises:
         _ = _plan(
             "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.b > t.b)"
         )
+
+
+def test_a_correlated_exists_keeps_its_inequality_on_the_join() raises:
+    # TPC-H q21 has this shape. The equality pairs the rows up and the other
+    # comparison is asked of each pairing.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE EXISTS"
+            " (SELECT 1 FROM u WHERE u.b = t.b AND u.k <> t.a)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = b] where k != a\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+    assert_true(
+        "JOIN anti [b = b] where k != a"
+        in _plan(
+            "SELECT a FROM t WHERE NOT EXISTS"
+            " (SELECT 1 FROM u WHERE u.b = t.b AND u.k <> t.a)"
+        )
+    )
 
 
 def test_an_exists_over_an_aggregate_runs_when_it_reads_no_outer_column() raises:

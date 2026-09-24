@@ -4380,6 +4380,17 @@ struct Join(Movable):
     var right_keys: List[Int]
     """The same on the build side, in the matching order."""
 
+    var tag: String
+    """What to call a column saying which probe row each output row came from,
+    or empty for no such column.
+
+    Only a left join writes one. The value is the probe row's position in its
+    chunk when the row paired and minus one less that position when it was
+    padded, so one column answers both which row and whether it matched. It is
+    what `Settle` reads to answer a semi or an anti join whose condition is
+    more than its keys, which needs every pairing rather than the first.
+    """
+
     var _left_at: Int
     """Where the key sits in the chunk, settled by `bind`."""
 
@@ -4450,6 +4461,7 @@ struct Join(Movable):
         var mark: String = String(),
         var left_keys: List[Int] = List[Int](),
         var right_keys: List[Int] = List[Int](),
+        var tag: String = String(),
     ):
         """Constructs a join against a frame.
 
@@ -4476,6 +4488,8 @@ struct Join(Movable):
                 Consumed.
             right_keys: The same on the build side, in the matching order.
                 Consumed.
+            tag: What to call the column saying which probe row each output
+                row came from, or empty for none. Consumed. Left joins only.
         """
         self.right = right^
         self.left_on = left_on^
@@ -4489,6 +4503,7 @@ struct Join(Movable):
         self.right_at = right_at
         self.left_keys = left_keys^
         self.right_keys = right_keys^
+        self.tag = tag^
         self._left_at = -1
         self._right_at = -1
         self._packed = False
@@ -4526,6 +4541,11 @@ struct Join(Movable):
             raise Error(
                 "join: a mark join hands out a boolean column and the column"
                 " has to be called something, so the name is not optional"
+            )
+        if self.tag.byte_length() != 0 and self.kind != JoinKind.LEFT:
+            raise Error(
+                "join: only a left join tags its rows, because it is the one"
+                " kind that hands out every pairing and every row that had none"
             )
 
         var probe_keys = self.left_keys.copy()
@@ -4640,7 +4660,7 @@ struct Join(Movable):
             )
 
         if len(self.wanted) != 0:
-            return self._marked(self._picked(input))
+            return self._tagged(self._marked(self._picked(input)))
 
         # The same plan `join_on` makes, without the coalescing branch: an
         # output row of these four kinds always has a probe side row behind it,
@@ -4704,7 +4724,34 @@ struct Join(Movable):
                 kept.append(fields[found].copy())
                 self._from_right.append(from_right[found])
                 self._source.append(source[found])
-        return self._marked(Schema(kept^))
+        return self._tagged(self._marked(Schema(kept^)))
+
+    def _tagged(self, var planned: Schema) raises -> Schema:
+        """Puts the tag column on the end of what it gathers, if it was asked
+        for.
+
+        Args:
+            planned: The gathered columns. Consumed.
+
+        Returns:
+            Those columns, with the tag on the end when there is one.
+
+        Raises:
+            If the tag's name is one the gathered columns already use.
+        """
+        if self.tag.byte_length() == 0:
+            return planned^
+        if planned.has(self.tag):
+            raise Error(
+                "join: the tag column was to be called '"
+                + self.tag
+                + "', and the join already hands out a column of that name"
+            )
+        var fields = List[Field]()
+        for i in range(len(planned)):
+            fields.append(planned[i].copy())
+        fields.append(Field(String(self.tag), LogicalType.INT64))
+        return Schema(fields^)
 
     def _marked(self, var planned: Schema) raises -> Schema:
         """Puts the mark join's own column on the end of what it gathers.
@@ -4935,10 +4982,168 @@ struct Join(Movable):
                 out.append(AnyArray(copy=chunk.columns[self._source[w]]))
                 dense.append(False)
                 pointing = True
+        if self.tag.byte_length() != 0:
+            var tags = Array[DType.int64](overwritten=height)
+            for i in range(height):
+                var row = pairs.left_at[i]
+                tags[i] = Int64(row if pairs.right_at[i] >= 0 else -1 - row)
+            out.append(AnyArray(tags^))
+            dense.append(True)
         _ = chunk^
         if not pointing:
             return Chunk(out^, height)
         return Chunk(out^, picks^, dense^)
+
+
+struct Settle(Movable):
+    """Answers a semi or an anti join whose condition is more than its keys.
+
+    A semi join keeps a probe row when some build row pairs with it, and the
+    table answers that on the keys alone. A condition with anything else in it,
+    such as `u.b <> t.b` beside `u.a = t.a`, is a question about each pairing,
+    so the pairings have to be made before it can be asked. `Join` makes them
+    as a left join would and tags each one with the probe row it came from, the
+    conditions are computed over them by the ordinary operators, and this is
+    the last step: one row out per probe row that had a pairing every condition
+    held for, or for an anti join one per probe row that had none.
+
+    A padded row is a probe row that paired with nothing, and it never counts as
+    a pairing that passed, whatever the conditions say about the nulls it was
+    padded with. That is what lets an anti join keep a row whose key matched
+    nothing, and what stops `u.b IS NULL` from matching a row that is not there.
+
+    It works one chunk at a time, which is enough because a join hands out
+    every pairing of one probe row in the same chunk and next to each other. So
+    the node reads itself and never writes itself, like the join before it.
+    """
+
+    var tag: Int
+    """Where the join's tag column is."""
+
+    var tests: List[Int]
+    """Where each condition's answer is. A pairing passes when all of them are
+    true, and a null is not true."""
+
+    var anti: Bool
+    """Whether to keep the probe rows with no pairing that passed rather than
+    the ones with one."""
+
+    var keep: List[Int]
+    """The columns handed out, which are the probe side's."""
+
+    def __init__(
+        out self,
+        tag: Int,
+        var tests: List[Int],
+        anti: Bool,
+        var keep: List[Int],
+    ):
+        """Constructs the last step of a semi or an anti join.
+
+        Args:
+            tag: Where the join's tag column is.
+            tests: Where each condition's answer is. Consumed.
+            anti: Whether this is an anti join.
+            keep: The columns to hand out. Consumed.
+        """
+        self.tag = tag
+        self.tests = tests^
+        self.anti = anti
+        self.keep = keep^
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Checks the tag and the conditions and reports what is handed out.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The kept columns.
+
+        Raises:
+            If the tag is not a whole number, a condition is not a boolean, or a
+            position is not a column.
+        """
+        if self.tag < 0 or self.tag >= len(input):
+            raise Error(
+                String(
+                    "settle: the tag is column ", self.tag, " of ", len(input)
+                )
+            )
+        if input[self.tag].dtype != LogicalType.INT64:
+            raise Error("settle: the tag column is not an int64")
+        for i in range(len(self.tests)):
+            var at = self.tests[i]
+            if at < 0 or at >= len(input):
+                raise Error(
+                    String(
+                        "settle: a condition is column ", at, " of ", len(input)
+                    )
+                )
+            if input[at].dtype != LogicalType.BOOL:
+                raise Error(
+                    "settle: a condition answers "
+                    + String(input[at].dtype)
+                    + " and it has to answer yes or no"
+                )
+        return _narrow(self.keep, input, "settle")
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Keeps one row per probe row that settled the way the join asks.
+
+        Args:
+            chunk: The pairings. Consumed.
+
+        Returns:
+            The probe side's columns of the rows kept, or None when none were.
+
+        Raises:
+            If a gather raises.
+        """
+        var rows = len(chunk)
+        if rows == 0:
+            return None
+        # A chunk that points at the probe side's rows is gathered only in the
+        # columns read here, which are the tag, the tests and what is kept.
+        if chunk.selected():
+            chunk.materialize(self.tag)
+            for t in range(len(self.tests)):
+                chunk.materialize(self.tests[t])
+            for k in range(len(self.keep)):
+                chunk.materialize(self.keep[k])
+        ref tags = chunk.columns[self.tag].as_typed_view[DType.int64]()
+        var picked = List[Int]()
+        var i = 0
+        while i < rows:
+            var first = Int(tags[i])
+            var row = first if first >= 0 else -1 - first
+            var start = i
+            var passed = False
+            while i < rows:
+                var here = Int(tags[i])
+                if (here if here >= 0 else -1 - here) != row:
+                    break
+                if here >= 0 and not passed:
+                    passed = True
+                    for t in range(len(self.tests)):
+                        ref column = chunk.columns[self.tests[t]]
+                        if not column.is_valid(i):
+                            passed = False
+                            break
+                        if not column.as_typed_view[DType.bool]()[i]:
+                            passed = False
+                            break
+                i += 1
+            if passed != self.anti:
+                picked.append(start)
+        if len(picked) == 0:
+            return None
+        var out = List[AnyArray](capacity=len(self.keep))
+        for k in range(len(self.keep)):
+            out.append(take_any(chunk.columns[self.keep[k]], picked, False))
+        var kept = len(picked)
+        _ = chunk^
+        return Chunk(out^, kept)
 
 
 def _names_include(fields: List[Field], name: String) -> Bool:
@@ -7344,6 +7549,7 @@ comptime Node = Variant[
     Constant,
     Cast,
     Join,
+    Settle,
     Limit,
     Sort,
     Window,
@@ -7424,6 +7630,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cast].bind(input^)
     if node.isa[Join]():
         return node[Join].bind(input^)
+    if node.isa[Settle]():
+        return node[Settle].bind(input^)
     if node.isa[Sort]():
         return node[Sort].bind(input^)
     if node.isa[Window]():
@@ -7555,7 +7763,7 @@ def node_is_row_local(node: Node) -> Bool:
         `Truncate`,
         `Presence`,
         `Fill`,
-        `Choose`, `Constant`, `Cast` and `Join`.
+        `Choose`, `Constant`, `Cast`, `Join` and `Settle`.
     """
     return (
         node.isa[Filter]()
@@ -7581,6 +7789,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Constant]()
         or node.isa[Cast]()
         or node.isa[Join]()
+        or node.isa[Settle]()
     )
 
 
@@ -7845,6 +8054,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cast].process(chunk^)
     if node.isa[Join]():
         return node[Join].process(chunk^)
+    if node.isa[Settle]():
+        return node[Settle].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
     if node.isa[Sort]():
@@ -7935,6 +8146,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         # False, because this is the entry point several workers share and a
         # join's own kernels would each hand themselves out to workers again.
         return node[Join].process(chunk^, False)
+    if node.isa[Settle]():
+        return node[Settle].process(chunk^)
     raise Error("apply: this node carries state between chunks")
 
 

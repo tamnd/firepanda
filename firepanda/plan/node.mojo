@@ -86,7 +86,8 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     node."""
 
     comptime JOIN = Self(4)
-    """Two inputs, a key pair list and a kind."""
+    """Two inputs, a key pair list and a kind, and on a semi or an anti join
+    whatever else the condition asks of a pair."""
 
     comptime SORT = Self(5)
     """Keys, directions and null placement."""
@@ -680,12 +681,22 @@ struct Plan(Movable, Sized):
         var right_keys: List[Int],
         kind: JoinKind,
         var mark: String = String(),
+        var residual: List[Int] = List[Int](),
     ) raises -> Int:
         """Builds a join.
 
         Two inputs, left then right. The expressions are the left keys and then
         the right keys, with `parts` at the left key count, so the pair at
         position `i` is `exprs[i]` against `exprs[parts + i]`.
+
+        Anything after the right keys is the residual, the part of the condition
+        that is not a key pair. Each one reads the two inputs end to end, the
+        way a filter over an inner join would, and a pair only matches when
+        every one of them is true. Only a semi and an anti join take one. Both
+        keep a left row or drop it and hand out nothing else, so a pairing the
+        residual turns down is a pairing that was never there. Every other kind
+        either hands the pairing out, where a filter above says the same thing,
+        or pads the rows that matched nothing, and that is a different operator.
 
         A mark join adds a column to the left side rather than taking rows away
         from it, so it is the one kind that has an output name to settle, and
@@ -700,14 +711,18 @@ struct Plan(Movable, Sized):
             kind: Which rows to keep.
             mark: What the mark join's boolean column is called. Consumed.
                 Required for a mark join and refused for every other kind.
+            residual: The rest of the condition, over both inputs end to end.
+                Consumed. Empty on every kind but a semi and an anti join.
 
         Returns:
             The index of the new node.
 
         Raises:
             If either input is not in the plan, a key is not in the arena or is
-            not elementwise, the two key lists are different lengths, or the
-            mark name is missing on a mark join or given on anything else.
+            not elementwise, the two key lists are different lengths, the mark
+            name is missing on a mark join or given on anything else, or a
+            residual is given to a kind that does not take one or has no key
+            pair beside it.
         """
         self.check(left)
         self.check(right)
@@ -742,10 +757,32 @@ struct Plan(Movable, Sized):
             self._rowwise(left_keys[i], "a join key")
         for i in range(len(right_keys)):
             self._rowwise(right_keys[i], "a join key")
+        if len(residual) != 0:
+            if kind != JoinKind.SEMI and kind != JoinKind.ANTI:
+                raise Error(
+                    String(
+                        "a ",
+                        kind,
+                        (
+                            " join was given a condition beyond its keys, and"
+                            " only a semi and an anti join carry one"
+                        ),
+                    )
+                )
+            if len(left_keys) == 0:
+                raise Error(
+                    "a join was given a condition beyond its keys and no key,"
+                    " and the pairs the condition is asked about are the pairs"
+                    " the keys make"
+                )
+        for i in range(len(residual)):
+            self._rowwise(residual[i], "a join condition")
         var parts = len(left_keys)
         var exprs = left_keys^
         for i in range(len(right_keys)):
             exprs.append(right_keys[i])
+        for i in range(len(residual)):
+            exprs.append(residual[i])
         var names = List[String]()
         if kind == JoinKind.MARK:
             names.append(mark^)
