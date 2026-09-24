@@ -7704,6 +7704,57 @@ class SeriesMixin:
             self._named(other, "mod", axis, level, fill_value, flip),
         )
 
+    def _between(self, left: Any, right: Any, inclusive: str) -> Any:
+        """`left <= s <= right`, with either end open as `inclusive` says.
+
+        Two comparisons and an and, which is what pandas does, so a missing
+        value is False because a comparison against one is, and bounds the wrong
+        way round are False everywhere rather than an error.
+        """
+        ends = {"both": (True, True), "neither": (False, False)}
+        ends |= {"left": (True, False), "right": (False, True)}
+        if inclusive not in ends:
+            raise InvalidArgumentError(
+                "Inclusive has to be either string of 'both','left', 'right', or 'neither'."
+            )
+        low, high = ends[inclusive]
+        above = self >= left if low else self > left
+        below = self <= right if high else self < right
+        return above & below
+
+    def _extreme_at(self, kind: str, axis: Any, skipna: bool, label: bool) -> Any:
+        """Where the first largest or smallest value is, as a label or a position.
+
+        The extreme comes from the reduction and the first row equal to it from
+        a filter, so both passes run in the kernel. The three errors are
+        pandas' own sentences, checked in the order pandas checks them, so an
+        empty series is the empty sequence error even with `skipna=False`.
+
+        Args:
+            kind: `max` or `min`.
+            axis: The axis, which on a series can only be the rows.
+            skipna: Whether a missing value is passed over or is an error.
+            label: True for `idxmax` and `idxmin`, False for the positions.
+
+        Returns:
+            The label, or the position as an int.
+        """
+        from ._frame import Series
+
+        _axis_number(axis, "Series", 0, (0,))
+        rows = self._inner.length()
+        if rows == 0:
+            raise InvalidArgumentError(f"attempt to get arg{kind} of an empty sequence")
+        gaps = rows - self.notna().sum()
+        if gaps and not skipna:
+            raise InvalidArgumentError("Encountered an NA value with skipna=False")
+        if gaps == rows:
+            raise InvalidArgumentError("Encountered all NA values")
+        mask = _filled_with_false((self == getattr(self, kind)())._inner)
+        column = self if label else self.reset_index(drop=True)
+        first = Series._wrap(column._inner.filter_rows(mask).head(1))
+        return first.index.to_list()[0]
+
     def _logical(self, other: Any, op: str, flip: bool) -> Any:
         """Runs `&`, `|` or `^`, on a series or a constant.
 

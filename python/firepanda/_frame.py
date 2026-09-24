@@ -3253,6 +3253,41 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def between(self, left: Any, right: Any, inclusive: str = "both") -> Any:
+        """Whether each value lies between two bounds, with a missing value False."""
+        try:
+            return self._between(left, right, inclusive)
+        except Exception as error:
+            raise translate(error) from None
+
+    def idxmax(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The label of the first largest value."""
+        try:
+            return self._extreme_at("max", axis, skipna, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def idxmin(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The label of the first smallest value."""
+        try:
+            return self._extreme_at("min", axis, skipna, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def argmax(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The position of the first largest value."""
+        try:
+            return self._extreme_at("max", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def argmin(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The position of the first smallest value."""
+        try:
+            return self._extreme_at("min", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
     def tolist(self) -> list[object]:
         """The values as a Python list, with None where a value is missing."""
         try:
