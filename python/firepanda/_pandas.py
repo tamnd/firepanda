@@ -10942,6 +10942,134 @@ class GroupByMixin[Answer]:
             "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
         )
 
+    def _transform(self, kind: str, periods: int = 1) -> DataFrame:
+        """Runs one transform over the groups and hands back the frame it makes.
+
+        The transforms keep the row count, so the answer has the frame's rows in
+        the frame's order and its labels, one column a column that is not a key
+        for the folds and `shift`, and one column called after the transform for
+        `cumcount` and `ngroup`. A column that came back with a gap in it is
+        widened the way pandas widens it, so an integer column with a missing
+        value in it is float64.
+
+        Args:
+            kind: The transform, as pandas spells the method.
+            periods: How far `shift` moves, and ignored by the others.
+
+        Returns:
+            The frame the core produced, as tall as the one grouped.
+        """
+        from ._frame import DataFrame
+
+        try:
+            if kind == "shift" and periods == 0:
+                # pandas answers a shift by nothing with the columns as they
+                # are, before it looks at the groups, so a row whose key is
+                # missing keeps its value and a column of whole numbers stays
+                # whole.
+                return DataFrame._wrap(self._frame._inner.drop(self._by))
+            out = self._frame._inner.group_scan(self._by, kind, periods, self._dropna, self._sort)
+            return DataFrame._wrap(out._widened_for_missing())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _cumulative(
+        self, kind: str, numeric_only: bool, args: Any = (), kwargs: Any = None
+    ) -> Answer:
+        """Runs one of the four running folds within each group.
+
+        Args:
+            kind: `cumsum`, `cumprod`, `cummax` or `cummin`.
+            numeric_only: Declared and held at False.
+            args: The numpy compatibility arguments, refused if there are any.
+            kwargs: The same, by keyword.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "dropping the columns a fold cannot read is a decision about which"
+            " columns come back, and firepanda folds the ones it was given or says"
+            " which one it could not",
+        )
+        if args or kwargs:
+            raise UnsupportedError(
+                f"the extra arguments of {kind} are not taken, because pandas only"
+                " passes them on to numpy and none of them mean anything here"
+            )
+        return self._shape_rows(kind, 1)
+
+    def _counted(self, kind: str, ascending: bool) -> Series:
+        """Numbers the rows within their group, or the groups themselves.
+
+        Args:
+            kind: `cumcount` or `ngroup`.
+            ascending: Declared and held at True.
+
+        Returns:
+            An unnamed series of numbers, one a row.
+        """
+        _held_at(
+            "ascending",
+            ascending,
+            True,
+            "counting from the end is a second pass over each group, and nothing"
+            " has asked for it yet",
+        )
+        out = self._transform(kind)
+        return _relabelled(out, out.columns[0], None)
+
+    def _shifted(self, periods: Any, freq: Any, fill_value: Any, suffix: Any) -> Answer:
+        """Moves each group's rows along within the group, leaving the gap missing.
+
+        Args:
+            periods: How far to move, and a single number.
+            freq: Refused.
+            fill_value: Held at no value.
+            suffix: Refused.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        _refuse(
+            "freq",
+            freq,
+            "shifting by a frequency moves the labels rather than the values and"
+            " needs the offset vocabulary, which is the resampling milestone",
+        )
+        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
+        _held_at(
+            "fill_value",
+            fill_value,
+            NO_DEFAULT,
+            "filling the gap keeps a column of whole numbers whole, and the value"
+            " has to reach the kernel as a typed one rather than as a Python"
+            " object",
+        )
+        if not isinstance(periods, int) or isinstance(periods, bool):
+            raise NotImplementedError(
+                "periods has to be a single number for now, because a list of them"
+                " answers a frame with one column per period"
+            )
+        return self._shape_rows("shift", periods)
+
+    def _shape_rows(self, kind: str, periods: int) -> Answer:
+        """Runs a transform and puts the answer in the shape pandas gives.
+
+        Overridden in both subclasses and never called on this one.
+
+        Args:
+            kind: The transform, as pandas spells the method.
+            periods: How far `shift` moves.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        raise NotImplementedError(kind)
+
     def _shape(self, kind: str, param: float) -> Answer:
         """Runs the reduction and puts the answer in the shape pandas gives.
 
@@ -11007,6 +11135,18 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             The frame of one row per group.
         """
         return self._reduced(kind, param)
+
+    def _shape_rows(self, kind: str, periods: int) -> DataFrame:
+        """One transform over every column that is not a key.
+
+        Args:
+            kind: The transform, as pandas spells the method.
+            periods: How far `shift` moves.
+
+        Returns:
+            The frame, as tall as the one grouped.
+        """
+        return self._transform(kind, periods)
 
     def _size(self) -> DataFrame | Series:
         """Counts the rows in each group, which is the one reduction with two shapes.
@@ -11085,6 +11225,19 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         # there is exactly one column left once the keys have gone into the
         # labels, so the answer is the column that is there.
         return _relabelled(out, out.columns[-1], None if kind == "size" else self._column)
+
+    def _shape_rows(self, kind: str, periods: int) -> Series:
+        """One transform over the one column.
+
+        Args:
+            kind: The transform, as pandas spells the method.
+            periods: How far `shift` moves.
+
+        Returns:
+            A series named after the column, as tall as the frame grouped.
+        """
+        out = self._transform(kind, periods)
+        return _relabelled(out, self._column, self._column)
 
 
 class IndexMixin:

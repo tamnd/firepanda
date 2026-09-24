@@ -82,6 +82,7 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.cumulative import CumulativeOp, grouped_cumulative_any
 from firepanda.kernel.chunked import (
     cast_chunked,
     filter_chunked,
@@ -2954,6 +2955,196 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         specs.append(AggSpec(by[0], AggKind.SIZE, "size"))
         return self.group_by(by, specs, dropna, sort, as_index)
 
+    def group_scan(
+        self,
+        by: List[String],
+        kind: String,
+        periods: Int = 1,
+        dropna: Bool = True,
+        sort: Bool = True,
+    ) raises -> Self:
+        """Answers one value a row, worked out within the row's group.
+
+        This is `df.groupby(keys).cumsum()` and the other transforms that keep
+        the row count: the four running folds, `shift`, `cumcount` and
+        `ngroup`. The answer has the input's rows in the input's order and its
+        labels, which is the property that separates a transform from an
+        aggregation. The folds and `shift` answer every column that is not a
+        key, under its own name. `cumcount` and `ngroup` answer one int64
+        column named for the transform.
+
+        Nothing is sorted. Every row is given its group's ordinal, and a fold
+        runs down the rows once with a carry per group. `shift` places the rows
+        of each group in a list with one counting pass and reads each row's
+        source out of its group's list. `ngroup` numbers the groups in key
+        order when `sort` is on, as pandas does, which sorts one row a group
+        rather than the frame, and in the order the groups first appear when it
+        is off.
+
+        A row whose key has a null in it, when `dropna` is on, belongs to no
+        group, so it answers missing in every column, again as pandas does.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            kind: The transform, as pandas spells the method.
+            periods: How far `shift` moves, and ignored by the others.
+            dropna: Leave the rows with a null in their key out of every group.
+            sort: Number the groups in key order for `ngroup`.
+
+        Returns:
+            A frame as tall as this one, with this one's labels.
+
+        Raises:
+            If a name is missing or repeated, if the transform is not one of
+            the seven, or if a fold has no answer on a column's type.
+        """
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            var idx = self.schema.index_of(by[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "group scan: key column " + by[i] + " was given twice"
+                    )
+            at.append(idx)
+
+        var op = CumulativeOp.SUM
+        if kind == "cumprod":
+            op = CumulativeOp.PROD
+        elif kind == "cummax":
+            op = CumulativeOp.MAX
+        elif kind == "cummin":
+            op = CumulativeOp.MIN
+        elif (
+            kind != "cumsum"
+            and kind != "shift"
+            and kind != "cumcount"
+            and kind != "ngroup"
+        ):
+            raise Error("group scan: unknown transformation " + kind)
+
+        var grouping = self._grouping(at)
+        var groups = grouping.groups
+        var ordinals = grouping.codes.unsafe_ptr()
+
+        # A group's key is what its representative row holds, so whether a
+        # group is dropped is a question about one row, asked only of the keys
+        # that have a null at all, the way `group_by` asks it.
+        var kept = List[Bool](length=groups, fill=True)
+        var alive = Bitmap(self.rows)
+        if dropna:
+            var risky = List[Int]()
+            for k in range(len(at)):
+                if self.columns[at[k]].null_count() > 0:
+                    risky.append(at[k])
+            if len(risky) > 0:
+                for g in range(groups):
+                    for k in range(len(risky)):
+                        if (
+                            not self.columns[risky[k]]
+                            .only()
+                            .is_valid(grouping.rows_at[g])
+                        ):
+                            kept[g] = False
+                            break
+                for i in range(self.rows):
+                    if not kept[Int(ordinals.unsafe_offset(i).unsafe_load())]:
+                        alive.set(i, False)
+
+        var fields = List[Field]()
+        var columns = List[AnyArray]()
+        if kind == "cumcount" or kind == "ngroup":
+            var numbers = List[Int](length=groups, fill=0)
+            if kind == "ngroup":
+                numbers = self._group_numbers(by, grouping, kept, sort)
+            var out = Array[DType.int64](self.rows)
+            var target = out.unsafe_mut_ptr()
+            for i in range(self.rows):
+                var g = Int(ordinals.unsafe_offset(i).unsafe_load())
+                target.unsafe_offset(i).unsafe_store(Int64(numbers[g]))
+                if kind == "cumcount":
+                    numbers[g] += 1
+            out.data.validity = Bitmap(copy=alive)
+            fields.append(Field(kind, LogicalType.INT64))
+            columns.append(AnyArray(out^))
+        else:
+            var sources = List[Int]()
+            if kind == "shift":
+                sources = _shift_sources(grouping, kept, periods, self.rows)
+            for c in range(len(self.columns)):
+                var is_key = False
+                for k in range(len(at)):
+                    if at[k] == c:
+                        is_key = True
+                if is_key:
+                    continue
+                var produced: AnyArray
+                if kind == "shift":
+                    produced = take_any(self.columns[c].only(), sources)
+                else:
+                    produced = grouped_cumulative_any(
+                        self.columns[c].only(),
+                        op,
+                        grouping.codes,
+                        groups,
+                        alive,
+                    )
+                fields.append(Field(self.schema[c].name, produced.type))
+                columns.append(produced^)
+
+        var out = Self(Schema(fields^), columns^)
+        out.index = Index(copy=self.index)
+        return out^
+
+    def _group_numbers(
+        self,
+        by: List[String],
+        grouping: Grouping,
+        kept: List[Bool],
+        sort: Bool,
+    ) raises -> List[Int]:
+        """Numbers the kept groups, in key order or in order of appearance.
+
+        Args:
+            by: The key columns.
+            grouping: The rows' ordinals and a representative row per group.
+            kept: Which groups are numbered. A dropped one keeps a zero that no
+                row reads, because its rows are missing.
+            sort: Number in key order, with a null key last, rather than in the
+                order the groups first appear.
+
+        Returns:
+            One number a group, indexed by ordinal.
+
+        Raises:
+            If a key dtype is not sortable.
+        """
+        var groups = grouping.groups
+        var numbers = List[Int](length=groups, fill=0)
+        var order = List[Int](capacity=groups)
+        if sort:
+            var flags = List[Bool](length=len(by), fill=False)
+            var sorted = (
+                self.select(by).take(grouping.rows_at).argsort(by, flags, flags)
+            )
+            for j in range(groups):
+                order.append(Int(sorted[j]))
+        else:
+            # The representative row is each group's first, so ordering the
+            # groups by it is ordering them by when they first appear.
+            var first = List[Int](length=self.rows, fill=-1)
+            for g in range(groups):
+                first[grouping.rows_at[g]] = g
+            for i in range(self.rows):
+                if first[i] >= 0:
+                    order.append(first[i])
+        var counter = 0
+        for j in range(len(order)):
+            if kept[order[j]]:
+                numbers[order[j]] = counter
+                counter += 1
+        return numbers^
+
     def join(
         self,
         other: Self,
@@ -5787,3 +5978,48 @@ def dt_isocalendar(s: Series) raises -> DataFrame:
     var out = DataFrame.from_series(columns^)
     out.index = Index(copy=s.index)
     return out^
+
+
+def _shift_sources(
+    grouping: Grouping, kept: List[Bool], periods: Int, rows: Int
+) raises -> List[Int]:
+    """Where each row of a grouped `shift` reads from, or -1 for nothing.
+
+    One counting pass puts the rows of every group in a list in row order, and
+    row `k` of a group reads row `k - periods` of the same group when there is
+    one. A row of a dropped group reads nothing.
+
+    Args:
+        grouping: The rows' ordinals.
+        kept: Which groups are kept.
+        periods: How far to move, down for a positive number and up for a
+            negative one.
+        rows: How many rows.
+
+    Returns:
+        One source position a row, in the form `take_any` reads.
+    """
+    var groups = grouping.groups
+    var ordinals = grouping.codes.unsafe_ptr()
+    var starts = List[Int](length=groups + 1, fill=0)
+    for i in range(rows):
+        starts[Int(ordinals.unsafe_offset(i).unsafe_load()) + 1] += 1
+    for g in range(groups):
+        starts[g + 1] += starts[g]
+    var cursor = List[Int](capacity=groups)
+    for g in range(groups):
+        cursor.append(starts[g])
+    var placed = List[Int](length=rows, fill=0)
+    for i in range(rows):
+        var g = Int(ordinals.unsafe_offset(i).unsafe_load())
+        placed[cursor[g]] = i
+        cursor[g] += 1
+    var sources = List[Int](length=rows, fill=-1)
+    for g in range(groups):
+        if not kept[g]:
+            continue
+        for k in range(starts[g], starts[g + 1]):
+            var source = k - periods
+            if source >= starts[g] and source < starts[g + 1]:
+                sources[placed[k]] = placed[source]
+    return sources^

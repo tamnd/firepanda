@@ -145,6 +145,11 @@ class DataFrame:
     ) -> DataFrame:
         """One reduction applied to every column that is not a key."""
         ...
+    def group_scan(
+        self, by: list[str], kind: str, periods: int, dropna: bool, sort: bool
+    ) -> DataFrame:
+        """One value a row, worked out within the row's group."""
+        ...
     def join_on(
         self, other: DataFrame, left_on: list[str], right_on: list[str], how: str, suffix: str
     ) -> DataFrame:

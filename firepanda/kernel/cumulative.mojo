@@ -525,3 +525,179 @@ def _scan[
     comptime if not dt.is_floating_point():
         out.data.validity = Bitmap(copy=present)
     return out^
+
+
+def grouped_cumulative_type(
+    op: CumulativeOp, t: LogicalType
+) raises -> LogicalType:
+    """Returns the type a running fold within groups answers.
+
+    The same refusals as `cumulative_type`, and one difference, measured against
+    pandas 3.0.3: a grouped running total or product of an integer column keeps
+    the column's own width, where the whole column one widens to int64 or
+    uint64. A bool column still answers int64 for those two.
+
+    Args:
+        op: The operation.
+        t: The column's type.
+
+    Returns:
+        The type of the answer.
+
+    Raises:
+        Error: If the operation has no answer on that type.
+    """
+    var answer = cumulative_type(op, t)
+    if t != LogicalType.BOOL and t.is_numeric():
+        return t
+    return answer
+
+
+def grouped_cumulative_any(
+    col: AnyArray,
+    op: CumulativeOp,
+    codes: Array[DType.uint32],
+    groups: Int,
+    alive: Bitmap,
+) raises -> AnyArray:
+    """Runs a fold down a column, starting again for every group.
+
+    One pass in row order with a carry per group, so there is no sort and the
+    answer comes out in the rows' own order, which is the order pandas gives. A
+    row that is missing, or whose group was dropped, is skipped in its group's
+    total and answers missing in place, as the whole column fold does.
+
+    Args:
+        col: The column.
+        op: Which fold to run.
+        codes: The group ordinal of every row, in `[0, groups)`.
+        groups: How many groups.
+        alive: The rows whose group is kept.
+
+    Returns:
+        A column of the same height, of the type `grouped_cumulative_type`
+        gives.
+
+    Raises:
+        Error: If the operation has no answer on the column's type, or the dtype
+            has no physical layout.
+    """
+    var answer = grouped_cumulative_type(op, col.type)
+    var present = present_bitmap_any(col)
+    present.and_with(alive)
+    var wide = AnyArray(
+        copy=col
+    ) if col.dtype() == answer.physical else cast_any(col, answer.physical)
+
+    comptime for candidate in ALL:
+        if answer.physical == candidate:
+            var out = _grouped_fold[candidate](
+                wide.unsafe_ptr[candidate](),
+                present,
+                len(col),
+                codes,
+                groups,
+                op.code,
+            )
+            return AnyArray(out^.into_data(), answer)
+    raise Error("cumulative: unsupported dtype " + String(answer.physical))
+
+
+def _grouped_fold[
+    dt: DType, origin: ImmOrigin
+](
+    src: Pointer[Scalar[dt], origin],
+    present: Bitmap,
+    rows: Int,
+    codes: Array[DType.uint32],
+    groups: Int,
+    code: Int,
+) raises -> Array[dt]:
+    """Sends the grouped scan to the loop written for one operation.
+
+    Args:
+        src: The values, already at the answer's width.
+        present: Which rows hold a value and belong to a kept group.
+        rows: How many rows.
+        codes: The group ordinal of every row.
+        groups: How many groups.
+        code: The operation.
+
+    Parameters:
+        dt: The answer's dtype.
+        origin: The origin of the values.
+
+    Returns:
+        The folded column.
+
+    Raises:
+        Error: If the code is not one of the four.
+    """
+    comptime if dt != DType.bool:
+        if code == OP_CUMSUM:
+            return _grouped_scan[code=OP_CUMSUM](
+                src, present, rows, codes, groups
+            )
+        if code == OP_CUMPROD:
+            return _grouped_scan[code=OP_CUMPROD](
+                src, present, rows, codes, groups
+            )
+    if code == OP_CUMMAX:
+        return _grouped_scan[code=OP_CUMMAX](src, present, rows, codes, groups)
+    if code == OP_CUMMIN:
+        return _grouped_scan[code=OP_CUMMIN](src, present, rows, codes, groups)
+    raise Error("cumulative: unknown operation " + String(code))
+
+
+def _grouped_scan[
+    dt: DType, //, code: Int, origin: ImmOrigin
+](
+    src: Pointer[Scalar[dt], origin],
+    present: Bitmap,
+    rows: Int,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[dt]:
+    """The grouped scan itself, one row at a time with a carry per group.
+
+    The shift ladder `_scan` uses does not apply, because two neighbouring rows
+    are usually in different groups and a register of them has no single carry
+    to fold into. A float total is summed in row order within its group, which
+    is the order pandas sums it in.
+
+    Args:
+        src: The values, already at the answer's width.
+        present: Which rows hold a value and belong to a kept group.
+        rows: How many rows.
+        codes: The group ordinal of every row.
+        groups: How many groups.
+
+    Parameters:
+        dt: The dtype.
+        code: The operation.
+        origin: The origin of the values.
+
+    Returns:
+        A column of running values, missing exactly where `present` is clear.
+
+    Raises:
+        Error: Only what allocation raises.
+    """
+    var carry = List[Scalar[dt]](length=groups, fill=_identity[dt, code]())
+    var out = Array[dt](rows)
+    var target = out.unsafe_mut_ptr()
+    var at = codes.unsafe_ptr()
+    for i in range(rows):
+        if present.get(i):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var folded = _fold_pair[code](
+                carry[g], src.unsafe_offset(i).unsafe_load()
+            )
+            carry[g] = folded
+            target.unsafe_offset(i).unsafe_store(folded)
+        else:
+            target.unsafe_offset(i).unsafe_store(_blank[dt]())
+
+    comptime if not dt.is_floating_point():
+        out.data.validity = Bitmap(copy=present)
+    return out^

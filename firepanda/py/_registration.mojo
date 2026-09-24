@@ -207,6 +207,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "group_agg",
         docstring="One reduction applied to every column that is not a key.",
     )
+    _ = dataframe.def_method[PyDataFrame.group_scan](
+        "group_scan",
+        docstring="One value a row, worked out within the row's group.",
+    )
     _ = dataframe.def_method[PyDataFrame.join_on](
         "join_on", docstring="The rows of two frames paired on key columns."
     )
