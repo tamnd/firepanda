@@ -5696,6 +5696,18 @@ def _missing(value: Any) -> bool:
     return value is None or value != value
 
 
+def _label_texts(index: Any) -> list[str]:
+    """The labels as the text pandas matches `like` and `regex` against.
+
+    pandas renders every label with `str`, so a missing label is the text of
+    its missing marker, `NaT` for instants and spans and `nan` for the rest,
+    and that text can itself hold what is looked for.
+    """
+    printed = str(index.dtype)
+    word = "NaT" if printed.startswith(("datetime", "timedelta")) else "nan"
+    return [word if label is None or label != label else str(label) for label in index.tolist()]
+
+
 def _mapper(func: Any) -> Callable[[Any], Any]:
     """What `map` does to one value, from a function, a mapping or a column.
 
@@ -8987,7 +8999,7 @@ class DataFrameMixin:
         if not rules:
             raise TypeError("Must pass either `items`, `like`, or `regex`")
         over_rows = _axis_number(axis, "DataFrame", 1, (0, 1)) == 0
-        labels = [str(one) for one in self.index] if over_rows else self._inner.names()
+        labels = _label_texts(self.index) if over_rows else self._inner.names()
         if items is not None:
             wanted = [str(one) for one in items]
             held = set(labels)
@@ -9945,10 +9957,12 @@ class SeriesMixin:
             places = {label: place for place, label in enumerate(labels)}
             kept = [places[one] for one in items if one in places]
         elif like is not None:
-            kept = [place for place, label in enumerate(labels) if str(like) in str(label)]
+            texts = _label_texts(self.index)
+            kept = [place for place, text in enumerate(texts) if str(like) in text]
         else:
             pattern = re.compile(regex if isinstance(regex, str) else str(regex))
-            kept = [place for place, label in enumerate(labels) if pattern.search(str(label))]
+            texts = _label_texts(self.index)
+            kept = [place for place, text in enumerate(texts) if pattern.search(text)]
         return self.take(kept)
 
     def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
