@@ -144,6 +144,24 @@ the whole of it, and this is where it is because a fixed width gather writes at
 a computed offset and does not care how many workers are open at once.
 """
 
+comptime PAYLOAD_SHARE = 8
+"""How much of a text column's payload a filter or gather has to keep to share it.
+
+A text filter or gather that keeps at least an eighth of the bytes in its
+input's payload hands the output that payload as it is, and copies only the
+views, which is what a string view layout is for. The payload is refcounted, so
+the output keeps the bytes alive on its own and every long view still names the
+offset it always named. `window` has shared this way since scans were split into
+pieces. Below an eighth the kept bytes are copied out, so a filter that keeps
+one comment in a thousand does not hold the other nine hundred and ninety nine
+alive, and the most a shared payload can hold beyond what its column reads is
+seven times that.
+
+On TPC-H q22 the customers filtered by country code keep 28 percent of the
+payload, and filtering their nine columns took 3.3 ms, most of it `memcpy`
+calls of eighteen to a hundred bytes each for the name, address and comment.
+"""
+
 comptime PARALLEL_FILTER_ROWS = 1 << 16
 """Below this many input rows a filter stays on one thread.
 
@@ -429,8 +447,11 @@ def _take_strings(
                 counted.unsafe_offset(w).unsafe_load()
             )
 
+    # See `PAYLOAD_SHARE`. A shared payload is never written, so the buffer the
+    # workers write into is then empty and nothing reaches it.
+    var shared = carried[workers] * PAYLOAD_SHARE >= len(col.payload)
     var views = Buffer(overwritten=n * VIEW_SIZE)
-    var payload = Buffer(overwritten=carried[workers])
+    var payload = Buffer(overwritten=0 if shared else carried[workers])
     var built = Bitmap(n, all_valid=False)
 
     def gather(w: Int) raises {mut views, mut payload, mut built, imm}:
@@ -457,9 +478,10 @@ def _take_strings(
                 target.unsafe_offset(i)[] = StringView()
             else:
                 var view = source_views.unsafe_offset(at)[]
-                if view.is_inline():
-                    # The bytes are already inside the sixteen, so the view is
-                    # the whole element and copying it is the whole gather.
+                if view.is_inline() or shared:
+                    # The bytes are already inside the sixteen, or they stay
+                    # where they are in a payload the output shares, so the
+                    # view is the whole element and copying it is the gather.
                     target.unsafe_offset(i)[] = view
                 else:
                     var count = len(view)
@@ -489,6 +511,8 @@ def _take_strings(
         gather(0)
     else:
         parallel_for(gather, workers)
+    if shared:
+        payload = Buffer(copy=col.payload)
     return StringArray(views^, payload^, built^, n)
 
 
@@ -1059,8 +1083,11 @@ def _filter_strings(
         )
 
     var kept = rows_before[workers]
+    # See `PAYLOAD_SHARE`. A shared payload is never written, so the buffer the
+    # workers write into is then empty and nothing reaches it.
+    var shared = bytes_before[workers] * PAYLOAD_SHARE >= len(col.payload)
     var views = Buffer(overwritten=kept * VIEW_SIZE)
-    var payload = Buffer(overwritten=bytes_before[workers])
+    var payload = Buffer(overwritten=0 if shared else bytes_before[workers])
     var nulls = not col.validity.all_valid()
     var built = Bitmap(kept, all_valid=not nulls)
 
@@ -1081,7 +1108,7 @@ def _filter_strings(
                 target.unsafe_offset(at)[] = StringView()
             else:
                 var view = source_views.unsafe_offset(i)[]
-                if view.is_inline():
+                if view.is_inline() or shared:
                     target.unsafe_offset(at)[] = view
                 else:
                     var count = len(view)
@@ -1101,6 +1128,8 @@ def _filter_strings(
         compact(0)
     else:
         parallel_for(compact, workers)
+    if shared:
+        payload = Buffer(copy=col.payload)
 
     # A worker's first output row can land in the middle of a validity word that
     # the worker before it also writes to, which is the one thing the take route

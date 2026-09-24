@@ -27,9 +27,11 @@ Building goes through `StringBuilder` rather than through the column, because th
 column is immutable once it exists and because the builder is the shape a reader
 wants: append a field, append a null, ask for the result. `finish` consumes it.
 
-Slicing, taking and filtering all copy, which is what `Array` does and for the
-same reason recorded on `Bitmap.slice`. A view into another column's payload
-would make every column's lifetime depend on every column it was ever cut from.
+Slicing copies. Taking and filtering copy the views and share the payload when
+they keep enough of it, which `PAYLOAD_SHARE` in `kernel/select.mojo` settles,
+and `window` always shares it. The payload is refcounted, so sharing it ties no
+column's lifetime to another's, and what it costs is the bytes nobody reads any
+more, which that threshold bounds.
 """
 
 from std.bit import byte_swap
@@ -77,7 +79,11 @@ struct StringArray(Copyable, Movable, Sized):
     """One 16 byte `StringView` per element."""
 
     var payload: Buffer
-    """The bytes of every element longer than twelve bytes, back to back."""
+    """The bytes of every element longer than twelve bytes.
+
+    Back to back in a column that was built, and possibly with bytes no view
+    names in one that shares its payload with the column it was cut from.
+    """
 
     var validity: Bitmap
     """One bit per element. Set means present."""
