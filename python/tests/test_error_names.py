@@ -11,6 +11,7 @@ import builtins
 import importlib.util
 import inspect
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -55,3 +56,35 @@ def test_each_class_catches_as_pandas_does(firepanda: ModuleType, name: str) -> 
             assert issubclass(mine, getattr(builtins, parent.__name__))
         else:
             assert parent.__name__ in {kind.__name__ for kind in mine.__mro__}
+
+
+@pytest.mark.parametrize("name", pandas_classes())
+def test_each_class_is_made_as_pandas_makes_it(firepanda: ModuleType, name: str) -> None:
+    """The same parameters, where pandas writes its own constructor."""
+    import pandas.errors
+
+    theirs = getattr(pandas.errors, name)
+    if "__init__" not in vars(theirs):
+        return
+    mine = getattr(firepanda.errors, name)
+    assert list(inspect.signature(mine).parameters) == list(inspect.signature(theirs).parameters)
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs"),
+    [((1,), {}), ((int,), {"methodtype": "classmethod"}), (([],), {"methodtype": "property"})],
+)
+def test_an_abstract_method_error_names_the_class(
+    firepanda: ModuleType, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> None:
+    """Which class should have written the method, in pandas' words."""
+    import pandas.errors
+
+    mine = firepanda.errors.AbstractMethodError(*args, **kwargs)
+    assert str(mine) == str(pandas.errors.AbstractMethodError(*args, **kwargs))
+
+
+def test_an_abstract_method_error_refuses_an_unknown_kind(firepanda: ModuleType) -> None:
+    """A kind that is not a method, a classmethod, a staticmethod or a property."""
+    with pytest.raises(ValueError, match="methodtype must be one of"):
+        firepanda.errors.AbstractMethodError(1, methodtype="field")

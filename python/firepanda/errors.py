@@ -37,6 +37,8 @@ moves. That is why it is built this way round.
 
 from __future__ import annotations
 
+from typing import Any
+
 __all__ = [
     "AbstractMethodError",
     "AttributeConflictWarning",
@@ -259,7 +261,25 @@ class CancelledError(KeyboardInterrupt):
 
 
 class AbstractMethodError(FirepandaError, NotImplementedError):
-    """A method a subclass was meant to write and did not."""
+    """A method a subclass was meant to write and did not.
+
+    It is raised with the object the method was called on and the kind of
+    method, and says which class should have written it, as pandas' does.
+    """
+
+    def __init__(self, class_instance: Any, methodtype: str = "method") -> None:
+        types = {"method", "classmethod", "staticmethod", "property"}
+        if methodtype not in types:
+            raise ValueError(f"methodtype must be one of {types}, got {methodtype} instead.")
+        self.methodtype = methodtype
+        self.class_instance = class_instance
+
+    def __str__(self) -> str:
+        if self.methodtype == "classmethod":
+            name = self.class_instance.__name__
+        else:
+            name = type(self.class_instance).__name__
+        return f"This {self.methodtype} must be defined in the concrete class {name}"
 
 
 class ClosedFileError(FirepandaError):
@@ -339,7 +359,17 @@ class PyperclipException(FirepandaError, RuntimeError):
 
 
 class PyperclipWindowsException(PyperclipException):
-    """The clipboard is not available on this Windows machine."""
+    """The clipboard is not available on this Windows machine.
+
+    The message is followed by the last Windows error, as pandas' is, and that
+    error only exists on Windows.
+    """
+
+    def __init__(self, message: str) -> None:
+        import ctypes
+
+        message += f" ({ctypes.WinError()})"  # type: ignore[attr-defined]
+        super().__init__(message)
 
 
 class UnsortedIndexError(FirepandaError, KeyError):

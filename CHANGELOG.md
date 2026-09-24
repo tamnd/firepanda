@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: AbstractMethodError and PyperclipWindowsException are made as pandas makes them
+
+`AbstractMethodError` now takes the object and the kind of method and says which class should have written it, and `PyperclipWindowsException` adds the last Windows error to its message, as pandas' classes do. Their signatures now match pandas', which the compat Board checks.
+
 ### Added: sample, case_when, dot and compare
 
 `Series.sample` and `DataFrame.sample` ask numpy's `choice` for positions the way pandas does, so the same `random_state` draws the same rows, with weights, `frac`, `replace` and `ignore_index`. `Series.case_when` applies its conditions last to first after moving the column to the type it shares with every replacement. `Series.dot` and `DataFrame.dot`, and `@` on both, line the two sides up by label. `Series.compare` sets the values that differ side by side, with `keep_shape`, `keep_equal` and `result_names`. A common type of objects, the sides stacked on a MultiIndex and a product labelled with numbers are refused.
