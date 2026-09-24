@@ -64,8 +64,16 @@ def test_a_numpy_array_is_several_values(firepanda: ModuleType) -> None:
     import numpy as np
 
     wanted = np.array([0, 5])
-    assert firepanda.Series(KEYS).searchsorted(wanted) == [0, 2]
-    assert firepanda.Index(KEYS).searchsorted(wanted) == [0, 2]
+    assert list(firepanda.Series(KEYS).searchsorted(wanted)) == [0, 2]
+    assert list(firepanda.Index(KEYS).searchsorted(wanted)) == [0, 2]
+
+
+def test_several_values_answer_an_array(firepanda: ModuleType) -> None:
+    """An array of positions with no labels, as pandas answers a numpy array."""
+    answer = firepanda.Series(KEYS).searchsorted([0, 5])
+    assert type(answer).__name__ == "FirepandaArray"
+    assert answer.ndim == 1
+    assert str(answer.dtype) == "int64"
 
 
 MISTAKES: list[Callable[[Any], Any]] = [

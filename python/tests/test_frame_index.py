@@ -207,7 +207,7 @@ def test_searchsorted_finds_where_a_label_would_have_to_go(firepanda: ModuleType
     mine = firepanda.Index([10, 20, 20, 40])
     them = pd.Index([10, 20, 20, 40])
     assert mine.searchsorted(30) == them.searchsorted(30)
-    assert mine.searchsorted([5, 20, 50]) == list(them.searchsorted([5, 20, 50]))
+    assert list(mine.searchsorted([5, 20, 50])) == list(them.searchsorted([5, 20, 50]))
 
 
 @needs_pandas

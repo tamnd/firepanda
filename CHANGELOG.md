@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `searchsorted` with several values answers an array
+
+`Series.searchsorted` and `Index.searchsorted` given several values now answer a `FirepandaArray` of int64 positions, where they answered a list, since pandas answers a numpy array and a list is a different shape of answer. One value still answers one position.
+
 ### Added: `Series.searchsorted`
 
 `Series.searchsorted` answers where each value would go for the column to stay in order, with pandas' signature, as `Index.searchsorted` already did for labels. Both now take the values to search for as a list, a tuple, an index, a series or a numpy array, honour `sorter`, search a float among whole numbers and a whole number among floats, and refuse an unknown side with numpy's message, `search side must be 'left' or 'right'`.

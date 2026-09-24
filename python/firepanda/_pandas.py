@@ -14709,8 +14709,9 @@ def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
     """Where one value or each of several would go in a core index kept in order.
 
     One value answers one position and anything that holds several, a list, a
-    tuple, an index, a series or a numpy array, answers a list of them. With
-    `sorter` the labels are read in its order first.
+    tuple, an index, a series or a numpy array, answers an array of them, as
+    pandas answers a numpy array. With `sorter` the labels are read in its order
+    first.
 
     Raises:
         ValueError: For a side other than left or right, with numpy's words.
@@ -14726,7 +14727,11 @@ def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
         elif hasattr(value, "tolist") and getattr(value, "ndim", 0) > 0:
             value = value.tolist()
         if isinstance(value, (list, tuple)):
-            return [_searched_one(index, one, side) for one in value]
+            from ._array import FirepandaArray
+            from ._frame import Series
+
+            positions = [_searched_one(index, one, side) for one in value]
+            return FirepandaArray(Series(positions, dtype="int64"))
         return _searched_one(index, value, side)
     except Exception as error:
         raise translate(error) from None
@@ -15051,8 +15056,8 @@ class IndexMixin:
     def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
         """Where a label would have to go for the labels to stay in order.
 
-        One label gives back one position and a sequence of labels gives back a
-        list of them, which is pandas' rule and is the reason this is written by
+        One label gives back one position and a sequence of labels gives back an
+        array of them, which is pandas' rule and is the reason this is written by
         hand: the shape of the answer is decided by the shape of the argument.
 
         Nothing here checks that the index is sorted, and that is deliberate.
