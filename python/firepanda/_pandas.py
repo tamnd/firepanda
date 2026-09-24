@@ -2165,6 +2165,26 @@ def _labelled(labels: list[Any], values: list[Any]) -> Any:
     return _answered(made.set_index("labels"))["values"]
 
 
+def _keyed_series(data: Any, index: Any, name: Any) -> Any:
+    """The extension series for a mapping: its keys as labels, its values as rows.
+
+    Args:
+        data: A mapping with at least one key.
+        index: `None`, or the labels to pick out of the mapping, in order.
+        name: The series name, or `None`.
+
+    Returns:
+        The extension object, unwrapped.
+    """
+    made = _labelled(list(data.keys()), list(data.values()))
+    inner = made._inner.relabel(None if name is None else str(name)).renamed_axis(None)
+    if index is None:
+        return inner
+    from ._frame import Series
+
+    return Series._wrap(inner).reindex(index)._inner
+
+
 def _fill_column(printed: str, value: Any, labels: list[Any], missing: Any, column: Any) -> Any:
     """A fallback that carries rows, as the type and the rows it is going into.
 
@@ -6859,12 +6879,22 @@ class SeriesMixin:
 
         `dtype=` is inference followed by a cast, for the reason the frame
         constructor gives.
+
+        A mapping is labels and values, the keys becoming the row labels in the
+        order the mapping holds them, and `index=` beside a mapping picks those
+        keys out in its own order, a key the mapping does not have answering a
+        missing value. An empty mapping is the empty series.
         """
-        _refuse("index", index, "putting labels on a series as it is built is not written")
+        keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
+        if not keyed:
+            _refuse("index", index, "putting labels on a series as it is built is not written")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         source = data._inner if isinstance(data, SeriesMixin) else data
         try:
-            self._inner = _firepanda.Series(source, None if name is None else str(name))
+            if keyed:
+                self._inner = _keyed_series(data, index, name)
+            else:
+                self._inner = _firepanda.Series(source, None if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `Series` built from a mapping
+
+`Series({"a": 1, "b": 2})` used to read the mapping as a sequence and hold its keys as the values. It now holds the values under the keys as row labels, in the mapping's order, as pandas does, and `index=` beside a mapping picks those keys out in its own order with a missing value for a key the mapping does not have. `name=` and `dtype=` work with it as they do with a list.
+
 ### Added: `round` on `Series` and `DataFrame`
 
 `Series.round(decimals)` and `DataFrame.round(decimals)` round every number the way numpy does, which is to scale by a power of ten, round half to even and scale back, all in the column's own floating point type, so `2.5` rounds to `2.0`, `2.675` to two places is `2.67` and a float32 column stays float32. An integer column is unchanged unless `decimals` is negative, and then it rounds to the nearest ten, hundred and so on and keeps its width. A column of text, bools, categories or times comes back as it was, as in pandas. The frame's method also takes a mapping or a series of places by column name and leaves the columns it does not name alone. Python's own `round` works on both, numpy's `out` is accepted empty and refused otherwise, and every mistake raises pandas' class with pandas' message.
