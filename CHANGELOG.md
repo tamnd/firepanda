@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: corr, cov and autocorr on a frame and a column
+
+`DataFrame.corr` and `DataFrame.cov` answer the square frame pandas does, labelled by the numeric columns both ways, pairing each two columns over the rows where both hold a value. `Series.corr`, `Series.cov` and `Series.autocorr` answer one number, lining the two columns up by label first. Pearson and Spearman are both there, `min_periods` and `ddof` behave as in pandas, including the difference in `DataFrame.cov` between a frame with a gap and one without, and text is refused with numpy's words unless `numeric_only` is set. Kendall is refused as not supported yet.
+
 ### Added: a row position past the end raises pandas' IndexError
 
 `df.iloc[9999]` on a short frame raises IndexError with pandas' message, "single positional indexer is out-of-bounds", from either end. It used to pass the position to the core and raise the core's slice message.

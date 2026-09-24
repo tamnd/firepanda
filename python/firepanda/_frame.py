@@ -2703,6 +2703,22 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def corr(
+        self, method: Any = "pearson", min_periods: int = 1, numeric_only: bool = False
+    ) -> DataFrame:
+        """The correlation of every numeric column with every other, pairwise."""
+        try:
+            return self._corr_matrix(method, min_periods, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cov(self, min_periods: Any = None, ddof: Any = 1, numeric_only: bool = False) -> DataFrame:
+        """The covariance of every numeric column with every other, pairwise."""
+        try:
+            return self._cov_matrix(min_periods, ddof, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
     def dropna(
         self,
         *,
@@ -3684,6 +3700,27 @@ class Series(SeriesMixin):
         """How many distinct values there are. Over the rows."""
         try:
             return self._nunique(0, dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def corr(self, other: Any, method: Any = "pearson", min_periods: Any = None) -> Any:
+        """The correlation with another column, over the rows both have a value in."""
+        try:
+            return self._corr(other, method, min_periods)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cov(self, other: Any, min_periods: Any = None, ddof: Any = 1) -> Any:
+        """The covariance with another column, over the rows both have a value in."""
+        try:
+            return self._cov(other, min_periods, ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def autocorr(self, lag: int = 1) -> Any:
+        """The correlation of the column with itself moved `lag` rows along."""
+        try:
+            return self._autocorr(lag)
         except Exception as error:
             raise translate(error) from None
 
