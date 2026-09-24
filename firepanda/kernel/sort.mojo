@@ -354,6 +354,12 @@ def argsort_any_into(
     Raises:
         If the column's dtype is not one firepanda can sort.
     """
+    # A column held as codes sorts on its categories' ranks. The categories are
+    # few and are sorted once, and the rows then sort on an int32 each, which
+    # radixes, rather than on their strings, which compare.
+    if not col.is_flat():
+        argsort_any_into(_ranks(col), order, descending, nulls_first)
+        return
     # Before the dispatch, because uint8 is in ORDERED and a string column would
     # match it and sort on the first byte of each view, which is a plausible
     # looking wrong answer rather than an error.
@@ -379,6 +385,34 @@ def argsort_any_into(
             )
             return
     raise Error("unsupported dtype " + String(col.dtype()) + " for sort")
+
+
+def _ranks(col: AnyArray) raises -> AnyArray:
+    """Returns each row's place in the sorted order of an encoded column's
+    categories.
+
+    Two rows compare the way their strings do exactly when their ranks do,
+    since the categories are distinct and so no two share a rank. A null row
+    stays null.
+
+    Args:
+        col: A dictionary encoded column.
+
+    Returns:
+        One int32 a row.
+
+    Raises:
+        If the column is not dictionary encoded.
+    """
+    var by_text = argsort_any(col.distinct())
+    var rank = Array[DType.int32](len(by_text))
+    var at = by_text.unsafe_ptr()
+    var out = rank.unsafe_mut_ptr()
+    for j in range(len(by_text)):
+        out.unsafe_offset(Int(at.unsafe_offset(j).unsafe_load())).unsafe_write(
+            Int32(j)
+        )
+    return col.through_codes(AnyArray(rank^))
 
 
 def _argsort_core[
@@ -1170,6 +1204,8 @@ def is_sorted_any(
     Raises:
         If the column's dtype is not one firepanda can order.
     """
+    if not col.is_flat():
+        return is_sorted_any(_ranks(col), descending, nulls_first)
     if col.is_string():
         return _strings_are_sorted(col.strings(), descending, nulls_first)
     comptime for candidate in ORDERED:

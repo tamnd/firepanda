@@ -548,6 +548,11 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
     Raises:
         Error: If the column cannot be exported. See `_check_exportable`.
     """
+    # A consumer reads the buffers as they lie, so a column held as codes goes
+    # out as the strings it stands for. Its dtype is string and a consumer
+    # handed a dictionary would call it a category.
+    if not column.is_flat():
+        column = column.decoded()
     _check_exportable(column)
     var length = len(column)
     var null_count = column.data.validity.null_count()
@@ -680,6 +685,10 @@ def export_array_borrowed[
     Raises:
         Error: If the column cannot be exported. See `_check_exportable`.
     """
+    # The strings a column held as codes stands for are not in anything the
+    # keep alive holds, so they go out in an array that owns them.
+    if not column[].is_flat():
+        return export_array(column[].decoded())
     _check_exportable(column[])
     var length = len(column[])
     var null_count = column[].data.validity.null_count()

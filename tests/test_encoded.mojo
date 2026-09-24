@@ -19,7 +19,12 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggKind, AggSpec
 from firepanda.frame.series import Series
 from firepanda.kernel.binary import BinaryOp, binary_value_any
+from firepanda.io.arrow_export import export_array, export_schema
+from firepanda.io.arrow_import import import_array
+from firepanda.io.arrow_ipc import read_ipc_stream
+from firepanda.io.arrow_ipc_write import write_ipc_stream_bytes
 from firepanda.kernel.member import is_in_any
+from firepanda.kernel.sort import argsort_any, argsort_multi, is_sorted_any
 from firepanda.kernel.select import filter_any, gather_any, take_any
 
 
@@ -143,6 +148,64 @@ def test_the_text_tests_match_the_flat_ones() raises:
     same_mask(held.str_starts_with("a st"), flat.str_starts_with("a st"))
     same_mask(held.str_ends_with("te"), flat.str_ends_with("te"))
     same_text(held.str_slice(0, 3).values, flat.str_slice(0, 3).values)
+
+
+def same_order(a: Array[DType.uint32], b: Array[DType.uint32]) raises:
+    assert_equal(len(a), len(b), "rows")
+    for i in range(len(a)):
+        assert_equal(a[i], b[i], "place " + String(i))
+
+
+def test_a_sort_on_an_encoded_key_matches_the_flat_one() raises:
+    var col = status()
+    var flat = col.decoded()
+    for way in range(4):
+        var descending = way % 2 == 1
+        var nulls_first = way >= 2
+        same_order(
+            argsort_any(col, descending, nulls_first),
+            argsort_any(flat, descending, nulls_first),
+        )
+    # Ties on the encoded key are broken by the next one, so the encoded pass
+    # has to be stable over the order the later key gave.
+    var n = Array[DType.int64](8)
+    var picked: List[Int64] = [3, 1, 4, 1, 5, 9, 2, 6]
+    for i in range(8):
+        n.set_valid(i, picked[i])
+    var held: List[AnyArray] = [col.copy(), AnyArray(n.copy())]
+    var bare: List[AnyArray] = [flat.copy(), AnyArray(n^)]
+    var descending: List[Bool] = [False, True]
+    var nulls_first: List[Bool] = [True, False]
+    same_order(
+        argsort_multi(held, descending, nulls_first),
+        argsort_multi(bare, descending, nulls_first),
+    )
+    assert_equal(is_sorted_any(col), is_sorted_any(flat))
+    var by: List[String] = ["status"]
+    var up: List[Bool] = [False]
+    same_order(
+        frame(status()).argsort_limit(by.copy(), up.copy(), up.copy(), 3),
+        frame(flat.copy()).argsort_limit(by.copy(), up.copy(), up.copy(), 3),
+    )
+    var order = argsort_any(col)
+    var picks = List[UInt32]()
+    for i in range(len(order)):
+        picks.append(order[i])
+    var sorted = gather_any(col, picks)
+    assert_false(sorted.is_flat())
+    assert_true(is_sorted_any(sorted))
+
+
+def test_an_export_hands_out_the_strings() raises:
+    var schema = export_schema(LogicalType.STRING)
+    var array = export_array(status())
+    var back = import_array(schema, array)
+    assert_true(back.is_flat())
+    same_text(back, status())
+    var bytes = write_ipc_stream_bytes(frame(status()))
+    var read = read_ipc_stream(Span(bytes))
+    assert_true(read[0].is_flat())
+    same_text(read[0], status())
 
 
 def main() raises:
