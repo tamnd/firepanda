@@ -26,11 +26,10 @@ pytestmark = pytest.mark.skipif(
 
 
 def facts(obj: Any) -> Any:
-    """What a frame or a column holds, in plain Python, with dtypes by kind."""
+    """What a frame or a column holds, in plain Python, with its dtypes and their units."""
 
     def kind(dtype: Any) -> str:
-        printed = str(dtype)
-        return "datetime" if printed.startswith("datetime") else printed.replace("string", "str")
+        return str(dtype).replace("string", "str")
 
     def cells(column: Any) -> list[Any]:
         return [None if value != value else value for value in column.tolist()]

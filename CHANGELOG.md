@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: read_json instants keep pandas' unit
+
+`read_json` reads epoch columns in the unit it detects, so a column of epoch milliseconds is `datetime64[ms]` as in pandas rather than `datetime64[ns]`. Epochs with a fraction still go through nanoseconds.
+
 ### Added: read_json
 
 `read_json` reads what `to_json` writes, in every orient but `table`, as a frame or with `typ="series"` as a column. Each column goes through pandas' inference: text that is all numbers becomes numbers, whole floats become integers, flags with a gap become floats, and columns named like dates become instants when they read as epochs or ISO text, in the first unit that fits. Row labels are inferred the same way unless `convert_axes=False`. Floats are read with a port of pandas' own decoder, which is not always the nearest float, fused the way arm64 builds of pandas fuse it, unless `precise_float` asks for the nearest. `dtype`, `convert_dates`, `keep_default_dates`, `date_unit`, `lines`, `nrows`, `encoding` and compressed files work as in pandas. Column names stay text, and `chunksize`, the pyarrow engine and `dtype_backend` are refused by name.
