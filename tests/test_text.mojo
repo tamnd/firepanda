@@ -29,12 +29,16 @@ from std.testing import (
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringBuilder, strings_from_list
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.group import AggKind, aggregate_group_any
-from firepanda.kernel.select import _take_strings
+from firepanda.kernel.select import _filter_strings, _take_strings
 
 
 def long_text(seed: String) -> String:
@@ -408,6 +412,71 @@ def test_a_text_filter_below_the_split_keeps_the_rows_and_the_nulls() raises:
     assert_equal(len(kept), 683)
     assert_true(kept.null_count() > 0, "the nulls were dropped")
     assert_equal(first_wrong(kept, source, mask), -1, "a kept row is wrong")
+
+
+def long_labels(rows: Int) raises -> StringArray:
+    """Builds a column of distinct values, all but the first ten of them long.
+
+    Args:
+        rows: How many values.
+
+    Returns:
+        The column.
+    """
+    var values = List[String](capacity=rows)
+    for i in range(rows):
+        values.append(long_text(String(i)))
+    return strings_from_list(values)
+
+
+def test_a_text_filter_that_keeps_most_of_the_payload_shares_it() raises:
+    # Two rows in three keep far more than an eighth of the bytes, so the output
+    # hands on the input's payload and copies only the views, and every long
+    # view still has to read the bytes it read before.
+    var col = long_labels(3_000)
+    var mask = every_third(3_000)
+    var kept = _filter_strings(col, mask)
+    assert_equal(len(kept.payload), len(col.payload))
+    assert_equal(
+        first_wrong(Series("s", kept^), Series("s", col^), mask),
+        -1,
+        "a kept row is wrong",
+    )
+
+
+def test_a_text_filter_that_keeps_little_copies_what_it_keeps() raises:
+    # One row in a thousand is far below an eighth of the bytes, so those rows
+    # are copied out and the output does not hold the rest alive.
+    var col = long_labels(3_000)
+    var mask = Array[DType.bool](3_000)
+    var bits = mask.unsafe_mut_ptr()
+    for i in range(3_000):
+        bits.unsafe_offset(i).unsafe_write(i % 1_000 == 107)
+    var kept = _filter_strings(col, mask)
+    assert_equal(len(kept), 3)
+    assert_equal(
+        len(kept.payload),
+        long_text("107").byte_length()
+        + long_text("1107").byte_length()
+        + long_text("2107").byte_length(),
+    )
+    assert_equal(Series("s", kept^).text(1), long_text("1107"))
+
+
+def test_a_text_take_that_repeats_a_row_shares_the_payload() raises:
+    # A gather that names rows more than once can want more bytes than the
+    # input holds, and a shared payload is then smaller than a copied one.
+    var col = long_labels(100)
+    var picks = List[Int]()
+    for i in range(1_000):
+        picks.append((i * 7) % 100)
+    picks.append(-1)
+    var taken = _take_strings(col, picks, False)
+    assert_equal(len(taken.payload), len(col.payload))
+    var got = Series("s", taken^)
+    for i in range(1_000):
+        assert_equal(got.text(i), long_text(String((i * 7) % 100)))
+    assert_false(got.is_valid(1_000))
 
 
 def test_a_substring_is_a_series_and_a_pattern_is_a_mask() raises:

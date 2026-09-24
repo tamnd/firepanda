@@ -33,6 +33,9 @@ A group by now keeps the first or last `n` rows of every group with `head` and `
 ### Added: `groupby(...).agg` and `aggregate` by name, and `NamedAgg`
 
 A group by now takes `agg` in the four shapes pandas reads when every function is a name: one name answers what the method of that name answers, a list of names over one column answers a column a name, a mapping of column to name answers a column a column, and keywords of `name=(column, function)` or `name=NamedAgg(column, function)` answer a column a keyword. Each column is that method run on its own, so the numbers and types are the method's, and the keys come back as labels or as columns the way `as_index` says. `firepanda.NamedAgg` has pandas 3's fields and printed form, and a pandas one is read too. A mapping handed to one column's `agg` raises `firepanda.errors.SpecificationError`, which is new and carries pandas' name. A Python function, and a list over a frame, which pandas answers with two levels of column labels, are refused by name. `python/tests/test_group_agg.py` checks 47 cases against pandas.
+### Changed: a text filter or gather that keeps enough of the payload shares it
+
+A filter or gather of a text column copied every kept string longer than twelve bytes into a payload of its own, one `memcpy` a row. When the rows it keeps hold at least an eighth of the input's payload bytes it now copies only the sixteen byte views and hands the output the input's payload, which is refcounted, so the bytes stay alive as long as either column needs them. Below an eighth it still copies, so a filter that keeps a handful of rows out of a large column does not hold the rest in memory. Filtering TPC-H's 42,000 q22 customers takes 136 us rather than 920 us for the comment and 127 us rather than 715 us for the address.
 
 ### Fixed: an operator against a moment or a span keeps the column's name
 
