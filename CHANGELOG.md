@@ -8,14 +8,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `describe` and `kurt` on a series and a frame
+
+`Series.describe` and `DataFrame.describe` answer the count, mean, standard deviation, smallest value, percentiles and largest value of a column of numbers as float64, labelled the way pandas labels them, with `percentiles` checked, sorted and printed by pandas' rules, so `0.333333` next to `0.25` is `33.3%`. A frame describes its columns of numbers and leaves the rest out, as pandas does by default. Text, flags, moments and spans are refused by name, because pandas describes them with a column of mixed values that only an object column holds. `kurt` and `kurtosis` answer the unbiased excess kurtosis with pandas' own sum and its guard for a column that is constant up to rounding, and a column they cannot read raises pandas' error for its type. `python/tests/test_describe.py` checks 59 cases against pandas.
+
 ## [0.8.33] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release. On the pandas side, a group by gains `head`, `tail`, `nth`, `idxmax` and `idxmin`, `agg` and `aggregate` take functions by name and `NamedAgg`, the `DataFrame` and `Series` constructors read records, rows, numpy arrays, `index=` and `columns=` as pandas does, and temporal columns hand out and take in moments, spans and dates. A boolean mask now lines up on the row labels and an operator against a moment or a span keeps the column's name. On the engine side, a semi or anti join marks the keys the other side has instead of bucketing its rows, a small text filter or gather writes its column directly, and the regex kernels cut a column finer and walk a greedy repeat in a loop, which takes ClickBench q28 from about 520 ms to about 390 ms on 1M rows.
-### Added: `describe` and `kurt` on a series and a frame
-
-`Series.describe` and `DataFrame.describe` answer the count, mean, standard deviation, smallest value, percentiles and largest value of a column of numbers as float64, labelled the way pandas labels them, with `percentiles` checked, sorted and printed by pandas' rules, so `0.333333` next to `0.25` is `33.3%`. A frame describes its columns of numbers and leaves the rest out, as pandas does by default. Text, flags, moments and spans are refused by name, because pandas describes them with a column of mixed values that only an object column holds. `kurt` and `kurtosis` answer the unbiased excess kurtosis with pandas' own sum and its guard for a column that is constant up to rounding, and a column they cannot read raises pandas' error for its type. `python/tests/test_describe.py` checks 59 cases against pandas.
 
 ### Added: `head`, `tail`, `nth`, `idxmax` and `idxmin` on a group by
 
