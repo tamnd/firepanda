@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a row position past the end raises pandas' IndexError
+
+`df.iloc[9999]` on a short frame raises IndexError with pandas' message, "single positional indexer is out-of-bounds", from either end. It used to pass the position to the core and raise the core's slice message.
+
 ### Added: one row of a frame as a series, and names that are numbers
 
 `df.iloc[0]`, `df.iloc[-1, [1, 0]]` and `df.loc[label]` read one row across several columns, which used to raise. The answer is a series labelled by the column names and named by the row's label, and it holds the one type every column fits: columns of one type keep it, and numbers meet the way numpy's do, so int32 next to int8 is int32 and float32 next to int64 is float64. A number next to a flag or to text is an object column in pandas, and that is still refused with NotImplementedError, since firepanda has no object column.
