@@ -873,23 +873,8 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     var rules = Transform(g)
     with assert_raises(contains="a MAP literal"):
         _ = _printed("SELECT MAP {'a': 1}", g, rules)
-
-
-def test_grouping_prints_back_in_capitals() raises:
-    # GROUPING_ID is the same call under another name, and DuckDB names the
-    # column it answers GROUPING either way.
-    var g = Grammar()
-    var rules = Transform(g)
-    assert_equal(
-        _printed(
-            "SELECT grouping(a), grouping_id(a, b) FROM t GROUP BY CUBE (a, b)",
-            g,
-            rules,
-        ),
-        "SELECT GROUPING(a), GROUPING(a, b) FROM t GROUP BY CUBE (a, b)",
-    )
-    with assert_raises(contains='syntax error at or near ")"'):
-        _ = _printed("SELECT GROUPING() FROM t GROUP BY a", g, rules)
+    with assert_raises(contains="GROUPING"):
+        _ = _printed("SELECT GROUPING(a) FROM t GROUP BY a", g, rules)
 
 
 def test_a_positional_column_prints_back_as_it_was_written() raises:

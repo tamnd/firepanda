@@ -464,6 +464,10 @@ def _fill_buffers(
         How many buffers the array has, which is two for a fixed width or a bool
         column and four for a view one.
     """
+    # The buffers are handed out as they lie, past the accessors, so this asks
+    # what they would have asked. `pack_bools` is only called from here and
+    # from the IPC writer, which asks the same thing first.
+    column[].require_flat()
     var type = column[].type
     if column[].data.validity.null_count() == 0:
         buffers.append(None)

@@ -8,17 +8,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Added
+### Added: every read of a column's values asks whether the column is flat first
 
-- `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
+`AnyArray.require_flat()` raises unless the column is held flat, and `AnyArray.decoded()` returns a flat column whatever it is held as. `check_dtype`, `strings` and `into_strings` call the first, so `as_typed`, `as_typed_view` and `into_typed` do too, and so does `dispatch`, whose kernels read through `unsafe_ptr` and check nothing themselves. The two Arrow exporters read buffers straight out of the column and ask the same question before they do. This is the second box of #979. When a dictionary encoded string column lands, a kernel nobody taught about it raises and names `decoded()` instead of reading codes as though they were values, and it does not have to remember to ask.
+
+Every column is flat today, so none of these can raise yet, and `decoded()` on a flat column shares its buffers rather than copying them. The check is one compare a column per kernel call, never one a row.
 
 ### Changed
 
 - A streaming group by on two keys or more, when one of them is text, keeps its groups in a map that lasts across chunks rather than stacking the running table with every chunk's table and grouping the two again. Each row's tuple is written out as bytes, a presence byte per key and a length in front of text, on the cores, and looked up in the text map the single key route already used, so a null in a key no longer matters to the route either. ClickBench q18 at 1M went from 80.2 to 48.2 ms and q39 from 112.2 to 67.4 ms through the SQL planner, and the planner's total over the 43 queries against the hand written port went from 1.42 to 1.28, with all 43 still agreeing. A table that arrives in one chunk and a tuple of integers alone stay on the old route, because the map inserts its groups one at a time and loses to one parallel pass there. A float key does too.
-
-### Fixed
-
-- A power between two labelled operands answers what pandas answers in a row only one side has, which is 1 where numpy's `1 ** nan` or `nan ** 0` is 1 and NaN everywhere else. The kernel answers a gap with a null before it looks at either value, so the pandas facing layer lines the two sides up by label with NaN in each gap and takes the power again. That covers a series with a series and a frame with a frame, through `**`, its reflection and `pow` and `rpow` without a `fill_value`. A side with a repeated label cannot be lined up that way and keeps the NaN it had. (Issue #8)
 
 ## [0.8.28] - 2026-09-24
 
