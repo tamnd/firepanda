@@ -45,6 +45,7 @@ __all__ = [
     "IndexingError",
     "IntCastingNaNError",
     "InvalidArgumentError",
+    "InvalidIndexError",
     "MergeError",
     "NumericOverflowError",
     "OutOfBoundsError",
@@ -98,6 +99,16 @@ class IndexingError(FirepandaError):
     boolean series whose labels miss some of the rows it is masking. It is a
     plain `Exception` there, so it is one here, and the name is carried for the
     reason `IntCastingNaNError` gives.
+    """
+
+
+class InvalidIndexError(FirepandaError):
+    """Labels that repeat where a lookup needs each label once.
+
+    pandas has a class with this name in `pandas.errors` and raises it when a
+    column with repeated labels is used as a mapping, since a label would then
+    name more than one value. It is a plain `Exception` there, so it is one
+    here, and the name is carried for the reason `IntCastingNaNError` gives.
     """
 
 
