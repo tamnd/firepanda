@@ -1153,10 +1153,12 @@ def _bytes_compare(a: Span[UInt8, _], b: Span[UInt8, _]) -> Int:
 def _bytes_equal(a: Span[UInt8, _], b: Span[UInt8, _]) -> Bool:
     """Compares two runs of bytes of known equal length.
 
-    A word at a time while there is a word left, then the tail. This only ever
-    runs on elements longer than twelve bytes whose first four bytes already
-    matched, so there is always at least one word to do and the loop is worth
-    having.
+    A word at a time, and the tail is one more word read so that it ends on the
+    last byte, overlapping the word before it. This only ever runs on elements
+    longer than twelve bytes whose first four bytes already matched, so there is
+    always a word to read. The tail used to go a byte at a time, and on a
+    grouping key of twenty odd bytes that loop, with a bounds check per byte,
+    was a third of the time spent here.
 
     Args:
         a: The left bytes.
@@ -1168,15 +1170,19 @@ def _bytes_equal(a: Span[UInt8, _], b: Span[UInt8, _]) -> Bool:
     var count = len(a)
     var left = a.unsafe_ptr()
     var right = b.unsafe_ptr()
+    if count < WORD:
+        for k in range(count):
+            if a[k] != b[k]:
+                return False
+        return True
+    var last = count - WORD
     var i = 0
-    while i + WORD <= count:
+    while i < last:
         var chunk = left.unsafe_offset(i).unsafe_load[width=WORD]()
         var other = right.unsafe_offset(i).unsafe_load[width=WORD]()
         if chunk.ne(other).reduce_or():
             return False
         i += WORD
-    while i < count:
-        if a[i] != b[i]:
-            return False
-        i += 1
-    return True
+    var chunk = left.unsafe_offset(last).unsafe_load[width=WORD]()
+    var other = right.unsafe_offset(last).unsafe_load[width=WORD]()
+    return not chunk.ne(other).reduce_or()

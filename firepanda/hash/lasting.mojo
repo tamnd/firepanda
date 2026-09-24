@@ -1344,24 +1344,42 @@ struct LastingTuple(Movable):
             else:
                 width.append(dtype_size(col.dtype()))
                 texts.append(StringBuilder().finish())
+        # A key that is fixed width and never missing costs every row the same,
+        # so it is counted once here rather than per row.
+        var keys = len(at)
+        var fixed = keys
+        for k in range(keys):
+            if width[k] > 0 and not gaps[k]:
+                fixed += width[k]
         var sizes = Array[DType.int64](overwritten=rows)
         var sized = sizes.unsafe_mut_ptr()
 
+        # Both passes go a key at a time down the morsel rather than a row at a
+        # time across the keys. A row at a time asked the lists which key was
+        # which on every row and paid a bounds check for each question, which
+        # was a third of what writing cost on q18.
         def size(begin: Int, stop: Int) raises {imm}:
             for i in range(begin, stop):
-                var n = 0
-                for k in range(len(at)):
-                    n += 1
-                    if gaps[k] and not columns[at[k]].is_valid(i):
-                        continue
-                    if width[k] == 0:
-                        n += 4 + texts[k].byte_length(i)
-                    else:
-                        n += width[k]
-                sized[i] = Int64(n)
+                sized[i] = Int64(fixed)
+            for k in range(keys):
+                ref col = columns[at[k]]
+                var gap = gaps[k]
+                if width[k] == 0:
+                    ref text = texts[k]
+                    for i in range(begin, stop):
+                        if gap and not col.is_valid(i):
+                            continue
+                        sized[i] += Int64(4 + text.byte_length(i))
+                elif gap:
+                    var w = Int64(width[k])
+                    for i in range(begin, stop):
+                        if col.is_valid(i):
+                            sized[i] += w
 
         parallel_morsels(size, rows, LASTING_TEXT_MORSEL)
 
+        # Where each row's bytes start. The write pass moves each entry along as
+        # it writes a key, so once it is done an entry is where its row ends.
         var starts = Array[DType.int64](overwritten=rows)
         var begun = starts.unsafe_mut_ptr()
         var total = 0
@@ -1375,35 +1393,57 @@ struct LastingTuple(Movable):
         var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
 
         def write(begin: Int, stop: Int) raises {imm}:
-            for i in range(begin, stop):
-                var first = Int(begun[i])
-                var end = first
-                for k in range(len(at)):
-                    ref col = columns[at[k]]
-                    if gaps[k] and not col.is_valid(i):
+            for k in range(keys):
+                ref col = columns[at[k]]
+                var gap = gaps[k]
+                var w = width[k]
+                if w == 0:
+                    ref text = texts[k]
+                    for i in range(begin, stop):
+                        var end = Int(begun[i])
+                        if gap and not col.is_valid(i):
+                            out[end] = 0
+                            begun[i] = Int64(end + 1)
+                            continue
+                        out[end] = 1
+                        var held = text.unsafe_bytes(i)
+                        var n = len(held)
+                        out.unsafe_offset(end + 1).unsafe_bitcast[
+                            UInt32
+                        ]().unsafe_store[alignment=1](UInt32(n))
+                        unsafe_memcpy(
+                            dest=out + end + 5, src=held.unsafe_ptr(), count=n
+                        )
+                        begun[i] = Int64(end + 5 + n)
+                    continue
+                var src = col.unsafe_ptr[DType.uint8]()
+                for i in range(begin, stop):
+                    var end = Int(begun[i])
+                    if gap and not col.is_valid(i):
                         out[end] = 0
-                        end += 1
+                        begun[i] = Int64(end + 1)
                         continue
                     out[end] = 1
-                    end += 1
-                    if width[k] == 0:
-                        var held = texts[k].unsafe_bytes(i)
-                        var n = len(held)
-                        for b in range(4):
-                            out[end + b] = UInt8((n >> (8 * b)) & 0xFF)
-                        end += 4
-                        unsafe_memcpy(
-                            dest=out + end, src=held.unsafe_ptr(), count=n
+                    var at_value = src + i * w
+                    var to = out.unsafe_offset(end + 1)
+                    if w == 8:
+                        to.unsafe_bitcast[UInt64]().unsafe_store[alignment=1](
+                            at_value.unsafe_bitcast[UInt64]().unsafe_load[
+                                alignment=1
+                            ]()
                         )
-                        end += n
+                    elif w == 4:
+                        to.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](
+                            at_value.unsafe_bitcast[UInt32]().unsafe_load[
+                                alignment=1
+                            ]()
+                        )
                     else:
-                        unsafe_memcpy(
-                            dest=out + end,
-                            src=col.unsafe_ptr[DType.uint8]() + i * width[k],
-                            count=width[k],
-                        )
-                        end += width[k]
-                var n = end - first
+                        unsafe_memcpy(dest=to, src=at_value, count=w)
+                    begun[i] = Int64(end + 1 + w)
+            for i in range(begin, stop):
+                var n = Int(sized[i])
+                var first = Int(begun[i]) - n
                 if n <= INLINE_CAPACITY:
                     target[i] = make_inline_at(out + first, n)
                 else:

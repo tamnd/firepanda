@@ -65,6 +65,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 `Series.str.cat(others)` answers a column now instead of refusing. `others` is read the way pandas reads it: a series, a frame's columns, an index, a numpy array of one or two dimensions, a list of strings, or a list of series, indexes and arrays. The pieces meet by position when every label list is the column's own and by label under `join` otherwise, `left`, `right`, `inner` or `outer` in pandas' order. A row with a missing piece is missing unless `na_rep` stands in for it, and a piece that is not text, a list of the wrong length, a bare string and an unknown `join` raise pandas' class with pandas' message. The rows are joined in the interpreter, since the engine has no row by row concatenation yet.
 
 A series built with a name that is not text, `Series(values, name=4)`, answers the number now rather than `'4'`, the way `rename(4)` already did.
+### Changed: a lasting tuple is written a key at a time
+
+`LastingTuple` wrote each row's key tuple a row at a time across the keys and asked its lists which key was which on every row, paying a bounds check each time, which was about a third of the write on ClickBench q18. The size and write passes now go a key at a time down each morsel with a cursor per row, and a four or eight byte key is stored as one word rather than through memcpy. The bytes are the same as before. `_bytes_equal` also reads the bytes past its last whole word as one more overlapping word instead of one at a time. On a six core Linux machine that was busy with other work, alternating the old and new driver, q18 went from 228 to 200 ms at best and 267 to 230 at the median, q39 from 257 to 214 at best, and every answer matched.
 
 ## [0.8.34] - 2026-09-24
 
