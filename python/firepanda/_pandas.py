@@ -5491,6 +5491,125 @@ def _combining_labels(mine: Index, theirs: Index) -> Index | None:
     return mine.union(theirs).rename(mine.name)
 
 
+def _aligned_labels(mine: Index, theirs: Index, join: Any) -> Index | None:
+    """The labels both sides of an `align` end up with, or None when they agree already.
+
+    An outer join is the sorted union, an inner one the labels both hold in this
+    side's order, and left and right are one side's labels. The name is the name
+    of the side whose labels lead.
+
+    Raises:
+        ValueError: For a join pandas does not know, with its words.
+        NotImplementedError: When the labels differ and one side repeats a label.
+    """
+    if mine.equals(theirs):
+        return None
+    if join not in ("outer", "inner", "left", "right"):
+        raise InvalidArgumentError(f"do not recognize join method {join}")
+    if not (mine.is_unique and theirs.is_unique):
+        raise NotImplementedError(
+            "align: the labels differ and one side repeats a label, and pandas lines up"
+            " repeated labels by joining them, which is not written here"
+        )
+    if join == "left":
+        return mine
+    if join == "right":
+        return theirs
+    joined = mine.union(theirs) if join == "outer" else mine.intersection(theirs)
+    return joined.rename(mine.name)
+
+
+def _align_axis(axis: Any, owner: str, allowed: tuple[int, ...]) -> int | None:
+    """The axis number an `align` was asked for, None for both.
+
+    Raises:
+        ValueError: For an axis the owner does not have, with pandas' words.
+    """
+    if axis is None:
+        return None
+    number = {"index": 0, "rows": 0, "columns": 1}.get(axis, axis)
+    if isinstance(number, bool) or number not in allowed:
+        raise InvalidArgumentError(f"No axis named {axis} for object type {owner}")
+    return cast("int", number)
+
+
+def _align_level(level: Any) -> None:
+    """Refuses a level other than the only one a flat index has.
+
+    Raises:
+        NotImplementedError: For any level but None or 0.
+    """
+    if level is not None and level != 0:
+        raise NotImplementedError(
+            "align: level= picks a level of a MultiIndex, and firepanda has flat indexes"
+        )
+
+
+def _moved_to(owner: Any, rows: Index | None, columns: list[Any] | None, fill_value: Any) -> Any:
+    """A frame or column given new labels and their name, with `fill_value` in new places."""
+    from ._frame import DataFrame
+
+    if rows is None and columns is None:
+        return owner.copy()
+    fill: dict[str, Any] = {} if fill_value is None else {"fill_value": fill_value}
+    if isinstance(owner, DataFrame):
+        moved = owner.reindex(index=rows, columns=columns, **fill)
+    else:
+        moved = owner.reindex(rows, **fill)
+    return moved if rows is None else moved.rename_axis(rows.name)
+
+
+def _column_labels(frame: DataFrame) -> Index:
+    """A frame's column labels as an index, so they can be joined like row labels."""
+    from ._frame import Index
+
+    return Index(list(frame.columns))
+
+
+def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value: Any) -> tuple:
+    """Both sides of an `align`, lined up on the axes they share.
+
+    A frame and a frame line up on both axes unless `axis` names one. A frame
+    and a column line up the column's labels with the frame's rows, or with its
+    columns under `axis=1`, and two columns line up their labels.
+
+    Raises:
+        TypeError: When the other side is neither a frame nor a column.
+        ValueError: For an axis the call cannot line up, with pandas' words.
+    """
+    from ._frame import DataFrame, Series
+
+    if not isinstance(other, (DataFrame, Series)):
+        raise TypeError(f"unsupported type: {type(other)}")
+    _align_level(level)
+    mine_frame = isinstance(this, DataFrame)
+    owner = "DataFrame" if mine_frame else "Series"
+    number = _align_axis(axis, owner, (0, 1) if mine_frame else (0,))
+    if mine_frame and not isinstance(other, DataFrame) and number is None:
+        raise InvalidArgumentError("Must specify axis=0 or 1")
+    if not mine_frame and isinstance(other, DataFrame):
+        number = 0
+    if mine_frame and isinstance(other, DataFrame):
+        rows = None if number == 1 else _aligned_labels(this.index, other.index, join)
+        joined = None
+        if number != 0:
+            joined = _aligned_labels(_column_labels(this), _column_labels(other), join)
+        columns = None if joined is None else joined.tolist()
+        return (
+            _moved_to(this, rows, columns, fill_value),
+            _moved_to(other, rows, columns, fill_value),
+        )
+    if mine_frame and number == 1:
+        joined = _aligned_labels(_column_labels(this), other.index, join)
+        columns = None if joined is None else joined.tolist()
+        return (
+            _moved_to(this, None, columns, fill_value),
+            _moved_to(other, joined, None, fill_value),
+        )
+    rows = _aligned_labels(this.index, other.index, join)
+    return _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -7709,6 +7828,12 @@ class DataFrameMixin:
         columns = _as_floats([read[name] for name in names])
         _correlation_method(method)
         return _square(names, lambda a, b: _pearson(columns[a], columns[b], method, min_periods))
+
+    def _align(
+        self, other: Any, join: Any, axis: Any, level: Any, copy: Any, fill_value: Any
+    ) -> tuple[Any, Any]:
+        """Both objects given the same labels, which is `align`. `copy` is accepted and unused."""
+        return _aligned(self, other, join, axis, level, fill_value)
 
     def _combine_first(self, other: Any) -> DataFrame:
         """Every missing value filled from the same place in another frame.
@@ -10433,6 +10558,12 @@ class SeriesMixin:
     def _autocorr(self, lag: int) -> float:
         """The correlation with the column moved `lag` rows along, as pandas writes it."""
         return self._corr(cast("Any", self).shift(lag), "pearson", None)
+
+    def _align(
+        self, other: Any, join: Any, axis: Any, level: Any, copy: Any, fill_value: Any
+    ) -> tuple[Any, Any]:
+        """Both objects given the same labels, which is `align`. `copy` is accepted and unused."""
+        return _aligned(self, other, join, axis, level, fill_value)
 
     def _combine_first(self, other: Any) -> Series:
         """Every missing value filled from the same label in another column."""

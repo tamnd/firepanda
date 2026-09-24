@@ -2719,6 +2719,21 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def align(
+        self,
+        other: Any,
+        join: Any = "outer",
+        axis: Any = None,
+        level: Any = None,
+        copy: Any = NO_DEFAULT,
+        fill_value: Any = None,
+    ) -> tuple[Any, Any]:
+        """This frame and another object given the same labels, as a pair."""
+        try:
+            return self._align(other, join, axis, level, copy, fill_value)
+        except Exception as error:
+            raise translate(error) from None
+
     def combine_first(self, other: Any) -> DataFrame:
         """Every missing value filled from the same place in another frame."""
         try:
@@ -3747,6 +3762,21 @@ class Series(SeriesMixin):
         """The correlation of the column with itself moved `lag` rows along."""
         try:
             return self._autocorr(lag)
+        except Exception as error:
+            raise translate(error) from None
+
+    def align(
+        self,
+        other: Any,
+        join: Any = "outer",
+        axis: Any = None,
+        level: Any = None,
+        copy: Any = NO_DEFAULT,
+        fill_value: Any = None,
+    ) -> tuple[Any, Any]:
+        """This column and another object given the same labels, as a pair."""
+        try:
+            return self._align(other, join, axis, level, copy, fill_value)
         except Exception as error:
             raise translate(error) from None
 

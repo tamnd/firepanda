@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: align
+
+`DataFrame.align` and `Series.align` give two objects the same labels and answer the pair, as pandas does. An outer join takes every label, sorted when the sides differ, an inner join the labels both sides hold in this side's order, and left and right one side's labels, and both answers carry the leading side's index name. Two frames line up on both axes unless `axis` names one, a frame and a column line up on the axis given, and `fill_value` fills the new places. Labels that already agree come back unchanged. A join pandas does not know, a missing or wrong axis and an other that is neither a frame nor a column fail with pandas' error and message. Repeated labels that differ and a `level` other than 0 are refused with NotImplementedError.
+
 ### Added: `combine_first`
 
 `DataFrame.combine_first` and `Series.combine_first` fill every missing value from the same row and column of the other object, as pandas does. The rows are both sides' rows, sorted when the two differ, a frame keeps its own columns first and then adds the ones only the other frame has, and a column both sides hold takes the type the two have in common. Two types that pandas combines into an object column, and differing labels where one side repeats a label, are refused with NotImplementedError.
