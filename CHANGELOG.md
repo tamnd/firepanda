@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: an encoding Parquet read turns each group into codes as it arrives
+
+With `encode_strings` on, each string column now goes through a `RepeatEncoder` (in `kernel/dictionary.mojo`) one group of rows at a time. Before, it was encoded after the whole read had been stacked. The first group decides, on a 64K row sample and then the whole group, and every later group is coded against one growing list of distinct values, so a code handed out early still means the same value at the end. If a column breaks the sixteen rows a value rule part way through, the groups encoded so far are decoded back and the rest of the column is read flat. The answer is the same column either way. On TPC-H sf1 lineitem the peak of the read went from 2.80 GB flat, and 2.58 GB with the old encoding at the end, to 2.39 GB on a six core Linux machine, with the frame at 813 MB against 1150 as before (#979).
+
 ### Added
 
 - A `FILTER` on a call it cannot be rewritten into, such as `list(i ORDER BY i) FILTER (WHERE i > 1)`, `first(x) FILTER (...)` or a macro like `my_sum(i) FILTER (...) OVER ()`, now parses and prints back as it was written instead of being refused by the transformer. The clause stays on the call in the AST, behind the call's own `ORDER BY`, and the plan refuses it by name there. A filter on an ordinary fold is still a `CASE` around its argument and runs as before.

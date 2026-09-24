@@ -40,10 +40,11 @@ injection, so the path is quoted the way SQL quotes a string and the caller neve
 writes SQL unless it wants to.
 """
 
+from firepanda.array.any import AnyArray
 from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
-from firepanda.kernel.dictionary import encode_repetitive
+from firepanda.kernel.dictionary import RepeatEncoder
 
 from .arrow_c import (
     ARROW_FLAG_NULLABLE,
@@ -219,7 +220,11 @@ def _columns_of(array: ArrowArray) raises -> List[ArrowArray]:
 
 
 def _stitch(
-    mut schema: Schema, mut built: List[ChunkedArray], var group: DataFrame
+    mut schema: Schema,
+    mut built: List[ChunkedArray],
+    var group: DataFrame,
+    mut encoders: List[RepeatEncoder],
+    encode_strings: Bool = False,
 ) raises:
     """Adds one group's frame onto the end of the frame being read.
 
@@ -228,20 +233,32 @@ def _stitch(
     costs the same bytes as a read of one and differs only in how many chunks a
     column ends up holding.
 
+    With `encode_strings` each chunk goes through its column's
+    `RepeatEncoder` first, and only what the encoder hands back as flat is
+    added to the column. The rest waits in the encoder as codes until the read
+    is over.
+
     Args:
         schema: The names and types, taken from the first group and checked
             against the rest.
         built: The columns so far, one entry a column, extended in place.
         group: The frame the assembler just built, consumed here.
+        encoders: One per column when encoding, filled in on the first group.
+        encode_strings: Whether to encode the string columns that repeat.
 
     Raises:
         Error: If a later group has a different width from the first, which
             would mean DuckDB changed the shape of a result mid stream.
     """
-    if len(built) == 0:
+    if len(built) == 0 and not encode_strings:
         schema = group.schema.copy()
         built = group^.into_columns()
         return
+    if len(built) == 0:
+        schema = group.schema.copy()
+        for c in range(len(schema.fields)):
+            built.append(ChunkedArray(schema.fields[c].dtype))
+            encoders.append(RepeatEncoder())
 
     var columns = group^.into_columns()
     if len(columns) != len(built):
@@ -256,12 +273,16 @@ def _stitch(
     for c in range(len(built)):
         var chunks = columns.pop(0).into_chunks()
         while len(chunks) != 0:
-            built[c].append(chunks.pop(0))
+            if not encode_strings:
+                built[c].append(chunks.pop(0))
+                continue
+            var flat = List[AnyArray]()
+            encoders[c].feed(chunks.pop(0), flat)
+            while len(flat) != 0:
+                built[c].append(flat.pop(0))
 
 
-def _combined(
-    var frame: DataFrame, encode_strings: Bool = False
-) raises -> DataFrame:
+def _combined(var frame: DataFrame) raises -> DataFrame:
     """Stacks each column's groups back into the one chunk callers expect.
 
     A column at a time rather than all of them at once, so that what is held
@@ -277,13 +298,8 @@ def _combined(
     when it has exactly one chunk and raises otherwise, so a frame in groups is
     not a frame most of this library can use.
 
-    It is also where a string column that repeats is turned into codes, when
-    the caller asked for that, since this is the one moment each column is
-    whole and the only copy of it. See `encode_repetitive` for the rule.
-
     Args:
         frame: The frame the collector built, consumed here.
-        encode_strings: Whether to hold repetitive string columns as codes.
 
     Returns:
         The same rows, one chunk a column.
@@ -295,10 +311,7 @@ def _combined(
     var pieces = frame^.into_columns()
     var out = List[ChunkedArray](capacity=len(pieces))
     while len(pieces) != 0:
-        var column = pieces.pop(0).combine()
-        if encode_strings:
-            column = encode_repetitive(column^)
-        out.append(ChunkedArray(column^))
+        out.append(ChunkedArray(pieces.pop(0).combine()))
     return DataFrame(schema^, out^)
 
 
@@ -433,7 +446,7 @@ struct Session(Movable):
             morsel_rows: The chunk height, passed through to the assembler.
             group_rows: How many rows to hold before assembling them, passed
                 through to the collector.
-            encode_strings: Passed through to `_combined`.
+            encode_strings: Passed through to the collector.
 
         Returns:
             The answer.
@@ -462,7 +475,12 @@ struct Session(Movable):
 
         var frame: DataFrame
         try:
-            frame = self._collect(slot, morsel_rows, group_rows)
+            frame = self._collect(
+                slot,
+                morsel_rows,
+                group_rows,
+                encode_strings and morsel_rows == 0,
+            )
         except error:
             self.lib.destroy_result(slot)
             raise error
@@ -473,7 +491,7 @@ struct Session(Movable):
         # exists. A caller that asked for morsels asked for chunks and keeps
         # them.
         if morsel_rows == 0:
-            return _combined(frame^, encode_strings)
+            return _combined(frame^)
         return frame^
 
     def _collect(
@@ -481,6 +499,7 @@ struct Session(Movable):
         slot: ResultPtr,
         morsel_rows: Int = 0,
         group_rows: Int = COLLECT_GROUP_ROWS,
+        encode_strings: Bool = False,
     ) raises -> DataFrame:
         """Drains a result and turns it into a frame.
 
@@ -489,6 +508,9 @@ struct Session(Movable):
             morsel_rows: The chunk height, passed through to the assembler.
             group_rows: How many rows of Arrow chunks to hold before assembling
                 them and letting them go. See `COLLECT_GROUP_ROWS`.
+            encode_strings: Whether each group's string columns go through a
+                `RepeatEncoder` as they are assembled. Only asked for when the
+                answer is going to be one chunk a column.
 
         Returns:
             The frame.
@@ -523,6 +545,7 @@ struct Session(Movable):
         var batches = List[List[ArrowArray]]()
         var schema = Schema(List[Field]())
         var built = List[ChunkedArray]()
+        var encoders = List[RepeatEncoder]()
         var held_rows = 0
         try:
             while True:
@@ -548,6 +571,8 @@ struct Session(Movable):
                         schema,
                         built,
                         assemble(layout, batches, morsel_rows=morsel_rows),
+                        encoders,
+                        encode_strings,
                     )
                     batches.clear()
                     self._drop(arrays^)
@@ -562,6 +587,8 @@ struct Session(Movable):
                     schema,
                     built,
                     assemble(layout, batches, morsel_rows=morsel_rows),
+                    encoders,
+                    encode_strings,
                 )
         except error:
             self._drop(arrays^)
@@ -570,6 +597,11 @@ struct Session(Movable):
 
         self._drop(arrays^)
         self._drop_options(settings)
+        # A column still being encoded has nothing in `built` and all of its
+        # rows in its encoder, as codes.
+        for c in range(len(encoders)):
+            if encoders[c].encoding():
+                built[c] = ChunkedArray(encoders[c].finish())
         return DataFrame(schema^, built^)
 
     def _layout(
