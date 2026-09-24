@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DataFrame(...)` and `Series(...)` read every shape of data pandas does
+
+`DataFrame` now takes a list of records, a list of rows with `columns=`, a two dimensional numpy array with `columns=` and another frame, and `index=` and `columns=` beside any of them. A single value in a mapping is repeated down the rows, series in a mapping are lined up on the union of their labels as pandas lines them up, and a category or an instant series keeps its type. `Series` takes `index=`, one value repeated along it, and a series with an index, which pandas reads as a reindex. A numpy array keeps its own type, int32, uint8 and `datetime64[s]` included, and numpy scalars in a list are read as the values they hold. A shape that would need a column named 0, a column of objects or a numpy array of spans is refused by name, and the wrong lengths raise pandas' own messages. `python/tests/test_construct_shapes.py` checks 56 cases against pandas.
+
 ### Added: `DataFrame.assign` and a column read as an attribute
 
 `df.assign(**columns)` adds or replaces columns and hands back a new frame. The keywords are taken in order and each one sees the frame the earlier ones made, so `assign(c=lambda f: f.a * 2, d=lambda f: f.c + 1)` works as it does in pandas. A value can be a function of the frame, a series lined up on the row labels, a frame of one column, a mapping, a list, a tuple, a range or a numpy array as long as the frame, or one value for every row. A replaced column keeps its place and a new one goes on the end. A wrong length, a frame of several columns and a set raise pandas' errors, and `None` is refused, because pandas makes it an object column. `df.name` now reads a column as an attribute when no method has that name, and `dir(df)` lists the columns that are identifiers.

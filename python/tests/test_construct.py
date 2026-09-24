@@ -187,16 +187,19 @@ def test_an_integer_too_large_for_int64_is_refused(firepanda: ModuleType) -> Non
         firepanda.DataFrame({"a": [1, 2**70]})
 
 
-def test_a_bare_string_is_a_scalar_and_is_refused(firepanda: ModuleType) -> None:
-    """Iterating it would give a column of characters, which is never the intent."""
-    with pytest.raises(ValueError, match="broadcast"):
+def test_a_bare_string_is_a_scalar_and_needs_an_index(firepanda: ModuleType) -> None:
+    """Iterating it would give a column of characters, so it is one value, as in pandas."""
+    with pytest.raises(ValueError, match="must pass an index"):
         firepanda.DataFrame({"a": "abc"})
+    assert firepanda.DataFrame({"a": "abc"}, index=[1, 2])["a"].tolist() == ["abc", "abc"]
 
 
-def test_a_shape_that_is_not_written_says_which_one(firepanda: ModuleType) -> None:
-    """Records and rows are real pandas inputs and are not read yet."""
-    with pytest.raises(ValueError, match="mapping"):
-        firepanda.DataFrame([{"a": 1}, {"a": 2}])
+def test_a_shape_that_is_not_a_frame_says_so(firepanda: ModuleType) -> None:
+    """One value is pandas' mistake, and a flat list would need a column named 0."""
+    with pytest.raises(ValueError, match="not properly called"):
+        firepanda.DataFrame(42)
+    with pytest.raises(NotImplementedError, match="list of values"):
+        firepanda.DataFrame([1, 2])
 
 
 def test_the_declared_pandas_parameters_are_refused_by_name(firepanda: ModuleType) -> None:
@@ -207,15 +210,14 @@ def test_the_declared_pandas_parameters_are_refused_by_name(firepanda: ModuleTyp
     worse than one that is missing, so each of them raises with its own name in
     the message.
 
-    `dtype` used to be on this list and is not any more, because it is honoured
-    now. `test_astype.py` has what it does instead.
+    `dtype`, `index` and `columns` used to be on this list and are not any
+    more, because they are honoured now. `test_astype.py` and
+    `test_construct_shapes.py` have what they do instead.
     """
-    for keyword in ("index", "columns", "copy"):
-        with pytest.raises(NotImplementedError, match=keyword):
-            firepanda.DataFrame({"a": [1]}, **{keyword: object()})
-    for keyword in ("index", "copy"):
-        with pytest.raises(NotImplementedError, match=keyword):
-            firepanda.Series([1], **{keyword: object()})
+    with pytest.raises(NotImplementedError, match="copy"):
+        firepanda.DataFrame({"a": [1]}, copy=object())
+    with pytest.raises(NotImplementedError, match="copy"):
+        firepanda.Series([1], copy=object())
 
 
 @needs_pandas
