@@ -1503,8 +1503,6 @@ def test_an_interval_is_refused_here_and_not_in_the_transformer() raises:
 
 
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
-    with assert_raises(contains="GROUPING SETS"):
-        _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="one row by construction"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
     with assert_raises(contains="written somewhere else"):
@@ -4145,3 +4143,46 @@ def test_a_positional_column_refuses_where_it_cannot_be_counted() raises:
         _ = _plan(
             "SELECT a FROM t WHERE b = (SELECT max(#1) FROM u WHERE u.k = t.a)"
         )
+
+
+def test_a_rollup_is_one_aggregate_per_set_stacked() raises:
+    # Every set folds its own copy of the input, and puts the keys it left out
+    # back as nulls so that the arms line up.
+    assert_equal(
+        _plan("SELECT g, sum(a) FROM t GROUP BY ROLLUP (g)"),
+        (
+            "PROJECT [g, __agg_0 as sum(a)]\n"
+            "  UNION all\n"
+            "    PROJECT [g, __agg_0]\n"
+            "      AGGREGATE [g] -> [sum(a)]\n"
+            "        SCAN t []\n"
+            "    PROJECT [null as g, __agg_0]\n"
+            "      AGGREGATE [] -> [sum(a)]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_grouping_is_a_constant_each_set_works_out() raises:
+    assert_equal(
+        _plan("SELECT g, GROUPING(g) FROM t GROUP BY GROUPING SETS ((g), ())"),
+        (
+            "PROJECT [g, __grouping_0 as GROUPING(g)]\n"
+            "  UNION all\n"
+            "    PROJECT [g, 0 as __grouping_0]\n"
+            "      AGGREGATE [g] -> []\n"
+            "        SCAN t []\n"
+            "    PROJECT [null as g, 1 as __grouping_0]\n"
+            "      AGGREGATE [] -> []\n"
+            "        SCAN t []\n"
+        ),
+    )
+    # With no sets every key is in every group.
+    assert_equal(
+        _plan("SELECT g, GROUPING(g) FROM t GROUP BY g"),
+        "PROJECT [g, 0 as GROUPING(g)]\n  AGGREGATE [g] -> []\n    SCAN t []\n",
+    )
+    with assert_raises(contains="GROUPING statement cannot be used without"):
+        _ = _plan("SELECT GROUPING(g) FROM t")
+    with assert_raises(contains='GROUPING child "a" must be a grouping column'):
+        _ = _plan("SELECT GROUPING(a) FROM t GROUP BY g")

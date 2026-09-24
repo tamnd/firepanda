@@ -332,6 +332,36 @@ struct Plan(Movable, Sized):
         self.nodes.append(node^)
         return at
 
+    def copy_tree(mut self, at: Int) raises -> Int:
+        """Returns a second copy of a whole subtree, sharing nothing with it.
+
+        For a plan that needs the same input under two parents. The passes are
+        written for a tree, so the input is copied rather than shared, and
+        common subplan elimination makes the two one node again once they have
+        all run. The expressions are copied too, for the reason
+        `Expressions.duplicate` gives.
+
+        Args:
+            at: The root of the subtree.
+
+        Returns:
+            The root of the copy.
+
+        Raises:
+            If `at` is not a node.
+        """
+        self.check(at)
+        var node = self.nodes[at].copy()
+        var inputs = List[Int](capacity=len(node.inputs))
+        for i in range(len(node.inputs)):
+            inputs.append(self.copy_tree(node.inputs[i]))
+        var exprs = List[Int](capacity=len(node.exprs))
+        for i in range(len(node.exprs)):
+            exprs.append(self.exprs.duplicate(node.exprs[i]))
+        node.inputs = inputs^
+        node.exprs = exprs^
+        return self._add(node^)
+
     def check(self, at: Int) raises:
         """Refuses an index that names no node in the plan.
 
