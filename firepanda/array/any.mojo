@@ -486,6 +486,32 @@ struct AnyArray(Copyable, Movable, Sized):
             )
         return self.text.value()
 
+    def text_at(self, i: Int) raises -> String:
+        """Reads one row of a string column, however it is held.
+
+        A copy of the row's bytes, empty for a null, which is what indexing
+        `strings()` gives. It is for a reader that goes a cell at a time, a
+        writer or a printer, and so has no use for decoding the whole column
+        to read one row of it.
+
+        Args:
+            i: The row.
+
+        Returns:
+            The row's text.
+
+        Raises:
+            If the column is not a string column, or the row is out of range.
+        """
+        if self.encoding != Encoding.DICTIONARY:
+            return self.strings()[i]
+        if i < 0 or i >= self.data.length:
+            raise Error(String("row ", i, " of ", self.data.length))
+        if not self.data.validity.get(i):
+            return String()
+        var codes = self.data.values.bitcast[DType.int32]()
+        return self.text.value()[Int(codes.unsafe_offset(i).unsafe_load())]
+
     def into_strings(deinit self) raises -> StringArray:
         """Converts to a string column without copying, consuming this one.
 
@@ -585,19 +611,43 @@ struct AnyArray(Copyable, Movable, Sized):
         Raises:
             If a code on a valid row is outside the categories.
         """
-        ref categories = self.text.value()
+        var out = self._gather_views(self.text.value(), False)
+        out.type = self.type
+        return out^
+
+    def _gather_views(
+        self, imm categories: StringArray, holes: Bool
+    ) raises -> Self:
+        """Gives each row the view its code names in a list of strings.
+
+        `decoded` hands it the column's own categories and `through_codes` an
+        answer worked out once per category, which is the one of the two that
+        can have a null in it.
+
+        Args:
+            categories: One string per category.
+            holes: Whether any of them is null, which makes its rows null.
+
+        Returns:
+            A flat string column, one view per row, sharing the payload.
+
+        Raises:
+            If a code on a valid row is outside the categories.
+        """
         var rows = self.data.length
         var count = len(categories)
         var views = Buffer(rows * VIEW_SIZE)
+        var validity = Bitmap(copy=self.data.validity)
+        if holes:
+            validity.make_private()
         var codes = self.data.values.bitcast[DType.int32]()
         # Two words a view, so the copy is two loads and two stores and not a
         # call to memcpy per row.
         var src = categories.views.bitcast[DType.uint64]()
         var dst = views.mut_bitcast[DType.uint64]()
-        ref validity = self.data.validity
-        var all_valid = validity.all_valid()
+        var all_valid = self.data.validity.all_valid()
         for i in range(rows):
-            if not all_valid and not validity.get(i):
+            if not all_valid and not self.data.validity.get(i):
                 continue
             var code = Int(codes.unsafe_offset(i).unsafe_load())
             if code < 0 or code >= count:
@@ -612,22 +662,23 @@ struct AnyArray(Copyable, Movable, Sized):
                         " categories",
                     )
                 )
+            if holes and not categories.is_valid(code):
+                validity.set(i, False)
+                continue
             dst.unsafe_offset(2 * i).unsafe_write(
                 src.unsafe_offset(2 * code).unsafe_load()
             )
             dst.unsafe_offset(2 * i + 1).unsafe_write(
                 src.unsafe_offset(2 * code + 1).unsafe_load()
             )
-        var out = Self(
+        return Self(
             StringArray(
                 views^,
                 Buffer(copy=categories.payload),
-                Bitmap(copy=validity),
+                validity^,
                 rows,
             )
         )
-        out.type = self.type
-        return out^
 
     def code_column(self) -> Self:
         """Views a dictionary encoded column's codes as an int32 column.
@@ -678,7 +729,7 @@ struct AnyArray(Copyable, Movable, Sized):
         return out^
 
     def through_codes(self, per_category: Self) raises -> Self:
-        """Spreads a fixed width answer per category over the rows.
+        """Spreads an answer worked out once per category over the rows.
 
         Row `i` gets `per_category[codes[i]]`, and is null where the row is
         null or where the answer for its category is.
@@ -691,18 +742,12 @@ struct AnyArray(Copyable, Movable, Sized):
             One value per row, with `per_category`'s type.
 
         Raises:
-            If this column is not dictionary encoded, or the answer is not
-            fixed width or not one per category.
+            If this column is not dictionary encoded, or the answer is
+            nested or not one per category.
         """
         if self.encoding != Encoding.DICTIONARY:
             raise Error(
                 "through_codes: column is held " + String(self.encoding)
-            )
-        if per_category.is_string() or per_category.is_nested():
-            raise Error(
-                "through_codes: an answer of "
-                + String(per_category.type)
-                + " is not fixed width"
             )
         var count = len(self.text.value())
         if len(per_category) != count:
@@ -714,6 +759,22 @@ struct AnyArray(Copyable, Movable, Sized):
                     count,
                     " categories",
                 )
+            )
+        if per_category.is_string():
+            # A string answer goes out flat. Two categories can map to the same
+            # answer, upper casing "a" and "A" say, and codes into a list with
+            # a repeat in it would break the one thing a group by on the codes
+            # counts on.
+            var out = self._gather_views(
+                per_category.strings(), per_category.null_count() > 0
+            )
+            out.type = per_category.type
+            return out^
+        if per_category.is_nested():
+            raise Error(
+                "through_codes: an answer of "
+                + String(per_category.type)
+                + " is not fixed width"
             )
         var rows = self.data.length
         var width = dtype_size(per_category.type.physical)

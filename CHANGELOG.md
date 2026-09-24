@@ -11,6 +11,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added
 
 - A slice whose end is written as a minus, such as `a[1:-:2]` or `a[:-:-1]`, which is how DuckDB says the end of the list when a step follows. It now parses and prints back as written, and the plan refuses it the way it refuses any other step. `a[1:-]` with no second colon is a syntax error, as it is in DuckDB.
+### Added: the text methods and the rest of the string kernels read a column held as codes
+
+Every `Series.chars_*` method that answers a row from its value alone (case, strip, pad, slice, find, replace, the regex and folded matches, the `is_*` tests, `translate` and the rest) now runs once per distinct string of a column held as codes (#979), and the answer is spread over the rows with `through_codes`. On six million rows of seven values that is seven calls rather than six million. `through_codes` takes a string answer too, and hands it back flat, because two categories can map to one answer ("a" and "A" upper cased) and codes into a list with a repeat would break a group by on the codes. The methods that are not a row at a time (`chars_extract_regex`, `chars_partition`, `chars_dummies`, `chars_join`, `to_datetime`) decode first.
+
+Concat, cast, `coalesce`, forward and backward fill, `pick`, a text reduction (min, max, any, all), a grouped aggregation of an encoded value column, a join on an encoded key, a column against column comparison and the lasting hash now decode such a column rather than raising. A reduction does not work over the categories, because a filter keeps them all and the smallest may be a value no row still holds. `distinct_count_any` counts the codes the rows still use and never compares a string. `AnyArray.text_at(i)` reads one row however it is held, and the CSV writer, the display, the index label compare, `python_list` and the Parquet DESCRIBE read use it.
 
 ### Added: a sort and an Arrow export read a string column held as codes
 

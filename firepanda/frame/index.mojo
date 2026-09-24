@@ -291,6 +291,8 @@ def _same_label(a: AnyArray, i: Int, b: AnyArray, j: Int) raises -> Bool:
         return False
     if not a_here:
         return True
+    if not a.is_flat() or not b.is_flat():
+        return a.text_at(i) == b.text_at(j)
     if a.is_string():
         ref mine = a.strings()
         ref theirs = b.strings()
@@ -526,6 +528,12 @@ def _label_order(a: AnyArray, i: Int, b: AnyArray, j: Int) raises -> Int:
         if b_here:
             return 1
         return 0
+    if not a.is_flat() or not b.is_flat():
+        var left = a.text_at(i)
+        var right = b.text_at(j)
+        if left == right:
+            return 0
+        return -1 if left < right else 1
     if a.is_string():
         ref mine = a.strings()
         ref theirs = b.strings()

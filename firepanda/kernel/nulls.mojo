@@ -743,6 +743,8 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             " would be out by the ratio between their units"
         )
     check_same_categories(a, b, "coalesce")
+    if not a.is_flat() or not b.is_flat():
+        return coalesce_any(a.decoded(), b.decoded())
     if a.is_string():
         return AnyArray(_coalesce_strings(a.strings(), b.strings())).retyped(
             a.type
@@ -918,6 +920,8 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
     Raises:
         If the dtype has no physical layout.
     """
+    if not col.is_flat():
+        return fill_forward_any(col.decoded(), limit)
     if col.is_string():
         return AnyArray(
             _fill_strings[forward=True](col.strings(), limit)
@@ -952,6 +956,8 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
     Raises:
         If the dtype has no physical layout.
     """
+    if not col.is_flat():
+        return fill_backward_any(col.decoded(), limit)
     if col.is_string():
         return AnyArray(
             _fill_strings[forward=False](col.strings(), limit)

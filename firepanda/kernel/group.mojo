@@ -5098,6 +5098,15 @@ def aggregate_group_any(
     # As in `cast_any` and `argsort_any_into`: uint8 is in ALL and a string
     # column would match it, so a sum over a column of names would return a
     # number taken from the first byte of every view rather than an error.
+    if not col.is_flat():
+        return aggregate_group_any(
+            col.decoded(),
+            kind,
+            codes,
+            groups,
+            trusted=True,
+            as_float=as_float,
+        )
     if col.is_string():
         return aggregate_group_strings(col.strings(), kind, codes, groups)
 

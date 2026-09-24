@@ -116,7 +116,7 @@ def cell_text(column: AnyArray, i: Int) raises -> String:
     if not column.is_valid(i):
         return String("")
     if column.is_string():
-        return column.strings()[i]
+        return column.text_at(i)
     # Before the layout dispatch below, because a date is laid out as an int32
     # and a timestamp as an int64, and falling through would write the day count
     # instead of the day. A reader parsing that back gets an integer where the

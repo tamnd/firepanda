@@ -355,7 +355,7 @@ def value_at(col: AnyArray, i: Int) raises -> Value:
     if not col.is_valid(i):
         return Value(null=col.type)
     if col.is_string():
-        return Value(String(col.strings()[i]))
+        return Value(col.text_at(i))
     comptime for target in ALL:
         if col.dtype() == target:
             ref typed = col.as_typed_view[target]()

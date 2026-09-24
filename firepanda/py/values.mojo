@@ -85,6 +85,8 @@ def python_list(column: AnyArray) raises -> PythonObject:
         # from `tolist()` and what a person at a prompt asked for. The codes are
         # reachable through `Series.cat.codes` for somebody who wants those.
         return python_list(AnyArray(decode_dictionary(column)))
+    if not column.is_flat():
+        return python_list(column.decoded())
     if column.is_string():
         var out = Python.list()
         for i in range(len(column)):

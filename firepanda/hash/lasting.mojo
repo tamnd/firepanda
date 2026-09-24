@@ -861,6 +861,9 @@ struct LastingKeys(Movable):
         Raises:
             If the key dtype has no physical layout.
         """
+        if not key.is_flat():
+            self.ordinals(key.decoded(), rows, codes)
+            return
         if key.is_string():
             # Text has one route and the first chunk decides nothing, so there
             # is no plan to make and no window to fix. The map holds the keys
@@ -1148,7 +1151,11 @@ struct LastingTuple(Movable):
         for k in range(len(at)):
             ref col = columns[at[k]]
             gaps.append(col.null_count() > 0)
-            if col.is_string():
+            if not col.is_flat():
+                width.append(0)
+                var flat = col.decoded()
+                texts.append(StringArray(copy=flat.strings()))
+            elif col.is_string():
                 width.append(0)
                 texts.append(StringArray(copy=col.strings()))
             else:

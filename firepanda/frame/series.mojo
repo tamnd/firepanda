@@ -350,6 +350,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a string column.
         """
+        if not self.values.is_flat():
+            return self.values.decoded().into_strings()
         return StringArray(copy=self.values.strings())
 
     def text(self, i: Int) raises -> String:
@@ -369,7 +371,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not a string column.
         """
-        return self.values.strings()[i]
+        return self.values.text_at(i)
 
     def rename(self, name: String) raises -> Self:
         """Returns the same data under a different name.
@@ -1071,6 +1073,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_length())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_character_length(self.values.strings())),
@@ -1097,6 +1101,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text, or the step is zero.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_slice(start, stop, step)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1117,6 +1125,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_get(at))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_character_get(self.values.strings(), at)),
@@ -1146,6 +1156,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_find(sub, start, stop, from_end)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1172,6 +1186,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_slice_replace(start, stop, repl)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1194,6 +1212,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_remove_prefix(prefix))
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1214,6 +1234,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_remove_suffix(suffix))
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1243,6 +1265,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_strip(set, by_set, from_left, from_right)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1274,6 +1300,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_pad(width, fill, on_left, on_right)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1299,6 +1329,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_zfill(width))
         return self._relabelled(
             self.name.copy(), AnyArray(text_zfill(self.values.strings(), width))
         )
@@ -1315,6 +1347,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_repeat(times))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_repeat(self.values.strings(), times)),
@@ -1335,6 +1369,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_upper())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_case(self.values.strings(), True)),
@@ -1349,6 +1385,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_lower())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_case(self.values.strings(), False)),
@@ -1366,6 +1404,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_capitalize())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_capitalize(self.values.strings())),
@@ -1384,6 +1424,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_swapcase())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_swapcase(self.values.strings())),
@@ -1402,6 +1444,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_title())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_title(self.values.strings())),
@@ -1422,6 +1466,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_casefold())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_casefold(self.values.strings())),
@@ -1450,6 +1496,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_normalize(full, compose)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_normalize(self.values.strings(), full, compose)),
@@ -1465,6 +1515,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_space())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_space(self.values.strings())),
@@ -1480,6 +1532,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_lower())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_lower(self.values.strings())),
@@ -1495,6 +1549,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_upper())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_upper(self.values.strings())),
@@ -1514,6 +1570,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_title())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_title(self.values.strings())),
@@ -1531,6 +1589,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_ascii())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_ascii(self.values.strings())),
@@ -1546,6 +1606,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_alpha())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_alpha(self.values.strings())),
@@ -1564,6 +1626,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_numeric())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_numeric(self.values.strings())),
@@ -1583,6 +1647,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_digit())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_digit(self.values.strings())),
@@ -1602,6 +1668,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_decimal())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_decimal(self.values.strings())),
@@ -1617,6 +1685,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_is_alnum())
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_is_alnum(self.values.strings())),
@@ -1713,6 +1783,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_full_match(pattern))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_equals(self.values.strings(), pattern.as_bytes())),
@@ -1734,6 +1806,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_count(pattern))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count(self.values.strings(), pattern.as_bytes())),
@@ -1761,6 +1835,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_replace(pattern, repl, limit)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1795,6 +1873,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_matches_regex(program))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_matches_regex(self.values.strings(), program)),
@@ -1829,6 +1909,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_count_regex(program))
         return self._relabelled(
             self.name.copy(),
             AnyArray(text_count_regex(self.values.strings(), program)),
@@ -1872,6 +1954,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_replace_regex(program, rewrite, limit)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1912,6 +1998,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._decoded().chars_extract_regex(program)
         var parts = text_extract_regex(self.values.strings(), program)
         var out = List[Self](capacity=len(parts))
         for _ in range(len(parts)):
@@ -1938,6 +2026,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_contains_folded(pattern)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1960,6 +2052,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(self._distinct().chars_match_folded(pattern))
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -1986,6 +2080,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_full_match_folded(pattern)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -2013,6 +2111,10 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_replace_folded(pattern, repl, limit)
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -2054,6 +2156,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._decoded().chars_partition(sep, from_right)
         var parts = text_partition(
             self.values.strings(), sep.as_bytes(), from_right
         )
@@ -2083,6 +2187,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._decoded().chars_dummy_tokens(sep)
         return text_dummy_tokens(self.values.strings(), sep.as_bytes())
 
     def chars_dummies(
@@ -2109,6 +2215,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._decoded().chars_dummies(sep, tokens)
         var flags = text_dummies(self.values.strings(), sep.as_bytes(), tokens)
         var out = List[Self](capacity=len(tokens))
         for i in range(len(tokens)):
@@ -2145,6 +2253,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the series is not text.
         """
+        if not self.values.is_flat():
+            return self._decoded().chars_join(sep, na_rep, skip_missing)
         return text_join(
             self.values.strings(),
             sep.as_bytes(),
@@ -2181,6 +2291,12 @@ struct Series(Copyable, Movable, Sized, Writable):
                 key is not exactly one character, or if the keys are out of
                 order.
         """
+        if not self.values.is_flat():
+            return self._through(
+                self._distinct().chars_translate(
+                    keys._decoded(), values._decoded()
+                )
+            )
         return self._relabelled(
             self.name.copy(),
             AnyArray(
@@ -3193,6 +3309,8 @@ struct Series(Copyable, Movable, Sized, Writable):
                 if a row does not match the format, or if the rows carry
                 different offsets and `utc` was not asked for.
         """
+        if not self.values.is_flat():
+            return self._decoded().to_datetime(fmt, unit, coerce, utc)
         if self.logical().kind == TypeKind.TIMESTAMP:
             return Self(copy=self)
         if self.logical().kind == TypeKind.STRING:
@@ -3210,6 +3328,41 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name.copy(),
             numbers_to_timestamps(self.values, unit_named(unit)),
         )
+
+    def _distinct(self) -> Self:
+        """The distinct strings of a column held as codes, as a series.
+
+        A text method that answers each row from its value alone runs over
+        these and `_through` spreads the answer back over the rows, so a
+        column of six million rows and seven values is upper cased seven
+        times.
+
+        Returns:
+            One row per category, named as this series is.
+        """
+        return Self(self.name.copy(), self.values.distinct())
+
+    def _through(self, answer: Self) raises -> Self:
+        """Spreads an answer per category, from `_distinct`, over the rows.
+
+        Args:
+            answer: One row per category.
+
+        Returns:
+            One row per row of this series, with its labels and the answer's
+            name.
+        """
+        return self._relabelled(
+            answer.name.copy(), self.values.through_codes(answer.values)
+        )
+
+    def _decoded(self) raises -> Self:
+        """This series held flat, for a method that is not a row at a time.
+
+        Returns:
+            The same values and labels, one value a row.
+        """
+        return self._relabelled(self.name.copy(), self.values.decoded())
 
     def _relabelled(
         self, var name: Optional[String], var values: AnyArray
