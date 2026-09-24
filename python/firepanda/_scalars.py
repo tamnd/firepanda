@@ -2457,3 +2457,143 @@ Timedelta.resolution = _Resolution()  # type: ignore[assignment]
 
 Timestamp.resolution = _Resolution()  # type: ignore[assignment]
 """One unit of whatever the moment is quoted at, and one nanosecond off the class."""
+
+
+def _temporal(dtype: str) -> tuple[str, str, Any] | None:
+    """Reads a temporal type's name into its kind, its unit and its zone.
+
+    Args:
+        dtype: A type as firepanda prints it, such as `datetime64[us, UTC]`.
+
+    Returns:
+        `("moment", unit, zone)`, `("span", unit, None)` or `("day", "D", None)`,
+        or None for a type that is not temporal.
+    """
+    if dtype.startswith("datetime64["):
+        inside = dtype[len("datetime64[") : -1].split(",", 1)
+        zone = None
+        if len(inside) == 2:
+            # A fixed offset is printed `UTC+02:00`, which is pandas' name for
+            # it and not one the zone database has.
+            name = inside[1].strip()
+            fixed = name.startswith("UTC") and len(name) > 3
+            zone = _zone(name[3:] if fixed else name)
+        return "moment", inside[0].strip(), zone
+    if dtype.startswith("timedelta64["):
+        return "span", dtype[len("timedelta64[") : -1], None
+    if dtype.startswith("date32"):
+        return "day", "D", None
+    return None
+
+
+def _outward(values: list[Any], dtype: str) -> list[Any]:
+    """A column's stored counts as the Python values pandas hands out for them.
+
+    A temporal column stores whole numbers, and `tolist`, iteration and reading
+    one cell all have to say what those numbers mean: a `Timestamp` for a
+    moment, with its zone and its unit, a `Timedelta` for a span and a
+    `datetime.date` for a day. A missing value stays None, as it does in every
+    other column firepanda has. Any other type comes back as it was.
+
+    Args:
+        values: What the column holds, as the extension hands it out.
+        dtype: The column's type.
+
+    Returns:
+        The values pandas would hand out.
+    """
+    read = _temporal(dtype)
+    if read is None:
+        return values
+    kind, unit, zone = read
+    if kind == "moment":
+        scale = _UNITS[unit]
+        return [
+            None if value is None else Timestamp._from_nanos(value * scale, unit, zone)
+            for value in values
+        ]
+    if kind == "span":
+        scale = _UNITS[unit]
+        return [
+            None if value is None else Timedelta._from_nanos(value * scale, unit)
+            for value in values
+        ]
+    epoch = _datetime.date(1970, 1, 1)
+    return [None if value is None else epoch + _datetime.timedelta(days=value) for value in values]
+
+
+def _outward_one(value: Any, dtype: str) -> Any:
+    """One stored count as the value pandas hands out for it, as `_outward` reads a list."""
+    if value is None or isinstance(value, float) or _temporal(dtype) is None:
+        return value
+    return _outward([value], dtype)[0]
+
+
+def _zone_name(zone: Any) -> str:
+    """The name a column type carries for a `tzinfo`, or an error if it has none."""
+    if zone in (_datetime.UTC, _datetime.UTC):
+        return "UTC"
+    key = getattr(zone, "key", None)
+    if isinstance(key, str):
+        return key
+    if isinstance(zone, _datetime.timezone):
+        offset = zone.utcoffset(None)
+        minutes = int(offset.total_seconds()) // 60
+        sign = "-" if minutes < 0 else "+"
+        return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+    raise InvalidArgumentError(f"a column cannot carry the zone {zone!r}, which has no name")
+
+
+_FINER = {"s": 0, "ms": 1, "us": 2, "ns": 3}
+
+
+def _inward(values: list[Any]) -> tuple[list[Any], str, str] | None:
+    """A list of moments or of spans as counts, their kind and the unit pandas infers.
+
+    pandas reads a list of `datetime` and `Timestamp` values as a column of
+    moments and a list of `timedelta` and `Timedelta` values as a column of
+    spans, quoted at the finest unit any value is quoted at, a plain `datetime`
+    or `timedelta` counting as microseconds. A zone every moment shares is kept.
+    The counts come back so the caller can build the column from whole numbers,
+    which is the one road into the extension that is written for them.
+
+    Args:
+        values: The list, with None for a missing value.
+
+    Returns:
+        The counts, `"moment"` or `"span"`, and the type to build, or None when
+        the list is not all moments or all spans.
+
+    Raises:
+        InvalidArgumentError: For moments with different zones, or some with a
+            zone and some without, which pandas refuses as well.
+    """
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    if all(isinstance(value, _datetime.datetime) for value in present):
+        zones = {value.utcoffset() is not None for value in present}
+        if len(zones) > 1:
+            raise InvalidArgumentError(
+                "Cannot mix tz-aware with tz-naive values",
+            )
+        unit = max((getattr(value, "unit", "us") for value in present), key=_FINER.__getitem__)
+        zone = present[0].tzinfo
+        if zone is not None:
+            names = {_zone_name(value.tzinfo) for value in present}
+            if len(names) > 1:
+                raise InvalidArgumentError("Cannot mix values with different time zones")
+        nanos = [
+            None if value is None else (value._total if isinstance(value, Timestamp) else
+                                        Timestamp._epoch(value))
+            for value in values
+        ]  # fmt: skip
+        counts = [None if n is None else n // _UNITS[unit] for n in nanos]
+        typed = f"datetime64[{unit}]" if zone is None else f"datetime64[{unit}, {_zone_name(zone)}]"
+        return counts, "moment", typed
+    if all(isinstance(value, _datetime.timedelta) for value in present):
+        unit = max((getattr(value, "unit", "us") for value in present), key=_FINER.__getitem__)
+        nanos = [None if value is None else Timedelta._read(value, None)[0] for value in values]
+        counts = [None if n is None else n // _UNITS[unit] for n in nanos]
+        return counts, "span", f"timedelta64[{unit}]"
+    return None

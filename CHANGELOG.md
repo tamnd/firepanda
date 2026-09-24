@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a temporal column hands out moments, spans and dates, and takes them in
+
+`tolist`, iterating a series or an index, `items`, `itertuples`, reading one cell with `iloc`, `loc`, `iat` or `at`, and the reductions that answer a value of the column's own kind now hand out a `Timestamp` for a moment, with its unit and zone, a `Timedelta` for a span and a `datetime.date` for a day, where they used to hand out the stored count. A missing value stays None. The other way round, a list of `datetime` or `Timestamp` values given to `Series` or `DataFrame` is a column of moments at the finest unit any value is quoted at, with a zone every value shares kept, and a list of `timedelta` values is a column of spans, which is what pandas infers. A `datetime` or `timedelta` on the other side of an operator is lined up as a column, so `s - s.min()` and `s > datetime(2024, 1, 1)` answer what pandas answers. This closes #348. `python/tests/test_temporal_values.py` checks 48 cases against pandas.
+
 ### Added: `DataFrame(...)` and `Series(...)` read every shape of data pandas does
 
 `DataFrame` now takes a list of records, a list of rows with `columns=`, a two dimensional numpy array with `columns=` and another frame, and `index=` and `columns=` beside any of them. A single value in a mapping is repeated down the rows, series in a mapping are lined up on the union of their labels as pandas lines them up, and a category or an instant series keeps its type. `Series` takes `index=`, one value repeated along it, and a series with an index, which pandas reads as a reindex. A numpy array keeps its own type, int32, uint8 and `datetime64[s]` included, and numpy scalars in a list are read as the values they hold. A shape that would need a column named 0, a column of objects or a numpy array of spans is refused by name, and the wrong lengths raise pandas' own messages. `python/tests/test_construct_shapes.py` checks 56 cases against pandas.

@@ -246,18 +246,8 @@ def test_a_format_that_is_not_a_word_is_refused(firepanda: ModuleType) -> None:
 
 @needs_pandas
 def test_the_dates_match(firepanda: ModuleType) -> None:
-    """`date` drops the time of day and leaves a calendar date.
-
-    Compared as days since the epoch rather than as written out dates, because
-    a date column reads back as the whole number it is stored as, which is
-    issue #348 and is the same on a column as it is here.
-    """
-    import datetime
-
-    epoch = datetime.date(1970, 1, 1)
-    got = made(firepanda).date.tolist()
-    want = [(x - epoch).days for x in theirs().date.tolist()]
-    assert got == want
+    """`date` drops the time of day and leaves a calendar date, as a `datetime.date`."""
+    assert made(firepanda).date.tolist() == list(theirs().date.tolist())
 
 
 @needs_pandas

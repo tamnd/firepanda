@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _firepanda
+from ._scalars import _inward, _outward, _outward_one, _temporal
 from .errors import (
     ColumnNotFoundError,
     DTypeError,
@@ -60,6 +61,83 @@ if TYPE_CHECKING:
         Series,
         SeriesGroupBy,
     )
+
+
+def _values_of(inner: Any) -> list[Any]:
+    """A column's or an index's values as pandas hands them out, a moment as a `Timestamp`."""
+    return _outward(list(inner.to_list()), inner.dtype())
+
+
+def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
+    """One value out of a series, or out of a frame by row and column position."""
+    if column is None:
+        return _outward_one(inner.cell(row), inner.dtype())
+    held = inner.column(inner.names()[column])
+    return _outward_one(inner.cell(row, column), held.dtype())
+
+
+def _reduced_outward(answer: Any, kind: str, dtype: str) -> Any:
+    """A reduction's answer as pandas hands it out.
+
+    The reductions that answer a value of the column's own kind, the smallest,
+    the largest, the middle and the mean of moments, and those and the sum and
+    the spread of spans, answer a `Timestamp` or a `Timedelta`. A count or a
+    variance stays a number.
+    """
+    read = _temporal(dtype)
+    if read is None or isinstance(answer, bool) or not isinstance(answer, (int, float)):
+        return answer
+    kinds = {"min", "max", "median", "mean"}
+    if read[0] == "span":
+        kinds |= {"sum", "std"}
+    if kind not in kinds:
+        return answer
+    return _outward_one(round(answer), dtype)
+
+
+def _temporal_series(values: list[Any], label: Any) -> Any:
+    """The extension series for a list of moments or spans, or None for any other list.
+
+    The extension builds columns of numbers, so the moments cross as their
+    counts in the unit pandas would infer and are read back as moments with
+    `to_datetime`, which is the conversion that is written. A span is the
+    difference of two moments, which is the one road to a column of spans
+    there is.
+    """
+    from ._frame import Series
+
+    if isinstance(values, SeriesMixin):
+        if _temporal(values.dtype) is None:
+            return None
+        return values._inner.relabel(label)
+    if not isinstance(values, (list, tuple)):
+        return None
+    read = _inward(list(values))
+    if read is None:
+        return None
+    counts, kind, typed = read
+    _, unit, zone = _temporal(typed) or ("", "", None)
+    moments = to_datetime(Series(counts), unit=unit)
+    if kind == "span":
+        moments = moments - to_datetime(Series([0] * len(counts)), unit=unit)
+    elif zone is not None:
+        moments = moments.dt.tz_localize("UTC").dt.tz_convert(typed.split(", ", 1)[1][:-1])
+    return moments._inner.relabel(label)
+
+
+def _temporal_operand(owner: Any, other: Any) -> Any:
+    """A moment or a span on the other side of an operator, as a column to line up with.
+
+    The extension's operators take a number or a column, and a `datetime` or a
+    `timedelta` is neither, so it is repeated down a column on the owner's own
+    labels and the operator runs column against column, which is written for
+    every temporal pair pandas allows. Anything else comes back as it was.
+    """
+    from ._frame import Series
+
+    if not isinstance(other, (datetime.datetime, datetime.timedelta)):
+        return other
+    return Series([other] * len(owner), index=owner.index)
 
 
 def _is_numpy(value: Any) -> bool:
@@ -4392,7 +4470,7 @@ class _Selection:
         try:
             if isinstance(picked, str):
                 if where[0] == "one":
-                    return inner.cell(where[1], names.index(picked))
+                    return _cell_of(inner, where[1], names.index(picked))
                 narrowed = _narrowed(inner.select([picked]), where)
                 return Series._wrap(narrowed.column(picked))
             if where[0] == "one":
@@ -4523,7 +4601,7 @@ class _Cell:
         inner = self._owner._inner
         if not self._labelled:
             try:
-                return inner.cell(int(row), int(column))
+                return _cell_of(inner, int(row), int(column))
             except Exception as error:
                 raise translate(error) from None
         names = inner.names()
@@ -4536,7 +4614,7 @@ class _Cell:
                 " answers several values there and this answers one"
             )
         try:
-            return inner.cell(found, names.index(column))
+            return _cell_of(inner, found, names.index(column))
         except Exception as error:
             raise translate(error) from None
 
@@ -4589,7 +4667,7 @@ class _Along:
                     # `iat`, so the two messages are raised by their two
                     # callers rather than by the one binding underneath.
                     raise OutOfBoundsError("single positional indexer is out-of-bounds")
-                return inner.cell(where[1])
+                return _cell_of(inner, where[1])
             return Series._wrap(_narrowed(inner, where))
         except Exception as error:
             raise translate(error) from None
@@ -4621,7 +4699,7 @@ class _Point:
         inner = self._owner._inner
         if not self._labelled:
             try:
-                return inner.cell(int(key))
+                return _cell_of(inner, int(key))
             except Exception as error:
                 raise translate(error) from None
         try:
@@ -4634,7 +4712,7 @@ class _Point:
                 " answers several values there and this answers one"
             )
         try:
-            return inner.cell(found)
+            return _cell_of(inner, found)
         except Exception as error:
             raise translate(error) from None
 
@@ -4735,18 +4813,32 @@ class DataFrameMixin:
         """A mapping of column name to values handed to the extension.
 
         A list the extension refuses is tried once more with its numpy scalars
-        made Python values, so a list of plain values pays nothing for that.
+        made Python values and its moments and spans built as their own
+        columns, so a list of plain values pays nothing for either.
         """
+        from ._frame import DataFrame, Series
+
         try:
             return _firepanda.DataFrame(data)
         except Exception as error:
             if data:
-                plain = {name: _unwrapped(values) for name, values in data.items()}
-                if any(plain[name] is not data[name] for name in data):
+                temporal = {}
+                for name, values in data.items():
+                    made = _temporal_series(values, name)
+                    if made is not None:
+                        temporal[name] = made
+                plain = {
+                    name: [0] * len(values) if name in temporal else _unwrapped(values)
+                    for name, values in data.items()
+                }
+                if temporal or any(plain[name] is not data[name] for name in data):
                     try:
-                        return _firepanda.DataFrame(plain)
+                        out = DataFrame._wrap(_firepanda.DataFrame(plain))
                     except Exception:
-                        pass
+                        raise translate(error) from None
+                    for name, made in temporal.items():
+                        out = out._assigned(name, Series._wrap(made))
+                    return out._inner
             raise translate(error) from None
 
     @staticmethod
@@ -5160,8 +5252,8 @@ class DataFrameMixin:
         """
         names = self._inner.names()
         try:
-            columns = [self._inner.column(held).to_list() for held in names]
-            labels = self._inner.labels().to_list() if index else []
+            columns = [_values_of(self._inner.column(held)) for held in names]
+            labels = _values_of(self._inner.labels()) if index else []
         except Exception as error:
             raise translate(error) from None
         fields = (["Index"] if index else []) + names
@@ -6065,7 +6157,7 @@ class DataFrameMixin:
         one_column = len(names) == 1 and wanted in (None, 1)
         if one_row and one_column:
             try:
-                return self._inner.cell(0, 0)
+                return _cell_of(self._inner, 0, 0)
             except Exception as error:
                 raise translate(error) from None
         if one_column:
@@ -7409,6 +7501,9 @@ class SeriesMixin:
         try:
             return _firepanda.Series(source, label)
         except Exception:
+            made = _temporal_series(source, label)
+            if made is not None:
+                return made
             plain = _unwrapped(source)
             if plain is source:
                 raise
@@ -7469,7 +7564,7 @@ class SeriesMixin:
         the column alive across the loop body and the list already does.
         """
         try:
-            return iter(self._inner.to_list())
+            return iter(_values_of(self._inner))
         except Exception as error:
             raise translate(error) from None
 
@@ -7631,7 +7726,8 @@ class SeriesMixin:
         than one of them being enough.
         """
         try:
-            return iter(zip(self._inner.labels().to_list(), self._inner.to_list(), strict=True))
+            labels, values = _values_of(self._inner.labels()), _values_of(self._inner)
+            return iter(zip(labels, values, strict=True))
         except Exception as error:
             raise translate(error) from None
 
@@ -8414,7 +8510,7 @@ class SeriesMixin:
         if self._inner.length() != 1:
             return Series._wrap(self._inner)
         try:
-            return self._inner.cell(0)
+            return _cell_of(self._inner, 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -8434,6 +8530,7 @@ class SeriesMixin:
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        other = _temporal_operand(self, other)
         try:
             if isinstance(other, SeriesMixin):
                 if strict:
@@ -8464,6 +8561,7 @@ class SeriesMixin:
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        other = _temporal_operand(self, other)
         try:
             if isinstance(other, SeriesMixin):
                 answer = self._inner.binary_series(other._inner, op, flip, fill_value)
@@ -8682,7 +8780,9 @@ class SeriesMixin:
             return float("nan")
         if min_count > 0 and self.count() < min_count:
             return float("nan")
-        return float("nan") if answer is None else answer
+        if answer is None:
+            return float("nan")
+        return _reduced_outward(answer, kind, self.dtype)
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
         """Runs `any` or `all` over the whole column.
@@ -12256,7 +12356,7 @@ class IndexMixin:
         for a person to look at.
         """
         try:
-            return iter(self._inner.to_list())
+            return iter(_values_of(self._inner))
         except Exception as error:
             raise translate(error) from None
 
