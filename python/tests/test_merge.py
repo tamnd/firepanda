@@ -41,8 +41,9 @@ def same(got: list[Any], want: list[Any]) -> bool:
 
 
 def agrees(got: Any, want: Any) -> None:
-    """The same columns, types and rows as pandas."""
+    """The same columns, types, rows and row labels as pandas."""
     assert list(got.columns) == list(want.columns)
+    assert list(got.index) == list(want.index)
     for name in want.columns:
         printed = str(want[name].dtype)
         assert got[name].dtype == ("string" if printed == "str" else printed), name

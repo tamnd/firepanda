@@ -12297,7 +12297,8 @@ def merge(
             column = out.column(name)
             out = out.pick(name, column.is_in(filler).unary("invert"), column.missing_row())
     if sort or how == "outer":
-        out = _merge_sorted(out, lefts, rights, how)
+        # The sort carries the labels along, and pandas numbers the rows again.
+        out = _merge_sorted(out, lefts, rights, how).reset_index(True)
     if any(out.null_counts()):
         out = out._widened_for_missing()
     return DataFrame._wrap(out)
