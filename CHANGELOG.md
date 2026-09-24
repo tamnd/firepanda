@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `combine_first`
+
+`DataFrame.combine_first` and `Series.combine_first` fill every missing value from the same row and column of the other object, as pandas does. The rows are both sides' rows, sorted when the two differ, a frame keeps its own columns first and then adds the ones only the other frame has, and a column both sides hold takes the type the two have in common. Two types that pandas combines into an object column, and differing labels where one side repeats a label, are refused with NotImplementedError.
+
 ### Fixed: `searchsorted` with several values answers an array
 
 `Series.searchsorted` and `Index.searchsorted` given several values now answer a `FirepandaArray` of int64 positions, where they answered a list, since pandas answers a numpy array and a list is a different shape of answer. One value still answers one position.
