@@ -887,6 +887,33 @@ def test_a_map_prints_its_keys_and_values_back() raises:
     )
 
 
+def test_join_by_a_type_is_the_join_that_type_names() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a FROM t JOIN BY (TYPE SeMi) u ON (a = b)", g, rules),
+        "SELECT a FROM t SEMI JOIN u ON (a = b)",
+    )
+    assert_equal(
+        _printed(
+            "SELECT * FROM t JOIN BY (TYPE left_join) u ON (a = b)", g, rules
+        ),
+        "SELECT * FROM t LEFT JOIN u ON (a = b)",
+    )
+    assert_equal(
+        _printed("SELECT * FROM t JOIN BY (TYPE outer) u ON (a = b)", g, rules),
+        "SELECT * FROM t FULL JOIN u ON (a = b)",
+    )
+    with assert_raises(contains="this kind of join"):
+        _ = _printed(
+            "SELECT * FROM t JOIN BY (TYPE mark) u ON (a = b)", g, rules
+        )
+    with assert_raises(contains='"bogus" is not a valid join type'):
+        _ = _printed(
+            "SELECT * FROM t JOIN BY (TYPE bogus) u ON (a = b)", g, rules
+        )
+
+
 def test_grouping_prints_back_in_capitals() raises:
     # GROUPING_ID is the same call under another name, and DuckDB names the
     # column it answers GROUPING either way.

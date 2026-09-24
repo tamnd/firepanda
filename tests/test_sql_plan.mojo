@@ -4195,3 +4195,14 @@ def test_a_map_written_out_reads_and_is_refused_by_the_plan() raises:
         _ = _plan("SELECT MAP {'a': 1} FROM t")
     with assert_raises(contains="a MAP literal"):
         _ = _plan("SELECT MAP {} FROM t")
+
+
+def test_join_by_a_type_builds_the_join_that_type_names() raises:
+    assert_equal(
+        _plan("SELECT a FROM t JOIN BY (TYPE semi) u ON t.b = u.b"),
+        _plan("SELECT a FROM t SEMI JOIN u ON t.b = u.b"),
+    )
+    assert_equal(
+        _plan("SELECT count(*) FROM t JOIN BY (TYPE anti) u USING (b)"),
+        _plan("SELECT count(*) FROM t ANTI JOIN u USING (b)"),
+    )

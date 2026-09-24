@@ -480,6 +480,7 @@ comptime _MARK_UNPIVOT_INTO: UInt8 = 221
 comptime _MARK_SAMPLE_FUNCTION: UInt8 = 222
 comptime _MARK_SAMPLE_METHOD: UInt8 = 223
 comptime _MARK_SAMPLE_REPEATABLE: UInt8 = 224
+comptime _MARK_JOIN_BY: UInt8 = 225
 
 # Where the parts of a statement sit in the small runs that carry them up. A
 # rule that has more than one thing to hand its parent puts them in a run of
@@ -1034,6 +1035,7 @@ struct Transform(Movable):
         self._set(names, "JoinClause", _MARK_JOIN)
         self._set(names, "RegularJoinClause", _MARK_JOIN_ON)
         self._set(names, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
+        self._set(names, "JoinByClause", _MARK_JOIN_BY)
         self._set(names, "TablePivotClause", _MARK_TABLE_PIVOT)
         self._set(names, "PivotOn", _MARK_PIVOT_ON)
         self._set(names, "PivotUsing", _MARK_PIVOT_USING)
@@ -1234,7 +1236,6 @@ struct Transform(Movable):
             "IsNull",
             "IsNullOperator",
             "IsTest",
-            "JoinByClause",
             "JoinOrPivot",
             "JoinPrefix",
             "JoinQualifier",
@@ -4978,6 +4979,8 @@ struct Transform(Movable):
             var form = self._join_form(tree, sql, kids[i])
             var at = tree.nodes[Int(form)].token_start
             var text = _join_text(tree, sql, form)
+            if self._marked(tree, form, _MARK_JOIN_BY):
+                text = _join_by_text(tree, sql, form)
             var right = work.value(self._join_right(tree, form))
             var on = self._join_on(tree, sql, form)
             if on != NO_NODE:
@@ -5017,8 +5020,10 @@ struct Transform(Movable):
                 tree, sql, node, TABLE_MODIFIER, _word(tree, sql, node)
             )
         var form = self._only(tree, clause)
-        if self._marked(tree, form, _MARK_JOIN_ON) or self._marked(
-            tree, form, _MARK_JOIN_PLAIN
+        if (
+            self._marked(tree, form, _MARK_JOIN_ON)
+            or self._marked(tree, form, _MARK_JOIN_PLAIN)
+            or self._marked(tree, form, _MARK_JOIN_BY)
         ):
             return form
         raise _unsupported(tree, sql, form, JOIN_FORM)
@@ -7040,6 +7045,54 @@ def _join_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:
         "the parse tree holds a join with no JOIN in it, which is a bug in"
         " firepanda rather than in the query"
     )
+
+
+def _join_by_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:
+    """Reads `JOIN BY (TYPE t)` as the join it names.
+
+    DuckDB wrote this spelling to reach its internal join types by name. Six of
+    them are joins firepanda already runs, so those come back as the words a
+    regular join is written with and print that way. The name is folded and may
+    end in `_join`, the way DuckDB reads it.
+
+    Args:
+        tree: The parse.
+        sql: The query.
+        form: The `JoinByClause` node.
+
+    Returns:
+        The join as the regular spelling writes it.
+
+    Raises:
+        Error: If the name is not a join type, or is one firepanda has no join
+            for.
+    """
+    # `'JOIN' 'BY' '(' 'TYPE' ColLabel ')'`, so the name is the fifth token.
+    var at = tree.nodes[Int(form)].token_start + 4
+    var name = _identifier(sql, tree.tokens[Int(at)]).lower()
+    var kind = name
+    if name.endswith("_join"):
+        kind = String(name[byte = 0 : name.byte_length() - 5])
+    if kind == "inner":
+        return "INNER JOIN"
+    if kind == "left":
+        return "LEFT JOIN"
+    if kind == "right":
+        return "RIGHT JOIN"
+    if kind == "outer" or kind == "full":
+        return "FULL JOIN"
+    if kind == "semi":
+        return "SEMI JOIN"
+    if kind == "anti":
+        return "ANTI JOIN"
+    if (
+        kind == "mark"
+        or kind == "single"
+        or kind == "right_semi"
+        or kind == "right_anti"
+    ):
+        raise _unsupported(tree, sql, form, JOIN_FORM, name)
+    raise Error(String('Parser Error: "', name, '" is not a valid join type'))
 
 
 def _quantifier(operator: StringSlice) -> UInt8:
