@@ -47,6 +47,7 @@ from std.testing import (
     assert_true,
 )
 
+from firepanda.array.encoding import Encoding
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.io.parquet import ParquetOptions, Session, quote, read_parquet
@@ -346,6 +347,48 @@ def test_a_result_read_in_groups_holds_what_one_group_holds() raises:
     assert_equal(wrong, -1, String("the two reads differ at row ", wrong))
     assert_equal(mine.null_count(), yours.null_count())
     assert_equal(mine.null_count(), 4000)
+
+
+def test_a_read_asked_to_encode_holds_repeats_as_codes_and_nothing_else() raises:
+    # Three string columns and one of them repeats: 97 values over twenty
+    # thousand rows, with a null every seventh row. The other two are one value
+    # a row and a column of nothing but nulls, and neither is worth encoding.
+    # Whatever the read decides, the decoded rows have to be the flat ones.
+    var session = Session()
+    var sql = String(
+        "SELECT CASE WHEN i % 7 = 0 THEN NULL",
+        " ELSE ('a status of some length ' || (i % 97)::VARCHAR) END AS s,",
+        " ('row-' || i::VARCHAR) AS u,",
+        " NULL::VARCHAR AS z,",
+        " i::BIGINT AS n",
+        " FROM range(20000) t(i)",
+    )
+    var flat = session.run(sql)
+    var held = session.run(sql, encode_strings=True)
+
+    assert_true(held[0].encoding == Encoding.DICTIONARY, "the repeating one")
+    assert_equal(held[0].type, LogicalType.STRING, "and it still says string")
+    assert_true(held[1].is_flat(), "one value a row is left alone")
+    assert_true(held[2].is_flat(), "and so is a column of nulls")
+    assert_true(held[3].is_flat(), "and a number")
+    assert_true(
+        held[0].nbytes() * 4 < flat[0].nbytes(),
+        String(held[0].nbytes(), " bytes against ", flat[0].nbytes()),
+    )
+
+    var back = held[0].decoded()
+    var ours = back.strings().copy()
+    var theirs = flat[0].strings().copy()
+    var wrong = -1
+    for i in range(len(flat)):
+        if back.is_valid(i) != flat[0].is_valid(i):
+            wrong = i
+            break
+        if back.is_valid(i) and ours[i] != theirs[i]:
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("the two reads differ at row ", wrong))
+    assert_equal(back.null_count(), flat[0].null_count())
 
 
 def test_a_group_asked_for_in_morsels_is_a_whole_number_of_them() raises:
