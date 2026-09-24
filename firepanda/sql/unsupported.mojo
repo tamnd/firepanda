@@ -386,7 +386,9 @@ def sql_support() -> List[Refusal]:
             "this kind of join",
             (
                 "firepanda runs the joins that name a condition or take none."
-                " POSITIONAL, NEAREST and JOIN BY are not among them."
+                " POSITIONAL and NEAREST are not among them, and nor are the"
+                " mark, single, right_semi and right_anti types JOIN BY can"
+                " name."
             ),
             SQL_ISSUE,
         ),

@@ -39,6 +39,8 @@ The pipeline's scan now decodes a column held in any encoding but flat as it han
 
 ### Added
 
+- `JOIN BY (TYPE t)`, the spelling DuckDB gives its internal join types, for the six that are ordinary joins: inner, left, right, full (or outer), semi and anti, with an optional `_join` on the end and in any case. Each one builds and prints as the regular join it names. The mark, single, right_semi and right_anti types are still refused by name, and a name that is no join type at all is a parser error that says so.
+
 - A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
 
 - `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
