@@ -2415,6 +2415,24 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.stack_rows",
+            name="stack_rows",
+            doc="This frame and others stacked down the rows.",
+            params=(
+                ("others", "list[DataFrame]"),
+                ("names", "list[str]"),
+                ("labels", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.stack_columns",
+            name="stack_columns",
+            doc="This frame and others side by side.",
+            params=(("others", "list[DataFrame]"),),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.labels",
             name="labels",
             doc="The row labels, as an index.",

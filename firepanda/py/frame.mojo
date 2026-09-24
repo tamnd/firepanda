@@ -25,7 +25,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.strings import strings_from_list
 from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame import DataFrame
-from firepanda.frame.concat import concat_series
+from firepanda.frame.concat import concat_series, stack_columns, stack_rows
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.join import JoinKind
@@ -1606,6 +1606,78 @@ struct PyDataFrame(Movable, Writable):
             )
         except cause:
             raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def stack_rows(
+        py_self: PythonObject,
+        others: PythonObject,
+        names: PythonObject,
+        labels: PythonObject,
+    ) raises -> PythonObject:
+        """Stacks this frame and others down the rows, which is `pd.concat`.
+
+        The core's `stack_rows` does the stacking and this gathers the frames.
+        The Python layer has already chosen the columns and brought each one to
+        a single type, so what is left is the copy and the labels.
+
+        Args:
+            py_self: The first frame.
+            others: The frames that go under it, in order.
+            names: The result's columns, in order.
+            labels: Whether to keep the row labels, or number the rows from
+                zero.
+
+        Returns:
+            A new frame as tall as all of them put together.
+
+        Raises:
+            Error: Tagged `dtype`, if a part is not a frame or two parts disagree
+                on a type, and tagged `column` if a name is in no part.
+        """
+        var frames = List[ArcPointer[DataFrame]](capacity=Int(len(others)) + 1)
+        frames.append(Self._frame(py_self)[].frame)
+        for other in others:
+            frames.append(Self._other(other, "others"))
+        var wanted = List[String](capacity=Int(len(names)))
+        for name in names:
+            wanted.append(String(name))
+        var keep = flag(labels, "labels")
+        try:
+            return PythonObject(
+                alloc=Self(ArcPointer(stack_rows(frames, wanted, keep)))
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def stack_columns(
+        py_self: PythonObject, others: PythonObject
+    ) raises -> PythonObject:
+        """Puts this frame and others side by side, which is `pd.concat(axis=1)`.
+
+        The Python layer has already lined the rows up, so this only gathers
+        the frames and hands them to the core, which shares every column rather
+        than copying it.
+
+        Args:
+            py_self: The first frame.
+            others: The frames that go to its right, in order.
+
+        Returns:
+            A new frame with the first frame's labels.
+
+        Raises:
+            Error: Tagged `dtype`, if a part is not a frame, and tagged `value`
+                if the heights differ or a column name repeats.
+        """
+        var frames = List[ArcPointer[DataFrame]](capacity=Int(len(others)) + 1)
+        frames.append(Self._frame(py_self)[].frame)
+        for other in others:
+            frames.append(Self._other(other, "others"))
+        try:
+            return PythonObject(alloc=Self(ArcPointer(stack_columns(frames))))
+        except cause:
+            raise retagged(VALUE, cause)
 
     @staticmethod
     def dropna(

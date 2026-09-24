@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `concat` down the rows and side by side
+
+`firepanda.concat` stacks frames and series the way `pandas.concat` does, through two new core bindings, `DataFrame.stack_rows` and `DataFrame.stack_columns`. Down the rows the columns are the union of the parts' columns in the order they first appear, or the shared ones with `join="inner"`, and a part without a column is missing on its rows. Each column takes the type pandas gives it, which is numpy's rule for mixed numbers, float64 for an integer column with a gap and text for category columns whose categories differ. The row labels come along with their shared name, or are numbered again with `ignore_index`. Series on series give a series, and a named series next to a frame is a column. With `axis=1` the parts are lined up on their row labels, the union of them or with `join="inner"` the shared ones, and `sort` sorts them. `verify_integrity` and the mistakes raise pandas' class and message. `keys`, `levels`, `names`, a dict of parts, and anything pandas answers with an object column are refused by name.
+
 ## [0.8.31] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
