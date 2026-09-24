@@ -1842,6 +1842,68 @@ def _ewm_members() -> tuple[Member, ...]:
     return tuple(out)
 
 
+GROUP_TRANSFORMS: tuple[tuple[str, str, str, str, str], ...] = (
+    (
+        "cumsum",
+        "numeric_only: bool = False, *args: Any, **kwargs: Any",
+        'self._cumulative("{name}", numeric_only, args, kwargs)',
+        "The running total within each group, one value a row.",
+        "",
+    ),
+    (
+        "cumprod",
+        "numeric_only: bool = False, *args: Any, **kwargs: Any",
+        'self._cumulative("{name}", numeric_only, args, kwargs)',
+        "The running product within each group, one value a row.",
+        "",
+    ),
+    (
+        "cummax",
+        "numeric_only: bool = False, **kwargs: Any",
+        'self._cumulative("{name}", numeric_only, (), kwargs)',
+        "The running largest value within each group, one value a row.",
+        "",
+    ),
+    (
+        "cummin",
+        "numeric_only: bool = False, **kwargs: Any",
+        'self._cumulative("{name}", numeric_only, (), kwargs)',
+        "The running smallest value within each group, one value a row.",
+        "",
+    ),
+    (
+        "cumcount",
+        "ascending: bool = True",
+        'self._counted("{name}", ascending)',
+        "Each row's position within its group, counting from zero.",
+        "Series",
+    ),
+    (
+        "ngroup",
+        "ascending: bool = True",
+        'self._counted("{name}", ascending)',
+        "The number of each row's group, counting from zero.",
+        "Series",
+    ),
+    (
+        "shift",
+        "periods: Any = 1, freq: Any = None, fill_value: Any = NO_DEFAULT, suffix: Any = None",
+        "self._shifted(periods, freq, fill_value, suffix)",
+        "Each group's rows moved along within the group, leaving the gap missing.",
+        "",
+    ),
+)
+"""The grouped transforms, which answer one value a row rather than one a group.
+
+Each is the name, pandas' parameter list as measured, the body, the sentence,
+and the return annotation when it is not the class's own. `cumcount` and
+`ngroup` answer one column on both classes, because they number rows or groups
+rather than reading a column, which is why they carry `Series` and a sentence
+that does not say which columns they read. The signatures are the same on both
+classes in pandas, so there is one table.
+"""
+
+
 def _group_members(py: str) -> tuple[Member, ...]:
     """Writes the eighteen reduction members for one group by class.
 
@@ -1916,6 +1978,17 @@ def _group_members(py: str) -> tuple[Member, ...]:
                 body="self._size()" if frame and sized else bodies[shape].format(name=name),
                 doc=what if sized else f"{what} Over {over}.",
                 returns="DataFrame | Series" if sized else gives,
+            )
+        )
+    for name, signature, body, what, returns in GROUP_TRANSFORMS:
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=signature,
+                body=body.format(name=name),
+                doc=what if returns else f"{what} Over {over}.",
+                returns=returns or gives,
             )
         )
     return tuple(out)
@@ -2398,6 +2471,19 @@ FRAME = Exposed(
                 ("dropna", "bool"),
                 ("sort", "bool"),
                 ("as_index", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.group_scan",
+            name="group_scan",
+            doc="One value a row, worked out within the row's group.",
+            params=(
+                ("by", "list[str]"),
+                ("kind", "str"),
+                ("periods", "int"),
+                ("dropna", "bool"),
+                ("sort", "bool"),
             ),
             returns="DataFrame",
         ),

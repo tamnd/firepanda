@@ -1538,6 +1538,57 @@ struct PyDataFrame(Movable, Writable):
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
+    def group_scan(
+        py_self: PythonObject,
+        by: PythonObject,
+        kind: PythonObject,
+        periods: PythonObject,
+        dropna: PythonObject,
+        sort: PythonObject,
+    ) raises -> PythonObject:
+        """Answers one value a row, worked out within the row's group.
+
+        This is `df.groupby(keys).cumsum()` and the six other transforms that
+        keep the row count, behind one door for the reason `group_agg` gives.
+        The Python layer picks the columns, and turns a column with a gap in it
+        into the type pandas would answer.
+
+        Args:
+            py_self: The frame.
+            by: The key columns, at least one and no repeats.
+            kind: The transform, as pandas spells the method on a group.
+            periods: How far `shift` moves, and ignored by the others.
+            dropna: Leave the rows with a missing key out of every group.
+            sort: Number the groups in key order for `ngroup`.
+
+        Returns:
+            A new frame as tall as this one, with its labels.
+
+        Raises:
+            Error: Tagged `column`, if a key is missing or named twice, tagged
+                `value` if the transform is not one of the seven, and tagged
+                `dtype` if a column has a type the transform cannot read.
+        """
+        var keys = List[String](capacity=Int(len(by)))
+        for name in by:
+            keys.append(String(name))
+        var wanted = words(kind, "kind")
+        var moved = whole(periods, "periods")
+        var drop = flag(dropna, "dropna")
+        var ordered = flag(sort, "sort")
+        ref frame = Self._frame(py_self)[].frame[]
+        try:
+            var out = frame.group_scan(keys, wanted, moved, drop, ordered)
+            return PythonObject(alloc=Self(ArcPointer(out^)))
+        except cause:
+            var text = String(cause)
+            if "unknown transformation" in text:
+                raise retagged(VALUE, cause)
+            if "no column named" in text or "given twice" in text:
+                raise retagged(COLUMN, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def join_on(
         py_self: PythonObject,
         other: PythonObject,

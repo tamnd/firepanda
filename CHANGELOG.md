@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: grouped transforms
+
+`cumsum`, `cumprod`, `cummax`, `cummin`, `shift`, `cumcount` and `ngroup` on `DataFrameGroupBy` and `SeriesGroupBy` answer one value a row, in the frame's order and with its labels, as pandas does. The folds run down the rows once with a carry per group and nothing is sorted, `shift` places each group's rows with one counting pass, and `ngroup` numbers the groups in key order or in order of appearance. A row whose key is missing belongs to no group and answers missing, so an integer answer with such a row in it is float64. Counting from the end, a fill value, a frequency, a suffix and a list of periods are refused by name.
+
 ### Added: `merge(indicator=)`
 
 `merge(indicator=)` answers pandas' category column that says which side each row came from, `left_only`, `right_only` or `both`, with all three categories whichever occur. `True` names it `_merge` and a string names it that, on key columns and on row labels alike, and pandas' `ValueError` sentences are given for a name that is taken or an indicator that is neither a flag nor a string.

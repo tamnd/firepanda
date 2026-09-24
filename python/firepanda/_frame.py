@@ -1742,6 +1742,67 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def cumsum(self, numeric_only: bool = False, *args: Any, **kwargs: Any) -> DataFrame:
+        """The running total within each group, one value a row. Over every column that is
+        not a key.
+        """
+        try:
+            return self._cumulative("cumsum", numeric_only, args, kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumprod(self, numeric_only: bool = False, *args: Any, **kwargs: Any) -> DataFrame:
+        """The running product within each group, one value a row. Over every column that
+        is not a key.
+        """
+        try:
+            return self._cumulative("cumprod", numeric_only, args, kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummax(self, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
+        """The running largest value within each group, one value a row. Over every column
+        that is not a key.
+        """
+        try:
+            return self._cumulative("cummax", numeric_only, (), kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummin(self, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
+        """The running smallest value within each group, one value a row. Over every column
+        that is not a key.
+        """
+        try:
+            return self._cumulative("cummin", numeric_only, (), kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumcount(self, ascending: bool = True) -> Series:
+        """Each row's position within its group, counting from zero."""
+        try:
+            return self._counted("cumcount", ascending)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ngroup(self, ascending: bool = True) -> Series:
+        """The number of each row's group, counting from zero."""
+        try:
+            return self._counted("ngroup", ascending)
+        except Exception as error:
+            raise translate(error) from None
+
+    def shift(
+        self, periods: Any = 1, freq: Any = None, fill_value: Any = NO_DEFAULT, suffix: Any = None
+    ) -> DataFrame:
+        """Each group's rows moved along within the group, leaving the gap missing. Over
+        every column that is not a key.
+        """
+        try:
+            return self._shifted(periods, freq, fill_value, suffix)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class SeriesGroupBy(SeriesGroupByMixin):
     """One column of a grouped frame, waiting for a reduction.
@@ -1929,6 +1990,59 @@ class SeriesGroupBy(SeriesGroupByMixin):
         """Whether every value in each group is true. Over the column."""
         try:
             return self._reduce("all", 0.0, False, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumsum(self, numeric_only: bool = False, *args: Any, **kwargs: Any) -> DataFrame | Series:
+        """The running total within each group, one value a row. Over the column."""
+        try:
+            return self._cumulative("cumsum", numeric_only, args, kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumprod(self, numeric_only: bool = False, *args: Any, **kwargs: Any) -> DataFrame | Series:
+        """The running product within each group, one value a row. Over the column."""
+        try:
+            return self._cumulative("cumprod", numeric_only, args, kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummax(self, numeric_only: bool = False, **kwargs: Any) -> DataFrame | Series:
+        """The running largest value within each group, one value a row. Over the column."""
+        try:
+            return self._cumulative("cummax", numeric_only, (), kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummin(self, numeric_only: bool = False, **kwargs: Any) -> DataFrame | Series:
+        """The running smallest value within each group, one value a row. Over the column."""
+        try:
+            return self._cumulative("cummin", numeric_only, (), kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumcount(self, ascending: bool = True) -> Series:
+        """Each row's position within its group, counting from zero."""
+        try:
+            return self._counted("cumcount", ascending)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ngroup(self, ascending: bool = True) -> Series:
+        """The number of each row's group, counting from zero."""
+        try:
+            return self._counted("ngroup", ascending)
+        except Exception as error:
+            raise translate(error) from None
+
+    def shift(
+        self, periods: Any = 1, freq: Any = None, fill_value: Any = NO_DEFAULT, suffix: Any = None
+    ) -> DataFrame | Series:
+        """Each group's rows moved along within the group, leaving the gap missing. Over
+        the column.
+        """
+        try:
+            return self._shifted(periods, freq, fill_value, suffix)
         except Exception as error:
             raise translate(error) from None
 
