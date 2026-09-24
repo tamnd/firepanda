@@ -43,6 +43,7 @@ from .errors import (
     ColumnNotFoundError,
     DTypeError,
     FirepandaError,
+    IndexingError,
     InvalidArgumentError,
     MergeError,
     OutOfBoundsError,
@@ -4360,6 +4361,29 @@ def _by_position(key: Any, height: int) -> tuple[Any, ...]:
     return ("one", int(key))
 
 
+def _aligned_mask(index: Any, mask: Any) -> Any:
+    """A boolean series lined up on the labels of the rows it masks.
+
+    pandas reads a mask by label rather than by position, so a mask that was
+    sorted or filtered on the way still picks the rows it was computed for. The
+    labels are usually the same ones in the same order, because the mask was
+    computed from the frame, and then it is used as it is.
+
+    Raises:
+        IndexingError: If a row has no label in the mask, in pandas' words.
+    """
+    labels = mask.index
+    if labels.equals(index):
+        return mask
+    known = set(labels.tolist())
+    if len(known) != len(labels) or any(label not in known for label in index.tolist()):
+        raise IndexingError(
+            "Unalignable boolean Series provided as indexer (index of the boolean"
+            " Series and of the indexed object do not match)."
+        )
+    return mask.reindex(index)
+
+
 def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
     """Reads a row key as labels, which is what `loc` does on either type.
 
@@ -4385,8 +4409,10 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
     """
     if key is EVERY:
         return ("every",)
+    if _is_numpy(key) and key.ndim == 1:
+        key = key.tolist()
     if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
-        return ("mask", key._inner)
+        return ("mask", _aligned_mask(index, key)._inner)
     if isinstance(key, slice):
         walked = index.slice_indexer(key.start, key.stop, key.step)
         start, stop, step = walked.indices(height)
@@ -4954,13 +4980,25 @@ class DataFrameMixin:
         key takes a column out and a list of strings takes a frame out, and the
         difference is the argument rather than the method.
 
-        pandas reads several other kinds of key here, including a boolean mask, a
-        slice and a callable. Those are refused rather than approximated, with a
-        message that says what is read today, because a key that quietly means
-        something else is worse than one that does not work at all.
+        A boolean mask picks rows instead, a series of them lined up on the row
+        labels and a list of them by position, which is `loc` with the mask, and
+        a callable is called with the frame and its answer read as the key. A
+        slice is refused rather than approximated, with a message that says
+        what is read today, because a key that quietly means something else is
+        worse than one that does not work at all.
         """
         from ._frame import DataFrame, Series
 
+        if callable(key) and not isinstance(key, (SeriesMixin, DataFrameMixin)):
+            return self[key(self)]
+        if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
+            return self.loc[key]
+        if _is_numpy(key) and key.ndim == 1 and key.dtype.kind == "b":
+            key = key.tolist()
+        if isinstance(key, list) and key and _is_mask(key):
+            if len(key) != len(self):
+                raise InvalidArgumentError(f"Item wrong length {len(key)} instead of {len(self)}.")
+            return self.loc[key]
         try:
             if isinstance(key, str):
                 return Series._wrap(self._inner.column(key))
@@ -11548,6 +11586,34 @@ class NamedAgg:
         )
 
 
+class _NthSelector:
+    """What `g.nth` hands back, which is called or indexed with the places."""
+
+    __slots__ = ("_owner",)
+
+    def __init__(self, owner: GroupByMixin[Any]) -> None:
+        """Holds the group by."""
+        self._owner = owner
+
+    def __call__(self, n: Any, dropna: Any = None) -> Any:
+        """The rows at the places `n` names in each group.
+
+        Args:
+            n: A place, counted from the back when negative, or a list of them.
+            dropna: Refused, as pandas deprecated it.
+        """
+        _refuse(
+            "dropna",
+            dropna,
+            "it drops a group's missing rows before counting, which pandas has deprecated",
+        )
+        return self._owner._nth(n)
+
+    def __getitem__(self, n: Any) -> Any:
+        """The rows at the places `n` names in each group."""
+        return self._owner._nth(n)
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -12237,6 +12303,145 @@ class GroupByMixin[Answer]:
         """
         raise NotImplementedError("agg")
 
+    def _positions(self, reverse: bool) -> Series:
+        """Each row's place in its group, counted from the front or from the back.
+
+        Lined up on the frame's own labels in the frame's order either way, and
+        missing for a row whose key is not a group, so a comparison with it is
+        False there, which is how pandas leaves those rows out.
+
+        Args:
+            reverse: Count from the last row of each group rather than the first.
+
+        Returns:
+            A series as tall as the frame.
+        """
+        from ._frame import DataFrameGroupBy
+
+        frame = self._frame.iloc[::-1] if reverse else self._frame
+        grouped = DataFrameGroupBy(frame, self._by, self._as_index, self._sort, self._dropna)
+        counted = grouped.cumcount()
+        return counted.iloc[::-1] if reverse else counted
+
+    def _kept(self, mask: Series) -> Any:
+        """The rows a mask keeps, in the frame's order and with its labels.
+
+        Overridden by `SeriesGroupBy`, which answers the one column.
+        """
+        return self._frame.loc[mask]
+
+    def head(self, n: int = 5) -> Any:
+        """The first `n` rows of each group, in the frame's order.
+
+        A negative `n` keeps every row but the last `-n` of each group, and a
+        row whose key is not a group is left out, as in pandas.
+
+        Args:
+            n: How many rows to keep from the front of each group.
+
+        Returns:
+            The rows kept, with the frame's labels.
+        """
+        if n >= 0:
+            return self._kept(self._positions(False) < n)
+        return self._kept(self._positions(True) >= -n)
+
+    def tail(self, n: int = 5) -> Any:
+        """The last `n` rows of each group, in the frame's order.
+
+        A negative `n` keeps every row but the first `-n` of each group.
+
+        Args:
+            n: How many rows to keep from the back of each group.
+
+        Returns:
+            The rows kept, with the frame's labels.
+        """
+        if n >= 0:
+            return self._kept(self._positions(True) < n)
+        return self._kept(self._positions(False) >= -n)
+
+    @property
+    def nth(self) -> _NthSelector:
+        """The row at a place in each group, called or indexed.
+
+        pandas made this a filter in 2.0, so it answers rows of the frame with
+        their own labels rather than one row a group on the keys, and it can be
+        written `g.nth(0)` or `g.nth[0]`, which is why it is a property.
+        """
+        return _NthSelector(self)
+
+    def _nth(self, n: Any) -> Any:
+        """The rows at the places `n` names, which is an int or a list of them."""
+        places = [n] if isinstance(n, int) and not isinstance(n, bool) else n
+        if not isinstance(places, (list, tuple)) or not all(
+            isinstance(one, int) and not isinstance(one, bool) for one in places
+        ):
+            raise NotImplementedError(
+                "nth takes a place or a list of places for now, because a slice"
+                " picks a run of places from each end"
+            )
+        front = self._positions(False) if any(one >= 0 for one in places) else None
+        back = self._positions(True) if any(one < 0 for one in places) else None
+        mask = None
+        for one in places:
+            hit = cast("Series", front) == one if one >= 0 else cast("Series", back) == -one - 1
+            mask = hit if mask is None else mask | hit
+        if mask is None:
+            return self._kept(self._positions(False) < 0)
+        return self._kept(mask)
+
+    def _picked(self, how: str, column: str, skipna: bool) -> Series:
+        """The label of the row holding each group's largest or smallest value.
+
+        The value is broadcast back over its group, the rows holding it are
+        kept, and the first of those in each group is the one pandas answers.
+
+        Args:
+            how: `max` or `min`.
+            column: The column to look in.
+            skipna: Declared and held at True.
+
+        Returns:
+            One label a group, on the keys, named after the column.
+
+        Raises:
+            InvalidArgumentError: If a group has only missing values, in
+                pandas' words.
+        """
+        from ._frame import DataFrame, DataFrameGroupBy
+
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a group whose answer is missing because one value is missing is a"
+            " second pass the kernels do not make",
+        )
+        values = self._frame[column]
+        target = DataFrameGroupBy(
+            self._frame[[*self._by, column]], self._by, True, self._sort, self._dropna
+        )[column].transform(how)
+        hits = self._frame.loc[values == target]
+        keys = {name: hits[name] for name in self._by}
+        label = "__firepanda_label__"
+        labelled = DataFrame(
+            {**{name: list(each) for name, each in keys.items()}, label: hits.index.tolist()}
+        )
+        answer = DataFrameGroupBy(labelled, self._by, True, self._sort, self._dropna)[label].first()
+        whole = DataFrameGroupBy(
+            self._frame[self._by], self._by, True, self._sort, self._dropna
+        ).size()
+        if len(answer) != len(whole):
+            raise InvalidArgumentError(
+                f"idx{how} with skipna=True encountered all NA values in a group."
+            )
+        if not self._sort:
+            # The groups in the order they first appear in the frame, which is
+            # not always the order their winning rows do.
+            answer = answer.reindex(whole.index)
+        return answer.rename(column)
+
     def _shape_rows(self, kind: str, periods: int) -> Answer:
         """Runs a transform and puts the answer in the shape pandas gives.
 
@@ -12380,6 +12585,52 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             raise KeyError(f"Label(s) {missing!r} do not exist")
         return plan
 
+    def idxmax(self, skipna: bool = True, numeric_only: bool = False) -> DataFrame:
+        """The label of each group's largest value, a column a column.
+
+        Args:
+            skipna: Declared and held at True.
+            numeric_only: Declared and held at False.
+
+        Returns:
+            One row a group, on the keys.
+        """
+        return self._picked_all("max", skipna, numeric_only)
+
+    def idxmin(self, skipna: bool = True, numeric_only: bool = False) -> DataFrame:
+        """The label of each group's smallest value, a column a column.
+
+        Args:
+            skipna: Declared and held at True.
+            numeric_only: Declared and held at False.
+
+        Returns:
+            One row a group, on the keys.
+        """
+        return self._picked_all("min", skipna, numeric_only)
+
+    def _picked_all(self, how: str, skipna: bool, numeric_only: bool) -> DataFrame:
+        """`_picked` over every column that is not a key, side by side."""
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "dropping the columns a reduction cannot read is a decision about"
+            " which columns come back",
+        )
+        if not self._as_index:
+            raise NotImplementedError(
+                f"idx{how} with as_index=False is not supported yet, because the"
+                " keys have to come back as columns beside the labels"
+            )
+        out: Any = None
+        for name in self._frame.columns:
+            if name in self._by:
+                continue
+            picked = self._picked(how, name, skipna)
+            out = picked.to_frame(name) if out is None else out._assigned(name, picked)
+        return out
+
     def _ranked(self, out: DataFrame) -> DataFrame:
         """The ranks as they are, one column a column that is not a key."""
         return out
@@ -12478,6 +12729,32 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     def _ranked(self, out: DataFrame) -> Series:
         """The ranks of the one column, as a series named after it."""
         return _relabelled(out, self._column, self._column)
+
+    def _kept(self, mask: Series) -> Series:
+        """The one column's rows a mask keeps."""
+        return self._frame.loc[mask][self._column]
+
+    def idxmax(self, skipna: bool = True) -> Series:
+        """The label of each group's largest value.
+
+        Args:
+            skipna: Declared and held at True.
+
+        Returns:
+            One label a group, on the keys, named after the column.
+        """
+        return self._picked("max", self._column, skipna)
+
+    def idxmin(self, skipna: bool = True) -> Series:
+        """The label of each group's smallest value.
+
+        Args:
+            skipna: Declared and held at True.
+
+        Returns:
+            One label a group, on the keys, named after the column.
+        """
+        return self._picked("min", self._column, skipna)
 
     def _column_group(self, column: str) -> SeriesGroupBy:
         """This group by, which is over the one column already."""
