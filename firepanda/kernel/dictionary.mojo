@@ -588,3 +588,76 @@ def check_same_categories(a: AnyArray, b: AnyArray, what: String) raises:
             ),
         )
     )
+
+
+comptime REPEAT_SAMPLE_ROWS = 65536
+"""How many leading rows `encode_repetitive` looks at before deciding to look
+at the rest."""
+
+comptime MIN_REPEATS = 16
+"""How many rows a distinct value has to cover, on average, before a string
+column is held as codes. See `encode_repetitive`."""
+
+
+def encode_repetitive(var col: AnyArray) raises -> AnyArray:
+    """Holds a string column as codes into its distinct values when it repeats.
+
+    This is the storage decision and not `astype("category")`: the result still
+    says string, and a user cannot tell. The categories come out in the order
+    they first appear, since nobody sees them and sorting them would be work
+    for nothing.
+
+    The rule is that every distinct value covers `MIN_REPEATS` rows on average.
+    Held flat a row is a sixteen byte view plus any bytes past twelve, and held
+    encoded it is a four byte code plus its share of one view and one copy of
+    the bytes per distinct value, so at sixteen repeats the encoded column is
+    already under a third of the flat one for short strings and the saving only
+    grows from there. The same rule keeps out the columns where it would not
+    pay, a comment or a name column where nearly every row is its own value,
+    and it is checked on the first `REPEAT_SAMPLE_ROWS` rows before the whole
+    column is hashed, so a column that fails costs one hash of a sample.
+
+    Args:
+        col: The column. Handed back unchanged if it is not flat text, is too
+            short to be worth it, or does not repeat enough.
+
+    Returns:
+        The column, encoded or as it was.
+
+    Raises:
+        If the hash of the column fails.
+    """
+    if not col.is_flat() or not col.is_string() or col.is_nested():
+        return col^
+    var rows = len(col)
+    if rows < MIN_REPEATS * 4:
+        return col^
+    ref text = col.strings()
+    var head = min(rows, REPEAT_SAMPLE_ROWS)
+    if head < rows:
+        var sample = factorize_strings(text.window(0, head))
+        if sample.count() * MIN_REPEATS > head:
+            return col^
+    var found = factorize_strings(text)
+    # A column of nothing but nulls has no values to hold codes into, and it
+    # is left as it is rather than made the one encoded column with no
+    # categories, which every kernel taught the encoding would have to expect.
+    if found.count() * MIN_REPEATS > rows or len(found.firsts) == 0:
+        return col^
+    var categories = text.take(found.firsts)
+    var shift = UInt32(1) if found.null_group >= 0 else UInt32(0)
+    var codes = Array[DType.int32](rows)
+    var ordinals = found.codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
+    var nulls = text.null_count() > 0
+    for i in range(rows):
+        if nulls and not text.is_valid(i):
+            codes.set_null(i)
+            continue
+        out.unsafe_offset(i).unsafe_write(
+            Int32(ordinals.unsafe_offset(i).unsafe_load() - shift)
+        )
+    var type = col.type
+    var encoded = AnyArray.dictionary_encoded(codes^, categories^)
+    encoded.type = type
+    return encoded^

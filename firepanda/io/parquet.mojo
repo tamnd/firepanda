@@ -43,6 +43,7 @@ writes SQL unless it wants to.
 from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
+from firepanda.kernel.dictionary import encode_repetitive
 
 from .arrow_c import (
     ARROW_FLAG_NULLABLE,
@@ -258,7 +259,9 @@ def _stitch(
             built[c].append(chunks.pop(0))
 
 
-def _combined(var frame: DataFrame) raises -> DataFrame:
+def _combined(
+    var frame: DataFrame, encode_strings: Bool = False
+) raises -> DataFrame:
     """Stacks each column's groups back into the one chunk callers expect.
 
     A column at a time rather than all of them at once, so that what is held
@@ -274,8 +277,13 @@ def _combined(var frame: DataFrame) raises -> DataFrame:
     when it has exactly one chunk and raises otherwise, so a frame in groups is
     not a frame most of this library can use.
 
+    It is also where a string column that repeats is turned into codes, when
+    the caller asked for that, since this is the one moment each column is
+    whole and the only copy of it. See `encode_repetitive` for the rule.
+
     Args:
         frame: The frame the collector built, consumed here.
+        encode_strings: Whether to hold repetitive string columns as codes.
 
     Returns:
         The same rows, one chunk a column.
@@ -287,7 +295,10 @@ def _combined(var frame: DataFrame) raises -> DataFrame:
     var pieces = frame^.into_columns()
     var out = List[ChunkedArray](capacity=len(pieces))
     while len(pieces) != 0:
-        out.append(ChunkedArray(pieces.pop(0).combine()))
+        var column = pieces.pop(0).combine()
+        if encode_strings:
+            column = encode_repetitive(column^)
+        out.append(ChunkedArray(column^))
     return DataFrame(schema^, out^)
 
 
@@ -354,6 +365,7 @@ struct Session(Movable):
         sql: StringSlice,
         morsel_rows: Int = 0,
         group_rows: Int = COLLECT_GROUP_ROWS,
+        encode_strings: Bool = False,
     ) raises -> DataFrame:
         """Runs one query and returns the whole answer as a frame.
 
@@ -370,6 +382,10 @@ struct Session(Movable):
             group_rows: How many rows to hold before assembling them. See
                 `COLLECT_GROUP_ROWS`, which is the default and is the only value
                 anything but a test passes.
+            encode_strings: Whether a string column where each value repeats
+                enough comes back held as codes into its distinct values. The
+                dtype still says string. Off until every kernel a query can
+                reach has been taught the encoding, issue #979.
 
         Returns:
             The result.
@@ -379,7 +395,9 @@ struct Session(Movable):
                 cannot read.
         """
         var result = Cells(RESULT_WORDS)
-        return self._execute(sql, result, morsel_rows, group_rows)
+        return self._execute(
+            sql, result, morsel_rows, group_rows, encode_strings
+        )
 
     def _execute(
         mut self,
@@ -387,6 +405,7 @@ struct Session(Movable):
         mut result: Cells,
         morsel_rows: Int = 0,
         group_rows: Int = COLLECT_GROUP_ROWS,
+        encode_strings: Bool = False,
     ) raises -> DataFrame:
         """Runs one query into a result the caller owns.
 
@@ -414,6 +433,7 @@ struct Session(Movable):
             morsel_rows: The chunk height, passed through to the assembler.
             group_rows: How many rows to hold before assembling them, passed
                 through to the collector.
+            encode_strings: Passed through to `_combined`.
 
         Returns:
             The answer.
@@ -453,7 +473,7 @@ struct Session(Movable):
         # exists. A caller that asked for morsels asked for chunks and keeps
         # them.
         if morsel_rows == 0:
-            return _combined(frame^)
+            return _combined(frame^, encode_strings)
         return frame^
 
     def _collect(

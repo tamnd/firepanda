@@ -22,7 +22,12 @@ from firepanda.array.strings import (
 )
 from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.kernel.cast import cast_any
-from firepanda.kernel.dictionary import decode_dictionary, encode_dictionary
+from firepanda.array.encoding import Encoding
+from firepanda.kernel.dictionary import (
+    decode_dictionary,
+    encode_dictionary,
+    encode_repetitive,
+)
 
 
 def text(var values: List[String]) -> StringArray:
@@ -232,6 +237,49 @@ def test_a_number_column_cannot_be_encoded_yet_and_says_so() raises:
     except cause:
         message = String(cause)
     assert_true("not supported" in message)
+
+
+def _repeating(rows: Int) raises -> AnyArray:
+    """Four values, one of them long, cycling, with every fifth row null."""
+    var words: List[String] = [
+        "late",
+        "ok",
+        "a status too long to be inlined in a view",
+        "ok",
+    ]
+    var out = StringBuilder()
+    for i in range(rows):
+        if i % 5 == 4:
+            out.append_null()
+        else:
+            out.append(words[i % 4].as_bytes())
+    return AnyArray(out^.finish())
+
+
+def test_a_column_that_repeats_is_held_as_codes_in_first_seen_order() raises:
+    var col = _repeating(200)
+    var held = encode_repetitive(col.copy())
+    assert_true(held.encoding == Encoding.DICTIONARY)
+    assert_equal(held.type, LogicalType.STRING)
+    var seen = held.distinct().strings().copy()
+    assert_equal(len(seen), 3, "three distinct values and no null")
+    assert_equal(seen[0], "late")
+    assert_equal(seen[1], "ok")
+    assert_equal(seen[2], "a status too long to be inlined in a view")
+    var back = held.decoded()
+    for i in range(200):
+        assert_equal(back.is_valid(i), col.is_valid(i))
+        if col.is_valid(i):
+            assert_equal(back.strings()[i], col.strings()[i])
+
+
+def test_a_column_that_does_not_repeat_enough_is_left_flat() raises:
+    var out = StringBuilder()
+    for i in range(1000):
+        out.append(String("row ", i % 100).as_bytes())
+    var ten_each = encode_repetitive(AnyArray(out^.finish()))
+    assert_true(ten_each.is_flat(), "ten rows a value is under the bar")
+    assert_true(encode_repetitive(_repeating(40)).is_flat(), "too short")
 
 
 def main() raises:
