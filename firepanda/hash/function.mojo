@@ -27,6 +27,7 @@ compares the bytes on a hash match instead of taking the match as proof. See
 `HashTable.build_strings`.
 """
 
+from std.bit import rotate_bits_left
 from std.collections.span import Span
 from std.math import isnan
 from std.sys.info import simd_width_of
@@ -194,39 +195,79 @@ def hash_chunk[
         i += width
 
 
-comptime BYTE_WORD = 8
-"""Bytes folded into the running hash at a time. One 64-bit word."""
+comptime BYTE_PRIME_1 = UInt64(0x9E3779B185EBCA87)
+"""The multiplier that ends a round of `hash_bytes`. xxHash's first prime."""
 
-comptime BYTE_SHIFTS = SIMD[DType.uint64, BYTE_WORD](
-    0, 8, 16, 24, 32, 40, 48, 56
-)
-"""Where each byte of a word goes when eight of them are packed into one.
+comptime BYTE_PRIME_2 = UInt64(0xC2B2AE3D27D4EB4F)
+"""The multiplier a word is taken in by. xxHash's second prime."""
 
-The order is little endian and it does not matter which order it is, only that it
-is the same one every time. This is a hash rather than a comparison, and unlike
-`StringArray.sort_prefix`, which packs the other way round because there the
-integer order has to be the byte order.
-"""
+
+@always_inline
+def _word(ptr: Pointer[UInt8, _], at: Int) -> UInt64:
+    """Reads eight bytes from wherever they start, as one little endian word.
+
+    Args:
+        ptr: The first byte of the run.
+        at: Where the word starts in it.
+
+    Returns:
+        The word.
+    """
+    return ptr.unsafe_offset(at).unsafe_bitcast[UInt64]().unsafe_load[
+        alignment=1
+    ]()
+
+
+@always_inline
+def _half(ptr: Pointer[UInt8, _], at: Int) -> UInt64:
+    """Reads four bytes from wherever they start, as one little endian word.
+
+    Args:
+        ptr: The first byte of the run.
+        at: Where the word starts in it.
+
+    Returns:
+        The word, widened.
+    """
+    return UInt64(
+        ptr.unsafe_offset(at).unsafe_bitcast[UInt32]().unsafe_load[
+            alignment=1
+        ]()
+    )
+
+
+@always_inline
+def _round(acc: UInt64, word: UInt64) -> UInt64:
+    """Takes one word into one lane of `hash_bytes`. xxHash64's round.
+
+    Args:
+        acc: The lane.
+        word: The word.
+
+    Returns:
+        The lane with the word in it.
+    """
+    return rotate_bits_left[31](acc + word * BYTE_PRIME_2) * BYTE_PRIME_1
 
 
 def hash_bytes(bytes: Span[UInt8, _], seed: UInt64 = DEFAULT_SEED) -> UInt64:
     """Hashes a run of bytes.
 
-    A word at a time through `mix`, which is two multiplies per eight bytes and
-    is where nearly all of the time goes on the short fields a dataframe is
-    actually full of. A dedicated wide hash would win on paragraphs and lose on
-    names.
+    Sixteen bytes a step, in two lanes that do not wait on each other, each
+    taking its word in with one multiply, a rotate and another multiply. The
+    lanes are what make it fast on a URL: one lane is a chain of multiplies
+    where every step waits for the last, and two chains run side by side on any
+    core this runs on. The two lanes are folded together and finished with
+    `mix`, which is what spreads the answer over both ends of the 64 bits, the
+    top ones a table's parts are picked by and the bottom ones its slots are.
 
-    The length is folded in before any bytes are, because without it the tail
-    cannot tell "ab" from "ab\\0": both leave the same bits in a word that was
-    zero to begin with. Folding it at the start rather than the end also means a
-    column of same-length keys, which is most categorical data, starts from a
-    value the seed has already spread out.
-
-    The word loop loads eight lanes of one byte rather than one lane of eight,
-    because an element's bytes start wherever the payload put them and a 64-bit
-    load off an odd address is an unaligned access. The pack afterwards is a
-    shift and a reduction and it vectorizes.
+    The bytes that do not fill a step are read as the last sixteen bytes of the
+    run, overlapping the step before, rather than one byte at a time. A run of
+    sixteen bytes or fewer is two overlapping reads, of eight bytes or of four,
+    and a run shorter than four is its first, middle and last byte. Overlapping
+    reads alone would let "abcd" and "abcdabcd" hash as one value, so the length
+    goes into the lanes before any bytes do, and with the length known the words
+    read give the bytes back.
 
     Args:
         bytes: The bytes to hash.
@@ -239,23 +280,39 @@ def hash_bytes(bytes: Span[UInt8, _], seed: UInt64 = DEFAULT_SEED) -> UInt64:
     """
     var count = len(bytes)
     var ptr = bytes.unsafe_ptr()
-    var h = UInt64(count)
-
-    var i = 0
-    while i + BYTE_WORD <= count:
-        var chunk = ptr.unsafe_offset(i).unsafe_load[width=BYTE_WORD]()
-        h = mix(
-            h ^ (chunk.cast[DType.uint64]() << BYTE_SHIFTS).reduce_or(), seed
-        )
-        i += BYTE_WORD
-
-    var tail = UInt64(0)
-    var shift = UInt64(0)
-    while i < count:
-        tail |= UInt64(ptr.unsafe_offset(i).unsafe_load()) << shift
-        shift += 8
-        i += 1
-    return mix(h ^ tail, seed)
+    var a = UInt64(count)
+    var b = UInt64(count) ^ BYTE_PRIME_1
+    if count <= 16:
+        var first: UInt64
+        var last: UInt64
+        if count >= 8:
+            first = _word(ptr, 0)
+            last = _word(ptr, count - 8)
+        elif count >= 4:
+            first = _half(ptr, 0)
+            last = _half(ptr, count - 4)
+        elif count > 0:
+            first = (
+                UInt64(ptr.unsafe_offset(0).unsafe_load())
+                | UInt64(ptr.unsafe_offset(count // 2).unsafe_load()) << 8
+                | UInt64(ptr.unsafe_offset(count - 1).unsafe_load()) << 16
+            )
+            last = 0
+        else:
+            first = 0
+            last = 0
+        a = _round(a, first)
+        b = _round(b, last)
+    else:
+        var i = 0
+        while i + 16 <= count:
+            a = _round(a, _word(ptr, i))
+            b = _round(b, _word(ptr, i + 8))
+            i += 16
+        if i < count:
+            a = _round(a, _word(ptr, count - 16))
+            b = _round(b, _word(ptr, count - 8))
+    return mix(a ^ rotate_bits_left[29](b), seed)
 
 
 def hash_strings_chunk(
