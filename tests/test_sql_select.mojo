@@ -735,8 +735,8 @@ def test_the_colon_alias_on_a_table_is_the_same_alias() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="SELECT MAP {'a': 1} FROM t"):
-        _ = _printed("SELECT MAP {'a': 1} FROM t", g, rules)
+    with assert_raises(contains="SELECT DEFAULT FROM t"):
+        _ = _printed("SELECT DEFAULT FROM t", g, rules)
 
 
 def test_the_at_on_a_table_reads_and_prints() raises:
@@ -871,8 +871,20 @@ def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
     # to print one.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="a MAP literal"):
-        _ = _printed("SELECT MAP {'a': 1}", g, rules)
+    with assert_raises(contains="DEFAULT where a value goes"):
+        _ = _printed("SELECT DEFAULT", g, rules)
+
+
+def test_a_map_prints_its_keys_and_values_back() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT MAP {'a': 1, b + 1: [2]} FROM t", g, rules),
+        "SELECT MAP {'a': 1, (b + 1): [2]} FROM t",
+    )
+    assert_equal(
+        _printed("SELECT map{} FROM t", g, rules), "SELECT MAP {} FROM t"
+    )
 
 
 def test_grouping_prints_back_in_capitals() raises:

@@ -10,6 +10,8 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
+
 - `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
 
 ### Added: every read of a column's values asks whether the column is flat first

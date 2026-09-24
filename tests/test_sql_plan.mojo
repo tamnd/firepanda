@@ -4186,3 +4186,12 @@ def test_grouping_is_a_constant_each_set_works_out() raises:
         _ = _plan("SELECT GROUPING(g) FROM t")
     with assert_raises(contains='GROUPING child "a" must be a grouping column'):
         _ = _plan("SELECT GROUPING(a) FROM t GROUP BY g")
+
+
+def test_a_map_written_out_reads_and_is_refused_by_the_plan() raises:
+    # The keys and values are expressions and read like any other, so the
+    # refusal comes from the plan, which has no column that holds a map.
+    with assert_raises(contains="a MAP literal"):
+        _ = _plan("SELECT MAP {'a': 1} FROM t")
+    with assert_raises(contains="a MAP literal"):
+        _ = _plan("SELECT MAP {} FROM t")

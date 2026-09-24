@@ -133,7 +133,6 @@ from .unsupported import (
     DOTTED_NAME,
     JOIN_FORM,
     LIKE_ESCAPE,
-    MAP_LITERAL,
     MODIFIER_SCHEMA,
     NAMED_ARGUMENT,
     NOT_SUBQUERY,
@@ -292,6 +291,9 @@ comptime _POSITIONAL: UInt8 = 89
 
 comptime _GROUPING: UInt8 = 90
 """`GroupingExpression`, which asks which columns a grouping set left out."""
+
+comptime _MAP: UInt8 = 91
+"""`MapExpression`, a map written out as `MAP {k: v, ...}`."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -1000,11 +1002,11 @@ struct Transform(Movable):
         self._set(names, "ColumnsExpression", _COLUMNS)
         self._set(names, "PositionalExpression", _POSITIONAL)
         self._set(names, "GroupingExpression", _GROUPING)
+        self._set(names, "MapExpression", _MAP)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(names, "MapExpression", MAP_LITERAL)
         self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
 
         # The last three the grammar gives a rule of their own. All three read
@@ -1869,6 +1871,25 @@ struct Transform(Movable):
             for item in items:
                 arguments.append(work.value(item))
             return ast.grouping(arguments, at)
+
+        if action == _MAP:
+            # `'MAP' MapStructExpression`, where every field is a key
+            # expression and a value expression either side of a colon.
+            var kids = tree.children(node)
+            var fields = self._items(tree, kids[len(kids) - 1])
+            var wanted = List[UInt32]()
+            for field in fields:
+                var pair = tree.children(field)
+                wanted.append(pair[0])
+                wanted.append(pair[1])
+            work.warm(wanted)
+            var keys = List[UInt32]()
+            var values = List[UInt32]()
+            for field in fields:
+                var pair = tree.children(field)
+                keys.append(work.value(pair[0]))
+                values.append(work.value(pair[1]))
+            return ast.map_of(keys, values, at)
 
         if action == _COALESCE:
             # `COALESCE Parens(List(Expression))`.
