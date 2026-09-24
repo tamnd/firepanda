@@ -223,7 +223,7 @@ def test_searchsorted_sides_pick_the_two_ends_of_a_run(firepanda: ModuleType) ->
 
 @needs_pandas
 def test_searchsorted_refuses_a_side_it_does_not_know(firepanda: ModuleType) -> None:
-    with pytest.raises(ValueError, match="Invalid side"):
+    with pytest.raises(ValueError, match="search side must be 'left' or 'right'"):
         firepanda.Index([10, 20]).searchsorted(15, "middle")
 
 
