@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas' options
+
+`get_option`, `set_option`, `reset_option`, `describe_option`, `option_context` and `options` work as they do in pandas 3.0. All 73 of pandas' options are registered with pandas' defaults and pandas' checks on a new value, a name is a pattern searched for in every option's name the way pandas searches, and the errors carry pandas' classes and messages. `mode.copy_on_write` and `future.no_silent_downcasting` give pandas' `Pandas4Warning`. `info` now reads `display.max_info_columns`, and the other options are kept but change nothing yet, since the printed form comes from the extension.
+
 ### Added: pivot and pivot_table
 
 `DataFrame.pivot`, `DataFrame.pivot_table`, `firepanda.pivot` and `firepanda.pivot_table` turn each value of one column into a column of its own, with the rows and columns sorted as pandas sorts them. `pivot` refuses two rows with one pair in pandas' words. `pivot_table` aggregates by name or with a Python function called on each group, fills a missing pair with `fill_value`, and turns whole numbers with a gap into floats as pandas does. firepanda refuses several keys, `values` left out with a columns key, lists of functions and margins, which pandas labels with a MultiIndex, and column values that are not text.

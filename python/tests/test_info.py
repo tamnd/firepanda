@@ -209,7 +209,7 @@ def test_a_frame_wider_than_the_limit_is_summarized_in_one_line(firepanda: Modul
 
 def test_the_limit_is_pandas_default_and_max_cols_moves_it(firepanda: ModuleType) -> None:
     """A hundred is the long form and a hundred and one is not, until `max_cols` says so."""
-    assert firepanda._pandas.MAX_INFO_COLUMNS == 100
+    assert firepanda.get_option("display.max_info_columns") == 100
     assert report(wide_frame(firepanda, 100))[2].startswith("Data columns")
     assert report(wide_frame(firepanda, 101))[2].startswith("Columns:")
     assert report(wide_frame(firepanda, 101), max_cols=200)[2].startswith("Data columns")
