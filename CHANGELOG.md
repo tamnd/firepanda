@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_timedelta
+
+`firepanda.to_timedelta` turns text, numbers with a unit, Python timedeltas, lists and Series into spans the way pandas does. It picks the same resolution pandas picks (microseconds for text, the given unit for whole numbers, nanoseconds for floats), keeps the Series index and name, returns a timedelta column untouched, and supports `errors="coerce"`. A bad unit, a boolean or a DataFrame raises the error pandas raises.
+
 ### Fixed: read_json instants keep pandas' unit
 
 `read_json` reads epoch columns in the unit it detects, so a column of epoch milliseconds is `datetime64[ms]` as in pandas rather than `datetime64[ns]`. Epochs with a fraction still go through nanoseconds.

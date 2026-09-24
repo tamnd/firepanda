@@ -19773,6 +19773,79 @@ def qcut(
     return (answer, edges) if retbins else answer
 
 
+def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
+    """Reads text or numbers as elapsed times, which is `pandas.to_timedelta`.
+
+    One value answers a `Timedelta`, or None for a missing one where pandas
+    answers `NaT`. A column answers a column with the same labels and name.
+    A list answers a column too, where pandas answers a `TimedeltaIndex`, for
+    the reason `to_datetime` gives.
+
+    The unit of the answer follows pandas: text is microseconds, or finer when
+    a value needs it, whole numbers are in `unit` or the coarsest of the four
+    units that holds it, and floats and anything mixed are nanoseconds.
+
+    Returns:
+        A `Timedelta`, None, or a column of elapsed times.
+
+    Raises:
+        TypeError: For a frame, and for a flag, with pandas' words.
+        ValueError: For a bad `errors`, a unit with text, and text that does
+            not read unless `errors="coerce"`, with pandas' words.
+    """
+    from ._frame import DataFrame, Series
+    from ._scalars import Timedelta, Timestamp
+
+    if errors not in ("raise", "coerce"):
+        raise ValueError("errors must be one of 'raise', or 'coerce'.")
+    if isinstance(arg, DataFrame):
+        raise TypeError("arg must be a string, timedelta, list, tuple, 1-d array, or Series")
+    if unit is not None:
+        try:
+            Timedelta(1, unit)
+        except ValueError as error:
+            raise ValueError(f"invalid unit abbreviation: {unit}") from error
+
+    def read(value: Any, scalar: bool) -> Any:
+        if _missing(value):
+            return None
+        if isinstance(value, bool):
+            raise TypeError(f"Invalid type for timedelta scalar: {type(value)}")
+        if isinstance(value, str) and unit is not None:
+            raise ValueError("unit must not be specified if the input contains a str")
+        try:
+            return Timedelta(value, unit) if unit is not None else Timedelta(value)
+        except (TypeError, ValueError) as error:
+            if errors == "coerce":
+                return None
+            if isinstance(value, str) and not scalar:
+                raise ValueError(f"Could not convert {value!r} to NumPy timedelta") from error
+            raise
+
+    if not _list_like(arg):
+        return read(arg, True)
+    column = arg if isinstance(arg, Series) else None
+    if column is not None and str(column.dtype).startswith("timedelta"):
+        return column
+    values = column.tolist() if column is not None else list(arg)
+    spans = [read(value, False) for value in values]
+    present = [value for value in values if not _missing(value)]
+    texts = sum(isinstance(value, str) for value in present)
+    if not present or any(isinstance(value, float) for value in present):
+        target = "ns"
+    else:
+        units = [span.unit for span in spans if span is not None]
+        if texts:
+            units.append("us" if texts == len(present) else "ns")
+        target = max(units, key=["s", "ms", "us", "ns"].index)
+    counts = [None if span is None else span.value for span in spans]
+    built = to_datetime(Series(counts, dtype="int64" if None not in counts else None), unit="ns")
+    built = (built - Timestamp(0)).dt.as_unit(target)
+    if column is None:
+        return built
+    return built.set_axis(column.index).rename(column.name)
+
+
 def to_numeric(
     arg: Any,
     errors: Any = "raise",

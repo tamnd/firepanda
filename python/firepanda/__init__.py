@@ -68,6 +68,7 @@ from ._pandas import (
     read_json,
     to_datetime,
     to_numeric,
+    to_timedelta,
     unique,
 )
 from ._scalars import Timedelta, Timestamp
@@ -111,6 +112,7 @@ __all__ = [
     "set_option",
     "to_datetime",
     "to_numeric",
+    "to_timedelta",
     "unique",
 ]
 
