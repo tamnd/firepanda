@@ -14771,6 +14771,137 @@ def melt(
     return _melt(frame, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
 
 
+def get_dummies(
+    data: Any,
+    prefix: Any = None,
+    prefix_sep: Any = "_",
+    dummy_na: bool = False,
+    columns: Any = None,
+    sparse: bool = False,
+    drop_first: bool = False,
+    dtype: Any = None,
+) -> DataFrame:
+    """One column of flags per distinct value, the way `pandas.get_dummies` does.
+
+    A column is read for its levels, which are the categories in order for a
+    categorical column, unused ones included, and the distinct values sorted for
+    anything else. Each level becomes a column that is True on the rows holding
+    it, and a missing row is False everywhere unless `dummy_na` adds a column
+    for it. On a frame the text and categorical columns are the ones encoded,
+    unless `columns` names others, and the columns left alone come first.
+
+    A label here is text, so a level that is not text needs a prefix to become
+    one, which is what pandas does on a frame. On a column of numbers with no
+    prefix pandas labels the columns with the numbers themselves, and that is
+    refused rather than printed, since the labels would not be the ones pandas
+    answers.
+
+    Args:
+        data: A column, a frame, or a list that is read as a column.
+        prefix: What goes before each label: one for every column, a list with
+            one per encoded column, or a mapping from column to prefix.
+        prefix_sep: What goes between the prefix and the level, in the same
+            three forms.
+        dummy_na: Adds a column flagging the missing rows.
+        columns: The frame's columns to encode, in place of the text ones.
+        sparse: Refused, since there is no sparse column here.
+        drop_first: Leaves out the first level of each column.
+        dtype: The type of the flags, bool when not given.
+
+    Returns:
+        The frame of flags, with the frame's other columns in front.
+
+    Raises:
+        TypeError: When `columns` is not a list.
+        ValueError: When a list of prefixes is the wrong length, or `dtype` is object.
+        NotImplementedError: For `sparse`, and for a level that would label a
+            column with something other than text.
+    """
+    from ._frame import DataFrame, Series
+
+    if sparse:
+        raise UnsupportedError(
+            "firepanda:unsupported: get_dummies with sparse=True is not written, since "
+            "there is no sparse column in firepanda"
+        )
+    if dtype is None:
+        dtype = "bool"
+    if dtype in (object, "object", "O"):
+        raise InvalidArgumentError("dtype=object is not a valid dtype for get_dummies")
+    if not isinstance(data, (Series, DataFrame)):
+        data = Series(list(data))
+    if isinstance(data, Series):
+        start = data.to_frame().iloc[:, :0]
+        flags = _dummies(data, prefix, prefix_sep, dummy_na, drop_first, dtype)
+        return start.assign(**flags)
+    names = list(data.columns)
+    if columns is None:
+        encoded = [
+            name for name in names if str(data[name]._inner.dtype()) in ("string", "category")
+        ]
+    elif isinstance(columns, str) or (
+        not isinstance(columns, (list, tuple)) and not hasattr(columns, "tolist")
+    ):
+        raise TypeError("Input must be a list-like for parameter `columns`")
+    else:
+        encoded = list(columns)
+    prefixes = _per_column("prefix", prefix, encoded)
+    separators = _per_column("prefix_sep", prefix_sep, encoded)
+    kept = [name for name in names if name not in encoded]
+    answer = data[kept]
+    for name in encoded:
+        before = name if prefixes[name] is None else prefixes[name]
+        flags = _dummies(data[name], before, separators[name], dummy_na, drop_first, dtype)
+        answer = answer.assign(**flags)
+    return answer
+
+
+def _per_column(what: str, given: Any, encoded: list[Any]) -> dict[Any, Any]:
+    """A prefix or a separator for each encoded column, from one, a list or a mapping."""
+    if not isinstance(given, (dict, list, tuple)):
+        return dict.fromkeys(encoded, given)
+    if len(given) != len(encoded):
+        raise InvalidArgumentError(
+            f"Length of '{what}' ({len(given)}) did not match the length of the "
+            f"columns being encoded ({len(encoded)})."
+        )
+    if isinstance(given, dict):
+        return {name: given[name] for name in encoded}
+    return dict(zip(encoded, given, strict=True))
+
+
+def _dummies(
+    column: Any, prefix: Any, sep: Any, dummy_na: bool, drop_first: bool, dtype: Any
+) -> dict[str, Any]:
+    """The flag columns for one column, by label, in pandas' order."""
+    if str(column._inner.dtype()) == "category":
+        codes = column.cat.codes
+        levels = list(column.cat.categories)
+        flags = [(codes == at).fillna(False) for at in range(len(levels))]
+    else:
+        levels = column.dropna().drop_duplicates().sort_values().tolist()
+        flags = [(column == level).fillna(False) for level in levels]
+    if dummy_na:
+        levels.append(float("nan"))
+        flags.append(column.isna())
+    if drop_first:
+        levels, flags = levels[1:], flags[1:]
+    if prefix is None:
+        strange = [level for level in levels if not isinstance(level, str)]
+        if strange:
+            raise UnsupportedError(
+                f"firepanda:unsupported: get_dummies would label a column {strange[0]!r}, "
+                "and a firepanda column label is text, so give a prefix"
+            )
+        labels = levels
+    else:
+        labels = [f"{prefix}{sep}{level}" for level in levels]
+    return {
+        label: flag if dtype == "bool" else flag.astype(dtype)
+        for label, flag in zip(labels, flags, strict=True)
+    }
+
+
 def _listed(names: Any) -> list[Any]:
     """One column name or several as a list, and None as no names."""
     if names is None:
