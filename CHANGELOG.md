@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: merge_asof
+
+- `firepanda.merge_asof` pairs each left row with the last right row at or before its key, or with `direction="forward"` or `"nearest"` the first at or after it or the closer one, only among right rows with the same `by` values and within `tolerance`, the way `pandas.merge_asof` does. Keys can be integers, floats or instants, as columns on both sides or as the labels of both sides, and `allow_exact_matches=False` skips equal keys. Unsorted keys, keys with gaps, mismatched key types and bad tolerances raise pandas' errors in pandas' words. A key on the labels of one side and a column of the other is refused for now.
+
 ### Added: to_string
 
 `DataFrame.to_string` and `Series.to_string` write the table of text pandas writes, from a port of its formatter. Floats get six digits after the point with the zeros trimmed across each column, or scientific form when a column needs it. Instants are dates alone when all are at midnight, and spans are days alone when none has a part of a day. Every column is padded to its widest cell, and a categorical column gets its categories line. `columns`, `col_space`, `header`, `index`, `na_rep`, `formatters`, `float_format`, `index_names`, `justify`, `show_dimensions`, `decimal`, `max_colwidth` and writing to a buffer or a path all work as in pandas. The row and column limits and `line_width` are refused, since the text is always the whole frame.

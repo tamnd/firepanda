@@ -18954,6 +18954,235 @@ def _concat_columns(
         raise translate(error) from None
 
 
+def _asof_dtype(dtype: Any) -> str:
+    """A key type the way pandas prints it in a merge error, as numpy's repr."""
+    text = str(dtype)
+    if text in ("string", "str"):
+        return "<StringDtype(na_value=nan)>"
+    for prefix, code in (("datetime64[", "M8"), ("timedelta64[", "m8")):
+        if text.startswith(prefix) and "," not in text:
+            return f"dtype('<{code}[{text[len(prefix) : -1]}]')"
+    return f"dtype('{text}')"
+
+
+def _asof_keys(frame: Any, key: Any, labels: bool) -> tuple[list[Any], str]:
+    """The values of one side's asof key and its type, instants and spans as counts."""
+    values = frame.index if labels else frame[key]
+    dtype = str(values.dtype)
+    raw = values.tolist()
+    if dtype.startswith(("datetime64", "timedelta64")):
+        raw = [None if v is None else v.value for v in raw]
+    return raw, dtype
+
+
+def _asof_tolerance(tolerance: Any, dtype: str) -> Any:
+    """Checks the tolerance against the key type, answering it in the key's terms.
+
+    Raises:
+        MergeError: For a tolerance of the wrong kind or below zero, or a key
+            that is neither numbers nor instants, in pandas' words.
+    """
+    from ._scalars import Timedelta
+
+    if tolerance is None:
+        return None
+    wrong = MergeError(
+        f"incompatible tolerance {tolerance}, must be compat with type {_asof_dtype(dtype)}"
+    )
+    if dtype.startswith(("datetime64", "timedelta64")):
+        if not isinstance(tolerance, datetime.timedelta):
+            raise wrong
+        tolerance = Timedelta(tolerance).value
+    elif dtype.startswith(("int", "uint")):
+        if isinstance(tolerance, bool) or not isinstance(tolerance, int):
+            raise wrong
+    elif dtype.startswith("float"):
+        if not isinstance(tolerance, (int, float)):
+            raise wrong
+    else:
+        raise MergeError("key must be integer, timestamp or float")
+    if tolerance < 0:
+        raise MergeError("tolerance must be positive")
+    return tolerance
+
+
+def _asof_checked(keys: list[Any], side: str) -> None:
+    """Refuses a key with a gap or out of order, in pandas' words."""
+    if any(_missing(v) for v in keys):
+        raise ValueError(f"Merge keys contain null values on {side} side")
+    if any(a > b for a, b in itertools.pairwise(keys)):
+        raise ValueError(f"{side} keys must be sorted")
+
+
+def _asof_match(
+    key: Any, keys: list[Any], rows: list[int], direction: str, exact: bool, tolerance: Any
+) -> int | None:
+    """The right row an asof merge pairs one left key with, or None for no match.
+
+    Backward takes the last right key at or before the left one, forward the
+    first at or after it, and nearest the closer of the two, backward on a tie.
+    Without `exact`, an equal key does not count, and a match further than the
+    tolerance is no match.
+    """
+    back = forth = None
+    if direction in ("backward", "nearest"):
+        found = (bisect.bisect_right if exact else bisect.bisect_left)(keys, key) - 1
+        if found >= 0 and (tolerance is None or key - keys[found] <= tolerance):
+            back = found
+    if direction in ("forward", "nearest"):
+        found = (bisect.bisect_left if exact else bisect.bisect_right)(keys, key)
+        if found < len(keys) and (tolerance is None or keys[found] - key <= tolerance):
+            forth = found
+    if back is not None and forth is not None:
+        chosen = back if key - keys[back] <= keys[forth] - key else forth
+    else:
+        chosen = back if back is not None else forth
+    return None if chosen is None else rows[chosen]
+
+
+def merge_asof(
+    left: Any,
+    right: Any,
+    on: Any = None,
+    left_on: Any = None,
+    right_on: Any = None,
+    left_index: bool = False,
+    right_index: bool = False,
+    by: Any = None,
+    left_by: Any = None,
+    right_by: Any = None,
+    suffixes: Any = ("_x", "_y"),
+    tolerance: Any = None,
+    allow_exact_matches: bool = True,
+    direction: str = "backward",
+) -> DataFrame:
+    """Pairs each left row with the nearest right row by key, the way `pandas.merge_asof` does.
+
+    Both sides must be sorted by the key. Each left row takes the last right
+    row whose key is at or before its own, or with `direction` the first at or
+    after it or the closer of the two, only among right rows with the same
+    `by` values, and only within `tolerance`. A left row with no match keeps
+    gaps in the right columns, and an integer column with a gap becomes float64
+    as in pandas, because the pairing is handed to `merge` as a left join on
+    the matched row.
+
+    The key can be a column on both sides, or the row labels on both sides, in
+    which case the answer keeps the left labels. A key that is a column on one
+    side and the labels on the other is refused.
+
+    Returns:
+        A new frame with every left row in order, with the default index unless
+        both keys are the labels.
+
+    Raises:
+        MergeError: For keys given in a combination pandas refuses, key types
+            that differ or are not numbers or instants, a bad tolerance, a bad
+            direction or a non boolean `allow_exact_matches`, in pandas' words.
+        ValueError: For a key with a gap or out of order.
+        NotImplementedError: For a key on the labels of one side only.
+    """
+    if direction not in ("backward", "forward", "nearest"):
+        raise MergeError(f"direction invalid: {direction}")
+    if not isinstance(allow_exact_matches, bool):
+        raise MergeError(f"allow_exact_matches must be boolean, passed {allow_exact_matches}")
+    left = _merge_side(left)
+    right = _merge_side(right)
+    if on is not None and (left_on is not None or right_on is not None):
+        raise MergeError(
+            'Can only pass argument "on" OR "left_on" and "right_on", not a combination of both.'
+        )
+    if on is not None and (left_index or right_index):
+        raise MergeError(
+            'Can only pass argument "on" OR "left_index" and "right_index", not a '
+            "combination of both."
+        )
+    if left_index != right_index:
+        raise NotImplementedError(
+            "merge_asof with the key on the labels of one side and a column of the other is not "
+            "supported yet; move the key into a column with reset_index"
+        )
+    labels = bool(left_index)
+    if not labels:
+        if on is None and left_on is None and right_on is None:
+            on = [c for c in left.columns if c in right.columns]
+            if not on:
+                raise MergeError(
+                    "No common columns to perform merge on. Merge options: left_on=None, "
+                    "right_on=None, left_index=False, right_index=False"
+                )
+        if on is not None:
+            left_on = right_on = on
+        if left_on is None:
+            raise MergeError('Must pass "left_on" OR "left_index".')
+        if right_on is None:
+            raise MergeError('Must pass "right_on" OR "right_index".')
+        left_on = list(left_on) if _list_like(left_on) else [left_on]
+        right_on = list(right_on) if _list_like(right_on) else [right_on]
+        if len(left_on) != 1:
+            raise MergeError("can only asof on a key for left")
+        if len(right_on) != 1:
+            raise MergeError("can only asof on a key for right")
+    left_key = None if labels else left_on[0]
+    right_key = None if labels else right_on[0]
+    lkeys, ltype = _asof_keys(left, left_key, labels)
+    rkeys, rtype = _asof_keys(right, right_key, labels)
+    if by is not None:
+        if left_by is not None or right_by is not None:
+            raise MergeError("Can only pass by OR left_by and right_by")
+        left_by = right_by = by
+    if left_by is None and right_by is not None:
+        raise MergeError("missing left_by")
+    if left_by is not None and right_by is None:
+        raise MergeError("missing right_by")
+    if "str" in ltype or "str" in rtype:
+        raise MergeError(
+            f"Incompatible merge dtype, {_asof_dtype(ltype)} and {_asof_dtype(rtype)}, both "
+            "sides must have numeric dtype"
+        )
+    left_by = [] if left_by is None else list(left_by) if _list_like(left_by) else [left_by]
+    right_by = [] if right_by is None else list(right_by) if _list_like(right_by) else [right_by]
+    if len(left_by) != len(right_by):
+        raise MergeError("left_by and right_by must be the same length")
+    pairs = [
+        (str(left[a].dtype), str(right[b].dtype)) for a, b in zip(left_by, right_by, strict=True)
+    ]
+    for position, (a, b) in enumerate([*pairs, (ltype, rtype)]):
+        if a != b:
+            raise MergeError(
+                f"incompatible merge keys [{position}] {_asof_dtype(a)} and {_asof_dtype(b)}, "
+                "must be the same type"
+            )
+    tolerance = _asof_tolerance(tolerance, ltype)
+    _asof_checked(lkeys, "left")
+    _asof_checked(rkeys, "right")
+    groups: dict[tuple[Any, ...], tuple[list[Any], list[int]]] = {}
+    rgroups = list(zip(*(right[c].tolist() for c in right_by), strict=True)) or [()] * len(rkeys)
+    for row, (group, key) in enumerate(zip(rgroups, rkeys, strict=True)):
+        keys, rows = groups.setdefault(group, ([], []))
+        keys.append(key)
+        rows.append(row)
+    lgroups = list(zip(*(left[c].tolist() for c in left_by), strict=True)) or [()] * len(lkeys)
+    matched = []
+    for group, key in zip(lgroups, lkeys, strict=True):
+        keys, rows = groups.get(group, ([], []))
+        matched.append(_asof_match(key, keys, rows, direction, allow_exact_matches, tolerance))
+    dropped = {b for a, b in zip(left_by, right_by, strict=True) if a == b}
+    if not labels and left_key == right_key:
+        dropped.add(right_key)
+    marker = "__asof_row__"
+    while marker in left.columns or marker in right.columns:
+        marker += "_"
+    kept = [c for c in right.columns if c not in dropped]
+    joined = merge(
+        left.assign(**{marker: matched}).reset_index(drop=True),
+        right[kept].reset_index(drop=True).assign(**{marker: list(range(len(rkeys)))}),
+        how="left",
+        on=marker,
+        suffixes=suffixes,
+    ).drop(columns=marker)
+    return joined.set_axis(left.index) if labels else joined
+
+
 def concat(
     objs: Any,
     *,
