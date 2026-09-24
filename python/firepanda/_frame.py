@@ -42,9 +42,11 @@ from ._pandas import (
     _Labelled,
     _Point,
     _Positional,
+    _resample,
     _rolling,
     _values_of,
 )
+from ._resample import Resampler
 from .errors import translate
 
 __all__ = [
@@ -2492,6 +2494,26 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def resample(
+        self,
+        rule: Any,
+        closed: str | None = None,
+        label: str | None = None,
+        convention: str = "start",
+        on: Any = None,
+        level: Any = None,
+        origin: Any = "start_day",
+        offset: Any = None,
+        group_keys: bool = False,
+    ) -> Resampler:
+        """Bins of a fixed step of time over every column, computing nothing until reduced."""
+        try:
+            return _resample(
+                self, rule, closed, label, convention, on, level, origin, offset, group_keys
+            )
+        except Exception as error:
+            raise translate(error) from None
+
     def mean(
         self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
     ) -> Series:
@@ -3827,6 +3849,26 @@ class Series(SeriesMixin):
         try:
             return _ewm(
                 self, com, span, halflife, alpha, min_periods, adjust, ignore_na, times, method
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def resample(
+        self,
+        rule: Any,
+        closed: str | None = None,
+        label: str | None = None,
+        convention: str = "start",
+        on: Any = None,
+        level: Any = None,
+        origin: Any = "start_day",
+        offset: Any = None,
+        group_keys: bool = False,
+    ) -> Resampler:
+        """Bins of a fixed step of time over the column, computing nothing until reduced."""
+        try:
+            return _resample(
+                self, rule, closed, label, convention, on, level, origin, offset, group_keys
             )
         except Exception as error:
             raise translate(error) from None

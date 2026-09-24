@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DataFrame.resample`, `Series.resample` and the resampler
+
+`resample` bins a datetime index, or the column `on=` names, into fixed steps of time, from nanoseconds to days, with multiples and fractions such as `90min` and `1.5h`. It is the group by firepanda already has, keyed on the bin number of every timestamp, with every bin from the first to the last in the answer. An empty bin holds what pandas puts there: 0 for `sum`, `count`, `size` and `nunique`, 1 for `prod`, and NaN for everything else, which widens an integer column to float64. `closed`, `label` and the origins `start_day`, `start` and `epoch` place the bins the way pandas places them, and a rule in days always starts at midnight of the first day. The resampler has every reduction the group by has plus `ohlc` on a series, `agg` and `apply` by name or by a mapping of columns to names, `transform` by name, `pipe`, `asfreq`, `get_group`, a column by key or by attribute, and `groups`, `indices`, `ngroups`, `ndim`, `ax`, `binner` and `obj`. Calendar rules such as weeks and months, `offset=`, the `end` origins, zoned timestamps, functions, lists of names and upsampling are refused by name. `python/tests/test_resample.py` checks all of this against pandas.
+
 ### Fixed: a group fill leaves NaN, not a null, in a float column
 
 A row that `groupby(...).ffill()` or `bfill()` could not fill, because its key is missing or its group has no value yet, is NaN in a float column now, which is what pandas holds there. Before it was a null, which reads the same through `isna` but is a different value in the column.

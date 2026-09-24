@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         Series,
         SeriesGroupBy,
     )
+    from ._resample import Resampler
 
 
 def _values_of(inner: Any) -> list[Any]:
@@ -10766,6 +10767,58 @@ engine, which answers it correctly and more slowly. That is the cheaper mistake
 of the two and it was the cheaper one before as well, which is why this set has
 never been the exact list `re.escape` uses.
 """
+
+
+def _resample(
+    data: Series | DataFrame,
+    rule: Any,
+    closed: str | None,
+    label: str | None,
+    convention: str,
+    on: Any,
+    level: Any,
+    origin: Any,
+    offset: Any,
+    group_keys: bool,
+) -> Resampler:
+    """Builds the object `s.resample(...)` and `df.resample(...)` hand back.
+
+    Written rather than generated for the reason `_rolling` gives. `convention`
+    only means something for a period index, which firepanda does not have, and
+    `group_keys` only for `apply`, so both are declared and held at pandas'
+    defaults.
+
+    Args:
+        data: The column or the frame.
+        rule: The step, read from text such as `6h` or `D`.
+        closed: Which end of a bin is inside it.
+        label: Which end of a bin names it.
+        convention: Declared and held at `start`.
+        on: The column that holds the timestamps, rather than the row labels.
+        level: The level of the row labels, which can only be the one there is.
+        origin: Where the bins are measured from.
+        offset: Declared and refused.
+        group_keys: Declared and held at False.
+
+    Returns:
+        A `Resampler`.
+    """
+    from ._resample import Resampler
+
+    _held_at(
+        "convention",
+        convention,
+        "start",
+        "it places the bins of a period index, and firepanda has no period index",
+    )
+    _held_at(
+        "group_keys",
+        group_keys,
+        False,
+        "it adds the bins to the labels of what apply answers, and apply with a"
+        " function is not written for a resample",
+    )
+    return Resampler(data, rule, closed, label, on, level, origin, offset)
 
 
 def _needs_an_engine(pat: Any, regex: bool) -> bool:
