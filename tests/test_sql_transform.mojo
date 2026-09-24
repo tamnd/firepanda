@@ -956,6 +956,20 @@ def test_a_slice_that_left_a_bound_out_leaves_it_out_again() raises:
     assert_equal(_printed("a[:]", g, rules), "a[:]")
 
 
+def test_a_slice_to_the_end_keeps_its_minus() raises:
+    # DuckDB writes the end of the list as a minus, which a negative step needs
+    # because an end left out is the front. It only takes the minus with the
+    # second colon after it, so `a[1:-]` stops the way DuckDB's parser does.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("a[1:-:2]", g, rules), "a[1:-:2]")
+    assert_equal(_printed("a[:-:-1]", g, rules), "a[:-:(-1)]")
+    assert_equal(_printed("a[s:-:step]", g, rules), "a[s:-:step]")
+    assert_equal(_printed("a[1:-:]", g, rules), "a[1:-:]")
+    with assert_raises(contains='syntax error at or near "]"'):
+        _ = _printed("a[1:-]", g, rules)
+
+
 def test_a_subscript_takes_what_is_in_front_of_it_and_not_more() raises:
     # A subscript binds tighter than any operator, and every operand that binds
     # looser already prints inside its own parentheses, so nothing here has to

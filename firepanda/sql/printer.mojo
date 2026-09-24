@@ -63,6 +63,7 @@ from .ast import (
     EXPR_STRUCT,
     EXPR_SUBQUERY,
     EXPR_SUBSCRIPT,
+    SLICE_TO_THE_END,
     EXPR_UNARY,
     EXPR_WINDOW,
     BOUND_CURRENT_ROW,
@@ -1000,6 +1001,16 @@ def _write_step(
                 return
             phase = 2
         if phase == 2:
+            if item.payload == SLICE_TO_THE_END:
+                # `x[1:-:2]`, whose end is the minus DuckDB only takes with a
+                # step written after it, even an empty one.
+                out += ":-:"
+                if step != NO_NODE:
+                    stack.append(_Step(node, 4))
+                    stack.append(_Step(step, 0))
+                    return
+                out += "]"
+                return
             if item.payload == 1:
                 out += ":"
             if end != NO_NODE:

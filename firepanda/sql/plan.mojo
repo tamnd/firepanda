@@ -529,6 +529,7 @@ from .ast import (
     EXPR_STAR,
     EXPR_SUBQUERY,
     EXPR_SUBSCRIPT,
+    SLICE_TO_THE_END,
     EXPR_UNARY,
     CALL_DISTINCT,
     CALL_EXPORT_STATE,
@@ -1247,7 +1248,9 @@ def _lower_subscript(
         Error: The subscript refusal, for a shape with no cut that answers it.
     """
     var node = ast.exprs[Int(at)]
-    if ast.at(node.children, 2) != NO_NODE:
+    # `x[1:-:]` has no step in it, but the minus is only written in front of
+    # one, and DuckDB turns a step on text down whatever it holds.
+    if ast.at(node.children, 2) != NO_NODE or node.payload == SLICE_TO_THE_END:
         raise not_implemented(SUBSCRIPT, "", "")
     var start = _subscript_bound(ast, ast.at(node.children, 0))
     var end = _subscript_bound(ast, ast.at(node.children, 1))

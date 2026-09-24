@@ -277,13 +277,23 @@ comptime EXPR_SUBSCRIPT: UInt8 = 22
 and the step, and a bound the query left out is 0, so `x[:2]` has no start and
 `x[1:]` has no end. `payload` is 1 when a colon was written and 0 when it was
 not, which is the whole of what tells `x[1]` from `x[1:]`, since both have a
-start and neither has an end.
+start and neither has an end. `payload` is `SLICE_TO_THE_END` for `x[1:-:2]`,
+whose end is written as a minus, and the end is 0 there too.
 
 Three bounds and a flag rather than two kinds, because the grammar makes one
 rule of them and DuckDB reads `x[a]` and `x[a:b]` as two calls of one family.
 Which family depends on what the operand turns out to hold, a list, an array or
 a string, and that is a question for a stage that knows types. This gets as far
 as the printer.
+"""
+
+comptime SLICE_TO_THE_END: UInt32 = 2
+"""The `payload` of a slice whose end was written as `-`, as in `x[1:-:2]`.
+
+The minus is DuckDB's way of saying the end of the list, which is what a slice
+with a negative step needs, since an end left out would be read as the front.
+DuckDB takes it only with the second colon after it, `x[1:-:]` included, and a
+slice written this way always has that colon.
 """
 
 comptime EXPR_ROW: UInt8 = 23
@@ -1741,6 +1751,7 @@ struct Ast(Movable):
         step: UInt32,
         sliced: Bool,
         token: UInt32 = 0,
+        to_the_end: Bool = False,
     ) -> UInt32:
         """Builds `x[1]` or `x[1:2]`.
 
@@ -1752,6 +1763,7 @@ struct Ast(Movable):
             sliced: Whether a colon was written, which is what tells `x[1]`
                 from `x[1:]`.
             token: The token it starts at.
+            to_the_end: Whether the end was written as `-`.
 
         Returns:
             The node index.
@@ -1767,7 +1779,9 @@ struct Ast(Movable):
                 token=token,
                 a=operand,
                 children=run,
-                payload=UInt32(1) if sliced else UInt32(0),
+                payload=SLICE_TO_THE_END if to_the_end else (
+                    UInt32(1) if sliced else UInt32(0)
+                ),
             )
         )
 
