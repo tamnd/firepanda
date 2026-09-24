@@ -40,6 +40,7 @@ from ._frame import DataFrame, Index, Series, from_arrow
 from ._pandas import (
     NamedAgg,
     concat,
+    factorize,
     get_dummies,
     isna,
     isnull,
@@ -49,6 +50,7 @@ from ._pandas import (
     notnull,
     read_csv,
     to_datetime,
+    unique,
 )
 from ._scalars import Timedelta, Timestamp
 
@@ -64,6 +66,7 @@ __all__ = [
     "api",
     "concat",
     "errors",
+    "factorize",
     "from_arrow",
     "get_dummies",
     "isna",
@@ -74,6 +77,7 @@ __all__ = [
     "notnull",
     "read_csv",
     "to_datetime",
+    "unique",
 ]
 
 __version__: str = _firepanda.version()

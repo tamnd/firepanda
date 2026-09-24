@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `unique` and `factorize`
+
+`Series.unique` and `firepanda.unique` give each value once in the order first seen, with a missing value kept once, and a categorical column keeps every one of its categories, used or not, as in pandas. The answer is a `FirepandaArray`, which is pandas' array answer here: values with a type and no row labels or name, with a length, positions, slices and the Arrow PyCapsule export, and `Series.array` gives one too. `Series.factorize`, `Index.factorize` and `firepanda.factorize` give an int64 array of codes and the uniques, as an index for a column or an index and as an array for an array, with `sort` and `use_na_sentinel` doing what they do in pandas, a float NaN included. The codes are the group numbers of a group by, so no Python loop runs over the rows. A list is refused with pandas' own TypeError, and `factorize` on a categorical column is refused, because its uniques are a categorical index, which firepanda does not hold yet.
+
 ### Added: pandas' aliases and small helpers on a frame and a column
 
 A frame and a column now have `div`, `divide`, `rdiv`, `multiply` and `subtract` as the names pandas gives the arithmetic already there, `isnull` and `notnull` beside `isna` and `notna`, and `add_prefix`, `add_suffix`, `pipe`, `first_valid_index`, `last_valid_index`, `pop`, `equals` and `to_dict`. A frame has `insert`, which puts a column at a position and refuses a label it already holds, as pandas does, and a column has `item`, `to_list` and `is_unique`, where two missing values count as the same value. `firepanda.isna`, `notna`, `isnull` and `notnull` answer for a scalar, a column or a frame. `to_dict` takes each of pandas' orients for a frame and a mapping class for `into`, and each signature matches pandas' parameter for parameter. `UndefinedVariableError` is now built from the name and whether it was the caller's, the way pandas builds it, so the compat signature check agrees.
