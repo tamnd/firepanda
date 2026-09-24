@@ -2719,6 +2719,13 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def combine_first(self, other: Any) -> DataFrame:
+        """Every missing value filled from the same place in another frame."""
+        try:
+            return self._combine_first(other)
+        except Exception as error:
+            raise translate(error) from None
+
     def dropna(
         self,
         *,
@@ -3740,6 +3747,13 @@ class Series(SeriesMixin):
         """The correlation of the column with itself moved `lag` rows along."""
         try:
             return self._autocorr(lag)
+        except Exception as error:
+            raise translate(error) from None
+
+    def combine_first(self, other: Any) -> Series:
+        """Every missing value filled from the same label in another column."""
+        try:
+            return self._combine_first(other)
         except Exception as error:
             raise translate(error) from None
 

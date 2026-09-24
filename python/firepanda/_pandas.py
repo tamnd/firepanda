@@ -5446,6 +5446,51 @@ def _factorized(column: Series, sort: Any, use_na_sentinel: Any) -> tuple[Series
     return codes.astype("int64"), uniques
 
 
+def _combined_type(left: str, right: str) -> str:
+    """The type pandas gives a column combined out of a column of each type.
+
+    Raises:
+        NotImplementedError: When pandas' answer is an object column.
+    """
+    if left == right:
+        return left
+    number = re.compile(r"u?int\d+|float\d+")
+    if number.fullmatch(left) and number.fullmatch(right):
+        return "float64" if "float" in left + right else "int64"
+    raise NotImplementedError(
+        f"combine_first: a {left} column and a {right} column combine into an object"
+        " column in pandas, and a firepanda column holds values of one type"
+    )
+
+
+def _combined(this: Series, that: Series, kind: str) -> Series:
+    """The values of `this`, with each missing one taken from `that` in the same row.
+
+    Both columns hold the same rows in the same order, so the fill goes by position.
+    `kind` is the type pandas gives the answer.
+    """
+    answer = this.reset_index(drop=True).fillna(that.reset_index(drop=True))
+    if str(answer.dtype) != kind and not (kind.startswith("int") and answer.isna().any()):
+        answer = answer.astype(kind)
+    return answer
+
+
+def _combining_labels(mine: Index, theirs: Index) -> Index | None:
+    """The row labels of a `combine_first`, or None when they are the caller's own.
+
+    Raises:
+        NotImplementedError: When the labels differ and one side repeats a label.
+    """
+    if mine.equals(theirs):
+        return None
+    if not (mine.is_unique and theirs.is_unique):
+        raise NotImplementedError(
+            "combine_first: the row labels differ and one side repeats a label, and"
+            " pandas lines up repeated labels by joining them, which is not written here"
+        )
+    return mine.union(theirs).rename(mine.name)
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -7664,6 +7709,35 @@ class DataFrameMixin:
         columns = _as_floats([read[name] for name in names])
         _correlation_method(method)
         return _square(names, lambda a, b: _pearson(columns[a], columns[b], method, min_periods))
+
+    def _combine_first(self, other: Any) -> DataFrame:
+        """Every missing value filled from the same place in another frame.
+
+        The answer has the rows of both frames, sorted when they differ, and the
+        columns of this frame followed by the ones only the other one has.
+        """
+        from ._frame import DataFrame
+
+        frame = cast("DataFrame", self)
+        if not isinstance(other, DataFrame):
+            raise AttributeError(f"'{type(other).__name__}' object has no attribute 'columns'")
+        labels = _combining_labels(frame.index, other.index)
+        this = frame if labels is None else frame.reindex(labels)
+        that = other if labels is None else other.reindex(labels)
+        mine = list(frame.columns)
+        names = mine + [name for name in other.columns if name not in mine]
+        columns: dict[Any, Series] = {}
+        for name in names:
+            if name not in mine:
+                columns[name] = that[name].reset_index(drop=True)
+            elif name not in other.columns:
+                columns[name] = this[name].reset_index(drop=True)
+            else:
+                kind = _combined_type(str(frame[name].dtype), str(other[name].dtype))
+                columns[name] = _combined(this[name], that[name], kind)
+        index = frame.index if labels is None else labels
+        answer = DataFrame(columns) if columns else this.reset_index(drop=True)
+        return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
 
     def _cov_matrix(self, min_periods: Any, ddof: Any, numeric_only: bool) -> DataFrame:
         """Every numeric column's covariance with every other, pairwise.
@@ -10359,6 +10433,21 @@ class SeriesMixin:
     def _autocorr(self, lag: int) -> float:
         """The correlation with the column moved `lag` rows along, as pandas writes it."""
         return self._corr(cast("Any", self).shift(lag), "pearson", None)
+
+    def _combine_first(self, other: Any) -> Series:
+        """Every missing value filled from the same label in another column."""
+        from ._frame import Series
+
+        column = cast("Series", self)
+        if not isinstance(other, Series):
+            other = Series(other)
+        labels = _combining_labels(column.index, other.index)
+        this = column if labels is None else column.reindex(labels)
+        that = other if labels is None else other.reindex(labels)
+        kind = _combined_type(str(column.dtype), str(other.dtype))
+        index = column.index if labels is None else labels
+        answer = _combined(this, that, kind).rename(column.name)
+        return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
 
     def _searchsorted(self, value: Any, side: Any, sorter: Any) -> Any:
         """Where each value would go, which is the index's answer over the values."""
