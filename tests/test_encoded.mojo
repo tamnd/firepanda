@@ -17,6 +17,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggKind, AggSpec
+from firepanda.frame.series import Series
 from firepanda.kernel.binary import BinaryOp, binary_value_any
 from firepanda.kernel.member import is_in_any
 from firepanda.kernel.select import filter_any, gather_any, take_any
@@ -95,7 +96,9 @@ def test_a_comparison_with_a_constant_matches_the_flat_one() raises:
 
 def test_a_lookup_in_a_set_matches_the_flat_one() raises:
     var col = status()
-    var wanted = AnyArray(strings_from_list(["late", "a status too long to inline"]))
+    var wanted = AnyArray(
+        strings_from_list(["late", "a status too long to inline"])
+    )
     same_mask(is_in_any(col, wanted), is_in_any(col.decoded(), wanted))
     # The set held encoded as well.
     same_mask(is_in_any(col, col), is_in_any(col.decoded(), col.decoded()))
@@ -126,6 +129,20 @@ def test_a_group_by_on_an_encoded_key_matches_the_flat_one() raises:
     ref b = want[1].as_typed_view[DType.int64]()
     for i in range(len(a)):
         assert_equal(a[i], b[i], "group " + String(i))
+
+
+def test_the_text_tests_match_the_flat_ones() raises:
+    var held = Series(String("s"), status())
+    var flat = Series(String("s"), status().decoded())
+    same_mask(held.str_contains("at"), flat.str_contains("at"))
+    same_mask(held.str_contains("long"), flat.str_contains("long"))
+    same_mask(
+        held.str_contains_in_order("a", "o"),
+        flat.str_contains_in_order("a", "o"),
+    )
+    same_mask(held.str_starts_with("a st"), flat.str_starts_with("a st"))
+    same_mask(held.str_ends_with("te"), flat.str_ends_with("te"))
+    same_text(held.str_slice(0, 3).values, flat.str_slice(0, 3).values)
 
 
 def main() raises:
