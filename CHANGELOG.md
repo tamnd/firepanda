@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `pandas.get_dummies`
+
+`firepanda.get_dummies` turns a column, a list, or the text and categorical columns of a frame into one column of flags per level, the way pandas does. The levels are the categories in order for a categorical column, unused ones included, and the distinct values sorted for anything else. `prefix` and `prefix_sep` take one value, a list with one per encoded column, or a mapping, and `dummy_na`, `columns`, `drop_first` and `dtype` all work, with pandas' messages for a prefix list of the wrong length, a `columns` that is not a list and an object dtype. `sparse=True` is refused, and so is a level that would label a column with something other than text, such as a number with no prefix, since a firepanda column label is text.
+
 ### Added: a semi or anti join asks the rest of its condition, and TPC-H q21 runs
 
 A semi or an anti join, and the correlated `EXISTS` and `NOT EXISTS` that become one, now take a condition with more than equalities in it, such as `EXISTS (SELECT 1 FROM lineitem l2 WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey)`. The equalities pair the rows up and the rest is asked of each pairing, and a left row is kept when some pairing passes (semi) or none does (anti). The plan shows it as `JOIN semi [a = k] where k > b` and the JSON form writes it under `"where"`. This is the last piece TPC-H q21 needed, so all 22 TPC-H queries now answer the same as DuckDB (#816).
