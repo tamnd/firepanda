@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `head`, `tail`, `nth`, `idxmax` and `idxmin` on a group by
+
+A group by now keeps the first or last `n` rows of every group with `head` and `tail`, a negative `n` dropping that many from the other end, and picks rows by their place in the group with `nth[...]` or `nth(n)`, one place or a list of them, counting from the end when negative. All three answer rows of the frame in the frame's order under its own labels, and a row whose key is missing is in no group, as in pandas. `idxmax` and `idxmin` answer the label of each group's largest or smallest value, the first one on a tie, for one column or for every column that is not a key, in the key order `sort` asks for, and a group with only missing values raises pandas' error. `nth` with `dropna` and `idxmax` with `as_index=False` are refused by name. `python/tests/test_group_filters.py` checks 57 cases against pandas.
+
+### Fixed: a boolean series used as a mask lines up on the row labels
+
+`df.loc[mask]` read a boolean series by position, so a mask whose labels were in another order picked the wrong rows. It is now lined up on the labels the way pandas does, and a mask missing one of the frame's labels raises `firepanda.errors.IndexingError`, which is new and carries pandas' name and message. `df[mask]` with a boolean series, list or array, and `df[function]`, now work as they do in pandas, and a list of the wrong length raises pandas' message.
+
 ### Added: `groupby(...).agg` and `aggregate` by name, and `NamedAgg`
 
 A group by now takes `agg` in the four shapes pandas reads when every function is a name: one name answers what the method of that name answers, a list of names over one column answers a column a name, a mapping of column to name answers a column a column, and keywords of `name=(column, function)` or `name=NamedAgg(column, function)` answer a column a keyword. Each column is that method run on its own, so the numbers and types are the method's, and the keys come back as labels or as columns the way `as_index` says. `firepanda.NamedAgg` has pandas 3's fields and printed form, and a pandas one is read too. A mapping handed to one column's `agg` raises `firepanda.errors.SpecificationError`, which is new and carries pandas' name. A Python function, and a list over a frame, which pandas answers with two levels of column labels, are refused by name. `python/tests/test_group_agg.py` checks 47 cases against pandas.

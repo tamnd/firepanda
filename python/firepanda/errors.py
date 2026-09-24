@@ -42,6 +42,7 @@ __all__ = [
     "ColumnNotFoundError",
     "DTypeError",
     "FirepandaError",
+    "IndexingError",
     "IntCastingNaNError",
     "InvalidArgumentError",
     "MergeError",
@@ -86,6 +87,16 @@ class InvalidArgumentError(FirepandaError, ValueError):
 
     A `ValueError`, on the same distinction Python itself draws: the type was
     acceptable and the value was not.
+    """
+
+
+class IndexingError(FirepandaError):
+    """A row key that cannot be lined up with the rows it is selecting.
+
+    pandas has a class with this name in `pandas.errors` and raises it for a
+    boolean series whose labels miss some of the rows it is masking. It is a
+    plain `Exception` there, so it is one here, and the name is carried for the
+    reason `IntCastingNaNError` gives.
     """
 
 
