@@ -1892,6 +1892,20 @@ GROUP_TRANSFORMS: tuple[tuple[str, str, str, str, str], ...] = (
         "Each group's rows moved along within the group, leaving the gap missing.",
         "",
     ),
+    (
+        "diff",
+        "periods: int = 1",
+        "self._differenced(periods)",
+        "Each row less the row that many rows before it in its group.",
+        "",
+    ),
+    (
+        "transform",
+        "func: Any, *args: Any, engine: Any = None, engine_kwargs: Any = None, **kwargs: Any",
+        "self._broadcast(func, args, engine, engine_kwargs, kwargs)",
+        "A named reduction or transform answered one value a row.",
+        "",
+    ),
 )
 """The grouped transforms, which answer one value a row rather than one a group.
 
@@ -2471,6 +2485,18 @@ FRAME = Exposed(
                 ("dropna", "bool"),
                 ("sort", "bool"),
                 ("as_index", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.group_broadcast",
+            name="group_broadcast",
+            doc="Each row answered with its group's reduction.",
+            params=(
+                ("by", "list[str]"),
+                ("kind", "str"),
+                ("param", "float"),
+                ("dropna", "bool"),
             ),
             returns="DataFrame",
         ),

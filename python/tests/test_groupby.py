@@ -399,14 +399,15 @@ def test_the_product_takes_a_min_count_of_zero_and_the_extremes_do_not(
         grouped.min(min_count=0)
 
 
-@pytest.mark.parametrize("name", ["groups", "indices", "get_group", "apply", "agg", "transform"])
+@pytest.mark.parametrize("name", ["groups", "indices", "get_group", "apply", "agg"])
 def test_the_names_that_are_absent_are_absent(firepanda: ModuleType, name: str) -> None:
     """Absent rather than wrong.
 
     The first three are the grouping made visible, which firepanda computes
     inside the reduction and throws away, and keeping it would mean holding an
-    index per group whether or not anybody asks. The other three are the doors
+    index per group whether or not anybody asks. The other two are the doors
     that take a function, which is a piece of work rather than a longer list.
+    `transform` takes a name and is tested in `test_group_transform.py`.
     """
     assert not hasattr(firepanda.DataFrame(DATA).groupby("k"), name)
 

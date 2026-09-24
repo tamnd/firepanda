@@ -1803,6 +1803,26 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def diff(self, periods: int = 1) -> DataFrame:
+        """Each row less the row that many rows before it in its group. Over every column
+        that is not a key.
+        """
+        try:
+            return self._differenced(periods)
+        except Exception as error:
+            raise translate(error) from None
+
+    def transform(
+        self, func: Any, *args: Any, engine: Any = None, engine_kwargs: Any = None, **kwargs: Any
+    ) -> DataFrame:
+        """A named reduction or transform answered one value a row. Over every column that
+        is not a key.
+        """
+        try:
+            return self._broadcast(func, args, engine, engine_kwargs, kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class SeriesGroupBy(SeriesGroupByMixin):
     """One column of a grouped frame, waiting for a reduction.
@@ -2043,6 +2063,22 @@ class SeriesGroupBy(SeriesGroupByMixin):
         """
         try:
             return self._shifted(periods, freq, fill_value, suffix)
+        except Exception as error:
+            raise translate(error) from None
+
+    def diff(self, periods: int = 1) -> DataFrame | Series:
+        """Each row less the row that many rows before it in its group. Over the column."""
+        try:
+            return self._differenced(periods)
+        except Exception as error:
+            raise translate(error) from None
+
+    def transform(
+        self, func: Any, *args: Any, engine: Any = None, engine_kwargs: Any = None, **kwargs: Any
+    ) -> DataFrame | Series:
+        """A named reduction or transform answered one value a row. Over the column."""
+        try:
+            return self._broadcast(func, args, engine, engine_kwargs, kwargs)
         except Exception as error:
             raise translate(error) from None
 

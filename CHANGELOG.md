@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: grouped `diff` and `transform` by name
+
+`diff` on `DataFrameGroupBy` and `SeriesGroupBy` answers each row less the row that many before it in its group, taking whole numbers to float32 for the two narrow signed widths and to float64 otherwise, as pandas does. `transform` takes the name of a reduction and puts each group's value on every one of its rows, through a new core `group_broadcast` that reduces the groups once and gathers by ordinal, and it casts the answer back to float32 or to the column's own integer width where pandas does. It also takes the name of a scan. A Python function, the names pandas takes that are not written yet, and a bool column's `diff`, which pandas answers with an object column, are refused by name, and an unknown name gets pandas' `ValueError`.
+
 ### Added: grouped transforms
 
 `cumsum`, `cumprod`, `cummax`, `cummin`, `shift`, `cumcount` and `ngroup` on `DataFrameGroupBy` and `SeriesGroupBy` answer one value a row, in the frame's order and with its labels, as pandas does. The folds run down the rows once with a carry per group and nothing is sorted, `shift` places each group's rows with one counting pass, and `ngroup` numbers the groups in key order or in order of appearance. A row whose key is missing belongs to no group and answers missing, so an integer answer with such a row in it is float64. Counting from the end, a fill value, a frequency, a suffix and a list of periods are refused by name.

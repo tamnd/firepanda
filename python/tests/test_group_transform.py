@@ -1,7 +1,7 @@
 """The grouped transforms, checked against pandas.
 
-`cumsum`, `cumprod`, `cummax`, `cummin`, `shift`, `cumcount` and `ngroup` on a
-group by keep the row count. Every test builds the same transform in both
+`cumsum`, `cumprod`, `cummax`, `cummin`, `shift`, `diff`, `cumcount`, `ngroup`
+and `transform` on a group by keep the row count. Every test builds the same transform in both
 libraries and compares the columns, the types, the row labels and every row,
 including the rows whose key is missing, which belong to no group and answer
 missing.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import math
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any
@@ -30,13 +31,22 @@ DATA = {
 
 
 def same(got: list[Any], want: list[Any]) -> bool:
-    """Equal row by row, with NaN equal to NaN and None equal to NaN."""
+    """Equal row by row, with NaN equal to NaN and None equal to NaN.
+
+    A float may be one rounding away, since a deviation sums its squares in a
+    different order from pandas.
+    """
 
     def missing(value: Any) -> bool:
         return value is None or value != value
 
+    def close(a: Any, b: Any) -> bool:
+        if isinstance(a, float) and isinstance(b, float):
+            return math.isclose(a, b, rel_tol=1e-12)
+        return bool(a == b)
+
     return len(got) == len(want) and all(
-        (missing(a) and missing(b)) or a == b for a, b in zip(got, want, strict=True)
+        (missing(a) and missing(b)) or close(a, b) for a, b in zip(got, want, strict=True)
     )
 
 
@@ -64,31 +74,45 @@ def frame(m: Any) -> Any:
     return m.DataFrame(DATA).set_index("j", drop=False).rename_axis(None)
 
 
-SCANS = ["cumsum", "cumprod", "cummax", "cummin", "shift", "cumcount", "ngroup"]
+SCANS = ["cumsum", "cumprod", "cummax", "cummin", "shift", "diff", "cumcount", "ngroup"]
 
-BUILDS: list[Callable[[Any, str], Any]] = [
-    lambda m, kind: getattr(frame(m).groupby("k")["x"], kind)(),
-    lambda m, kind: getattr(frame(m).groupby("k")["y"], kind)(),
-    lambda m, kind: getattr(frame(m).groupby("k")[["x", "y"]], kind)(),
-    lambda m, kind: getattr(frame(m).groupby("k", dropna=False)["x"], kind)(),
-    lambda m, kind: getattr(frame(m).groupby("k", sort=False)["y"], kind)(),
-    lambda m, kind: getattr(frame(m).groupby(["j", "k"])["x"], kind)(),
-    lambda m, kind: getattr(frame(m).groupby(["k", "j"], dropna=False)["y"], kind)(),
-    lambda m, kind: getattr(frame(m).drop(columns="k").groupby("j"), kind)(),
-    lambda m, kind: getattr(frame(m).astype({"x": "int8"}).groupby("j")["x"], kind)(),
-    lambda m, kind: getattr(frame(m).astype({"y": "float32"}).groupby("k")["y"], kind)(),
+GROUPS: list[Callable[[Any], Any]] = [
+    lambda m: frame(m).groupby("k")["x"],
+    lambda m: frame(m).groupby("k")["y"],
+    lambda m: frame(m).groupby("k")[["x", "y"]],
+    lambda m: frame(m).groupby("k", dropna=False)["x"],
+    lambda m: frame(m).groupby("k", sort=False)["y"],
+    lambda m: frame(m).groupby(["j", "k"])["x"],
+    lambda m: frame(m).groupby(["k", "j"], dropna=False)["y"],
+    lambda m: frame(m).drop(columns="k").groupby("j"),
+    lambda m: frame(m).astype({"x": "int8"}).groupby("j")["x"],
+    lambda m: frame(m).astype({"y": "float32"}).groupby("k")["y"],
 ]
 
 
 @pytest.mark.parametrize("kind", SCANS)
-@pytest.mark.parametrize("build", BUILDS)
+@pytest.mark.parametrize("group", GROUPS)
 def test_a_transform_is_pandas_transform(
-    firepanda: ModuleType, build: Callable[[Any, str], Any], kind: str
+    firepanda: ModuleType, group: Callable[[Any], Any], kind: str
 ) -> None:
     """Every transform, on a column and on a frame, with and without missing keys."""
     import pandas as pd
 
-    agrees(build(firepanda, kind), build(pd, kind))
+    agrees(getattr(group(firepanda), kind)(), getattr(group(pd), kind)())
+
+
+NAMED = ["sum", "mean", "min", "max", "count", "first", "last", "median", "std", "prod"]
+
+
+@pytest.mark.parametrize("func", [*NAMED, "cumsum", "shift", "diff"])
+@pytest.mark.parametrize("group", GROUPS)
+def test_a_named_transform_is_pandas_transform(
+    firepanda: ModuleType, group: Callable[[Any], Any], func: str
+) -> None:
+    """A reduction put on every row of its group, and a scan named as a string."""
+    import pandas as pd
+
+    agrees(group(firepanda).transform(func), group(pd).transform(func))
 
 
 SHIFTS: list[Callable[[Any], Any]] = [
@@ -97,6 +121,11 @@ SHIFTS: list[Callable[[Any], Any]] = [
     lambda m: frame(m).groupby("k")["x"].shift(0),
     lambda m: frame(m).groupby("j")[["x", "y"]].shift(-2),
     lambda m: frame(m).groupby("k", dropna=False)["y"].shift(periods=1),
+    lambda m: frame(m).groupby("k")["x"].diff(2),
+    lambda m: frame(m).groupby("k")["y"].diff(-1),
+    lambda m: frame(m).groupby("k")["x"].diff(0),
+    lambda m: frame(m).astype({"x": "int16"}).groupby("j")["x"].diff(),
+    lambda m: frame(m).astype({"x": "uint8"}).groupby("j")["x"].diff(),
 ]
 
 
@@ -130,12 +159,27 @@ def test_what_is_not_written_is_refused(firepanda: ModuleType) -> None:
         lambda: grouped.shift([1, 2]),
         lambda: grouped.shift(1, suffix="_s"),
         lambda: grouped.cumsum(numeric_only=True),
+        lambda: grouped.transform(lambda v: v),
+        lambda: grouped.transform("rank"),
+        lambda: grouped.transform("sum", engine="numba"),
+        lambda: frame(firepanda).astype({"x": "bool"}).groupby("k")["x"].diff(),
     ):
         with pytest.raises(NotImplementedError):
             build()
 
 
-@pytest.mark.parametrize("name", SCANS)
+def test_a_bad_name_is_pandas_mistake(firepanda: ModuleType) -> None:
+    """The same class and sentence for a name transform does not know."""
+    import pandas as pd
+
+    with pytest.raises(ValueError) as theirs:
+        frame(pd).groupby("k")["x"].transform("nope")
+    with pytest.raises(ValueError) as mine:
+        frame(firepanda).groupby("k")["x"].transform("nope")
+    assert str(mine.value) == str(theirs.value)
+
+
+@pytest.mark.parametrize("name", [*SCANS, "transform"])
 @pytest.mark.parametrize("cls", ["DataFrameGroupBy", "SeriesGroupBy"])
 def test_the_signatures_are_pandas_signatures(firepanda: ModuleType, cls: str, name: str) -> None:
     """Parameter for parameter, with the same defaults but for the sentinel."""
