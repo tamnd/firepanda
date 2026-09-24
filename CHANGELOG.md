@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: a group fill leaves NaN, not a null, in a float column
 
 A row that `groupby(...).ffill()` or `bfill()` could not fill, because its key is missing or its group has no value yet, is NaN in a float column now, which is what pandas holds there. Before it was a null, which reads the same through `isna` but is a different value in the column.
+### Added: `DataFrame.melt` and `pandas.melt`
+
+`melt` turns a frame long. The id columns repeat once for each value column, a new column holds the name of the column each row came from, and another holds the values, stacked one column after another. It picks columns by default the way pandas does, takes `var_name` from the column labels' own name, and keeps the row labels with `ignore_index=False`, repeated labels included. The stacked values widen the way `concat` widens them. A mix that pandas answers with an object column is refused, and that includes a bool column next to a number column, which pandas' melt turns into object even though its concat of frames does not. A missing column raises pandas' KeyError, and a `value_name` that names an existing column raises its ValueError. `python/tests/test_melt.py` checks all of this against pandas.
 
 ### Fixed: `kurt` over a column with an infinity answers NaN
 
