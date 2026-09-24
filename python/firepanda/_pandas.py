@@ -5524,13 +5524,20 @@ class DataFrameMixin:
         largest is the largest. There is no kernel for it and there does not
         need to be one.
 
+        The second pass has to know where a NaN among the per column answers
+        came from. A total or a product is NaN only when the column's own
+        arithmetic made one, `inf` plus `-inf` for instance, and that is part of
+        the answer, so the second pass lets it through. A smallest or a largest
+        is NaN when the column had nothing in it, and that is a missing value
+        pandas would have skipped cell by cell, so the second pass skips it.
+
         The answer is a series for every other spelling of the axis, which is
         why this returns whatever it returns rather than a series.
         """
         if axis is not None:
             return self._reduce(kind, param, axis, skipna, numeric_only, min_count)
         columns = self._reduce(kind, param, 0, skipna, numeric_only, 0)
-        answer = columns._reduce(kind, param, 0, skipna, False, 0)
+        answer = columns._reduce(kind, param, 0, skipna and kind in ("min", "max"), False, 0)
         if min_count > 0:
             read = self._numeric_part() if numeric_only else self
             if sum(read[name].count() for name in read._inner.names()) < min_count:
