@@ -5696,6 +5696,92 @@ def _missing(value: Any) -> bool:
     return value is None or value != value
 
 
+def _mapper(func: Any) -> Callable[[Any], Any]:
+    """What `map` does to one value, from a function, a mapping or a column.
+
+    A mapping answers a missing key as missing, unless it is a dict with its
+    own `__missing__`, which pandas asks, and a column is read as a mapping from
+    its labels to its values.
+
+    Raises:
+        TypeError: With pandas' words for anything else.
+        InvalidIndexError: For a column whose labels repeat, which pandas
+            cannot look a value up in either.
+    """
+    if hasattr(func, "index") and hasattr(func, "tolist") and not callable(func):
+        labels = func.index.tolist()
+        if len(set(labels)) != len(labels):
+            from .errors import InvalidIndexError
+
+            raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
+        table = dict(zip(labels, func.tolist(), strict=True))
+        return table.get
+    if isinstance(func, dict) and hasattr(type(func), "__missing__"):
+        return func.__getitem__
+    if hasattr(func, "get") and hasattr(func, "keys"):
+        return func.get
+    if not callable(func):
+        raise TypeError(f"'{type(func).__name__}' object is not callable")
+    return cast(Callable[[Any], Any], func)
+
+
+def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
+    """A column with `apply` called on each value, the labels and name kept.
+
+    A missing value reaches `apply` as NaN, as pandas hands it over, or stays
+    missing without a call when `na_action` is `"ignore"`. The answer's type is
+    read from what came back, the way the constructor reads a list.
+
+    Raises:
+        InvalidArgumentError: For an `na_action` pandas does not know.
+        NotImplementedError: On a category column, whose categories pandas
+            maps rather than its values.
+    """
+    if na_action not in (None, "ignore"):
+        raise InvalidArgumentError(
+            f"na_action must either be 'ignore' or None, {na_action} was passed"
+        )
+    printed = str(column.dtype)
+    if printed == "category":
+        raise NotImplementedError(
+            "map on a category column maps the categories and keeps the column a category,"
+            " which firepanda does not do yet; map `astype(str)` for the plain answer"
+        )
+    if len(column) == 0:
+        return column.copy()
+    gap = None if printed.startswith("datetime64") else math.nan
+    answers = []
+    for value in column.tolist():
+        if _missing(value):
+            if na_action == "ignore":
+                answers.append(None)
+                continue
+            value = gap
+        answers.append(apply(value))
+    return type(column)(_readable(answers), index=column.index, name=column.name)
+
+
+def _readable(answers: list[Any]) -> list[Any]:
+    """Answers the way pandas reads them into a column, a gap as None.
+
+    Whole numbers beside a gap are floats in pandas, because numpy has no gap
+    in a column of whole numbers, and the constructor here would keep them
+    whole, so they are made floats first.
+    """
+    held = [None if _missing(answer) else answer for answer in answers]
+    if len(held) != len(answers) or None not in held:
+        return held
+    found = [answer for answer in held if answer is not None]
+    if found and all(isinstance(answer, int) and not isinstance(answer, bool) for answer in found):
+        return [None if answer is None else float(answer) for answer in held]
+    return held
+
+
+def _shared_name(one: Any, two: Any) -> Any:
+    """The name two columns' answer carries, theirs when they agree, else None."""
+    return one.name if one.name == two.name else None
+
+
 _SPANS = re.compile(r"(datetime|timedelta)64\[(s|ms|us|ns)\]")
 """The types numpy holds as counts of a unit, instants with no zone and spans."""
 
@@ -6350,6 +6436,15 @@ class DataFrameMixin:
         """Each row label with its row as a column named by the label."""
         for position, label in enumerate(self.index.tolist()):
             yield label, self.iloc[position]
+
+    def map(self, func: Any, na_action: Any = None, **kwargs: Any) -> DataFrame:
+        """A function on each value, column by column, the labels kept."""
+        if not callable(func):
+            raise TypeError("the first argument must be callable")
+        pieces = {
+            name: self[name].map(func, na_action=na_action, **kwargs) for name in self.columns
+        }
+        return type(self)(pieces, index=self.index)
 
     def to_numpy(self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT) -> Any:
         """The values as a two dimensional numpy array, in the type the columns share."""
@@ -9417,6 +9512,102 @@ class SeriesMixin:
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
+
+    def map(
+        self, func: Any = None, na_action: Any = None, engine: Any = None, **kwargs: Any
+    ) -> Series:
+        """Each value through a function, a mapping or another column's labels.
+
+        `engine` is accepted for pandas' signature and must be None, and the
+        keywords go to the function.
+        """
+        if engine is not None:
+            raise NotImplementedError("map: engine is pandas' JIT hook, and firepanda has none")
+        apply = _mapper(func)
+        if kwargs:
+            return _mapped(self, lambda value: apply(value, **kwargs), na_action)
+        return _mapped(self, apply, na_action)
+
+    def apply(
+        self, func: Any, args: tuple[Any, ...] = (), *, by_row: Any = "compat", **kwargs: Any
+    ) -> Any:
+        """A function on each value, or a reduction by name, or several by name.
+
+        A name like `"sum"` is the method of that name, and a list or a dict of
+        names answers a column of the reductions labelled by name or by key.
+        `by_row` is accepted, and a function is always called on each value.
+        """
+        if isinstance(func, str):
+            return getattr(self, func)(*args, **kwargs)
+        if isinstance(func, (list, dict)):
+            pairs = func.items() if isinstance(func, dict) else ((name, name) for name in func)
+            labels, results = [], []
+            for label, name in pairs:
+                labels.append(
+                    label if isinstance(label, str) else getattr(label, "__name__", label)
+                )
+                results.append(self.apply(name, args, **kwargs))
+            return type(self)(results, index=labels, name=self.name)
+        return _mapped(self, lambda value: func(value, *args, **kwargs), None)
+
+    def combine(self, other: Any, func: Any, fill_value: Any = None) -> Series:
+        """`func` on each pair of values, over both columns' labels.
+
+        Against a column the labels are the union of both, sorted when they
+        differ, and a label one side lacks reads `fill_value` there, NaN when it
+        is None. Against anything else each value is paired with that thing.
+        """
+        blank = math.nan if fill_value is None else fill_value
+
+        def read(value: Any) -> Any:
+            return blank if _missing(value) else value
+
+        if not (hasattr(other, "index") and hasattr(other, "reindex")):
+            answers = [func(read(value), other) for value in self.tolist()]
+            return type(self)(_readable(answers), index=self.index, name=self.name)
+        labels = self.index if self.index.equals(other.index) else self.index.union(other.index)
+        mine = dict(zip(self.index.tolist(), self.tolist(), strict=True))
+        theirs = dict(zip(other.index.tolist(), other.tolist(), strict=True))
+        answers = [
+            func(read(mine.get(label, blank)), read(theirs.get(label, blank)))
+            for label in labels.tolist()
+        ]
+        return type(self)(_readable(answers), index=labels, name=_shared_name(self, other))
+
+    def update(self, other: Any) -> None:
+        """Puts in the values of `other` that are not missing, label by label.
+
+        A list is read against the positions and a mapping against the labels.
+        The column keeps its type, so a value it cannot hold is refused.
+
+        Raises:
+            TypeError: With pandas' words for a value the column cannot hold.
+        """
+        if not (hasattr(other, "index") and hasattr(other, "reindex")):
+            other = type(self)(other)
+        lined = other.reindex(self.index)
+        pairs = list(zip(lined.tolist(), self.tolist(), strict=True))
+        wrong = [value for value, old in pairs if not _missing(value) and value != old]
+        values = [old if _missing(value) else value for value, old in pairs]
+        try:
+            answer = type(self)(values, index=self.index, name=self.name)
+            if str(answer.dtype) != str(self.dtype):
+                kept = answer.astype(self.dtype)
+                if kept.tolist() != answer.tolist():
+                    raise TypeError
+                answer = kept
+        except (TypeError, ValueError):
+            raise TypeError(f"Invalid value '{wrong!r}' for dtype '{self.dtype}'") from None
+        _settled(self, answer, True)
+
+    @property
+    def T(self) -> Series:
+        """The column itself, which is its own transpose."""
+        return self
+
+    def transpose(self, *args: Any, **kwargs: Any) -> Series:
+        """The column itself, which is its own transpose."""
+        return self
 
     def to_numpy(
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
