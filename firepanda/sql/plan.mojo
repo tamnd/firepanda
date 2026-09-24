@@ -513,6 +513,7 @@ from .ast import (
     EXPR_EXISTS,
     EXPR_FIELD,
     EXPR_FUNCTION,
+    EXPR_GROUPING,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
     EXPR_INTERVAL,
@@ -536,7 +537,12 @@ from .ast import (
     call_flags,
     call_sorts,
     GROUP_ALL,
+    GROUP_CUBE,
+    GROUP_EMPTY,
     GROUP_EXPRESSION,
+    GROUP_ROLLUP,
+    GROUP_SETS,
+    GROUP_TUPLE,
     LIMIT_PERCENT,
     LITERAL_BOOLEAN,
     LITERAL_NULL,
@@ -2529,6 +2535,25 @@ struct _Walk(Movable):
     they are written in the SQL arena. What each one's four columns are called
     is read off its position here rather than kept beside it."""
 
+    var keyed: Bool
+    """Whether the GROUP BY has been read, which is when `GROUPING` has keys to
+    ask about."""
+
+    var key_shapes: List[String]
+    """What every group key computes, in key order, which is what an argument
+    of `GROUPING` is matched against."""
+
+    var sets: Bool
+    """Whether the GROUP BY wrote grouping sets. Without them every key is in
+    every group and `GROUPING` is zero."""
+
+    var groupings: List[List[Int]]
+    """The `GROUPING` calls found so far, each as the keys it asks about in the
+    order it asks. Each grouping set works its calls out as constants."""
+
+    var grouping_names: List[String]
+    """What the column each of those comes out in is called."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -2545,6 +2570,11 @@ struct _Walk(Movable):
         self.asked = List[UInt32]()
         self.asked_names = List[String]()
         self.compared = List[UInt32]()
+        self.keyed = False
+        self.key_shapes = List[String]()
+        self.sets = False
+        self.groupings = List[List[Int]]()
+        self.grouping_names = List[String]()
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -2802,6 +2832,318 @@ def _lower_operand(
     return _lower_expr(ast, at, plan, walk, scope, grouped)
 
 
+comptime _MOST_SETS = 4096
+"""How many grouping sets one GROUP BY may expand to. Each is an aggregate over
+the whole input, and a CUBE of thirteen columns is already twice this."""
+
+
+def _group_leaves(ast: Ast, entry: UInt32, mut out: List[UInt32]):
+    """Collects the expressions a GROUP BY entry writes, depth first.
+
+    `GROUP BY ALL` counts as one, since it stands for the keys it will find.
+
+    Args:
+        ast: The arenas.
+        entry: The `STMT_GROUP`.
+        out: Where they go.
+    """
+    var group = ast.stmts[Int(entry)]
+    if group.b == GROUP_EXPRESSION or group.b == GROUP_ALL:
+        out.append(entry)
+        return
+    for child in ast.items(group.children):
+        _group_leaves(ast, child, out)
+
+
+def _product(
+    left: List[List[Int]], right: List[List[Int]]
+) raises -> List[List[Int]]:
+    """Every set of the left with every set of the right, each pair as one.
+
+    It is what two entries side by side in a GROUP BY mean, and what the
+    columns of one parenthesized set mean. A key both halves hold is held once.
+
+    Args:
+        left: The sets so far.
+        right: The sets to pair them with.
+
+    Returns:
+        The pairs, the left one varying slowest.
+
+    Raises:
+        If there come to be more than `_MOST_SETS`.
+    """
+    if len(left) * len(right) > _MOST_SETS:
+        raise Error(
+            String(
+                "a GROUP BY of more than ",
+                _MOST_SETS,
+                " grouping sets, and each one is an aggregate of its own",
+            )
+        )
+    var out = List[List[Int]]()
+    for i in range(len(left)):
+        for j in range(len(right)):
+            var both = left[i].copy()
+            for key in right[j]:
+                if key not in both:
+                    both.append(key)
+            out.append(both^)
+    return out^
+
+
+def _group_sets(
+    ast: Ast, entry: UInt32, leaf_keys: List[Int], mut cursor: Int
+) raises -> List[List[Int]]:
+    """The grouping sets one GROUP BY entry stands for, as lists of keys.
+
+    A plain expression is one set of one key and `()` is one set of none. A
+    parenthesized list is the one set of all its columns, and GROUPING SETS is
+    every set its entries stand for, one after another. ROLLUP is every prefix
+    of its entries from the whole list down to none, and CUBE is every subset.
+    A set written twice is kept twice, since DuckDB answers its rows twice.
+
+    Args:
+        ast: The arenas.
+        entry: The `STMT_GROUP`.
+        leaf_keys: Which key each expression landed on, in the order
+            `_group_leaves` found them.
+        cursor: How many of those have been read so far.
+
+    Returns:
+        The sets.
+
+    Raises:
+        If there come to be more than `_MOST_SETS`, or a ROLLUP or a CUBE is
+        over something that is more than one set.
+    """
+    var group = ast.stmts[Int(entry)]
+    if group.b == GROUP_EXPRESSION:
+        var key = leaf_keys[cursor]
+        cursor += 1
+        return [[key]]
+    if group.b == GROUP_EMPTY:
+        return [List[Int]()]
+    var parts = List[List[List[Int]]]()
+    for child in ast.items(group.children):
+        parts.append(_group_sets(ast, child, leaf_keys, cursor))
+    var out = List[List[Int]]()
+    if group.b == GROUP_TUPLE:
+        out.append(List[Int]())
+        for part in parts:
+            out = _product(out, part)
+        return out^
+    if group.b == GROUP_SETS:
+        for part in parts:
+            for one in part:
+                out.append(one.copy())
+        if len(out) > _MOST_SETS:
+            raise Error(
+                String(
+                    "a GROUP BY of more than ",
+                    _MOST_SETS,
+                    " grouping sets, and each one is an aggregate of its own",
+                )
+            )
+        return out^
+    var word = "a ROLLUP" if group.b == GROUP_ROLLUP else "a CUBE"
+    var columns = List[List[Int]]()
+    for part in parts:
+        if len(part) != 1:
+            raise Error(
+                String(
+                    word,
+                    " over something that is several grouping sets rather"
+                    " than one set of columns",
+                )
+            )
+        columns.append(part[0].copy())
+    if group.b == GROUP_ROLLUP:
+        var n = len(columns)
+        while n >= 0:
+            var one = List[Int]()
+            for i in range(n):
+                for key in columns[i]:
+                    if key not in one:
+                        one.append(key)
+            out.append(one^)
+            n -= 1
+        return out^
+    if group.b == GROUP_CUBE:
+        if len(columns) > 12:
+            raise Error(
+                String(
+                    "a CUBE of ",
+                    len(columns),
+                    " columns, which is more than ",
+                    _MOST_SETS,
+                    " grouping sets, and each one is an aggregate of its own",
+                )
+            )
+        var count = 1 << len(columns)
+        for mask in range(count - 1, -1, -1):
+            var one = List[Int]()
+            for i in range(len(columns)):
+                if mask & (1 << (len(columns) - 1 - i)) != 0:
+                    for key in columns[i]:
+                        if key not in one:
+                            one.append(key)
+            out.append(one^)
+        return out^
+    raise Error("a grouping entry of a kind this has no case for")
+
+
+def _grouping_sets(
+    mut plan: Plan,
+    input: Int,
+    keys: List[Int],
+    key_names: List[String],
+    aggs: List[Int],
+    agg_names: List[String],
+    sets: List[List[Int]],
+    walk: _Walk,
+) raises -> Int:
+    """Builds one aggregate per grouping set and stacks them into one.
+
+    Every set folds the same input over its own keys, and a projection over
+    each puts back the keys it left out as nulls and works out every
+    `GROUPING` call as a constant, so all of them come out with the columns
+    one aggregate over all the keys would have and a union can stack them.
+    The union is `UNION ALL`, since two sets are two groups of rows even when
+    they happen to hold the same values.
+
+    Args:
+        plan: Where the nodes go.
+        input: What every set folds.
+        keys: Every key, in the order the GROUP BY first wrote each.
+        key_names: What each key comes out as.
+        aggs: The folds.
+        agg_names: What each fold comes out as.
+        sets: Which keys each set holds.
+        walk: The `GROUPING` calls to work out.
+
+    Returns:
+        The union.
+
+    Raises:
+        Whatever building a node raises.
+    """
+    var arms = List[Int]()
+    for s in range(len(sets)):
+        ref held = sets[s]
+        var set_keys = List[Int]()
+        var names = List[String]()
+        for k in range(len(keys)):
+            if k in held:
+                set_keys.append(keys[k])
+                names.append(key_names[k].copy())
+        for name in agg_names:
+            names.append(name.copy())
+        # The first set reads the input as it is and every other one reads a
+        # copy, keys and folds included, since a node with two parents is one
+        # the passes are not written for.
+        var under = input
+        var folds = aggs.copy()
+        if s > 0:
+            under = plan.copy_tree(input)
+            for k in range(len(set_keys)):
+                set_keys[k] = plan.exprs.duplicate(set_keys[k])
+            for f in range(len(folds)):
+                folds[f] = plan.exprs.duplicate(folds[f])
+        var folded = plan.aggregate(under, set_keys^, folds^, names^)
+        var outputs = List[Int]()
+        var called = List[String]()
+        for k in range(len(keys)):
+            if k in held:
+                outputs.append(plan.exprs.column(key_names[k].copy()))
+            else:
+                outputs.append(plan.exprs.literal(Value(null=LogicalType.NULL)))
+            called.append(key_names[k].copy())
+        for name in agg_names:
+            outputs.append(plan.exprs.column(name.copy()))
+            called.append(name.copy())
+        for g in range(len(walk.groupings)):
+            # One bit per column asked about, the first one the highest, set
+            # when this set left that column out.
+            var bits = 0
+            for key in walk.groupings[g]:
+                bits = bits * 2 + (0 if key in held else 1)
+            outputs.append(plan.exprs.literal(Value(Int64(bits))))
+            called.append(walk.grouping_names[g].copy())
+        arms.append(plan.project(folded, outputs^, called^))
+    if len(arms) == 1:
+        return arms[0]
+    return plan.setop(arms^, SET_UNION, True)
+
+
+def _lower_grouping(
+    ast: Ast, at: UInt32, mut plan: Plan, mut walk: _Walk, scope: _Scope
+) raises -> Int:
+    """Lowers `GROUPING(a, b)` to the column each grouping set fills in for it.
+
+    Each argument has to be one of the group keys, matched on what it computes
+    the way DuckDB matches it. With no grouping sets every key is in every
+    group and the answer is zero. With them, the call gets a column of its own
+    that every set fills with its own constant, and this reads that column.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_GROUPING` node.
+        plan: Where the lowered expression goes.
+        walk: What the GROUP BY left for this to match against.
+        scope: What the FROM put in reach, for lowering the arguments.
+
+    Returns:
+        The index in the plan's expression arena.
+
+    Raises:
+        If the query has no groups, or an argument is not a group key.
+    """
+    if not walk.keyed or len(walk.key_shapes) == 0:
+        raise Error(
+            "Binder Error: GROUPING statement cannot be used without groups"
+        )
+    var asked = List[Int]()
+    for argument in ast.items(ast.exprs[Int(at)].children):
+        # Lowered only to be compared, the same way an ORDER BY entry is, which
+        # leaves a few arena nodes behind that nothing reaches.
+        var shape = _agg_shape(
+            plan.exprs, _lower_expr(ast, argument, plan, walk, scope, False)
+        )
+        var found = -1
+        for i in range(len(walk.key_shapes)):
+            if walk.key_shapes[i] == shape:
+                found = i
+                break
+        if found < 0:
+            # DuckDB prints the child here, and a column is the one child this
+            # can print without the grammar the printer wants.
+            var child = String("")
+            ref written = ast.exprs[Int(argument)]
+            if written.kind == EXPR_COLUMN:
+                var parts = ast.length(written.children)
+                child = String(
+                    '"', ast.text(ast.at(written.children, parts - 1)), '" '
+                )
+            raise Error(
+                String(
+                    "Binder Error: GROUPING child ",
+                    child,
+                    "must be a grouping column",
+                )
+            )
+        asked.append(found)
+    if not walk.sets:
+        return plan.exprs.literal(Value(Int64(0)))
+    for i in range(len(walk.groupings)):
+        if walk.groupings[i] == asked:
+            return plan.exprs.column(walk.grouping_names[i].copy())
+    var name = String("__grouping_", len(walk.groupings))
+    walk.groupings.append(asked^)
+    walk.grouping_names.append(name.copy())
+    return plan.exprs.column(name^)
+
+
 def _lower_positional(n: Int, mut plan: Plan, scope: _Scope) raises -> Int:
     """Lowers `#n` to the column of the FROM it counts to.
 
@@ -2909,6 +3251,9 @@ def _lower_expr(
 
     if node.kind == EXPR_POSITIONAL:
         return _lower_positional(Int(node.a), plan, scope)
+
+    if node.kind == EXPR_GROUPING:
+        return _lower_grouping(ast, at, plan, walk, scope)
 
     if node.kind == EXPR_COLUMN:
         var parts = ast.length(node.children)
@@ -3719,6 +4064,10 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     if at == NO_NODE:
         return False
     var node = ast.exprs[Int(at)]
+    # `GROUPING` is not a fold, but it only means anything over groups and it
+    # is answered by the node that makes them, so it takes the same road.
+    if node.kind == EXPR_GROUPING:
+        return True
     if node.kind == EXPR_FUNCTION:
         if node.b == NO_NODE:
             try:
@@ -7651,10 +8000,26 @@ def _block(
     # projection above reads the column rather than computing the same thing a
     # second time over columns the aggregate no longer hands out.
     var reads = List[Int](length=len(items), fill=-1)
+    # Which key each expression the GROUP BY wrote landed on, in the order
+    # `_group_leaves` finds them, which is the order `_group_sets` reads them
+    # back in to say which keys each grouping set holds.
+    var leaf_keys = List[Int]()
+    var written_sets = False
     if grouped:
+        var leaves = List[UInt32]()
         for entry in ast.items(group_clause):
+            var tag = ast.stmts[Int(entry)].b
+            if tag != GROUP_EXPRESSION and tag != GROUP_ALL:
+                written_sets = True
+            _group_leaves(ast, entry, leaves)
+        for entry in leaves:
             var group = ast.stmts[Int(entry)]
             if group.b == GROUP_ALL:
+                if written_sets:
+                    raise Error(
+                        "a GROUP BY ALL beside grouping sets, and ALL already"
+                        " stands for the whole of the GROUP BY"
+                    )
                 # GROUP BY ALL is the select list read twice rather than a mask
                 # on the aggregate, so it is written out here as the keys the
                 # query would have had to write. Every item that is not an
@@ -7675,12 +8040,6 @@ def _block(
                     key_names,
                 )
                 continue
-            if group.b != GROUP_EXPRESSION:
-                raise Error(
-                    "firepanda lowers a GROUP BY of plain expressions and"
-                    " GROUP BY ALL so far, and GROUPING SETS, CUBE and ROLLUP"
-                    " are masks on one aggregate the plan cannot carry yet"
-                )
             # A number here counts the select list rather than being the number
             # itself, so it lands on an item the same way a name that is an
             # alias does and takes the same route from there. The item is
@@ -7760,11 +8119,38 @@ def _block(
                     )
                     key_names.append(name^)
                     reads[named] = len(keys) - 1
+                leaf_keys.append(reads[named])
                 continue
-            keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
-            key_names.append(
-                _name_of(ast, grammar, group.a, len(key_names), scope)
-            )
+            var key = _lower_expr(ast, group.a, plan, walk, scope, False)
+            var called = _name_of(ast, grammar, group.a, len(key_names), scope)
+            # Inside grouping sets the same expression written twice is one
+            # key that two sets hold, and a set that holds it twice holds it
+            # once.
+            var again = -1
+            if written_sets:
+                var shape = _agg_shape(plan.exprs, key)
+                for i in range(len(keys)):
+                    if _agg_shape(plan.exprs, keys[i]) == shape:
+                        again = i
+                        break
+            if again >= 0:
+                leaf_keys.append(again)
+                continue
+            keys.append(key)
+            key_names.append(called^)
+            leaf_keys.append(len(keys) - 1)
+
+    var sets = List[List[Int]]()
+    if grouped:
+        walk.keyed = True
+        for i in range(len(keys)):
+            walk.key_shapes.append(_agg_shape(plan.exprs, keys[i]))
+        if written_sets:
+            walk.sets = True
+            var cursor = 0
+            sets.append(List[Int]())
+            for entry in ast.items(group_clause):
+                sets = _product(sets, _group_sets(ast, entry, leaf_keys, cursor))
 
     # The shape of each key that is worth looking for again higher up, and the
     # name the aggregate puts that key out under. A key that is a plain column
@@ -7927,7 +8313,12 @@ def _block(
         var both = key_names.copy()
         for i in range(len(agg_names)):
             both.append(String(agg_names[i]))
-        at = plan.aggregate(at, keys^, aggs^, both^)
+        if len(sets) == 0:
+            at = plan.aggregate(at, keys^, aggs^, both^)
+        else:
+            at = _grouping_sets(
+                plan, at, keys, key_names, aggs, agg_names, sets, walk
+            )
 
     # The subqueries the `HAVING` and the select list read, joined on now that
     # there is an aggregate to put them over. Above rather than below for the
