@@ -8463,6 +8463,50 @@ class DataFrameMixin:
         found = [chosen.iloc[:, place] for place in range(len(names))]
         return _write_csv(names, found, chosen.index, path_or_buf, **options)
 
+    def to_json(
+        self,
+        path_or_buf: Any = None,
+        *,
+        orient: Any = None,
+        date_format: Any = None,
+        double_precision: int = 10,
+        force_ascii: bool = True,
+        date_unit: str = "ms",
+        default_handler: Any = None,
+        lines: bool = False,
+        compression: Any = "infer",
+        index: Any = None,
+        indent: Any = None,
+        storage_options: Any = None,
+        mode: str = "w",
+    ) -> Any:
+        """The frame as JSON, in one of pandas' orients, written to a file or answered.
+
+        Floats are written the way pandas' encoder writes them, with at most
+        `double_precision` digits after the point, gaps as null, and instants
+        and spans as counts since the epoch or, with `date_format="iso"`, as
+        ISO text.
+
+        Returns:
+            The text when `path_or_buf` is None, and None otherwise.
+        """
+        return _write_json(
+            self,
+            path_or_buf,
+            orient,
+            date_format=date_format,
+            double_precision=double_precision,
+            force_ascii=force_ascii,
+            date_unit=date_unit,
+            default_handler=default_handler,
+            lines=lines,
+            compression=compression,
+            index=index,
+            indent=indent,
+            storage_options=storage_options,
+            mode=mode,
+        )
+
     def to_dict(self, orient: str = "dict", *, into: Any = dict, index: bool = True) -> Any:
         """The frame as Python mappings and lists, in one of pandas' seven shapes.
 
@@ -11676,6 +11720,50 @@ class SeriesMixin:
         }
         name = "0" if self.name is None else self.name
         return _write_csv([name], [self], self.index, path_or_buf, **options)
+
+    def to_json(
+        self,
+        path_or_buf: Any = None,
+        *,
+        orient: Any = None,
+        date_format: Any = None,
+        double_precision: int = 10,
+        force_ascii: bool = True,
+        date_unit: str = "ms",
+        default_handler: Any = None,
+        lines: bool = False,
+        compression: Any = "infer",
+        index: Any = None,
+        indent: Any = None,
+        storage_options: Any = None,
+        mode: str = "w",
+    ) -> Any:
+        """The column as JSON, in one of pandas' orients, written to a file or answered.
+
+        Floats are written the way pandas' encoder writes them, with at most
+        `double_precision` digits after the point, gaps as null, and instants
+        and spans as counts since the epoch or, with `date_format="iso"`, as
+        ISO text.
+
+        Returns:
+            The text when `path_or_buf` is None, and None otherwise.
+        """
+        return _write_json(
+            self,
+            path_or_buf,
+            orient,
+            date_format=date_format,
+            double_precision=double_precision,
+            force_ascii=force_ascii,
+            date_unit=date_unit,
+            default_handler=default_handler,
+            lines=lines,
+            compression=compression,
+            index=index,
+            indent=indent,
+            storage_options=storage_options,
+            mode=mode,
+        )
 
     def to_dict(self, *, into: Any = dict) -> Any:
         """The column as a mapping from row label to value.
@@ -20067,6 +20155,329 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
     with _csv_handle(
         path_or_buf, kw["mode"], kw["encoding"], kw["errors"], kw["compression"]
     ) as handle:
+        handle.write(text)
+    return None
+
+
+_JSON_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "/": "\\/",
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+_JSON_UNITS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
+_JSON_DIGITS = {"s": 0, "ms": 3, "us": 6, "ns": 9}
+
+
+class _JsonText(str):
+    """Text that is JSON already, which `_json_dumped` writes as it is."""
+
+    __slots__ = ()
+
+
+def _json_float(value: float, precision: int) -> str:
+    """A float the way pandas' JSON encoder writes it, which is not the shortest way.
+
+    This is ujson's own routine, ported step for step: whole and fraction as
+    integers, the fraction cut to `precision` digits with its own rounding and
+    trailing zeros dropped, and C's `%g` for anything past about 1e16 or under
+    1e-15.
+    """
+    negative = value < 0
+    value = -value if negative else value
+    if value > 1e16 - 1 or (value != 0.0 and value < 1e-15):
+        return f"%.{precision}g" % (-value if negative else value)
+    scale = 10**precision
+    whole = int(value)
+    scaled = (value - whole) * scale
+    fraction = int(scaled)
+    rest = scaled - fraction
+    if rest > 0.5 or (rest == 0.5 and (fraction == 0 or fraction & 1)):
+        fraction += 1
+    if fraction >= scale:
+        fraction = 0
+        whole += 1
+    if precision == 0:
+        rest = value - whole
+        if rest > 0.5 or (rest == 0.5 and whole & 1):
+            whole += 1
+        text = str(whole)
+    elif fraction:
+        text = f"{whole}." + str(fraction).rjust(precision, "0").rstrip("0")
+    else:
+        text = f"{whole}.0"
+    return "-" + text if negative else text
+
+
+def _json_string(text: str, ascii_only: bool) -> str:
+    """Text quoted the way ujson quotes it, which escapes the slash too."""
+    out = ['"']
+    for char in text:
+        code = ord(char)
+        if char in _JSON_ESCAPES:
+            out.append(_JSON_ESCAPES[char])
+        elif code < 0x20:
+            out.append(f"\\u{code:04x}")
+        elif code > 0x7F and ascii_only:
+            if code > 0xFFFF:
+                code -= 0x10000
+                out.append(f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}")
+            else:
+                out.append(f"\\u{code:04x}")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def _json_moment(value: Any, iso: bool, unit: str) -> Any:
+    """An instant or a span as a count of `unit` since the epoch, or as ISO text."""
+    from ._scalars import Timedelta
+
+    if not iso:
+        return value.value // _JSON_UNITS[unit]
+    if isinstance(value, Timedelta):
+        return value.isoformat()
+    suffix = ""
+    if value.tzinfo is not None:
+        value, suffix = value.tz_convert("UTC"), "Z"
+    text = (
+        f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+        f"T{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+    )
+    digits = _JSON_DIGITS[unit]
+    if digits:
+        text += f".{value.microsecond * 1000 + value.nanosecond:09d}"[: digits + 1]
+    return text + suffix
+
+
+def _json_value(value: Any, kw: dict[str, Any]) -> _JsonText:
+    """One value as JSON, a gap and an infinity as null."""
+    from ._scalars import Timedelta, Timestamp
+
+    if isinstance(value, Timestamp | Timedelta):
+        value = _json_moment(value, kw["iso"], kw["unit"])
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return _JsonText("null")
+    if isinstance(value, bool):
+        return _JsonText("true" if value else "false")
+    if isinstance(value, int):
+        return _JsonText(str(value))
+    if isinstance(value, float):
+        return _JsonText(_json_float(value, kw["precision"]))
+    if not isinstance(value, str) and kw["handler"] is not None:
+        return _json_value(kw["handler"](value), kw)
+    return _JsonText(_json_string(str(value), kw["ascii"]))
+
+
+def _json_key(label: Any, kw: dict[str, Any]) -> str:
+    """A row label as the text of a key, which pandas writes for every label."""
+    from ._scalars import Timedelta, Timestamp
+
+    if isinstance(label, Timestamp | Timedelta):
+        return str(_json_moment(label, kw["iso"], kw["unit"]))
+    if _missing(label):
+        return "nan"
+    if isinstance(label, float):
+        return _json_float(label, kw["precision"])
+    return str(label)
+
+
+def _json_dumped(node: Any, kw: dict[str, Any], depth: int = 0) -> str:
+    """Nested mappings and lists as JSON, spread over lines when `indent` asks.
+
+    ujson puts no space after a colon even when it indents, and an empty
+    mapping or list indented is its brackets with an empty line between.
+    """
+    if isinstance(node, _JsonText):
+        return node
+    if isinstance(node, dict):
+        items = [
+            f"{_json_string(key, kw['ascii'])}:{_json_dumped(value, kw, depth + 1)}"
+            for key, value in node.items()
+        ]
+        opening, closing = "{", "}"
+    else:
+        items = [_json_dumped(value, kw, depth + 1) for value in node]
+        opening, closing = "[", "]"
+    indent = kw["indent"]
+    if not indent:
+        return opening + ",".join(items) + closing
+    outer = " " * (indent * depth)
+    if not items:
+        return f"{opening}\n\n{outer}{closing}"
+    inner = "\n" + " " * (indent * (depth + 1))
+    return opening + inner + ("," + inner).join(items) + "\n" + outer + closing
+
+
+def _json_checked(orient: Any, index: Any, lines: bool, mode: str, indent: Any) -> bool:
+    """pandas' checks on the options, in its order, and whether to write the labels.
+
+    Raises:
+        ValueError: For each combination pandas refuses, with its words.
+    """
+    if indent is not None and (not isinstance(indent, int) or indent < 0):
+        raise ValueError("Value must be a nonnegative integer or None")
+    if orient in ("records", "values") and index is True:
+        raise ValueError(
+            "'index=True' is only valid when 'orient' is 'split', 'table', 'index', or 'columns'."
+        )
+    if orient in ("index", "columns") and index is False:
+        raise ValueError(
+            "'index=False' is only valid when 'orient' is 'split', 'table', 'records', or 'values'."
+        )
+    if lines and orient != "records":
+        raise ValueError("'lines' keyword only valid when 'orient' is records")
+    if mode not in ("a", "w"):
+        raise ValueError(
+            f"mode={mode} is not a valid option.Only 'w' and 'a' are currently supported."
+        )
+    if mode == "a" and (not lines or orient != "records"):
+        raise ValueError(
+            "mode='a' (append) is only supported when lines is True and orient is 'records'"
+        )
+    if orient == "table":
+        raise NotImplementedError(
+            "to_json: orient='table' is not supported yet, because its schema names pandas"
+            " types firepanda spells differently"
+        )
+    return index is not False
+
+
+def _json_options(obj: Any, **kw: Any) -> dict[str, Any]:
+    """The encoder's settings, with pandas' warnings about epoch dates.
+
+    Raises:
+        ValueError: For a unit or a precision pandas refuses.
+    """
+    from .errors import Pandas4Warning
+
+    date_format, date_unit = kw["date_format"], kw["date_unit"]
+    kinds = [str(kind) for kind in (obj.dtypes if hasattr(obj, "columns") else [obj.dtype])]
+    if date_format is None:
+        if any(kind.startswith(("datetime", "timedelta")) for kind in kinds):
+            warnings.warn(
+                "The default 'epoch' date format is deprecated and will be removed in a future"
+                " version, please use 'iso' date format instead.",
+                Pandas4Warning,
+                stacklevel=4,
+            )
+    elif date_format == "epoch":
+        warnings.warn(
+            "'epoch' date format is deprecated and will be removed in a future version, please"
+            " use 'iso' date format instead.",
+            Pandas4Warning,
+            stacklevel=4,
+        )
+    if date_unit not in _JSON_UNITS:
+        raise ValueError(f"Invalid value '{date_unit}' for option 'date_unit'")
+    precision = kw["double_precision"]
+    if precision > 15:
+        raise ValueError(f"Invalid value '{precision}' for option 'double_precision', max is '15'")
+    return {
+        "iso": date_format == "iso",
+        "unit": date_unit,
+        "precision": precision,
+        "ascii": kw["force_ascii"],
+        "handler": kw["default_handler"],
+        "indent": kw["indent"] or 0,
+    }
+
+
+def _json_frame(frame: Any, orient: str, labelled: bool, kw: dict[str, Any]) -> Any:
+    """A frame as the nested mappings and lists an orient asks for.
+
+    Raises:
+        ValueError: For repeated labels or names where the orient makes them
+            keys, and an orient pandas does not know, with pandas' words.
+    """
+    names = list(frame.columns)
+    labels = frame.index.tolist()
+    if orient in ("index", "columns") and len(set(labels)) != len(labels):
+        raise ValueError(f"DataFrame index must be unique for orient='{orient}'.")
+    if orient in ("index", "columns", "records") and len(set(names)) != len(names):
+        raise ValueError(f"DataFrame columns must be unique for orient='{orient}'.")
+    cells = [
+        [_json_value(value, kw) for value in frame.iloc[:, place].tolist()]
+        for place in range(len(names))
+    ]
+    rows = [list(row) for row in zip(*cells, strict=True)] if cells else [[] for _ in labels]
+    keys = [_json_key(label, kw) for label in labels]
+    if orient == "columns":
+        return {
+            str(name): dict(zip(keys, column, strict=True))
+            for name, column in zip(names, cells, strict=True)
+        }
+    if orient == "index":
+        return {
+            key: dict(zip(map(str, names), row, strict=True))
+            for key, row in zip(keys, rows, strict=True)
+        }
+    if orient == "records":
+        return [dict(zip(map(str, names), row, strict=True)) for row in rows]
+    if orient == "values":
+        return rows
+    if orient == "split":
+        split: dict[str, Any] = {"columns": [_json_value(str(name), kw) for name in names]}
+        if labelled:
+            split["index"] = [_json_value(label, kw) for label in labels]
+        split["data"] = rows
+        return split
+    raise ValueError(f"Invalid value '{orient}' for option 'orient'")
+
+
+def _json_column(column: Any, orient: str, labelled: bool, kw: dict[str, Any]) -> Any:
+    """A column as the nested mappings and lists an orient asks for.
+
+    Raises:
+        ValueError: For repeated labels under the index orient, and an orient
+            pandas does not know, with pandas' words.
+    """
+    labels = column.index.tolist()
+    if orient == "index" and len(set(labels)) != len(labels):
+        raise ValueError("Series index must be unique for orient='index'")
+    values = [_json_value(value, kw) for value in column.tolist()]
+    if orient in ("index", "columns"):
+        return dict(zip([_json_key(label, kw) for label in labels], values, strict=True))
+    if orient in ("records", "values"):
+        return values
+    if orient == "split":
+        split: dict[str, Any] = {"name": _json_value(column.name, kw)}
+        if labelled:
+            split["index"] = [_json_value(label, kw) for label in labels]
+        split["data"] = values
+        return split
+    raise ValueError(f"Invalid value '{orient}' for option 'orient'")
+
+
+def _write_json(obj: Any, path_or_buf: Any, orient: Any, **kw: Any) -> Any:
+    """Writes a frame or a column as pandas' `to_json` does, and answers the text with no path."""
+    framed = hasattr(obj, "columns")
+    orient = orient or ("columns" if framed else "index")
+    labelled = _json_checked(orient, kw["index"], kw["lines"], kw["mode"], kw["indent"])
+    if kw["storage_options"] is not None:
+        raise NotImplementedError(
+            "to_json: storage_options are for remote files, which firepanda does not write yet"
+        )
+    options = _json_options(obj, **kw)
+    shaped = (_json_frame if framed else _json_column)(obj, orient, labelled, options)
+    if kw["lines"]:
+        text = "".join(_json_dumped(record, options) + "\n" for record in shaped)
+    else:
+        text = _json_dumped(shaped, options)
+    if path_or_buf is None:
+        return text
+    if hasattr(path_or_buf, "write"):
+        try:
+            path_or_buf.write(text)
+        except TypeError:
+            path_or_buf.write(text.encode("utf-8"))
+        return None
+    with _csv_handle(path_or_buf, kw["mode"], "utf-8", "strict", kw["compression"]) as handle:
         handle.write(text)
     return None
 
