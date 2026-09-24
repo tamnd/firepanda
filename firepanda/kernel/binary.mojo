@@ -1255,6 +1255,12 @@ def binary_value_any(
     # common type with anything, and a comparison needs neither.
     if a.is_dictionary() and op.is_comparison():
         return _dictionary_const_erased(a, b, op, value_on_left)
+    # A string column held as codes compares each category once and spreads
+    # the answers over the rows, which is the reason to hold it that way.
+    if not a.is_flat() and op.is_comparison():
+        return a.through_codes(
+            binary_value_any(a.distinct(), b, op, value_on_left)
+        )
 
     # A Python scalar arrives without a width and takes the column's, so this
     # runs before anything reads the constant's type.
