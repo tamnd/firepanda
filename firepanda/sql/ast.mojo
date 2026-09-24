@@ -408,6 +408,15 @@ comptime EXPR_MAP: UInt8 = 32
 `children` alternates a key and its value, and both are expressions.
 """
 
+comptime EXPR_QUANTIFIED_VALUE: UInt8 = 33
+"""`x > ALL (e)` and `x > ANY (e)` where `e` is a value rather than a query.
+
+DuckDB unnests `e`, so it is a list. `a` is the operand, `b` is the value on
+the right, `payload` is the interned comparison and `children` is 1 for `ALL`
+and 0 for `ANY`, the same way `EXPR_QUANTIFIED` keeps them. It is a kind of its
+own because there `b` is a statement index and here it is an expression.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -2102,6 +2111,37 @@ struct Ast(Movable):
             flat.append(values[i])
         return self.add(
             Expr(kind=EXPR_MAP, token=token, children=self.run(flat))
+        )
+
+    def quantified_value(
+        mut self,
+        operand: UInt32,
+        operator: StringSlice,
+        every: Bool,
+        value: UInt32,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `x > ALL (e)` or `x > ANY (e)` over a value.
+
+        Args:
+            operand: What is being compared.
+            operator: The comparison, as written.
+            every: True for `ALL`, false for `ANY` and `SOME`.
+            value: The expression on the right.
+            token: The token it starts at.
+
+        Returns:
+            The expression node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_QUANTIFIED_VALUE,
+                token=token,
+                a=operand,
+                b=value,
+                children=UInt32(1) if every else UInt32(0),
+                payload=self.intern(operator),
+            )
         )
 
     def star(

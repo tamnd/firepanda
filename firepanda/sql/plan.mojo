@@ -524,6 +524,7 @@ from .ast import (
     EXPR_NAMED_ARGUMENT,
     EXPR_POSITIONAL,
     EXPR_QUANTIFIED,
+    EXPR_QUANTIFIED_VALUE,
     EXPR_ROW,
     EXPR_STAR,
     EXPR_SUBQUERY,
@@ -593,6 +594,7 @@ from .unsupported import (
     MAP_LITERAL,
     NAMED_ARGUMENT,
     POSITIONAL,
+    QUANTIFIED_VALUE,
     ROW_VALUE,
     SELECT_SAMPLE,
     SPECIAL_CALL,
@@ -3566,6 +3568,8 @@ def _lower_expr(
 
     if node.kind == EXPR_BETWEEN:
         return _lower_between(ast, at, plan, walk, scope, grouped)
+    if node.kind == EXPR_QUANTIFIED_VALUE:
+        return _lower_quantified_value(ast, at, plan, walk, scope, grouped)
 
     if node.kind == EXPR_IN:
         return _lower_in(ast, at, plan, walk, scope, grouped)
@@ -3772,6 +3776,63 @@ def _lower_between(
     if node.payload == 1:
         return plan.exprs.call("not", [within], True)
     return within
+
+
+def _lower_quantified_value(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Lowers `x > ANY ([a, b])` and `x > ALL ([a, b])` over a written list.
+
+    DuckDB unnests the list and answers the way the subquery form does, which
+    is `x > a OR x > b` for `ANY` and `x > a AND x > b` for `ALL` under the
+    three valued rule, so a null in the list turns a false `ANY` or a true
+    `ALL` into a null and leaves the other answer alone. An empty list has no
+    rows to test, so `ANY` is false and `ALL` is true. The operand is lowered
+    once and every comparison points at it, the way `BETWEEN` does it.
+
+    A list that is not written out, such as a column, is refused, since no
+    firepanda column holds a list.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_QUANTIFIED_VALUE`.
+        plan: Where the lowered expressions go.
+        walk: What the aggregates and windows found so far are recorded in.
+        scope: What the FROM put in reach.
+        grouped: Whether the block aggregates.
+
+    Returns:
+        The predicate.
+
+    Raises:
+        If the right side is not a written list, or a part does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var every = node.children == 1
+    var right = ast.exprs[Int(node.b)]
+    if right.kind != EXPR_LIST:
+        raise not_implemented(QUANTIFIED_VALUE, "", "")
+    var items = ast.items(right.children)
+    if len(items) == 0:
+        return plan.exprs.literal(Value(every))
+    var op = _binary_op(String(ast.text(node.payload)))
+    var over = _lower_operand(ast, node.a, plan, walk, scope, grouped)
+    var joined = -1
+    for item in items:
+        var value = _lower_operand(ast, item, plan, walk, scope, grouped)
+        var test = plan.exprs.binary(op, over, value)
+        if joined < 0:
+            joined = test
+        else:
+            joined = plan.exprs.call(
+                "and" if every else "or", [joined, test], True
+            )
+    return joined
 
 
 def _lower_in(
@@ -4108,6 +4169,13 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
             if _has_aggregate(ast, part):
                 return True
         return _has_aggregate(ast, node.a)
+    if node.kind == EXPR_QUANTIFIED_VALUE:
+        return _has_aggregate(ast, node.a) or _has_aggregate(ast, node.b)
+    if node.kind == EXPR_LIST:
+        for part in ast.items(node.children):
+            if _has_aggregate(ast, part):
+                return True
+        return False
     return False
 
 
@@ -4154,6 +4222,13 @@ def _has_over(ast: Ast, at: UInt32) -> Bool:
             if _has_over(ast, part):
                 return True
         return _has_over(ast, node.a)
+    if node.kind == EXPR_QUANTIFIED_VALUE:
+        return _has_over(ast, node.a) or _has_over(ast, node.b)
+    if node.kind == EXPR_LIST:
+        for part in ast.items(node.children):
+            if _has_over(ast, part):
+                return True
+        return False
     return False
 
 
@@ -4233,6 +4308,14 @@ def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]) raises:
         for part in ast.items(node.children):
             _taken(ast, part, kind, found)
         _taken(ast, node.a, kind, found)
+        return
+    if node.kind == EXPR_QUANTIFIED_VALUE:
+        _taken(ast, node.a, kind, found)
+        _taken(ast, node.b, kind, found)
+        return
+    if node.kind == EXPR_LIST:
+        for part in ast.items(node.children):
+            _taken(ast, part, kind, found)
 
 
 def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]) raises:
@@ -6347,6 +6430,14 @@ def _written_names(
         for part in ast.items(node.children):
             _written_names(ast, part, found, plain)
         _written_names(ast, node.a, found, plain)
+        return
+    if node.kind == EXPR_QUANTIFIED_VALUE:
+        _written_names(ast, node.a, found, plain)
+        _written_names(ast, node.b, found, plain)
+        return
+    if node.kind == EXPR_LIST:
+        for part in ast.items(node.children):
+            _written_names(ast, part, found, plain)
 
 
 def _from_columns(

@@ -274,12 +274,19 @@ def test_only_six_comparisons_may_carry_a_quantifier() raises:
     )
 
 
-def test_a_quantifier_over_a_value_is_refused_by_name() raises:
-    # DuckDB unnests a list on the right, which is IN written the long way.
+def test_a_quantifier_over_a_value_prints_back() raises:
+    # DuckDB unnests a list on the right, so it reads as a value and not a
+    # statement, and prints back the way it was written.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="ANY or ALL over a value"):
-        _ = _printed("SELECT a FROM t WHERE a = ANY ([1, 2])", g, rules)
+    assert_equal(
+        _printed("SELECT a FROM t WHERE a = ANY ([1, 2])", g, rules),
+        "SELECT a FROM t WHERE (a = ANY ([1, 2]))",
+    )
+    assert_equal(
+        _printed("SELECT 4 > all(l) FROM t", g, rules),
+        "SELECT (4 > ALL (l)) FROM t",
+    )
 
 
 def test_the_wrong_number_of_columns_is_counted_in_the_message() raises:
