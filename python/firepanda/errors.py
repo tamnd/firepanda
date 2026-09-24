@@ -44,6 +44,7 @@ __all__ = [
     "FirepandaError",
     "IntCastingNaNError",
     "InvalidArgumentError",
+    "MergeError",
     "NumericOverflowError",
     "OutOfBoundsError",
     "ReaderError",
@@ -99,6 +100,16 @@ class IntCastingNaNError(InvalidArgumentError):
     It subclasses `InvalidArgumentError` rather than sitting beside it, which
     makes it a `ValueError` by two routes: the pandas one is a `ValueError` too,
     and a caller who catches the broad one still catches this either way.
+    """
+
+
+class MergeError(InvalidArgumentError):
+    """A merge asked for in a way that cannot be carried out.
+
+    pandas has a class with this name in `pandas.errors` and raises it for keys
+    that were not given or not found, and for a `validate` the keys fail. A
+    program that catches it by name gets nothing from a plain `ValueError`, so
+    the name is carried, for the reason `IntCastingNaNError` gives.
     """
 
 

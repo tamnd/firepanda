@@ -207,6 +207,9 @@ def register(mut module: PythonModuleBuilder) raises:
         "group_agg",
         docstring="One reduction applied to every column that is not a key.",
     )
+    _ = dataframe.def_method[PyDataFrame.join_on](
+        "join_on", docstring="The rows of two frames paired on key columns."
+    )
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
