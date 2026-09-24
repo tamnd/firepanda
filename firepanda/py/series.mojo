@@ -2121,6 +2121,29 @@ struct PySeries(Movable, Writable):
             raise retagged(DTYPE, cause)
 
     @staticmethod
+    def round(
+        py_self: PythonObject, decimals: PythonObject
+    ) raises -> PythonObject:
+        """Rounds every row to some number of decimal places, half to even.
+
+        Args:
+            py_self: The series.
+            decimals: The places to keep, negative for tens and so on.
+
+        Returns:
+            A new series of the same type, on the same labels.
+
+        Raises:
+            Error: Tagged `value` if `decimals` is not a whole number.
+        """
+        var places = whole(decimals, "decimals")
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(Self._held(py_self)[].series[].rounded(places))
+            )
+        )
+
+    @staticmethod
     def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:
         """Describes the column as an Arrow schema capsule.
 

@@ -2101,6 +2101,44 @@ struct PyDataFrame(Movable, Writable):
             raise retagged(DTYPE, cause)
 
     @staticmethod
+    def round(
+        py_self: PythonObject, at: PythonObject, decimals: PythonObject
+    ) raises -> PythonObject:
+        """Rounds some columns to some number of decimal places, half to even.
+
+        Args:
+            py_self: The frame.
+            at: The positions of the columns to round.
+            decimals: The places to keep for each of them, in the same order.
+
+        Returns:
+            A new frame of the same shape and types, on the same labels.
+
+        Raises:
+            Error: Tagged `value` if a position or a number of places is not a
+                whole number, the lists differ in length or a position is
+                outside the frame.
+        """
+        var positions = List[Int](capacity=Int(len(at)))
+        for i in range(Int(len(at))):
+            positions.append(whole(at[i], "at"))
+        var places = List[Int](capacity=Int(len(decimals)))
+        for i in range(Int(len(decimals))):
+            places.append(whole(decimals[i], "decimals"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .rounded(positions, places)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(VALUE, cause)
+
+    @staticmethod
     def _borrowed(
         py_self: PythonObject,
     ) raises -> List[Pointer[AnyArray, MutAnyOrigin]]:

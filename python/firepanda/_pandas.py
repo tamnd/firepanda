@@ -3224,6 +3224,44 @@ def _numpy_clip(kwargs: dict[str, Any]) -> None:
             raise TypeError(f"clip() got an unexpected keyword argument '{name}'")
 
 
+def _numpy_round(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Holds numpy's `out` at rest for `round`, the way pandas does.
+
+    `np.round(s, 2)` lands on the method with the output array as the one
+    positional argument after `decimals`, or as a keyword. pandas accepts it
+    empty and refuses it holding anything, and refuses a second positional
+    argument or a keyword numpy does not have, in Python's own words.
+
+    Args:
+        args: Whatever arrived by position after `decimals`.
+        kwargs: Whatever arrived by keyword that the signature does not name.
+
+    Raises:
+        InvalidArgumentError: If `out` holds anything.
+        TypeError: For too many arguments or an unknown keyword.
+    """
+    if len(args) > 1:
+        raise TypeError(f"round() takes at most 2 arguments ({len(args) + 1} given)")
+    for name in kwargs:
+        if name != "out":
+            raise TypeError(f"round() got an unexpected keyword argument '{name}'")
+    if (args and args[0] is not None) or kwargs.get("out") is not None:
+        raise InvalidArgumentError(
+            "the 'out' parameter is not supported in the pandas implementation of round()"
+        )
+
+
+def _whole_places(value: Any) -> bool:
+    """Whether a number of places is one pandas takes: a whole number, not a bool."""
+    if isinstance(value, bool):
+        return False
+    try:
+        operator.index(value)
+    except TypeError:
+        return False
+    return True
+
+
 def _nothing(value: Any) -> bool:
     """Whether a single value says nothing at all.
 
@@ -5254,6 +5292,58 @@ class DataFrameMixin:
                 except Exception as error:
                     raise translate(error) from None
         return _kept(self, answer, inplace)
+
+    def round(self, decimals: Any = 0, *args: Any, **kwargs: Any) -> DataFrame:
+        """The frame with every number rounded to some decimal places.
+
+        numpy's rounding, which is half to even after scaling, so `2.5` is `2.0`
+        and `0.125` to two places is `0.12`. A column that is not a number comes
+        back as it was, and so does an integer column unless `decimals` is
+        negative, which rounds it to the nearest ten, hundred and so on.
+
+        Args:
+            decimals: One number of places for every column, or a mapping or a
+                series of them by column name. A column the mapping does not
+                name is left alone, and a name the frame does not have is
+                ignored.
+            *args: numpy's `out`, which has to be empty.
+            **kwargs: numpy's `out` again, by keyword.
+
+        Returns:
+            A new frame of the same shape and types.
+
+        Raises:
+            TypeError: If `decimals` is not a whole number, a mapping or a
+                series, or holds something that is not a whole number.
+            InvalidArgumentError: If `out` holds anything, or a series of places
+                names a column twice.
+        """
+        from ._frame import DataFrame
+
+        _numpy_round(args, kwargs)
+        names = list(self.columns)
+        if isinstance(decimals, SeriesMixin):
+            if not decimals.index.is_unique:
+                raise InvalidArgumentError("Index of decimals must be unique")
+            decimals = dict(zip(decimals.index, decimals.tolist(), strict=True))
+        if isinstance(decimals, collections.abc.Mapping):
+            if not all(_whole_places(value) for value in decimals.values()):
+                raise TypeError("Values in decimals must be integers")
+            at = [i for i, name in enumerate(names) if name in decimals]
+            places = [int(decimals[names[i]]) for i in at]
+        elif _whole_places(decimals):
+            at = list(range(len(names)))
+            places = [int(decimals)] * len(at)
+        else:
+            raise TypeError("decimals must be an integer, a dict-like or a Series")
+        try:
+            return DataFrame._wrap(self._inner.round(at, places))
+        except Exception as error:
+            raise translate(error) from None
+
+    def __round__(self, decimals: int = 0) -> DataFrame:
+        """What Python's own `round` calls, which is `round` with no extras."""
+        return self.round(decimals)
 
     def replace(
         self,
@@ -7556,6 +7646,39 @@ class SeriesMixin:
             except Exception as error:
                 raise translate(error) from None
         return _kept(self, Series._wrap(answer), inplace)
+
+    def round(self, decimals: int = 0, *args: Any, **kwargs: Any) -> Series:
+        """The column with every number rounded to some decimal places.
+
+        numpy's rounding, which is half to even after scaling, so `2.5` is `2.0`
+        and `0.125` to two places is `0.12`. A column that is not a number comes
+        back as it was, and so does an integer column unless `decimals` is
+        negative, which rounds it to the nearest ten, hundred and so on.
+
+        Args:
+            decimals: The places to keep.
+            *args: numpy's `out`, which has to be empty.
+            **kwargs: numpy's `out` again, by keyword.
+
+        Returns:
+            A new column of the same type, on the same labels and name.
+
+        Raises:
+            TypeError: If `decimals` is not a whole number.
+            InvalidArgumentError: If `out` holds anything.
+        """
+        from ._frame import Series
+
+        _numpy_round(args, kwargs)
+        places = operator.index(decimals)
+        try:
+            return Series._wrap(self._inner.round(places))
+        except Exception as error:
+            raise translate(error) from None
+
+    def __round__(self, decimals: int = 0) -> Series:
+        """What Python's own `round` calls, which is `round` with no extras."""
+        return self.round(decimals)
 
     def replace(
         self,
