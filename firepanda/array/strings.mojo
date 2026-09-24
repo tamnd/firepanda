@@ -1172,7 +1172,7 @@ def _bytes_equal(a: Span[UInt8, _], b: Span[UInt8, _]) -> Bool:
     var right = b.unsafe_ptr()
     if count < WORD:
         for k in range(count):
-            if left[k] != right[k]:
+            if a[k] != b[k]:
                 return False
         return True
     var last = count - WORD
