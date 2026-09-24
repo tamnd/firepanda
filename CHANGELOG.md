@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: str.cat joins others row by row
+
+`Series.str.cat(others)` answers a column now instead of refusing. `others` is read the way pandas reads it: a series, a frame's columns, an index, a numpy array of one or two dimensions, a list of strings, or a list of series, indexes and arrays. The pieces meet by position when every label list is the column's own and by label under `join` otherwise, `left`, `right`, `inner` or `outer` in pandas' order. A row with a missing piece is missing unless `na_rep` stands in for it, and a piece that is not text, a list of the wrong length, a bare string and an unknown `join` raise pandas' class with pandas' message. The rows are joined in the interpreter, since the engine has no row by row concatenation yet.
+
+A series built with a name that is not text, `Series(values, name=4)`, answers the number now rather than `'4'`, the way `rename(4)` already did.
+
 ## [0.8.34] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).

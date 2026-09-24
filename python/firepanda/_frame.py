@@ -544,8 +544,8 @@ class StringAccessor(StringMixin):
 
     def cat(
         self, others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = "left"
-    ) -> str:
-        """The whole column folded into one string."""
+    ) -> Any:
+        """The whole column folded into one string, or joined row by row with others."""
         try:
             return self._joined(others, sep, na_rep, join)
         except Exception as error:

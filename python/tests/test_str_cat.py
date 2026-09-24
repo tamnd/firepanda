@@ -255,19 +255,16 @@ def test_the_answer_is_a_plain_string(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_cat_with_others_is_refused_by_name(firepanda: ModuleType) -> None:
-    """The row by row half needs alignment, which is not written yet.
+def test_cat_with_others_is_the_row_by_row_half(firepanda: ModuleType) -> None:
+    """With `others` the answer is a column joined row by row, as pandas answers.
 
-    pandas matches a row of `others` to the row of this column carrying the same
-    label rather than the one in the same position, so serving this by position
-    would answer a different question. The refusal is a `NotImplementedError`
-    and says so, which puts it on the board as a gap rather than as a
-    disagreement.
+    The alignment and the rest of that half are in `test_str_cat_others.py`.
     """
-    with pytest.raises(NotImplementedError, match="alignment"):
-        made(firepanda).str.cat(made(firepanda))
-    with pytest.raises(NotImplementedError, match="alignment"):
-        made(firepanda).str.cat(others=["a"] * len(ROWS))
+    mine = made(firepanda).str.cat(made(firepanda), sep="-")
+    want = theirs().str.cat(theirs(), sep="-")
+    assert [None if v != v else v for v in want.tolist()] == mine.tolist()
+    mine = made(firepanda).str.cat(others=["a"] * len(ROWS), na_rep="?")
+    assert mine.tolist() == theirs().str.cat(others=["a"] * len(ROWS), na_rep="?").tolist()
 
 
 @needs_pandas

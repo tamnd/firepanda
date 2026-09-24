@@ -1165,8 +1165,8 @@ def _string_members() -> tuple[Member, ...]:
             kind="method",
             signature="others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = \"left\"",
             body="self._joined(others, sep, na_rep, join)",
-            doc="The whole column folded into one string.",
-            returns="str",
+            doc="The whole column folded into one string, or joined row by row with others.",
+            returns="Any",
         ),
         Member(
             name="get_dummies",
