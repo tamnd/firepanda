@@ -4879,6 +4879,102 @@ class _Point:
 __all__ = ["NO_DEFAULT", "DataFrameMixin", "IndexMixin", "SeriesMixin"]
 
 
+def _piped(owner: Any, func: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """`pipe`: the function called with the object, first or as the keyword a tuple names."""
+    if isinstance(func, tuple):
+        func, target = func
+        if target in kwargs:
+            raise InvalidArgumentError(f"{target} is both the pipe target and a keyword argument")
+        kwargs[target] = owner
+        return func(*args, **kwargs)
+    return func(owner, *args, **kwargs)
+
+
+def _same_values(left: Any, right: Any) -> bool:
+    """Whether two columns hold the same type and values, a missing row equal to a missing row."""
+    if len(left) != len(right) or str(left.dtype) != str(right.dtype):
+        return False
+    if len(left) == 0:
+        return True
+    left, right = left.reset_index(drop=True), right.reset_index(drop=True)
+    alike = (left == right).fillna(False) | (left.isna() & right.isna())
+    return bool(alike.all())
+
+
+def _valid_label(owner: Any, present: Any, last: bool) -> Any:
+    """The first or the last row label where `present` is True, or None when there is none."""
+    labels = owner.index[present.tolist()].tolist() if len(owner) else []
+    if not labels:
+        return None
+    return labels[-1] if last else labels[0]
+
+
+_NAN_WHEN_MISSING = ("float", "int", "uint", "string")
+"""The types whose missing value pandas hands back as NaN in `to_dict`, since pandas
+holds a missing number as a float and a missing text as NaN in its text type."""
+
+
+def _python_values(column: Any) -> list[Any]:
+    """A column as Python values, with a missing value spelled the way pandas spells it."""
+    values = column.tolist()
+    if str(column.dtype).startswith(_NAN_WHEN_MISSING):
+        return [float("nan") if value is None else value for value in values]
+    return values
+
+
+def _mapping_factory(into: Any) -> Callable[[], Any]:
+    """The mapping `to_dict` builds, from a mapping class or an instance of one."""
+    import collections.abc
+
+    kind = into if isinstance(into, type) else type(into)
+    if not issubclass(kind, collections.abc.Mapping):
+        raise TypeError(f"unsupported type: {into}")
+    if isinstance(into, collections.defaultdict):
+        factory = into.default_factory
+        return lambda: collections.defaultdict(factory)
+    if kind is collections.defaultdict:
+        raise TypeError("to_dict() only accepts initialized defaultdicts")
+    return kind
+
+
+def _prefixed(owner: Any, text: str, axis: Any, before: bool) -> Any:
+    """`add_prefix` and `add_suffix`: the column labels, or the row labels, with text added."""
+    from ._frame import DataFrame
+
+    frame = isinstance(owner, DataFrame)
+    kind = "DataFrame" if frame else "Series"
+    if axis in (None,) and frame:
+        axis = 1
+    if axis in (None, 0, "index", "rows"):
+        axis = 0
+    elif frame and axis in (1, "columns"):
+        axis = 1
+    else:
+        raise InvalidArgumentError(f"No axis named {axis} for object type {kind}")
+
+    def change(label: Any) -> str:
+        return f"{text}{label}" if before else f"{label}{text}"
+
+    if axis == 1:
+        return owner.rename(columns=change)
+    return _with_row_labels(owner, [change(label) for label in owner.index.tolist()])
+
+
+def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
+    """The frame or column with new row labels, one per row, the index name kept.
+
+    The labels go in as a column and `set_index` takes them from there, since an
+    index is not assigned to directly here.
+    """
+    from ._frame import DataFrame
+
+    values, held = "__firepanda_values", "__firepanda_labels"
+    frame = isinstance(owner, DataFrame)
+    work = owner if frame else owner.to_frame(values)
+    work = work.assign(**{held: labels}).set_index(held).rename_axis(owner.index.name)
+    return work if frame else work[values].rename(owner.name)
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -6358,6 +6454,240 @@ class DataFrameMixin:
                 raise InvalidArgumentError("Cannot operate inplace if there is no assignment")
             return answer
         return _settled(self, answer, inplace)
+
+    def div(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """Division, the same as `truediv`."""
+        return self.truediv(other, axis=axis, level=level, fill_value=fill_value)
+
+    def divide(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """Division, the same as `truediv`."""
+        return self.truediv(other, axis=axis, level=level, fill_value=fill_value)
+
+    def rdiv(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """Division the other way round, the same as `rtruediv`."""
+        return self.rtruediv(other, axis=axis, level=level, fill_value=fill_value)
+
+    def multiply(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """Multiplication, the same as `mul`."""
+        return self.mul(other, axis=axis, level=level, fill_value=fill_value)
+
+    def subtract(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """Subtraction, the same as `sub`."""
+        return self.sub(other, axis=axis, level=level, fill_value=fill_value)
+
+    def isnull(self) -> Any:
+        """Where a value is missing, the same as `isna`."""
+        return self.isna()
+
+    def notnull(self) -> Any:
+        """Where a value is present, the same as `notna`."""
+        return self.notna()
+
+    def add_prefix(self, prefix: str, axis: Any = None) -> Any:
+        """The labels with `prefix` in front: the columns of a frame, the rows of a column.
+
+        Args:
+            prefix: The text to put in front.
+            axis: Which labels, the row labels with 0 or `index`.
+
+        Returns:
+            A copy with the labels changed.
+        """
+        return _prefixed(self, prefix, axis, before=True)
+
+    def add_suffix(self, suffix: str, axis: Any = None) -> Any:
+        """The labels with `suffix` after them: the columns of a frame, the rows of a column.
+
+        Args:
+            suffix: The text to put after.
+            axis: Which labels, the row labels with 0 or `index`.
+
+        Returns:
+            A copy with the labels changed.
+        """
+        return _prefixed(self, suffix, axis, before=False)
+
+    def pipe(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """`func(self, *args, **kwargs)`, or with `self` as the keyword a tuple names.
+
+        Args:
+            func: A function, or a function and the name of the keyword that takes
+                this object.
+            *args: Passed along.
+            **kwargs: Passed along.
+
+        Returns:
+            Whatever the function answers.
+        """
+        return _piped(self, func, args, kwargs)
+
+    def first_valid_index(self) -> Any:
+        """The label of the first row holding a value, or None when there is none."""
+        return _valid_label(self, self._present(), last=False)
+
+    def last_valid_index(self) -> Any:
+        """The label of the last row holding a value, or None when there is none."""
+        return _valid_label(self, self._present(), last=True)
+
+    def _present(self) -> Any:
+        """Where a row holds at least one value."""
+        from ._frame import Series
+
+        names = list(self.columns)
+        if not names:
+            return Series([False] * len(self), index=self.index)
+        present = self[names[0]].notna()
+        for name in names[1:]:
+            present = present | self[name].notna()
+        return present
+
+    def pop(self, item: Any) -> Any:
+        """The column `item`, taken out of this frame.
+
+        Args:
+            item: The column's label.
+
+        Returns:
+            The column.
+
+        Raises:
+            KeyError: When there is no such column.
+        """
+        if item not in list(self.columns):
+            raise KeyError(item)
+        column = self[item]
+        self.drop(columns=[item], inplace=True)
+        return column
+
+    def insert(self, loc: int, column: Any, value: Any, allow_duplicates: Any = NO_DEFAULT) -> None:
+        """Puts a new column into this frame at position `loc`.
+
+        Args:
+            loc: Where the column goes, from 0 to the number of columns.
+            column: The new column's label.
+            value: A value for every row, a list or a column.
+            allow_duplicates: Refused when True, since a firepanda frame holds each
+                label once.
+
+        Raises:
+            TypeError: When `loc` is not an integer.
+            IndexError: When `loc` is past either end.
+            ValueError: When the label is already a column, or the values are the
+                wrong length.
+        """
+        if allow_duplicates is True:
+            raise UnsupportedError(
+                "firepanda:unsupported: insert with allow_duplicates=True is not written, "
+                "since a firepanda frame holds each column label once"
+            )
+        if isinstance(loc, bool) or not isinstance(loc, int):
+            raise DTypeError("loc must be int")
+        names = list(self.columns)
+        if not -len(names) <= loc <= len(names):
+            raise IndexError(f"loc must be an integer between -{len(names)} and {len(names)}")
+        if loc < 0:
+            raise InvalidArgumentError("unbounded slice")
+        if column in names:
+            raise InvalidArgumentError(f"cannot insert {column}, already exists")
+        if isinstance(value, (list, tuple)) and len(value) != len(self):
+            raise InvalidArgumentError(
+                f"Length of values ({len(value)}) does not match length of index ({len(self)})"
+            )
+        grown = self.assign(**{column: value})
+        order = [*names[:loc], column, *names[loc:]]
+        _settled(self, grown[order], True)
+
+    def equals(self, other: object) -> bool:
+        """Whether `other` is a frame with the same labels, types and values.
+
+        A missing value is equal to a missing value here, which is the one way this
+        differs from comparing with `==`.
+
+        Args:
+            other: Anything.
+
+        Returns:
+            Whether the two are the same.
+        """
+        if not isinstance(other, type(self)):
+            return False
+        if list(self.columns) != list(other.columns):
+            return False
+        if not _same_values(self.index.to_series(), other.index.to_series()):
+            return False
+        return all(_same_values(self[name], other[name]) for name in self.columns)
+
+    def to_dict(self, orient: str = "dict", *, into: Any = dict, index: bool = True) -> Any:
+        """The frame as Python mappings and lists, in one of pandas' seven shapes.
+
+        Args:
+            orient: `dict`, `list`, `series`, `split`, `tight`, `records` or `index`.
+            into: The mapping class to build, or an instance of one.
+            index: Leaves the row labels out, for `split` and `tight` only.
+
+        Returns:
+            The mapping, or a list of them for `records`.
+
+        Raises:
+            ValueError: For an orient pandas does not know, or `index=False` on one
+                that always has the labels.
+            TypeError: When `into` is not a mapping.
+        """
+        make = _mapping_factory(into)
+        if orient not in ("dict", "list", "series", "split", "tight", "records", "index"):
+            raise InvalidArgumentError(f"orient '{orient}' not understood")
+        if not index and orient not in ("split", "tight"):
+            raise InvalidArgumentError(
+                "'index=False' is only valid when 'orient' is 'split' or 'tight'"
+            )
+        names = list(self.columns)
+        labels = self.index.tolist()
+        columns = [_python_values(self[name]) for name in names]
+
+        def mapping(pairs: Any) -> Any:
+            built = make()
+            for key, value in pairs:
+                built[key] = value
+            return built
+
+        if orient == "dict":
+            return mapping(
+                (name, mapping(zip(labels, values, strict=True)))
+                for name, values in zip(names, columns, strict=True)
+            )
+        if orient == "list":
+            return mapping(zip(names, columns, strict=True))
+        if orient == "series":
+            return mapping((name, self[name]) for name in names)
+        rows = (
+            [list(row) for row in zip(*columns, strict=True)] if columns else [[] for _ in labels]
+        )
+        if orient == "records":
+            return [mapping(zip(names, row, strict=True)) for row in rows]
+        if orient == "index":
+            return mapping(
+                (label, mapping(zip(names, row, strict=True)))
+                for label, row in zip(labels, rows, strict=True)
+            )
+        parts: list[tuple[str, Any]] = []
+        if index:
+            parts.append(("index", labels))
+        parts += [("columns", names), ("data", rows)]
+        if orient == "tight":
+            if index:
+                parts.append(("index_names", [self.index.name]))
+            parts.append(("column_names", [None]))
+        return mapping(parts)
 
     def rename_axis(
         self,
@@ -8804,6 +9134,155 @@ class SeriesMixin:
             )
         except Exception as error:
             raise translate(error) from None
+
+    def div(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """Division, the same as `truediv`."""
+        return self.truediv(other, level=level, fill_value=fill_value, axis=axis)
+
+    def divide(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """Division, the same as `truediv`."""
+        return self.truediv(other, level=level, fill_value=fill_value, axis=axis)
+
+    def rdiv(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """Division the other way round, the same as `rtruediv`."""
+        return self.rtruediv(other, level=level, fill_value=fill_value, axis=axis)
+
+    def multiply(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """Multiplication, the same as `mul`."""
+        return self.mul(other, level=level, fill_value=fill_value, axis=axis)
+
+    def subtract(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """Subtraction, the same as `sub`."""
+        return self.sub(other, level=level, fill_value=fill_value, axis=axis)
+
+    def isnull(self) -> Any:
+        """Where a value is missing, the same as `isna`."""
+        return self.isna()
+
+    def notnull(self) -> Any:
+        """Where a value is present, the same as `notna`."""
+        return self.notna()
+
+    def add_prefix(self, prefix: str, axis: Any = None) -> Any:
+        """The labels with `prefix` in front: the columns of a frame, the rows of a column.
+
+        Args:
+            prefix: The text to put in front.
+            axis: Which labels, the row labels with 0 or `index`.
+
+        Returns:
+            A copy with the labels changed.
+        """
+        return _prefixed(self, prefix, axis, before=True)
+
+    def add_suffix(self, suffix: str, axis: Any = None) -> Any:
+        """The labels with `suffix` after them: the columns of a frame, the rows of a column.
+
+        Args:
+            suffix: The text to put after.
+            axis: Which labels, the row labels with 0 or `index`.
+
+        Returns:
+            A copy with the labels changed.
+        """
+        return _prefixed(self, suffix, axis, before=False)
+
+    def pipe(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """`func(self, *args, **kwargs)`, or with `self` as the keyword a tuple names.
+
+        Args:
+            func: A function, or a function and the name of the keyword that takes
+                this object.
+            *args: Passed along.
+            **kwargs: Passed along.
+
+        Returns:
+            Whatever the function answers.
+        """
+        return _piped(self, func, args, kwargs)
+
+    def first_valid_index(self) -> Any:
+        """The label of the first row holding a value, or None when there is none."""
+        return _valid_label(self, self._present(), last=False)
+
+    def last_valid_index(self) -> Any:
+        """The label of the last row holding a value, or None when there is none."""
+        return _valid_label(self, self._present(), last=True)
+
+    def _present(self) -> Any:
+        """Where the row holds a value."""
+        return self.notna()
+
+    def pop(self, item: Any) -> Any:
+        """The value at label `item`, taken out of this column.
+
+        Args:
+            item: The row's label.
+
+        Returns:
+            The value.
+
+        Raises:
+            KeyError: When there is no such label.
+        """
+        value = self[item]
+        self.drop(item, inplace=True)
+        return value
+
+    def item(self) -> Any:
+        """The one value of a column of length one.
+
+        Raises:
+            ValueError: When the column does not hold exactly one value.
+        """
+        if len(self) != 1:
+            raise InvalidArgumentError("can only convert an array of size 1 to a Python scalar")
+        return self.iloc[0]
+
+    def to_list(self) -> list[Any]:
+        """The values as a Python list, the same as `tolist`."""
+        return self.tolist()
+
+    @property
+    def is_unique(self) -> bool:
+        """Whether no value appears twice, a missing value counting as a value."""
+        missing = int(self.isna().sum())
+        return missing <= 1 and int(self.nunique()) + missing == len(self)
+
+    def equals(self, other: object) -> bool:
+        """Whether `other` is a column with the same row labels, type and values.
+
+        A missing value is equal to a missing value here, and the names are not
+        compared, both of which is pandas.
+
+        Args:
+            other: Anything.
+
+        Returns:
+            Whether the two are the same.
+        """
+        if not isinstance(other, type(self)):
+            return False
+        if not _same_values(self.index.to_series(), other.index.to_series()):
+            return False
+        return _same_values(self, other)
+
+    def to_dict(self, *, into: Any = dict) -> Any:
+        """The column as a mapping from row label to value.
+
+        Args:
+            into: The mapping class to build, or an instance of one.
+
+        Returns:
+            The mapping.
+
+        Raises:
+            TypeError: When `into` is not a mapping.
+        """
+        built = _mapping_factory(into)()
+        for label, value in zip(self.index.tolist(), _python_values(self), strict=True):
+            built[label] = value
+        return built
 
     def rename_axis(
         self,
@@ -14769,6 +15248,49 @@ def melt(
 ) -> DataFrame:
     """The frame turned long, the way `pandas.melt` does. See `DataFrame.melt`."""
     return _melt(frame, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
+
+
+def isna(obj: Any) -> Any:
+    """Whether a value is missing, or where a column, frame or index is missing.
+
+    A scalar is missing when it is None or a float NaN. A list is refused rather
+    than answered, since pandas answers a numpy array for one and numpy is not a
+    dependency here, so turn it into a column first.
+
+    Args:
+        obj: A scalar, a column, a frame or an index.
+
+    Returns:
+        A flag for a scalar, and flags of the same shape for anything else.
+
+    Raises:
+        NotImplementedError: For a list or another sequence.
+    """
+    if hasattr(obj, "isna"):
+        return obj.isna()
+    if isinstance(obj, (list, tuple, dict, set)):
+        raise UnsupportedError(
+            "firepanda:unsupported: isna on a list answers a numpy array in pandas and "
+            "numpy is not a firepanda dependency, so pass a Series"
+        )
+    return obj is None or (isinstance(obj, float) and obj != obj)
+
+
+def notna(obj: Any) -> Any:
+    """The opposite of `isna`, for a scalar, a column, a frame or an index. See `isna`."""
+    if hasattr(obj, "notna"):
+        return obj.notna()
+    return not isna(obj)
+
+
+def isnull(obj: Any) -> Any:
+    """The same as `isna`."""
+    return isna(obj)
+
+
+def notnull(obj: Any) -> Any:
+    """The same as `notna`."""
+    return notna(obj)
 
 
 def get_dummies(

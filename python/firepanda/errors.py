@@ -142,7 +142,13 @@ class UndefinedVariableError(FirepandaError, NameError):
     pandas has a class with this name in `pandas.errors` and it is a `NameError`
     there, which is what Python raises for a name it cannot find, so it is one
     here, and the name is carried for the reason `IntCastingNaNError` gives.
+    It is built the way pandas builds it, from the name and whether the name was
+    a variable of the caller, and it writes the message from those.
     """
+
+    def __init__(self, name: str, is_local: bool | None = None) -> None:
+        said = f"{name!r} is not defined"
+        super().__init__(f"local variable {said}" if is_local else f"name {said}")
 
 
 class NumericOverflowError(FirepandaError, OverflowError):

@@ -202,3 +202,15 @@ def test_the_signature_is_pandas_signature(firepanda: ModuleType, name: str) -> 
     assert [(p.name, p.kind) for p in ours.values()] == [(p.name, p.kind) for p in yours.values()]
     for each in ours:
         assert ours[each].default == yours[each].default, each
+
+
+@pytest.mark.parametrize("is_local", [None, False, True])
+def test_the_undefined_name_error_is_built_like_pandas(
+    firepanda: ModuleType, is_local: bool | None
+) -> None:
+    """From the name and whether it was the caller's, with the same message."""
+    import pandas as pd
+
+    mine = firepanda.errors.UndefinedVariableError("x", is_local)
+    theirs = pd.errors.UndefinedVariableError("x", is_local)
+    assert str(mine) == str(theirs)
