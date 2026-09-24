@@ -4830,6 +4830,242 @@ def _square(names: list[str], cell: Callable[[int, int], float]) -> DataFrame:
     )
 
 
+_LINE_METHODS = ("linear", "time", "index", "values")
+"""The methods pandas answers with numpy's `interp`, the last three reading the index."""
+
+_SCIPY_METHODS = (
+    "nearest",
+    "zero",
+    "slinear",
+    "quadratic",
+    "cubic",
+    "barycentric",
+    "krogh",
+    "spline",
+    "polynomial",
+    "from_derivatives",
+    "piecewise_polynomial",
+    "pchip",
+    "akima",
+    "cubicspline",
+)
+"""The methods pandas hands to scipy, none of which is written here."""
+
+
+def _interpolation_direction(method: Any, direction: Any) -> str:
+    """Checks the method and works out the direction, in pandas' order.
+
+    These are the checks pandas makes once for the whole object, before it looks
+    at any column, so a method it does not know is refused even on a column of
+    text.
+
+    Raises:
+        ValueError: For a method that is not text, one pandas does not know, and
+            a direction that contradicts a fill method, with pandas' messages.
+    """
+    if not isinstance(method, str):
+        raise InvalidArgumentError("'method' should be a string, not None.")
+    if direction is None:
+        direction = "backward" if method in ("backfill", "bfill") else "forward"
+    elif method in ("pad", "ffill") and direction != "forward":
+        raise InvalidArgumentError(f"`limit_direction` must be 'forward' for method `{method}`")
+    elif method in ("backfill", "bfill") and direction != "backward":
+        raise InvalidArgumentError(f"`limit_direction` must be 'backward' for method `{method}`")
+    if method not in _LINE_METHODS + _SCIPY_METHODS:
+        raise InvalidArgumentError(f"Can not interpolate with method={method}.")
+    return direction
+
+
+def _interpolation_limits(
+    method: str, index: Any, limit: Any, direction: str, area: Any, kwargs: dict[str, Any]
+) -> tuple[str, Any]:
+    """Checks what pandas checks once it has a column it can interpolate.
+
+    Returns:
+        The direction and the area, lowered the way pandas lowers them.
+
+    Raises:
+        ValueError: With pandas' message for each of its checks.
+        NotImplementedError: For a method pandas hands to scipy, and for one that
+            reads an index of dates.
+    """
+    if method in ("spline", "polynomial") and kwargs.get("order") is None:
+        raise InvalidArgumentError("You must specify the order of the spline or polynomial.")
+    if method == "time":
+        if not str(index.dtype).startswith("datetime64"):
+            raise InvalidArgumentError(
+                "time-weighted interpolation only works on Series or DataFrames with a"
+                " DatetimeIndex"
+            )
+        raise NotImplementedError(
+            "method='time' is not supported yet, because it reads the index as"
+            " nanoseconds and the index here does not hand its dates out as numbers"
+        )
+    directions = ["forward", "backward", "both"]
+    direction = direction.lower()
+    if direction not in directions:
+        raise InvalidArgumentError(
+            f"Invalid limit_direction: expecting one of {directions}, got '{direction}'."
+        )
+    if area is not None:
+        areas = ["inside", "outside"]
+        area = area.lower()
+        if area not in areas:
+            raise InvalidArgumentError(f"Invalid limit_area: expecting one of {areas}, got {area}.")
+    if limit is not None:
+        if isinstance(limit, bool) or (not isinstance(limit, int) and not _is_numpy_int(limit)):
+            raise InvalidArgumentError("Limit must be an integer")
+        if limit < 1:
+            raise InvalidArgumentError("Limit must be greater than 0")
+    if method in _SCIPY_METHODS:
+        raise NotImplementedError(
+            f"method={method!r} is not supported yet, because pandas hands it to scipy"
+            " and firepanda has no scipy of its own"
+        )
+    return direction, area
+
+
+def _is_numpy_int(value: Any) -> bool:
+    """Whether a value is one of numpy's whole number scalars."""
+    kind = type(value)
+    return kind.__module__ == "numpy" and "int" in kind.__name__
+
+
+def _interpolation_points(column: Series, method: str, index: Any) -> Series:
+    """Where each row sits along the line: its position, or its label in `index`.
+
+    Raises:
+        TypeError: For a text index under `index` or `values`, with numpy's
+            message, since that is where pandas stops.
+        NotImplementedError: For an index that is not numbers in rising order.
+    """
+    from ._frame import Series
+
+    if method == "linear":
+        every = column.isna() | column.notna()
+        return every.astype("float64").cumsum() - 1.0
+    kind = str(index.dtype)
+    if kind in ("string", "str", "object"):
+        raise TypeError(
+            "Cannot cast array data from dtype('O') to dtype('float64') according to the"
+            " rule 'safe'"
+        )
+    if not _counts_as_numeric(kind) or kind == "bool":
+        raise NotImplementedError(
+            f"method={method!r} over an index of {kind} is not supported yet, because only"
+            " an index of numbers is read as positions along the line here"
+        )
+    if not (index.is_monotonic_increasing and index.is_unique):
+        raise NotImplementedError(
+            f"method={method!r} needs an index of numbers in rising order here, because"
+            " each gap is filled from the rows either side of it rather than by sorting"
+            " the labels first"
+        )
+    return Series(index.tolist(), index=column.index, dtype="float64")
+
+
+def _interpolated_line(
+    values: Series, points: Series, limit: Any, direction: str, area: Any
+) -> Series:
+    """Fills each gap on the line between the values either side of it.
+
+    The arithmetic is numpy's `interp`, slope first and then the distance from
+    the left end, retried from the right end where that is NaN, which is where
+    an infinity meets a finite value, so the answers agree to the last bit. A
+    gap before the first value takes the first and one after the last takes the
+    last, as `interp` clamps, and then the gaps pandas leaves are put back:
+    those more than `limit` rows from a value in the direction asked for, the
+    ones at the front for a forward fill and at the back for a backward one,
+    and the ones inside or outside the values under `limit_area`.
+
+    Every step is a whole column operation. The values have at least one gap
+    and at least one value, and the labels are unique, since the steps line
+    columns up by label.
+    """
+    here = values.notna()
+    gap = ~here
+    seen = points.where(here)
+    left_x, right_x = seen.ffill(), seen.bfill()
+    left_y, right_y = values.ffill(), values.bfill()
+    slope = (right_y - left_y) / (right_x - left_x)
+    guess = slope * (points - left_x) + left_y
+    guess = guess.where(guess.notna(), slope * (points - right_x) + right_y)
+    guess = guess.where(guess.notna() | (left_y != right_y), left_y)
+    guess = guess.where(left_x.notna(), right_y).where(right_x.notna(), left_y)
+    filled = values.where(here, guess)
+
+    rows = _interpolation_points(values, "linear", None)
+    counted = rows.where(here)
+    since, until = rows - counted.ffill(), counted.bfill() - rows
+    front, back = since.isna(), until.isna()
+    far_behind = front | (since > limit) if limit is not None else None
+    far_ahead = back | (until > limit) if limit is not None else None
+    keep: Series | None
+    if direction == "forward":
+        keep = front if far_behind is None else far_behind
+    elif direction == "backward":
+        keep = back if far_ahead is None else far_ahead
+    else:
+        keep = None if far_behind is None or far_ahead is None else far_behind & far_ahead
+    if area == "inside":
+        keep = front | back if keep is None else keep | front | back
+    elif area == "outside":
+        middle = gap & ~front & ~back
+        keep = middle if keep is None else keep | middle
+    if keep is None:
+        return filled
+    return filled.where(~(keep & gap))
+
+
+def _interpolated(
+    column: Series,
+    owner: str,
+    method: str,
+    index: Any,
+    limit: Any,
+    direction: str,
+    area: Any,
+    kwargs: dict[str, Any],
+) -> Series:
+    """One column interpolated, or refused the way pandas refuses its type.
+
+    A column that cannot hold a gap in pandas, whole numbers or flags with none,
+    comes back as it is before anything else is checked, which is pandas' order.
+    Whole numbers with a gap are floats in pandas and are read as float64 here.
+
+    Raises:
+        TypeError: For text, and for flags with a gap, which pandas holds as
+            objects, with pandas' messages.
+        NotImplementedError: For a category, as pandas refuses it, and for a
+            date, which is not written yet.
+    """
+    kind = str(column.dtype)
+    gaps = int(column.isna().sum())
+    if kind in _SIGNED or kind in _UNSIGNED or kind == "bool":
+        if gaps == 0:
+            return column
+        if kind == "bool":
+            raise TypeError(f"{owner} cannot interpolate with object dtype.")
+        values = column.astype("float64")
+    elif kind == "string":
+        raise TypeError("Cannot interpolate with str dtype")
+    elif kind == "category":
+        raise NotImplementedError("Categorical does not implement interpolate")
+    elif kind in _FLOATING:
+        values = column if kind == "float64" else column.astype("float64")
+    else:
+        raise NotImplementedError(
+            f"interpolating a {kind} column is not supported yet, because pandas reads its"
+            " values as numbers along the line and firepanda does not hand them out that way"
+        )
+    direction, area = _interpolation_limits(method, index, limit, direction, area, kwargs)
+    if gaps == 0 or gaps == len(column):
+        return column if kind in _FLOATING else values
+    points = _interpolation_points(values, method, index)
+    answer = _interpolated_line(values, points, limit, direction, area)
+    return answer.astype(kind) if kind in _FLOATING and kind != "float64" else answer
+
+
 def _narrowed(inner: Any, where: tuple[Any, ...]) -> Any:
     """Applies a row selection that has already been read to a frame.
 
@@ -7442,6 +7678,42 @@ class DataFrameMixin:
             return _square(names, lambda a, b: math.nan)
         return _square(names, lambda a, b: _covariance(columns[a], columns[b], None, ddof))
 
+    def _interpolate(
+        self,
+        method: Any,
+        axis: Any,
+        limit: Any,
+        inplace: Any,
+        limit_direction: Any,
+        limit_area: Any,
+        kwargs: dict[str, Any],
+    ) -> DataFrame:
+        """Each column's gaps filled on the line between the values either side.
+
+        A column pandas leaves alone, whole numbers or flags with no gap, is
+        left alone here too, and the first column pandas refuses stops the call.
+        """
+        keep = _flag("inplace", inplace)
+        _transforming_axis(axis, "DataFrame")
+        frame = cast("DataFrame", self)
+        if frame.empty:
+            return _kept(frame, frame.copy(), keep)
+        direction = _interpolation_direction(method, limit_direction)
+        index = frame.index
+        work = frame if index.is_unique else frame.reset_index(drop=True)
+        changed = {}
+        for name in work.columns:
+            column = work[name]
+            answer = _interpolated(
+                column, "DataFrame", method, index, limit, direction, limit_area, kwargs
+            )
+            if answer is not column:
+                changed[name] = answer
+        out = work.assign(**changed) if changed else work.copy()
+        if work is not frame:
+            out = _with_row_labels(out, index.tolist()).rename_axis(index.name)
+        return _kept(frame, out, keep)
+
     def _nunique(self, axis: Any, dropna: bool) -> Series:
         """Counts the distinct values in every column.
 
@@ -10050,6 +10322,36 @@ class SeriesMixin:
     def _autocorr(self, lag: int) -> float:
         """The correlation with the column moved `lag` rows along, as pandas writes it."""
         return self._corr(cast("Any", self).shift(lag), "pearson", None)
+
+    def _interpolate(
+        self,
+        method: Any,
+        axis: Any,
+        limit: Any,
+        inplace: Any,
+        limit_direction: Any,
+        limit_area: Any,
+        kwargs: dict[str, Any],
+    ) -> Series:
+        """The gaps filled on the line between the values either side of each.
+
+        The steps line columns up by label, so a column whose labels repeat is
+        worked on by position and given its labels back afterwards.
+        """
+        keep = _flag("inplace", inplace)
+        _axis_number(axis, "Series", 0, (0,))
+        column = cast("Series", self)
+        if len(column) == 0:
+            return _kept(column, column.copy(), keep)
+        direction = _interpolation_direction(method, limit_direction)
+        index = column.index
+        work = column if index.is_unique else column.reset_index(drop=True)
+        answer = _interpolated(work, "Series", method, index, limit, direction, limit_area, kwargs)
+        if answer is work:
+            return _kept(column, column.copy(), keep)
+        if work is not column:
+            answer = _with_row_labels(answer, index.tolist()).rename_axis(index.name)
+        return _kept(column, answer.rename(column.name), keep)
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
         """Runs the quantile over the whole column.

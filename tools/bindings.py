@@ -2176,6 +2176,24 @@ def _transformations(py: str) -> tuple[Member, ...]:
             )
         )
 
+    out.append(
+        Member(
+            name="interpolate",
+            kind="method",
+            signature=(
+                'method: Any = "linear", *, axis: Any = 0, limit: Any = None,'
+                " inplace: bool = False, limit_direction: Any = None,"
+                " limit_area: Any = None, **kwargs: Any"
+            ),
+            body=(
+                "self._interpolate(method, axis, limit, inplace, limit_direction,"
+                " limit_area, kwargs)"
+            ),
+            doc=f"The {this} with each gap filled on the line between the values either side.",
+            returns=gives,
+        )
+    )
+
     shift = (
         "periods: Any = 1, freq: Any = None, axis: Any = 0,"
         " fill_value: Any = NO_DEFAULT, suffix: Any = None"
