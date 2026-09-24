@@ -76,7 +76,8 @@ from .ast import (
     EXPR_UNARY,
     EXPR_WINDOW,
     NO_NODE,
-    call_sorts,
+    CALL_FILTER,
+    call_arity,
 )
 from .catalog import fold
 
@@ -237,9 +238,12 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         # are statement nodes, not expression ones, so they stop here the way a
         # window's `ORDER BY` stops at `EXPR_WINDOW` below. Nothing downstream
         # misses them, because a call carrying any is refused in lowering.
-        var count = ast.length(item.children) - call_sorts(item.a)
-        for i in range(count):
+        var length = ast.length(item.children)
+        for i in range(call_arity(item.a, length)):
             out.append(ast.at(item.children, i))
+        if item.a & CALL_FILTER != 0:
+            # A `FILTER` the transformer kept is an expression and is last.
+            out.append(ast.at(item.children, length - 1))
         out.append(item.b)
         return out^
     if kind == EXPR_CASE:
@@ -314,7 +318,7 @@ def check_nesting(ast: Ast, node: UInt32) raises:
             if is_aggregate(ast.text(ast.at(item.payload, 0))):
                 # The arguments and not the whole run, since the call's own
                 # `ORDER BY` entries live behind them and are statement nodes.
-                var count = ast.length(item.children) - call_sorts(item.a)
+                var count = call_arity(item.a, ast.length(item.children))
                 for i in range(count):
                     var inner = inspect(ast, ast.at(item.children, i))
                     if inner.aggregate:

@@ -10,6 +10,8 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- A `FILTER` on a call it cannot be rewritten into, such as `list(i ORDER BY i) FILTER (WHERE i > 1)`, `first(x) FILTER (...)` or a macro like `my_sum(i) FILTER (...) OVER ()`, now parses and prints back as it was written instead of being refused by the transformer. The clause stays on the call in the AST, behind the call's own `ORDER BY`, and the plan refuses it by name there. A filter on an ordinary fold is still a `CASE` around its argument and runs as before.
+
 - `x = ANY ([1, 2])` and `x > ALL ([1, 2])`, a quantified comparison over a list written out, which DuckDB unnests. `ANY` becomes one comparison per item joined by OR and `ALL` joins them with AND, so a null in the list gives the same three-valued answer DuckDB gives, and an empty list answers false for `ANY` and true for `ALL`. The form now also parses and prints back when the right side is not written out, such as a list column, and only the plan refuses it there.
 
 - `JOIN BY (TYPE t)`, the spelling DuckDB gives its internal join types, for the six that are ordinary joins: inner, left, right, full (or outer), semi and anti, with an optional `_join` on the end and in any case. Each one builds and prints as the regular join it names. The mark, single, right_semi and right_anti types are still refused by name, and a name that is no join type at all is a parser error that says so.

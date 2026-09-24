@@ -698,32 +698,52 @@ def test_a_filter_keeps_the_distinct_and_the_window_beside_it() raises:
     )
 
 
-def test_a_filter_on_something_it_cannot_be_rewritten_into_refuses() raises:
+def test_a_filter_that_cannot_be_rewritten_is_kept_as_written() raises:
+    # A name that is not a fold, a fold that keeps a null, or a fold of two
+    # arguments that is not in `WRAPS_FIRST` has no `CASE` that answers the same
+    # thing, so the clause stays on the call and prints back. Lowering is what
+    # turns these down.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="FILTER on upper"):
-        _ = _printed("upper(a) FILTER (WHERE b > 1)", g, rules)
-    with assert_raises(contains="FILTER on first"):
-        _ = _printed("first(a) FILTER (WHERE b > 1)", g, rules)
-    with assert_raises(contains="FILTER on last"):
-        _ = _printed("last(a) FILTER (WHERE b > 1)", g, rules)
-    with assert_raises(contains="FILTER on arg_min_null"):
-        _ = _printed("arg_min_null(a, b) FILTER (WHERE b > 1)", g, rules)
-    with assert_raises(contains="FILTER on my_sum"):
-        _ = _printed("my_sum(a, b) FILTER (WHERE b > 1)", g, rules)
+    assert_equal(
+        _printed("upper(a) FILTER (WHERE b > 1)", g, rules),
+        "upper(a) FILTER (WHERE (b > 1))",
+    )
+    assert_equal(
+        _printed("first(a) FILTER (WHERE b > 1)", g, rules),
+        "first(a) FILTER (WHERE (b > 1))",
+    )
+    assert_equal(
+        _printed("arg_min_null(a, b) FILTER (b > 1)", g, rules),
+        "arg_min_null(a, b) FILTER (WHERE (b > 1))",
+    )
+    assert_equal(
+        _printed("my_sum(a, b) FILTER (WHERE b > 1) OVER ()", g, rules),
+        "my_sum(a, b) FILTER (WHERE (b > 1)) OVER ()",
+    )
 
 
-def test_a_filter_on_a_fold_that_keeps_a_null_refuses() raises:
-    # DuckDB answers [2, 3] for the filter and [NULL, 2, NULL, 3] for the
-    # `CASE`, so these used to be rewritten into a different question.
+def test_a_kept_filter_sits_behind_the_call_order_by() raises:
+    # The predicate is the last entry of the run, so the sort entries in front
+    # of it still print as the call's own and the clause comes after them.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="FILTER on list"):
-        _ = _printed("list(a) FILTER (WHERE a > 1)", g, rules)
-    with assert_raises(contains="FILTER on array_agg"):
-        _ = _printed("array_agg(a) FILTER (WHERE a > 1)", g, rules)
-    with assert_raises(contains="FILTER on arbitrary"):
-        _ = _printed("arbitrary(a) FILTER (WHERE a > 1)", g, rules)
+    assert_equal(
+        _printed("list(a ORDER BY a DESC) FILTER (WHERE a > 1)", g, rules),
+        "list(a ORDER BY a DESC) FILTER (WHERE (a > 1))",
+    )
+    assert_equal(
+        _printed("array_agg(DISTINCT a) FILTER (WHERE a > 1)", g, rules),
+        "array_agg(DISTINCT a) FILTER (WHERE (a > 1))",
+    )
+    assert_equal(
+        _printed(
+            "arbitrary(a) WITHIN GROUP (ORDER BY b) FILTER (WHERE a > 1)",
+            g,
+            rules,
+        ),
+        "arbitrary(a) WITHIN GROUP (ORDER BY b) FILTER (WHERE (a > 1))",
+    )
 
 
 def test_a_filter_on_a_fold_of_two_arguments_wraps_the_first() raises:

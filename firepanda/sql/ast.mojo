@@ -95,7 +95,9 @@ qualification. `children` is a run of argument expressions with the call's own
 `ORDER BY` entries on the end of it. `a` holds the `CALL_` flags and the count
 of those entries, packed by `call_tags` and read back by `call_flags` and
 `call_sorts`. `b` is the `EXPR_WINDOW` the `OVER` names, and is 0 for a call
-with no `OVER` on it, which is most of them.
+with no `OVER` on it, which is most of them. A `FILTER` the transformer could
+not fold into the arguments is the last thing in the run, after the sort
+entries, and `CALL_FILTER` says it is there.
 
 An operator is not one of these even where the grammar spells it as one. The
 printer has to know that `+` goes between its operands and `f` goes before
@@ -606,6 +608,16 @@ transformer sees it, so what reaches here is a dot on something that cannot be a
 name at all.
 """
 
+comptime CALL_FILTER: UInt32 = 128
+"""`f(x) FILTER (WHERE p)`, with `p` the last entry of the argument run.
+
+Most filters never get here. The transformer puts the predicate under the
+argument as a `CASE` wherever that answers the same thing, and this flag is for
+the calls where it would not, `list(x) FILTER (WHERE p)` or a macro the catalog
+defines. Keeping the clause lets the printer hand the query back as it was
+written, and lowering is where such a call is turned down.
+"""
+
 
 comptime _CALL_FLAG_FIELD: UInt32 = 0xFFFF
 """The half of a call's `a` the flags live in."""
@@ -643,6 +655,24 @@ def call_flags(tags: UInt32) -> UInt32:
         A bit set of the `CALL_` constants.
     """
     return tags & _CALL_FLAG_FIELD
+
+
+def call_arity(tags: UInt32, length: Int) -> Int:
+    """Reads how many entries of a call's run are its arguments.
+
+    The run holds the arguments, then the sort entries, then the `FILTER`
+    predicate if there is one, so what is left after the last two are taken off
+    is the arguments.
+
+    Args:
+        tags: An `EXPR_FUNCTION` `a`.
+        length: How long the call's `children` run is.
+
+    Returns:
+        How many entries at the front of the run are arguments.
+    """
+    var filtered = 1 if tags & CALL_FILTER != 0 else 0
+    return length - call_sorts(tags) - filtered
 
 
 def call_sorts(tags: UInt32) -> Int:
