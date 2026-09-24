@@ -281,6 +281,51 @@ side. A span also has to stay under half the probe height, so a small probe side
 never pays for zeroing a table larger than itself.
 """
 
+comptime SIEVE_SPAN = 1 << 26
+"""The widest value range a hashed build side keeps a bit per value for.
+
+A join whose build side is too spread out for a table indexed by value still
+knows its range, and one bit per value in that range answers "not here" for most
+probe rows without hashing them or touching the table. That is the case in TPC-H
+q5, where forty six thousand orders are probed by six million lines and all but
+three percent of the lines miss. The table lookup on a miss ends on an empty slot
+or on a slot holding some other key, which at a load of a half is close to a coin
+toss and so a branch the processor gets wrong a lot. A bit test on a mostly empty
+sieve is a branch it gets right.
+
+Eight megabytes of bits. The sieve is also kept only when it is no larger than
+the hash table it guards, so this cap is reached only by a build side of a
+quarter of a million keys or more, and past it a sieve is a cache miss of its own
+in front of the table's.
+
+Measured on an M-series laptop, ten million probe rows, best of seven, the probe
+rows either spread evenly over the range, so that nearly all of them miss, or all
+drawn from the build side's keys:
+
+| range | build keys | probe rows | plain | with the sieve |
+| --- | --- | --- | --- | --- |
+| 1M | 20K | spread | 17.5 ms | 4.7 ms |
+| 1M | 20K | all hit | 8.7 to 9.5 ms | 8.7 to 9.5 ms |
+| 64M | 200K | spread | 22.3 ms | 6.5 ms |
+| 64M | 200K | all hit | 11.5 to 14.1 ms | 14.4 to 15.3 ms |
+
+The last row is the worst case the size rule lets through, a sieve exactly as
+large as its table and a probe side where every row hits, and it costs a few
+milliseconds against a win of more than three times on the row above it. A
+sieve larger than its table is not kept at all.
+"""
+
+comptime SIEVE_SHARE = 4
+"""How many values per build key the range has to span before a sieve is kept.
+
+A build side that fills more than a quarter of its range lets a quarter of the
+misses through anyway, and a join like that is usually a foreign key join where
+nearly every probe row hits, which is the case the sieve can only slow down. The
+probe also stops asking the sieve for the rest of a morsel once a chunk of it
+lets more than half its rows through, so a sieve that turns out useless costs one
+chunk in sixty four rather than every row.
+"""
+
 comptime PROBE_MORSEL_ROWS = 1 << 16
 """Probe rows a worker takes at a time.
 
@@ -972,14 +1017,17 @@ struct BuildSide(Movable):
     """Whether the key value indexes the table, rather than its hash."""
 
     var seats: Buffer
-    """The direct route's slots, four bytes each, or an empty buffer.
+    """The direct route's slots, four bytes each, or the hashed route's sieve,
+    a bit per value, or an empty buffer.
 
-    Holds the ordinal plus one, so a zero left by the allocation means the slot
-    was never filled and no initializing pass is needed.
+    The direct route holds the ordinal plus one, so a zero left by the
+    allocation means the slot was never filled and no initializing pass is
+    needed. The sieve has a bit set for every value the build side holds, from
+    `base` up; see `SIEVE_SPAN`.
     """
 
     var span: Int
-    """How many slots `seats` has, or zero."""
+    """How many slots or bits `seats` has, or zero."""
 
     var base: UInt64
     """The bits of the key value that indexes slot zero, or zero.
@@ -1147,12 +1195,53 @@ def build_side[
             DIRECT_LIMIT,
             min(probe_rows // 2, DIRECT_PROBE_SPAN),
         )
-        var plan = direct_plan[dt](build, ceiling)
-        if plan.span >= 0:
+        var plan = direct_plan[dt](build, max(ceiling, SIEVE_SPAN))
+        if plan.span >= 0 and plan.span <= ceiling:
             return _build_direct[dt](
                 build, build_at, plan.span, plan.base, codes
             )
+        var built = _build_hashed[dt](build, build_at, codes)
+        # Worth keeping when most of the range is values the build side does
+        # not hold, and only when the bits are no larger than the table they
+        # stand in front of, so the sieve never costs more to fill than the
+        # table did.
+        if (
+            plan.span >= 0
+            and len(build) * SIEVE_SHARE <= plan.span
+            and plan.span // 8 <= built.table.capacity() * 16
+        ):
+            built.seats = _sieve[dt](build, plan.span, plan.base)
+            built.span = plan.span
+            built.base = plan.base.cast[DType.uint64]()
+        return built^
     return _build_hashed[dt](build, build_at, codes)
+
+
+def _sieve[dt: DType](build: Array[dt], span: Int, low: Scalar[dt]) -> Buffer:
+    """Sets a bit for every value the build side holds, from `low` up.
+
+    Args:
+        build: The build side's key column.
+        span: How many values the bits cover.
+        low: The value bit zero stands for.
+
+    Parameters:
+        dt: The key dtype.
+
+    Returns:
+        The bits, a word per sixty four values.
+    """
+    var sieve = Buffer(((span + 63) >> 6) * 8)
+    var bits = sieve.mut_bitcast[DType.uint64]()
+    var values = build.unsafe_ptr()
+    var build_nulls = build.null_count() > 0
+    for i in range(len(build)):
+        if build_nulls and not build.data.validity.get(i):
+            continue
+        var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(low)
+        var word = bits.unsafe_offset(at >> 6)
+        word.unsafe_write(word.unsafe_load() | (UInt64(1) << UInt64(at & 63)))
+    return sieve^
 
 
 def _build_direct[
@@ -1348,6 +1437,18 @@ def probe_side[
             codes,
             spread,
         )
+    elif built.span > 0:
+        _probe_sieved[dt](
+            built.table,
+            built.seats,
+            built.base.cast[dt](),
+            built.span,
+            built.miss,
+            probe,
+            probe_at,
+            codes,
+            spread,
+        )
     else:
         _probe_hashed[dt](
             built.table, built.miss, probe, probe_at, codes, spread
@@ -1409,6 +1510,88 @@ def _probe_direct[
             into.unsafe_offset(to).unsafe_write(
                 miss if stored == 0 else stored - 1
             )
+
+    if spread and probe_rows >= PARALLEL_PROBE_ROWS:
+        parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
+    else:
+        look(0, probe_rows)
+
+
+def _probe_sieved[
+    dt: DType
+](
+    table: HashTable,
+    sieve: Buffer,
+    low: Scalar[dt],
+    span: Int,
+    miss: UInt32,
+    probe: Array[dt],
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+    spread: Bool = True,
+) raises:
+    """`_probe_hashed` with the build side's bits asked first.
+
+    Each morsel starts out asking the bits and gives up on them after the first
+    chunk where more than half its rows got through, and from there it probes
+    the table the way `_probe_hashed` does. A join whose rows mostly hit pays
+    for one chunk of bit tests a morsel and no more.
+
+    Args:
+        table: The table the build side filled.
+        sieve: A bit per value the build side holds.
+        low: The value bit zero stands for.
+        span: How many values the sieve covers.
+        miss: The ordinal for a row that matches nothing.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core.
+
+    Parameters:
+        dt: The key dtype.
+
+    Raises:
+        Error: If the parallel probe raises.
+    """
+    var probe_rows = len(probe)
+    var probe_nulls = probe.null_count() > 0
+
+    def look(start: Int, stop: Int) raises {mut codes, imm}:
+        var scratch = Buffer(CHUNK_ROWS * 8)
+        var sieving = True
+        var here = start
+        while here < stop:
+            var count = min(CHUNK_ROWS, stop - here)
+            hash_chunk(probe, here, count, DEFAULT_SEED, scratch)
+            if sieving:
+                var passed = table.probe_sieved[dt](
+                    scratch,
+                    probe,
+                    sieve,
+                    low,
+                    span,
+                    probe_nulls,
+                    here,
+                    count,
+                    probe_at,
+                    miss,
+                    codes,
+                )
+                sieving = passed * 2 <= count
+            else:
+                table.probe(
+                    scratch,
+                    probe.data.validity,
+                    probe_nulls,
+                    here,
+                    count,
+                    probe_at,
+                    miss,
+                    codes,
+                )
+            here += count
+        _ = scratch^
 
     if spread and probe_rows >= PARALLEL_PROBE_ROWS:
         parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)

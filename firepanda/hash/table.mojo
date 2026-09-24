@@ -655,6 +655,88 @@ struct HashTable(Movable, Sized):
                     break
                 at = (at + 1) & mask
 
+    def probe_sieved[
+        dt: DType
+    ](
+        self,
+        hashes: Buffer,
+        keys: Array[dt],
+        sieve: Buffer,
+        low: Scalar[dt],
+        span: Int,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        out_at: Int,
+        miss: UInt32,
+        mut codes: Array[DType.uint32],
+    ) -> Int:
+        """`probe` with a bit per key value in front of the table.
+
+        Args:
+            hashes: Hashes for this chunk, indexed from zero.
+            keys: The probe column, indexed by absolute row.
+            sieve: One bit per value from `low` over `span` values, set for
+                every value the build side holds.
+            low: The value bit zero stands for.
+            span: How many values the sieve covers.
+            has_null: Whether the probe column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            out_at: Added to the row index to get where in `codes` it goes.
+            miss: The ordinal written for a row whose key is not in the table.
+            codes: Where the per-row ordinals go, indexed by absolute row.
+
+        Returns:
+            How many rows the bits let through to the table.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var out = codes.unsafe_mut_ptr()
+        var slots = self._slots.bitcast[DType.uint64]()
+        var bits = sieve.bitcast[DType.uint64]()
+        var passed = 0
+        var values = keys.unsafe_ptr()
+        var mask = self._mask
+
+        for j in range(count):
+            var i = base + j
+            var to = out_at + i
+            var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(low)
+            if (
+                at < 0
+                or at >= span
+                or (
+                    bits.unsafe_offset(at >> 6).unsafe_load() >> UInt64(at & 63)
+                )
+                & 1
+                == 0
+                or (has_null and not keys.data.validity.get(i))
+            ):
+                out.unsafe_offset(to).unsafe_write(miss)
+                continue
+
+            passed += 1
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var slot_at = wanted & mask
+            while True:
+                var slot = Int(slot_at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    out.unsafe_offset(to).unsafe_write(miss)
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    out.unsafe_offset(to).unsafe_write(UInt32(Int(ordinal) - 1))
+                    break
+                slot_at = (slot_at + 1) & mask
+        return passed
+
     def probe_strings(
         self,
         hashes: Buffer,

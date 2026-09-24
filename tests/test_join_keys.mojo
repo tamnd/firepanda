@@ -58,7 +58,13 @@ from std.testing import (
 from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
 from firepanda.array.strings import StringArray, StringBuilder
-from firepanda.join.keys import KeyAlignment, align_keys, build_side, probe_side
+from firepanda.join.keys import (
+    KeyAlignment,
+    _build_hashed,
+    align_keys,
+    build_side,
+    probe_side,
+)
 
 
 def ints(values: List[Scalar[DType.int64]]) -> Array[DType.int64]:
@@ -811,6 +817,85 @@ def test_a_large_probe_side_pays_for_a_wide_table_indexed_by_value() raises:
             break
     assert_equal(bad, -1, String("row ", bad))
     assert_equal(Int(many[4]), direct.groups() - 1, "the five found nothing")
+
+
+def sieve_keys() -> Array[DType.int64]:
+    """A thousand keys a hundred apart, from 1000 to 100900.
+
+    Too spread out for a table indexed by value with no probe height given, and
+    close enough together that a bit per value is smaller than the hash table,
+    so this build side keeps a sieve.
+    """
+    var keys = List[Scalar[DType.int64]]()
+    for i in range(1000):
+        keys.append(Int64(1000 + i * 100))
+    return ints(keys^)
+
+
+def same_codes(want: Array[DType.uint32], got: Array[DType.uint32]) -> Int:
+    """The first row the two disagree on, or -1."""
+    for i in range(len(want)):
+        if want[i] != got[i]:
+            return i
+    return -1
+
+
+def test_a_sieved_table_answers_what_the_plain_one_does() raises:
+    # Hits, a value inside the range the build side does not hold, a value
+    # under the range, one over it, and a null whose zero would be under it.
+    var probe = ints([1000, 1050, 100900, 999, 100901, 50000, 0, 1100, -5])
+    probe.set_null(6)
+    var rows = len(probe) + 1000
+
+    var plain = Array[DType.uint32](overwritten=rows)
+    var hashed = _build_hashed[DType.int64](sieve_keys(), 0, plain)
+    probe_side[DType.int64](hashed, probe, 1000, plain)
+
+    var codes = Array[DType.uint32](overwritten=rows)
+    var built = build_side[DType.int64](sieve_keys(), 0, codes)
+    assert_true(not built.direct and built.span > 0, "kept a sieve")
+    probe_side[DType.int64](built, probe, 1000, codes)
+
+    var bad = same_codes(plain, codes)
+    assert_equal(bad, -1, String("row ", bad))
+    assert_equal(Int(codes[1001]), built.groups() - 1, "1050 is not a key")
+    assert_equal(Int(codes[1006]), built.groups() - 1, "the null row")
+
+
+def test_a_sieve_that_lets_everything_through_still_answers() raises:
+    # Every probe row is a key, so the probe gives up on the bits after the
+    # first chunk of each morsel. Long enough to cross chunks and to split
+    # across cores, and asked both ways.
+    var values = List[Scalar[DType.int64]]()
+    for i in range(300_000):
+        values.append(Int64(1000 + (i * 7919 % 1000) * 100))
+    var probe = ints(values^)
+    var rows = len(probe) + 1000
+
+    var plain = Array[DType.uint32](overwritten=rows)
+    var hashed = _build_hashed[DType.int64](sieve_keys(), 0, plain)
+    probe_side[DType.int64](hashed, probe, 1000, plain)
+
+    for spread in [True, False]:
+        var codes = Array[DType.uint32](overwritten=rows)
+        var built = build_side[DType.int64](sieve_keys(), 0, codes)
+        assert_true(built.span > 0, "kept a sieve")
+        probe_side[DType.int64](built, probe, 1000, codes, spread)
+        var bad = same_codes(plain, codes)
+        assert_equal(bad, -1, String("row ", bad, " spread ", spread))
+
+
+def test_keys_that_fill_their_range_keep_no_sieve() raises:
+    # Forty thousand keys two apart span eighty thousand values, too wide for a
+    # table indexed by value, and fill half of that range. A sieve would let
+    # half the misses through, so the build side does not keep one.
+    var keys = List[Scalar[DType.int64]]()
+    for i in range(40_000):
+        keys.append(Int64(i * 2))
+    var codes = Array[DType.uint32](overwritten=40_000)
+    var built = build_side[DType.int64](ints(keys^), 0, codes)
+    assert_true(not built.direct, "too wide to index by value")
+    assert_equal(built.span, 0, "no sieve")
 
 
 def test_a_probe_of_nothing_leaves_the_table_ready_for_the_next_one() raises:
