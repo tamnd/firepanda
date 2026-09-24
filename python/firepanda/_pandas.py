@@ -6231,6 +6231,47 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def melt(
+        self,
+        id_vars: Any = None,
+        value_vars: Any = None,
+        var_name: Any = None,
+        value_name: Any = "value",
+        col_level: Any = None,
+        ignore_index: bool = True,
+    ) -> DataFrame:
+        """The frame turned long: one row for every row and every value column.
+
+        The id columns repeat once for every value column, the new `var_name`
+        column holds the name of the column a row came from, and `value_name`
+        holds its value, the value columns stacked one after another. With
+        `ignore_index=False` the row labels repeat along with the id columns.
+        The value columns are stacked with `concat`, so they widen the way
+        pandas widens them, and a mix pandas answers with an object column is
+        refused there.
+
+        Args:
+            id_vars: The columns kept as they are, one name or a list.
+            value_vars: The columns stacked, one name or a list. By default
+                every column that is not an id column.
+            var_name: The name of the column of names. By default the column
+                labels' own name, or `variable`.
+            value_name: The name of the column of values.
+            col_level: Only 0 or None, since there is one level of columns.
+            ignore_index: Number the rows from zero rather than repeating the
+                row labels.
+
+        Returns:
+            The long frame.
+
+        Raises:
+            KeyError: For an id or value column the frame does not have.
+            InvalidArgumentError: When `value_name` names a column of the frame.
+            NotImplementedError: For a column level other than 0, or a name
+                that would appear twice in the answer.
+        """
+        return _melt(self, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
+
     def rename_axis(
         self,
         mapper: Any = NO_DEFAULT,
@@ -14576,6 +14617,108 @@ MERGE_KEY = "\x00firepanda merge key"
 
 MERGE_LABELS = "\x00firepanda merge labels"
 """The column that carries a side's row labels through a join to the answer."""
+
+
+def melt(
+    frame: DataFrame,
+    id_vars: Any = None,
+    value_vars: Any = None,
+    var_name: Any = None,
+    value_name: Any = "value",
+    col_level: Any = None,
+    ignore_index: bool = True,
+) -> DataFrame:
+    """The frame turned long, the way `pandas.melt` does. See `DataFrame.melt`."""
+    return _melt(frame, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
+
+
+def _listed(names: Any) -> list[Any]:
+    """One column name or several as a list, and None as no names."""
+    if names is None:
+        return []
+    if isinstance(names, (list, tuple)) or hasattr(names, "tolist"):
+        return list(names)
+    return [names]
+
+
+def _melt(
+    frame: DataFrame,
+    id_vars: Any,
+    value_vars: Any,
+    var_name: Any,
+    value_name: Any,
+    col_level: Any,
+    ignore_index: bool,
+) -> DataFrame:
+    """`melt`, one frame a value column stacked with `concat`.
+
+    Each value column becomes a frame of the id columns, the column's name and
+    its values, and the frames go one after another. The row labels ride along
+    in a column when they are kept, so labels that repeat are carried the way
+    they are.
+    """
+    from ._frame import Series
+
+    _refuse(
+        "col_level",
+        None if col_level == 0 else col_level,
+        "firepanda's columns have one level, so there is no other level to melt",
+    )
+    columns = list(frame.columns)
+    ids = _listed(id_vars)
+    values = _listed(value_vars)
+    missing = [name for name in ids + values if name not in columns]
+    if missing:
+        raise KeyError(
+            f"The following id_vars or value_vars are not present in the DataFrame: {missing}"
+        )
+    if value_name in columns:
+        raise InvalidArgumentError(
+            f"value_name ({value_name}) cannot match an element in the DataFrame columns."
+        )
+    if value_vars is None or not (ids or values):
+        # pandas melts every column that is not an id when no value column is
+        # named, and an empty list with no ids too.
+        values = [name for name in columns if name not in ids]
+    else:
+        values = [name for name in values if name not in ids]
+    if var_name is None:
+        var_name = getattr(frame.columns, "name", None) or "variable"
+    label = "__firepanda_label__"
+    keep = ids if ignore_index else [label, *ids]
+    if len({*keep, var_name, value_name}) < len(keep) + 2:
+        raise NotImplementedError(
+            f"melt: the answer would have two columns called {var_name!r} or {value_name!r},"
+            " and a firepanda frame's column names are distinct"
+        )
+    flags = [str(frame[name].dtype) == "bool" for name in values]
+    if any(flags) and not all(flags):
+        # pandas stacks the columns as arrays, where a flag beside a number is
+        # an object column, rather than as frames, where it is a number.
+        raise NotImplementedError(
+            "melt: stacking a bool column with a column of another type gives pandas'"
+            " object column, and firepanda has no object column"
+        )
+    plain = frame.reset_index(drop=True) if ignore_index else _with_labels(frame, label)
+    if values:
+        out = concat(
+            [plain[keep].assign(**{var_name: name, value_name: plain[name]}) for name in values],
+            ignore_index=True,
+        )
+    else:
+        out = (
+            plain[keep]
+            .head(0)
+            .assign(
+                **{
+                    var_name: Series([], dtype="string"),
+                    value_name: Series([], dtype="float64"),
+                }
+            )
+        )
+    if not ignore_index:
+        out = out.set_index(label).rename_axis(frame.index.name)
+    return out
 
 
 def _with_labels(frame: DataFrame, name: str) -> DataFrame:
