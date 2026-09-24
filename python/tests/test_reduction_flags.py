@@ -197,3 +197,24 @@ def test_dropna_refuses_how_and_thresh_together(firepanda: ModuleType) -> None:
     """Which pandas checks before it looks at either one."""
     with pytest.raises(TypeError, match="both the how and thresh"):
         firepanda.DataFrame(FRAME).dropna(how="all", thresh=1)
+
+
+@pytest.mark.parametrize("name", ["sum", "prod", "min", "max"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"a": [1, 2], "b": [float("inf"), -float("inf")]},
+        {"a": [1.0, 2.0], "b": [None, None]},
+        {"a": [None, None], "b": [None, None]},
+    ],
+    ids=["inf-minus-inf", "one-empty-column", "all-empty"],
+)
+def test_the_whole_frame_keeps_a_nan_the_arithmetic_made(
+    firepanda: ModuleType, name: str, data: dict[str, list[Any]]
+) -> None:
+    """A NaN a column's own total made is the answer, and an empty column is skipped."""
+    import pandas as pd
+
+    mine = getattr(firepanda.DataFrame(data, dtype="float64"), name)(axis=None)
+    theirs = getattr(pd.DataFrame(data, dtype="float64"), name)(axis=None)
+    assert same(mine, float(theirs))
