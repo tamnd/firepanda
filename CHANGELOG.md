@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.30] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. The Parquet read can now keep a string column that repeats as int32 codes into its distinct values, behind `Session.run(encode_strings=True)`, and it codes each group of rows as it arrives, so on TPC-H sf1 lineitem the frame is 813 MB instead of 1150 and the peak of the read is 2.39 GB instead of 2.80. The dtype still says string. The four `str_` tests on a series read such a column once per distinct value, and with those in, all 22 TPC-H queries in firepanda-bench give the same answers encoded as flat. The option stays off by default until the kernels outside the bench learn the encoding too. On the pandas side, a series answers `value_counts`, `mode`, `idxmax`, `idxmin`, `argmax`, `argmin` and `between`, and `&`, `|` and `^` work on boolean series and frames. SQL reads `ANY` and `ALL` over a written list, `JOIN BY (TYPE t)`, and keeps a `FILTER` it cannot rewrite instead of refusing it while parsing. The 0.8.29 shortcut that answered a sum of a column and a constant from one sum and one count is taken out again.
+
 ### Changed: an encoding Parquet read turns each group into codes as it arrives
 
 With `encode_strings` on, each string column now goes through a `RepeatEncoder` (in `kernel/dictionary.mojo`) one group of rows at a time. Before, it was encoded after the whole read had been stacked. The first group decides, on a 64K row sample and then the whole group, and every later group is coded against one growing list of distinct values, so a code handed out early still means the same value at the end. If a column breaks the sixteen rows a value rule part way through, the groups encoded so far are decoded back and the rest of the column is read flat. The answer is the same column either way. On TPC-H sf1 lineitem the peak of the read went from 2.80 GB flat, and 2.58 GB with the old encoding at the end, to 2.39 GB on a six core Linux machine, with the frame at 813 MB against 1150 as before (#979).
@@ -9378,7 +9384,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.29...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.30...HEAD
+[0.8.30]: https://github.com/tamnd/firepanda/releases/tag/v0.8.30
 [0.8.29]: https://github.com/tamnd/firepanda/releases/tag/v0.8.29
 [0.8.28]: https://github.com/tamnd/firepanda/releases/tag/v0.8.28
 [0.8.27]: https://github.com/tamnd/firepanda/releases/tag/v0.8.27
