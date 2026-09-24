@@ -5812,6 +5812,49 @@ def _shared_name(one: Any, two: Any) -> Any:
     return one.name if one.name == two.name else None
 
 
+def _function_name(func: Any) -> Any:
+    """The label pandas gives a function in a list of them, its name."""
+    return func if isinstance(func, str) else getattr(func, "__name__", func)
+
+
+def _method_named(owner: Any, func: str, kind: str) -> Any:
+    """The method a function is named for, with pandas' words for no such method.
+
+    Raises:
+        AttributeError: When the owner has no method of that name.
+    """
+    found = getattr(owner, func, None)
+    if found is None or not callable(found):
+        raise AttributeError(f"'{func}' is not a valid function for '{kind}' object")
+    return found
+
+
+def _gathered(results: list[Any], labels: list[Any], stack: Any, name: Any = None) -> Any:
+    """What a function on each column or row answered, put together the way pandas does.
+
+    Values become a column labelled by `labels`. Columns become a frame, one
+    column per label when `stack` is None, and one row per label, with `stack`
+    as the column labels, when it is the rows that were walked.
+    """
+    from ._frame import DataFrame, Series
+
+    if not all(hasattr(result, "index") and hasattr(result, "tolist") for result in results):
+        return Series(_readable(results), index=labels, name=name)
+    if stack is None:
+        return DataFrame(dict(zip(labels, results, strict=True)))
+    rows = [result.tolist() for result in results]
+    return DataFrame(rows, index=labels, columns=results[0].index.tolist() if results else stack)
+
+
+def _padded(pieces: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
+    """Columns of different lengths made the longest length, NaN after the end."""
+    longest = max((len(values) for values in pieces.values()), default=0)
+    return {
+        name: _readable([*values, *([math.nan] * (longest - len(values)))])
+        for name, values in pieces.items()
+    }
+
+
 _SPANS = re.compile(r"(datetime|timedelta)64\[(s|ms|us|ns)\]")
 """The types numpy holds as counts of a unit, instants with no zone and spans."""
 
@@ -6466,6 +6509,161 @@ class DataFrameMixin:
         """Each row label with its row as a column named by the label."""
         for position, label in enumerate(self.index.tolist()):
             yield label, self.iloc[position]
+
+    def apply(
+        self,
+        func: Any,
+        axis: Any = 0,
+        raw: bool = False,
+        result_type: Any = None,
+        args: Any = (),
+        by_row: Any = "compat",
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """A function on each column, or on each row with `axis=1`.
+
+        A function that answers a value for each gives a column of them, and one
+        that answers a column for each gives a frame. A name, a list of names or
+        a dict is `agg`. The function runs in Python, as it does in pandas.
+
+        Raises:
+            ValueError: For an axis a frame does not have.
+            NotImplementedError: For `raw`, `result_type` and `engine`, which
+                are numpy and JIT paths.
+        """
+        number = _align_axis(axis, "DataFrame", (0, 1))
+        if raw or result_type is not None or engine is not None:
+            raise NotImplementedError(
+                "apply: raw, result_type and engine are numpy and JIT paths, and firepanda"
+                " calls the function on a column or a row"
+            )
+        if isinstance(func, (str, list, dict)):
+            return self.agg(func, number, *args, **kwargs)
+        if number == 1:
+            from ._frame import Series
+
+            names = list(self.columns)
+            columns = [self[name].tolist() for name in names]
+            labels = self.index.tolist()
+            results = [
+                func(Series(list(row), index=names, name=label), *args, **kwargs)
+                for label, row in zip(labels, zip(*columns, strict=True), strict=True)
+            ]
+            return _gathered(results, labels, names)
+        names = list(self.columns)
+        return _gathered([func(self[name], *args, **kwargs) for name in names], names, None)
+
+    def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
+        """One or more reductions of each column, by name, function, list or dict.
+
+        A name or a function answers a column of one value per column, a list
+        answers a frame with a row per function, and a dict picks the functions
+        for each column, NaN where a column was not asked for one.
+
+        Raises:
+            AttributeError: For a name that is no method, with pandas' words.
+            NotImplementedError: For `axis=1` with a list or a dict.
+        """
+        number = _align_axis(axis, "DataFrame", (0, 1))
+        if func is None:
+            raise NotImplementedError("agg: named aggregation is groupby's, and needs a function")
+        if isinstance(func, str):
+            asked = kwargs if number == 0 else {"axis": number} | kwargs
+            return _method_named(self, func, "DataFrame")(*args, **asked)
+        if callable(func):
+            return self.apply(func, number, args=args, **kwargs)
+        if number == 1:
+            raise NotImplementedError("agg: a list or a dict of functions goes down the columns")
+        from ._frame import DataFrame, Series
+
+        if isinstance(func, list):
+            answers = {name: self[name].agg(func, 0, *args, **kwargs) for name in self.columns}
+            labels = [_function_name(one) for one in func]
+            return DataFrame(
+                {name: answer.tolist() for name, answer in answers.items()}, index=labels
+            )
+        picked = {name: self[name].agg(asked, 0, *args, **kwargs) for name, asked in func.items()}
+        if not any(isinstance(answer, Series) for answer in picked.values()):
+            return Series(_readable(list(picked.values())), index=list(picked))
+        held: dict[Any, dict[Any, Any]] = {}
+        for name, answer in picked.items():
+            if isinstance(answer, Series):
+                held[name] = dict(zip(answer.index.tolist(), answer.tolist(), strict=True))
+            else:
+                held[name] = {_function_name(func[name]): answer}
+        labels: list[Any] = []
+        for found in held.values():
+            labels.extend(label for label in found if label not in labels)
+        pieces = {
+            name: _readable([found.get(label, math.nan) for label in labels])
+            for name, found in held.items()
+        }
+        return DataFrame(pieces, index=labels)
+
+    aggregate = agg
+
+    def transform(self, func: Any, axis: Any = 0, *args: Any, **kwargs: Any) -> DataFrame:
+        """A function on each column that answers a column of the same length.
+
+        Raises:
+            ValueError: When a function answers something else, with pandas' words.
+        """
+        if _align_axis(axis, "DataFrame", (0, 1)) == 1:
+            raise NotImplementedError("transform: axis=1 is the transform of the transpose")
+        pieces = {name: self[name].transform(func, 0, *args, **kwargs) for name in self.columns}
+        return type(self)(pieces, index=self.index)
+
+    def mode(self, axis: Any = 0, numeric_only: bool = False, dropna: bool = True) -> DataFrame:
+        """The most common values of each column, NaN where a column has fewer."""
+        if _align_axis(axis, "DataFrame", (0, 1)) == 1:
+            raise NotImplementedError("mode: axis=1 is the mode of each row, not done yet")
+        frame = self.select_dtypes("number") if numeric_only else self
+        pieces = {name: frame[name].mode(dropna=dropna).tolist() for name in frame.columns}
+        return type(self)(_padded(pieces))
+
+    @property
+    def T(self) -> DataFrame:
+        """The frame with rows and columns swapped, which is `transpose()`."""
+        return self.transpose()
+
+    def transpose(self, *args: Any, copy: Any = NO_DEFAULT) -> DataFrame:
+        """The frame with rows and columns swapped.
+
+        The columns keep one type when they all had it, and otherwise take the
+        type their values share, the wider number when they are all numbers.
+
+        Raises:
+            NotImplementedError: When the row labels are not text, since a
+                column here is named by text, or when the columns mix text and
+                numbers, which pandas answers with a column of objects.
+        """
+        from .errors import DTypeError
+
+        labels = self.index.tolist()
+        if not all(isinstance(label, str) for label in labels):
+            raise NotImplementedError(
+                "transpose: the row labels become column names, and a firepanda column is"
+                " named by text, so the rows need text labels"
+            )
+        names = list(self.columns)
+        types = {str(self[name].dtype) for name in names}
+        columns = [self[name].tolist() for name in names]
+        rows = list(zip(*columns, strict=True)) if columns else [() for _ in labels]
+        try:
+            answer = type(self)(
+                {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
+                index=names,
+            )
+        except DTypeError:
+            raise NotImplementedError(
+                "transpose: the columns mix text and numbers, which pandas answers with"
+                " columns of objects, the representation firepanda does not have"
+            ) from None
+        if len(types) == 1 and labels:
+            answer = answer.astype(types.pop())
+        return answer
 
     def map(self, func: Any, na_action: Any = None, **kwargs: Any) -> DataFrame:
         """A function on each value, column by column, the labels kept."""
@@ -9542,6 +9740,52 @@ class SeriesMixin:
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
+
+    def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
+        """One or more reductions of the column, by name, function, list or dict.
+
+        A name is the method of that name and a function is called on the
+        column. A list answers a column of the reductions labelled by name, and
+        a dict labelled by key.
+
+        Raises:
+            AttributeError: For a name that is no method, with pandas' words.
+        """
+        _align_axis(axis, "Series", (0,))
+        if func is None:
+            raise NotImplementedError("agg: named aggregation is groupby's, and needs a function")
+        if isinstance(func, str):
+            return _method_named(self, func, "Series")(*args, **kwargs)
+        if isinstance(func, (list, dict)):
+            pairs = func.items() if isinstance(func, dict) else ((one, one) for one in func)
+            labels, results = [], []
+            for label, one in pairs:
+                labels.append(_function_name(label))
+                results.append(self.agg(one, 0, *args, **kwargs))
+            return type(self)(_readable(results), index=labels, name=self.name)
+        return func(self, *args, **kwargs)
+
+    aggregate = agg
+
+    def transform(self, func: Any, axis: Any = 0, *args: Any, **kwargs: Any) -> Series:
+        """A function that answers a column of the same labels, by name or itself.
+
+        Raises:
+            ValueError: When the function answers anything else, with pandas' words.
+        """
+        _align_axis(axis, "Series", (0,))
+        if isinstance(func, (list, dict)):
+            raise NotImplementedError("transform: a list or a dict of functions answers a frame")
+        if isinstance(func, str):
+            answer = _method_named(self, func, "Series")(*args, **kwargs)
+        else:
+            try:
+                answer = func(self, *args, **kwargs)
+            except (TypeError, ValueError, AttributeError):
+                answer = self.map(lambda value: func(value, *args, **kwargs))
+        if not isinstance(answer, type(self)) or not answer.index.equals(self.index):
+            raise InvalidArgumentError("Function did not transform")
+        return answer
 
     def map(
         self, func: Any = None, na_action: Any = None, engine: Any = None, **kwargs: Any
