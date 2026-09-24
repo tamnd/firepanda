@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DataFrame.join` and `merge` on the row labels
+
+`merge(left_index=True, right_index=True)`, `merge(left_on=..., right_index=True)` and the mirror of it now work, and so does `DataFrame.join`, with or without `on`. A side keyed on its row labels has them put in a column, and the merge on columns does the rest, so suffixes, key types, a missing key matching a missing key and the outer sort all behave as they already did. With both sides on their labels the answer is labelled by the key, under the right side's label name in a right join and the left side's otherwise. With one side on its labels the answer keeps the other side's row labels, and a row that side does not have loses its label, so an integer label becomes float64 with NaN and the name goes, as in pandas. `join` takes a named series or a list of one frame, and a cross join, a longer list, and text labels that go missing (pandas' object index) are refused by name.
+
 ### Added: `concat` down the rows and side by side
 
 `firepanda.concat` stacks frames and series the way `pandas.concat` does, through two new core bindings, `DataFrame.stack_rows` and `DataFrame.stack_columns`. Down the rows the columns are the union of the parts' columns in the order they first appear, or the shared ones with `join="inner"`, and a part without a column is missing on its rows. Each column takes the type pandas gives it, which is numpy's rule for mixed numbers, float64 for an integer column with a gap and text for category columns whose categories differ. The row labels come along with their shared name, or are numbered again with `ignore_index`. Series on series give a series, and a named series next to a frame is a column. With `axis=1` the parts are lined up on their row labels, the union of them or with `join="inner"` the shared ones, and `sort` sorts them. `verify_integrity` and the mistakes raise pandas' class and message. `keys`, `levels`, `names`, a dict of parts, and anything pandas answers with an object column are refused by name.
