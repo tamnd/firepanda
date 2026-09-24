@@ -5708,6 +5708,181 @@ def _label_texts(index: Any) -> list[str]:
     return [word if label is None or label != label else str(label) for label in index.tolist()]
 
 
+def _random_state(state: Any) -> Any:
+    """The numpy source of randomness pandas reads `random_state` as.
+
+    A whole number, an array or a bit generator seeds a new `RandomState`, a
+    `RandomState` or a `Generator` is used as it is, and None is numpy's own
+    global state, so the same seed draws the same rows pandas draws.
+
+    Raises:
+        ValueError: For anything else, with pandas' words.
+    """
+    numpy = _numpy()
+    whole = isinstance(state, int | numpy.integer) and not isinstance(state, bool | numpy.bool_)
+    if whole or isinstance(state, numpy.ndarray | numpy.random.BitGenerator):
+        return numpy.random.RandomState(state)
+    if isinstance(state, numpy.random.RandomState | numpy.random.Generator):
+        return state
+    if state is None:
+        return numpy.random
+    raise ValueError(
+        "random_state must be an integer, array-like, a BitGenerator, Generator, "
+        "a numpy RandomState, or None"
+    )
+
+
+def _sample_weights(owner: Any, weights: Any, over_rows: bool) -> list[float]:
+    """The weights `sample` draws with, checked and with a gap read as nothing.
+
+    A column is lined up against the labels drawn from, and text names a column
+    of the frame when rows are drawn.
+
+    Raises:
+        KeyError: For text that names no column.
+        ValueError: For text on a column or across columns, a length that does
+            not match, an infinite weight or a negative one.
+    """
+    from ._frame import Series
+
+    frame = hasattr(owner, "columns")
+    if hasattr(weights, "reindex") and hasattr(weights, "index"):
+        labels = owner.index if over_rows else owner.columns
+        weights = weights.reindex(labels)
+    if isinstance(weights, str):
+        if not frame:
+            raise ValueError("Strings cannot be passed as weights when sampling from a Series.")
+        if not over_rows:
+            raise ValueError(
+                "Strings can only be passed to weights when sampling from rows on a DataFrame"
+            )
+        if weights not in list(owner.columns):
+            raise KeyError("String passed to weights not a valid column")
+        weights = owner[weights]
+    if hasattr(weights, "tolist"):
+        weights = weights.tolist()
+    read = Series(list(weights), dtype="float64").tolist()
+    if len(read) != (len(owner) if over_rows else len(owner.columns)):
+        raise ValueError("Weights and axis to be sampled must be of same length")
+    if any(value in (math.inf, -math.inf) for value in read if value is not None):
+        raise ValueError("weight vector may not include `inf` values")
+    if any(value < 0 for value in read if not _missing(value)):
+        raise ValueError("weight vector many not include negative values")
+    return [0.0 if _missing(value) else value for value in read]
+
+
+def _sampled(
+    owner: Any,
+    n: Any,
+    frac: Any,
+    replace: bool,
+    weights: Any,
+    random_state: Any,
+    axis: Any,
+    ignore_index: bool,
+) -> Any:
+    """The rows or columns `sample` draws, in the order pandas draws them.
+
+    pandas asks numpy's `choice` for positions and takes them, so the same seed
+    here draws the same positions in the same order.
+
+    Raises:
+        ValueError: With pandas' words for a size or weights it refuses.
+    """
+    frame = hasattr(owner, "columns")
+    over_rows = True
+    if frame:
+        over_rows = _axis_number(0 if axis is None else axis, "DataFrame", 1, (0, 1)) == 0
+    else:
+        _align_axis(0 if axis is None else axis, "Series", (0,))
+    length = len(owner) if over_rows else len(owner.columns)
+    state = _random_state(random_state)
+    if n is None and frac is None:
+        n = 1
+    elif n is not None and frac is not None:
+        raise ValueError("Please enter a value for `frac` OR `n`, not both")
+    elif n is not None:
+        if n < 0:
+            raise ValueError("A negative number of rows requested. Please provide `n` >= 0.")
+        if n % 1 != 0:
+            raise ValueError("Only integers accepted as `n` values")
+    else:
+        if frac > 1 and not replace:
+            raise ValueError(
+                "Replace has to be set to `True` when upsampling the population `frac` > 1."
+            )
+        if frac < 0:
+            raise ValueError("A negative number of rows requested. Please provide `frac` >= 0.")
+    size = int(n) if n is not None else round(frac * length)
+    chances = None
+    if weights is not None:
+        read = _sample_weights(owner, weights, over_rows)
+        total = math.fsum(read)
+        if total == 0:
+            raise ValueError("Invalid weights: weights sum to zero")
+        chances = _numpy().array(read, dtype="float64") / total
+        if not replace and size * chances.max() > 1:
+            raise ValueError(
+                "Weighted sampling cannot be achieved with replace=False. Either set "
+                "replace=True or use smaller weights. See the docstring of sample for details."
+            )
+    positions = state.choice(length, size=size, replace=replace, p=chances).tolist()
+    answer = owner.take(positions, axis=0 if over_rows else 1) if frame else owner.take(positions)
+    return answer.reset_index(drop=True) if ignore_index else answer
+
+
+def _numeric_kind(printed: str) -> str | None:
+    """`float64` or `int64` for a numeric type, and None for any other."""
+    if printed.startswith("float"):
+        return "float64"
+    if printed.startswith(("int", "uint")):
+        return "int64"
+    return None
+
+
+def _replacement_type(value: Any) -> str:
+    """The type pandas reads a `case_when` replacement as, the way it infers one."""
+    if hasattr(value, "dtype"):
+        printed = str(value.dtype)
+    elif isinstance(value, bool):
+        printed = "bool"
+    elif isinstance(value, int):
+        printed = "int64"
+    elif isinstance(value, float):
+        printed = "float64"
+    elif isinstance(value, str):
+        printed = "str"
+    elif isinstance(value, list | tuple):
+        from ._frame import Series
+
+        printed = str(Series(list(value)).dtype)
+    else:
+        printed = "object"
+    return "str" if printed in ("string", "large_string") else printed
+
+
+def _case_type(owner: Any, replacements: list[Any]) -> str | None:
+    """The type `case_when` moves the column to first, or None to keep its own.
+
+    pandas finds the type the column and every replacement have in common. Two
+    kinds of number meet in `float64` when either is a float, and anything else
+    meets only in objects, which firepanda does not have.
+
+    Raises:
+        NotImplementedError: When pandas' common type would be objects.
+    """
+    kinds = [_replacement_type(value) for value in [*replacements, owner]]
+    if len(set(kinds)) == 1:
+        return None
+    numbers = [_numeric_kind(kind) for kind in kinds]
+    if None in numbers:
+        raise NotImplementedError(
+            f"case_when: the replacements and the column are {sorted(set(kinds))}, which"
+            " pandas answers as objects, and firepanda has no object type"
+        )
+    return "float64" if "float64" in numbers else "int64"
+
+
 def _mapper(func: Any) -> Callable[[Any], Any]:
     """What `map` does to one value, from a function, a mapping or a column.
 
@@ -6736,6 +6911,71 @@ class DataFrameMixin:
                 )
             )
             _settled(self, self.assign(**{name: column}), True)
+
+    def sample(
+        self,
+        n: Any = None,
+        frac: Any = None,
+        replace: bool = False,
+        weights: Any = None,
+        random_state: Any = None,
+        axis: Any = None,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """Rows or columns drawn at random, the same ones pandas draws for the same seed.
+
+        Raises:
+            KeyError: For weights named by a column the frame does not have.
+            ValueError: With pandas' words for a size or weights it refuses.
+        """
+        return cast(
+            "DataFrame",
+            _sampled(self, n, frac, replace, weights, random_state, axis, ignore_index),
+        )
+
+    def dot(self, other: Any) -> Any:
+        """Each row's sum of products with a column, or with each column of a frame.
+
+        A column or a frame is lined up against this frame's column names and has
+        to hold the same labels. A plain sequence is read by position.
+
+        Raises:
+            ValueError: When the labels or the lengths differ, with pandas' words.
+            NotImplementedError: For a two dimensional array, whose answer pandas
+                labels with numbers.
+        """
+        from ._frame import DataFrame, Series
+
+        numpy = _numpy()
+        names = list(self.columns)
+        left = self.to_numpy()
+        if hasattr(other, "index") and hasattr(other, "reindex"):
+            labels = other.index.tolist()
+            if set(labels) != set(names) or len(labels) != len(names):
+                raise ValueError("matrices are not aligned")
+            answer = numpy.dot(left, other.reindex(names).to_numpy())
+            if hasattr(other, "columns"):
+                return DataFrame(
+                    {
+                        str(name): answer[:, place].tolist()
+                        for place, name in enumerate(other.columns)
+                    },
+                    index=self.index,
+                )
+            return Series(answer.tolist(), index=self.index)
+        right = numpy.asarray(other)
+        if left.shape[1] != right.shape[0]:
+            raise ValueError(f"Dot product shape mismatch, {left.shape} vs {right.shape}")
+        if right.ndim != 1:
+            raise NotImplementedError(
+                "dot: pandas labels the columns of a product with a two dimensional array"
+                " by number, and firepanda names columns with text"
+            )
+        return Series(numpy.dot(left, right).tolist(), index=self.index)
+
+    def __matmul__(self, other: Any) -> Any:
+        """`dot`, which is what `@` means."""
+        return self.dot(other)
 
     def isetitem(self, loc: Any, value: Any) -> None:
         """Sets the column at a position, or the columns at several, by position.
@@ -10106,6 +10346,168 @@ class SeriesMixin:
     def transpose(self, *args: Any, **kwargs: Any) -> Series:
         """The column itself, which is its own transpose."""
         return self
+
+    def sample(
+        self,
+        n: Any = None,
+        frac: Any = None,
+        replace: bool = False,
+        weights: Any = None,
+        random_state: Any = None,
+        axis: Any = None,
+        ignore_index: bool = False,
+    ) -> Series:
+        """Values drawn at random, the same ones pandas draws for the same seed.
+
+        Raises:
+            ValueError: With pandas' words for a size or weights it refuses.
+        """
+        return cast(
+            "Series",
+            _sampled(self, n, frac, replace, weights, random_state, axis, ignore_index),
+        )
+
+    def case_when(self, caselist: Any) -> Series:
+        """The column with the values of the first condition that holds put in.
+
+        Each entry is a condition and a replacement, and either may be a callable
+        handed the column. The column first moves to the type it has in common
+        with every replacement, as pandas moves it.
+
+        Raises:
+            TypeError: For a caselist that is not a list of tuples.
+            ValueError: For an empty caselist, an entry that is not a pair, or a
+                condition that cannot be applied, with pandas' words.
+            NotImplementedError: When pandas' common type would be objects.
+        """
+        if not isinstance(caselist, list):
+            raise TypeError(f"The caselist argument should be a list; instead got {type(caselist)}")
+        if not caselist:
+            raise ValueError(
+                "provide at least one boolean condition, with a corresponding replacement."
+            )
+        for number, entry in enumerate(caselist):
+            if not isinstance(entry, tuple):
+                raise TypeError(f"Argument {number} must be a tuple; instead got {type(entry)}.")
+            if len(entry) != 2:
+                raise ValueError(
+                    f"Argument {number} must have length 2; a condition and replacement;"
+                    f" instead got length {len(entry)}."
+                )
+        pairs = [
+            (
+                condition(self) if callable(condition) else condition,
+                replacement(self) if callable(replacement) else replacement,
+            )
+            for condition, replacement in caselist
+        ]
+        common = _case_type(self, [replacement for _, replacement in pairs])
+        answer = self if common is None else self.astype(common)
+        for position in reversed(range(len(pairs))):
+            condition, replacement = pairs[position]
+            if common is not None and hasattr(replacement, "astype"):
+                replacement = replacement.astype(common)
+            try:
+                answer = answer.mask(condition, replacement)
+            except Exception as error:
+                raise ValueError(
+                    f"Failed to apply condition{position} and replacement{position}."
+                ) from error
+        return answer
+
+    def dot(self, other: Any) -> Any:
+        """The sum of the products of this column and another, or of each column of a frame.
+
+        A column or a frame is lined up by label and has to hold the same labels.
+        A plain sequence is read by position.
+
+        Raises:
+            ValueError: When the labels differ, with pandas' words.
+            Exception: When the lengths differ, which pandas raises as it is.
+        """
+        from ._frame import Series
+
+        numpy = _numpy()
+        if hasattr(other, "index") and hasattr(other, "reindex"):
+            if len(self.index.union(other.index)) > min(len(self.index), len(other.index)):
+                raise ValueError("matrices are not aligned")
+            right = other.reindex(self.index).to_numpy()
+            answer = numpy.dot(self.to_numpy(), right)
+            if hasattr(other, "columns"):
+                return Series(answer.tolist(), index=list(other.columns))
+            return answer
+        right = numpy.asarray(other)
+        left = self.to_numpy()
+        if left.shape[0] != right.shape[0]:
+            raise Exception(f"Dot product shape mismatch, {left.shape} vs {right.shape}")
+        return numpy.dot(left, right)
+
+    def __matmul__(self, other: Any) -> Any:
+        """`dot`, which is what `@` means."""
+        return self.dot(other)
+
+    def __rmatmul__(self, other: Any) -> Any:
+        """`dot` with this column on the right."""
+        return _numpy().dot(_numpy().asarray(other), self.to_numpy())
+
+    def compare(
+        self,
+        other: Any,
+        align_axis: Any = 1,
+        keep_shape: bool = False,
+        keep_equal: bool = False,
+        result_names: Any = ("self", "other"),
+    ) -> Any:
+        """The values that differ from another column's, side by side.
+
+        Two missing values are the same. A value that is the same on both sides
+        reads as missing unless `keep_equal`, and a row where nothing differs is
+        left out unless `keep_shape`.
+
+        Raises:
+            ValueError: When the labels differ, with pandas' words.
+            TypeError: For result names that are not a tuple, with pandas' words.
+            NotImplementedError: For the sides stacked, which labels the rows
+                with a MultiIndex, and for true or false values pandas answers
+                as objects.
+        """
+        from ._frame import DataFrame, Series
+
+        if not isinstance(result_names, tuple):
+            raise TypeError(
+                f"Passing 'result_names' as a {type(result_names)} is not "
+                "supported. Provide 'result_names' as a tuple instead."
+            )
+        if not self.index.equals(other.index):
+            raise ValueError("Can only compare identically-labeled Series objects")
+        if align_axis not in (1, "columns"):
+            raise NotImplementedError(
+                "compare: align_axis=0 labels the rows with a MultiIndex, which firepanda"
+                " does not have"
+            )
+        pairs = list(zip(self.tolist(), other.tolist(), strict=True))
+        differs = [
+            not (_missing(mine) and _missing(theirs)) and mine != theirs for mine, theirs in pairs
+        ]
+        sides = [self, other]
+        if not keep_equal and not all(differs):
+            sides = [side.where(Series(differs, index=self.index)) for side in sides]
+            for place, side in enumerate(sides):
+                printed = str(side.dtype)
+                if printed == "bool":
+                    raise NotImplementedError(
+                        "compare: pandas answers true and false values with a gap as"
+                        " objects, and firepanda has no object type"
+                    )
+                if _numeric_kind(printed) == "int64":
+                    sides[place] = side.astype("float64")
+        if not keep_shape:
+            kept = [place for place, different in enumerate(differs) if different]
+            sides = [side.take(kept) for side in sides]
+        return DataFrame(
+            {str(result_names[0]): sides[0], str(result_names[1]): sides[1]},
+            index=sides[0].index,
+        )
 
     def to_numpy(
         self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any

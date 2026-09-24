@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: sample, case_when, dot and compare
+
+`Series.sample` and `DataFrame.sample` ask numpy's `choice` for positions the way pandas does, so the same `random_state` draws the same rows, with weights, `frac`, `replace` and `ignore_index`. `Series.case_when` applies its conditions last to first after moving the column to the type it shares with every replacement. `Series.dot` and `DataFrame.dot`, and `@` on both, line the two sides up by label. `Series.compare` sets the values that differ side by side, with `keep_shape`, `keep_equal` and `result_names`. A common type of objects, the sides stacked on a MultiIndex and a product labelled with numbers are refused.
+
 ### Fixed: filter reads a missing label as pandas does
 
 `filter` with `like` or `regex` now matches a missing label as the text `nan`, or `NaT` for instants, because pandas renders every label with `str` before it looks. A search for `a` over text labels with a gap now keeps the gap, as pandas does.
