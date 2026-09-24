@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `Series.searchsorted`
+
+`Series.searchsorted` answers where each value would go for the column to stay in order, with pandas' signature, as `Index.searchsorted` already did for labels. Both now take the values to search for as a list, a tuple, an index, a series or a numpy array, honour `sorter`, search a float among whole numbers and a whole number among floats, and refuse an unknown side with numpy's message, `search side must be 'left' or 'right'`.
+
 ### Added: `date_range`
 
 `firepanda.date_range` builds a `DatetimeIndex` of evenly stepped instants from any three of start, end, periods and freq, with pandas' rules for the unit, the zone, `normalize`, `name` and `inclusive`. A step of days with a zone keeps to the wall clock across a transition and every other step keeps to absolute time. With start, end and periods and no freq the points are spaced evenly. Calendar offsets such as months and weeks are refused with NotImplementedError, and the mistakes pandas refuses are refused with its classes and messages.

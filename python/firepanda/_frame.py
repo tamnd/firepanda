@@ -3743,6 +3743,13 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
+        """Where each value would have to go for the column to stay in order."""
+        try:
+            return self._searchsorted(value, side, sorter)
+        except Exception as error:
+            raise translate(error) from None
+
     def dropna(
         self, *, axis: Any = 0, inplace: bool = False, how: Any = None, ignore_index: bool = False
     ) -> Series | None:

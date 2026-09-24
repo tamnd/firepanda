@@ -3831,6 +3831,14 @@ SERIES = Exposed(
         ),
         *_reductions("Series"),
         *_correlations("Series"),
+        Member(
+            name="searchsorted",
+            kind="method",
+            signature='value: Any, side: str = "left", sorter: Any = None',
+            body="self._searchsorted(value, side, sorter)",
+            doc="Where each value would have to go for the column to stay in order.",
+            returns="Any",
+        ),
         *_transformations("Series"),
         Member(
             name="rolling",

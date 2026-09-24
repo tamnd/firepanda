@@ -26,6 +26,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 
 from __future__ import annotations
 
+import bisect
 import collections
 import contextlib
 import datetime
@@ -10359,6 +10360,10 @@ class SeriesMixin:
         """The correlation with the column moved `lag` rows along, as pandas writes it."""
         return self._corr(cast("Any", self).shift(lag), "pearson", None)
 
+    def _searchsorted(self, value: Any, side: Any, sorter: Any) -> Any:
+        """Where each value would go, which is the index's answer over the values."""
+        return _searched(self._inner.to_index(None), value, side, sorter)
+
     def _interpolate(
         self,
         method: Any,
@@ -14700,6 +14705,52 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         return [(name, self._column, how) for name, how in named.items()]
 
 
+def _searched(index: Any, value: Any, side: Any, sorter: Any) -> Any:
+    """Where one value or each of several would go in a core index kept in order.
+
+    One value answers one position and anything that holds several, a list, a
+    tuple, an index, a series or a numpy array, answers a list of them. With
+    `sorter` the labels are read in its order first.
+
+    Raises:
+        ValueError: For a side other than left or right, with numpy's words.
+    """
+    if side not in ("left", "right"):
+        raise InvalidArgumentError(f"search side must be 'left' or 'right' (got {side!r})")
+    try:
+        if sorter is not None:
+            labels = index.to_list()
+            index = _firepanda.Index([labels[position] for position in list(sorter)], None)
+        if isinstance(value, (IndexMixin, SeriesMixin)):
+            value = value._inner.to_list()
+        elif hasattr(value, "tolist") and getattr(value, "ndim", 0) > 0:
+            value = value.tolist()
+        if isinstance(value, (list, tuple)):
+            return [_searched_one(index, one, side) for one in value]
+        return _searched_one(index, value, side)
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _searched_one(index: Any, value: Any, side: str) -> int:
+    """Where one value would go, asked of the kernel and then of Python.
+
+    The kernel searches for a value of the index's own type, so a float in
+    whole numbers or a whole number in floats is searched by comparing in
+    Python instead, with a missing label after every value, as numpy puts it.
+    """
+    try:
+        return int(index.searchsorted(value, side))
+    except Exception:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise
+    if value != value:
+        return len(index.to_list())
+    labels = [label for label in index.to_list() if label is not None and label == label]
+    find = bisect.bisect_left if side == "left" else bisect.bisect_right
+    return find(labels, value)
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -15009,20 +15060,11 @@ class IndexMixin:
         an answer that is meaningless in exactly the way it is in both of them.
         Checking would cost a pass over the labels on every call to protect
         against a mistake the callers of this method do not make.
+
+        `sorter` is the positions that put the labels in order, and the answer
+        is then a position in that order, as numpy's is.
         """
-        _refuse("sorter", sorter, "sorting the index on the way past needs the sort to be carried")
-        if side not in ("left", "right"):
-            raise InvalidArgumentError(
-                f"firepanda:value: Invalid side: {side}. Side must be one of 'left', 'right'"
-            )
-        try:
-            if isinstance(value, IndexMixin):
-                value = value._inner.to_list()
-            if isinstance(value, (list, tuple)):
-                return [self._inner.searchsorted(one, side) for one in value]
-            return self._inner.searchsorted(value, side)
-        except Exception as error:
-            raise translate(error) from None
+        return _searched(self._inner, value, side, sorter)
 
     def isin(self, values: Any, level: Any = None) -> Any:
         """Whether each label is one of a set of values.
