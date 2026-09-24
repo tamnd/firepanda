@@ -317,8 +317,10 @@ def test_a_result_read_in_groups_holds_what_one_group_holds() raises:
         " CASE WHEN i % 5 = 0 THEN NULL ELSE i::DOUBLE * 1.5 END AS d",
         " FROM range(20000) t(i)",
     )
-    var whole = session.run(sql, group_rows=1 << 30)
-    var split = session.run(sql, group_rows=2048)
+    # Flat, because what is under test is the stacking and the encoding has a
+    # test of its own below.
+    var whole = session.run(sql, group_rows=1 << 30, encode_strings=False)
+    var split = session.run(sql, group_rows=2048, encode_strings=False)
 
     # Both come back in one chunk. That is the point of the stacking step and
     # it is why this test can compare them with the ordinary accessors at all.
@@ -349,7 +351,7 @@ def test_a_result_read_in_groups_holds_what_one_group_holds() raises:
     assert_equal(mine.null_count(), 4000)
 
 
-def test_a_read_asked_to_encode_holds_repeats_as_codes_and_nothing_else() raises:
+def test_a_read_holds_repeats_as_codes_and_nothing_else() raises:
     # Three string columns and one of them repeats: 97 values over twenty
     # thousand rows, with a null every seventh row. The other two are one value
     # a row and a column of nothing but nulls, and neither is worth encoding.
@@ -363,8 +365,8 @@ def test_a_read_asked_to_encode_holds_repeats_as_codes_and_nothing_else() raises
         " i::BIGINT AS n",
         " FROM range(20000) t(i)",
     )
-    var flat = session.run(sql)
-    var held = session.run(sql, encode_strings=True)
+    var flat = session.run(sql, encode_strings=False)
+    var held = session.run(sql)
 
     assert_true(held[0].encoding == Encoding.DICTIONARY, "the repeating one")
     assert_equal(held[0].type, LogicalType.STRING, "and it still says string")
@@ -405,8 +407,8 @@ def test_an_encoded_read_in_groups_matches_the_flat_one() raises:
         " ELSE ('late ' || i::VARCHAR) END AS t",
         " FROM range(20000) t(i)",
     )
-    var flat = session.run(sql)
-    var held = session.run(sql, group_rows=2048, encode_strings=True)
+    var flat = session.run(sql, encode_strings=False)
+    var held = session.run(sql, group_rows=2048)
     assert_true(held[0].encoding == Encoding.DICTIONARY, "s stays encoded")
     assert_true(held[1].is_flat(), "t gave up part way")
     assert_equal(len(held[0].distinct()), 7, "one code per value")

@@ -378,7 +378,7 @@ struct Session(Movable):
         sql: StringSlice,
         morsel_rows: Int = 0,
         group_rows: Int = COLLECT_GROUP_ROWS,
-        encode_strings: Bool = False,
+        encode_strings: Bool = True,
     ) raises -> DataFrame:
         """Runs one query and returns the whole answer as a frame.
 
@@ -397,8 +397,10 @@ struct Session(Movable):
                 anything but a test passes.
             encode_strings: Whether a string column where each value repeats
                 enough comes back held as codes into its distinct values. The
-                dtype still says string. Off until every kernel a query can
-                reach has been taught the encoding, issue #979.
+                dtype still says string. On by default since every kernel a
+                frame method reaches reads the encoding or decodes it first,
+                issue #979. Off gives every column flat, for a caller that
+                hands buffers out without asking.
 
         Returns:
             The result.
