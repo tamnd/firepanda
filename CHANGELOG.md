@@ -17,6 +17,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 - A `NEAREST` join, such as `JOIN products t APPROX NEAREST 2 BY SIMILARITY f(q.e, t.e)`, now parses and prints back, with or without an alias on the right side and with the join type, `APPROX` or `EXACT` and the count all optional. The plan still refuses it as a kind of join firepanda does not run.
 
 - A slice whose end is written as a minus, such as `a[1:-:2]` or `a[:-:-1]`, which is how DuckDB says the end of the list when a step follows. It now parses and prints back as written, and the plan refuses it the way it refuses any other step. `a[1:-]` with no second colon is a syntax error, as it is in DuckDB.
+
 ### Added: the text methods and the rest of the string kernels read a column held as codes
 
 Every `Series.chars_*` method that answers a row from its value alone (case, strip, pad, slice, find, replace, the regex and folded matches, the `is_*` tests, `translate` and the rest) now runs once per distinct string of a column held as codes (#979), and the answer is spread over the rows with `through_codes`. On six million rows of seven values that is seven calls rather than six million. `through_codes` takes a string answer too, and hands it back flat, because two categories can map to one answer ("a" and "A" upper cased) and codes into a list with a repeat would break a group by on the codes. The methods that are not a row at a time (`chars_extract_regex`, `chars_partition`, `chars_dummies`, `chars_join`, `to_datetime`) decode first.
