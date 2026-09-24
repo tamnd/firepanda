@@ -5610,6 +5610,71 @@ def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value
     return _moved_to(this, rows, None, fill_value), _moved_to(other, rows, None, fill_value)
 
 
+def _repeated_positions(count: int, repeats: Any, axis: Any) -> list[int]:
+    """The positions `repeat` takes, each position as many times as it repeats.
+
+    A count with a fraction is cut to its whole part, as numpy casts it.
+
+    Raises:
+        ValueError: For an axis, a negative count or a count per value that does
+            not match the values, with numpy's and pandas' words.
+    """
+    if axis is not None:
+        raise InvalidArgumentError(
+            "the 'axis' parameter is not supported in the pandas implementation of repeat()"
+        )
+    several = not isinstance(repeats, str) and hasattr(repeats, "__iter__")
+    counts = list(repeats) if several else [repeats] * count
+    if several and len(counts) == 1:
+        counts = counts * count
+    if len(counts) != count:
+        raise InvalidArgumentError(
+            f"operands could not be broadcast together with shape ({count},) ({len(counts)},)"
+        )
+    whole = [int(each) for each in counts]
+    if any(each < 0 for each in whole):
+        raise InvalidArgumentError(
+            "negative dimensions are not allowed"
+            if not several
+            else "repeats may not contain negative values."
+        )
+    return [position for position, each in enumerate(whole) for _ in range(each)]
+
+
+def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
+    """The frame or column with new labels on one axis, which is `set_axis`.
+
+    An index brings its name along, and any other sequence leaves the axis unnamed.
+
+    Raises:
+        ValueError: For an axis the owner does not have, or labels that are not one
+            per row or column, with pandas' words.
+        NotImplementedError: For column labels that repeat.
+    """
+    from ._frame import DataFrame, Index
+
+    frame = isinstance(owner, DataFrame)
+    owner_type = "DataFrame" if frame else "Series"
+    number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
+    name = labels.name if isinstance(labels, Index) else None
+    values = labels.tolist() if hasattr(labels, "tolist") else list(labels)
+    current = list(owner.columns) if number == 1 else owner.index.tolist()
+    if len(values) != len(current):
+        raise InvalidArgumentError(
+            f"Length mismatch: Expected axis has {len(current)} elements, new values have"
+            f" {len(values)} elements"
+        )
+    if number == 0:
+        return _with_row_labels(owner, values).rename_axis(name)
+    if len(set(values)) != len(values):
+        raise NotImplementedError(
+            "set_axis: the column labels repeat, and a firepanda frame names each column once"
+        )
+    held = [f"__firepanda_column_{position}" for position in range(len(values))]
+    moved = owner.rename(columns=dict(zip(current, held, strict=True)))
+    return moved.rename(columns=dict(zip(held, values, strict=True)))
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -6104,6 +6169,64 @@ class DataFrameMixin:
         if memory_usage is None or memory_usage:
             lines.append("memory usage: " + _info_size(int(self.memory_usage().sum())))
         _info_write(lines, buf)
+
+    def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> DataFrame:
+        """The frame with new row or column labels. `copy` is accepted and unused."""
+        return _with_axis(self, labels, axis)
+
+    def idxmax(self, axis: Any = 0, skipna: bool = True, numeric_only: bool = False) -> Series:
+        """The label of the first largest value in each column, or each row's column."""
+        return self._extreme_labels("max", axis, skipna, numeric_only)
+
+    def idxmin(self, axis: Any = 0, skipna: bool = True, numeric_only: bool = False) -> Series:
+        """The label of the first smallest value in each column, or each row's column."""
+        return self._extreme_labels("min", axis, skipna, numeric_only)
+
+    def _extreme_labels(self, which: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
+        """Where the extreme of each column is, or which column holds each row's extreme.
+
+        Down the columns this is each column's own `idxmax` or `idxmin`. Across a
+        row the values are compared in Python, the first extreme wins, and a
+        missing value is passed over or refused the way a column refuses it.
+
+        Raises:
+            ValueError: For a bad axis, or a row with nothing to compare.
+            NotImplementedError: Across rows holding values other than numbers.
+        """
+        from ._frame import Series
+
+        number = _align_axis(axis, "DataFrame", (0, 1)) or 0
+        read = self._numeric_part() if numeric_only else self
+        names = list(read.columns)
+        if number == 0:
+            found = [getattr(read[name], f"idx{which}")(skipna=skipna) for name in names]
+            return Series(found, index=names)
+        if len(names) != len(list(read._numeric_part().columns)):
+            raise NotImplementedError(
+                f"idx{which}: across a row every column has to hold numbers, since pandas"
+                " compares a row as objects"
+            )
+        columns = [read[name].tolist() for name in names]
+        pick = max if which == "max" else min
+        found = []
+        for row in zip(*columns, strict=True):
+            present = [
+                (value, position)
+                for position, value in enumerate(row)
+                if value is not None and value == value
+            ]
+            if len(present) != len(row) and not skipna:
+                raise InvalidArgumentError("Encountered an NA value with skipna=False")
+            if not present:
+                raise InvalidArgumentError("Encountered all NA values")
+            best = pick(value for value, _ in present)
+            found.append(names[next(position for value, position in present if value == best)])
+        return _with_row_labels(Series(found), self.index.tolist()).rename_axis(self.index.name)
+
+    def iterrows(self) -> Iterator[tuple[Any, Series]]:
+        """Each row label with its row as a column named by the label."""
+        for position, label in enumerate(self.index.tolist()):
+            yield label, self.iloc[position]
 
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
@@ -9154,6 +9277,14 @@ class SeriesMixin:
         if memory_usage is None or memory_usage:
             lines.append("memory usage: " + _info_size(self.memory_usage()))
         _info_write(lines, buf)
+
+    def repeat(self, repeats: Any, axis: None = None) -> Series:
+        """Each value and its label as many times as `repeats` says, in order."""
+        return self.take(_repeated_positions(len(self), repeats, axis))
+
+    def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
+        """The column with new labels. `copy` is accepted and unused."""
+        return _with_axis(self, labels, axis)
 
     def items(self) -> Iterator[tuple[Any, Any]]:
         """Each label with its value.
@@ -15272,6 +15403,10 @@ class IndexMixin:
             raise translate(error) from None
         made, positions = answer
         return Index._wrap(made), None if positions is None else list(positions)
+
+    def repeat(self, repeats: Any, axis: None = None) -> Any:
+        """Each label as many times as `repeats` says, in order."""
+        return self.take(_repeated_positions(len(self), repeats, axis))
 
     def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
         """Where a label would have to go for the labels to stay in order.

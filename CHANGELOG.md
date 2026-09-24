@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: repeat, set_axis, DataFrame.idxmax and idxmin, and iterrows
+
+`Series.repeat` and `Index.repeat` take each value and its label as many times as one count for all or one count each says, with a fraction cut to its whole part and numpy's errors for a negative count or counts that do not match the values. `Series.set_axis` and `DataFrame.set_axis` put new labels on the rows or the columns, an index bringing its name along, with pandas' length mismatch error. `DataFrame.idxmax` and `idxmin` answer each column's label of its extreme, or across a row the column that holds it, with `skipna` and `numeric_only`. `DataFrame.iterrows` walks the rows as columns named by their labels. Across a row, `idxmax` and `idxmin` refuse columns other than numbers, and `set_axis` refuses column labels that repeat.
+
 ### Added: align
 
 `DataFrame.align` and `Series.align` give two objects the same labels and answer the pair, as pandas does. An outer join takes every label, sorted when the sides differ, an inner join the labels both sides hold in this side's order, and left and right one side's labels, and both answers carry the leading side's index name. Two frames line up on both axes unless `axis` names one, a frame and a column line up on the axis given, and `fill_value` fills the new places. Labels that already agree come back unchanged. A join pandas does not know, a missing or wrong axis and an other that is neither a frame nor a column fail with pandas' error and message. Repeated labels that differ and a `level` other than 0 are refused with NotImplementedError.
