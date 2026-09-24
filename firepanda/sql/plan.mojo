@@ -2953,8 +2953,10 @@ def _group_sets(
             raise Error(
                 String(
                     word,
-                    " over something that is several grouping sets rather"
-                    " than one set of columns",
+                    (
+                        " over something that is several grouping sets rather"
+                        " than one set of columns"
+                    ),
                 )
             )
         columns.append(part[0].copy())
@@ -8150,7 +8152,9 @@ def _block(
             var cursor = 0
             sets.append(List[Int]())
             for entry in ast.items(group_clause):
-                sets = _product(sets, _group_sets(ast, entry, leaf_keys, cursor))
+                sets = _product(
+                    sets, _group_sets(ast, entry, leaf_keys, cursor)
+                )
 
     # The shape of each key that is worth looking for again higher up, and the
     # name the aggregate puts that key out under. A key that is a plain column
