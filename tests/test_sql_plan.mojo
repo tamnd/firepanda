@@ -393,6 +393,15 @@ def test_a_filter_on_a_fold_reaches_the_plan_as_a_conditional() raises:
     )
 
 
+def test_a_filter_the_transform_kept_is_turned_down_by_name() raises:
+    # `list` keeps a null, so the `CASE` would answer a different question and
+    # the clause reaches lowering as it was written.
+    with assert_raises(contains="FILTER on list"):
+        _ = _plan("SELECT list(a) FILTER (WHERE b > 1) FROM t")
+    with assert_raises(contains="FILTER on upper"):
+        _ = _plan("SELECT upper(a) FILTER (WHERE b > 1) FROM t")
+
+
 def test_a_group_by_all_groups_by_the_items_that_do_not_fold() raises:
     # The same plan the query with the key written out gives, because that is
     # what GROUP BY ALL means rather than being a node of its own.

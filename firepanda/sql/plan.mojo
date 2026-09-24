@@ -532,10 +532,12 @@ from .ast import (
     EXPR_UNARY,
     CALL_DISTINCT,
     CALL_EXPORT_STATE,
+    CALL_FILTER,
     CALL_IGNORE_NULLS,
     CALL_RESPECT_NULLS,
     CALL_STAR,
     CALL_WITHIN_GROUP,
+    call_arity,
     call_flags,
     call_sorts,
     GROUP_ALL,
@@ -582,6 +584,7 @@ from .star import (
 from .table import Grammar
 from .types import DECIMAL_MAX_WIDTH, engine_type, instant_type, parse_type
 from .unsupported import (
+    AGGREGATE_FILTER,
     ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
@@ -1805,6 +1808,12 @@ def _check_functions(ast: Ast, registry: Registry) raises:
     for at in range(len(ast.exprs)):
         if ast.exprs[at].kind != EXPR_FUNCTION:
             continue
+
+        # A `FILTER` the transformer kept is what stops the call whatever its
+        # name, so it is said before anything about the name is, and
+        # `list(x) FILTER (WHERE p)` names the filter rather than the fold.
+        if call_flags(ast.exprs[at].a) & CALL_FILTER != 0:
+            _call_modifiers(ast, ast.exprs[at])
 
         # A call with an `OVER` on it is left alone. `_lower_over` refuses one
         # by name already and says the more useful thing while it does it,
@@ -3917,19 +3926,20 @@ def _call_arguments(ast: Ast, node: Expr) -> List[UInt32]:
         One index per argument, in the order they were written.
     """
     var out = List[UInt32]()
-    for i in range(ast.length(node.children) - call_sorts(node.a)):
+    for i in range(call_arity(node.a, ast.length(node.children))):
         out.append(ast.at(node.children, i))
     return out^
 
 
 def _call_modifiers(ast: Ast, node: Expr) raises:
-    """Turns down the four things a call may carry that change what it reads.
+    """Turns down the five things a call may carry that change what it reads.
 
-    The transformer reads all four and the printer writes all four back, so a
+    The transformer reads all five and the printer writes all five back, so a
     query holding one still round trips. They stop here because each of them
     asks the fold itself for something firepanda's folds do not do: an order to
     see the rows in, or a rule for what to do with a null, or the fold's own
-    state instead of its answer.
+    state instead of its answer, or a `FILTER` the transformer could not put
+    under the argument as a `CASE`.
 
     Args:
         ast: The arenas.
@@ -3939,6 +3949,11 @@ def _call_modifiers(ast: Ast, node: Expr) raises:
         Error: If the call carries any of them.
     """
     var flags = call_flags(node.a)
+    if flags & CALL_FILTER != 0:
+        var last = ast.length(node.payload) - 1
+        raise not_implemented(
+            AGGREGATE_FILTER, fold(ast.text(ast.at(node.payload, last))), ""
+        )
     if flags & CALL_WITHIN_GROUP != 0:
         raise not_implemented(CALL_MODIFIER, "WITHIN GROUP", "")
     if flags & CALL_EXPORT_STATE != 0:

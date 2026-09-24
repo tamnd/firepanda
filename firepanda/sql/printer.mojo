@@ -76,9 +76,11 @@ from .ast import (
     CALL_IGNORE_NULLS,
     CALL_METHOD,
     CALL_RESPECT_NULLS,
+    CALL_FILTER,
     CALL_STAR,
     CALL_WITHIN_GROUP,
     call_flags,
+    call_arity,
     call_sorts,
     CLAUSE_FROM,
     CLAUSE_GROUP,
@@ -600,7 +602,7 @@ def _write_step(
         # walks the argument run, one argument per phase. The same shape does
         # the list, the struct and the two IN forms below.
         var flags = call_flags(item.a)
-        var count = ast.length(item.children) - call_sorts(item.a)
+        var count = call_arity(item.a, ast.length(item.children))
         # A call written with a dot keeps its operand as the first argument, so
         # the run is one longer than what stands inside the parentheses and the
         # arguments start one along.
@@ -1121,7 +1123,7 @@ def _write_call_tail(
     ref item = ast.exprs[Int(node)]
     var flags = call_flags(item.a)
     var sorts = call_sorts(item.a)
-    var count = ast.length(item.children) - sorts
+    var count = call_arity(item.a, ast.length(item.children))
     # The operand of a dot call stands outside the parentheses, so it does not
     # count as something already written inside them.
     var first = 1 if flags & CALL_METHOD != 0 else 0
@@ -1138,6 +1140,12 @@ def _write_call_tail(
     if sorts != 0 and flags & CALL_WITHIN_GROUP != 0:
         out += " WITHIN GROUP (ORDER BY "
         _write_call_order(ast, node, grammar, out)
+        out += ")"
+    if flags & CALL_FILTER != 0:
+        # The predicate is the last entry of the run, behind the sort entries.
+        out += " FILTER (WHERE "
+        var last = ast.length(item.children) - 1
+        _write(ast, ast.at(item.children, last), grammar, out)
         out += ")"
     if flags & CALL_EXPORT_STATE != 0:
         out += " EXPORT_STATE"
@@ -1160,7 +1168,7 @@ def _write_call_order(
     """
     ref item = ast.exprs[Int(node)]
     var sorts = call_sorts(item.a)
-    var count = ast.length(item.children) - sorts
+    var count = call_arity(item.a, ast.length(item.children))
     for i in range(sorts):
         if i > 0:
             out += ", "

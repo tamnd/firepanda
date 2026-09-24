@@ -60,6 +60,7 @@ from .ast import (
     CALL_IGNORE_NULLS,
     CALL_METHOD,
     CALL_RESPECT_NULLS,
+    CALL_FILTER,
     CALL_STAR,
     CALL_WITHIN_GROUP,
     call_tags,
@@ -125,7 +126,6 @@ from .token import (
     token_text,
 )
 from .unsupported import (
-    AGGREGATE_FILTER,
     CALL_ARGUMENT,
     CALL_MODIFIER,
     CUSTOM_OPERATOR,
@@ -523,6 +523,41 @@ requests the form left behind in `Work.wants`, builds those first and runs the
 form again. It is spelled as an error because a form asks for a value in the
 middle of an expression, where there is nothing sensible to return instead.
 """
+
+
+def _filter_folds(parts: List[String], flags: UInt32, arguments: Int) -> Bool:
+    """Says whether a call's `FILTER` can go under its argument as a `CASE`.
+
+    A filter belongs to a fold, and a name that is not one of the aggregates
+    has nothing for the `CASE` to go inside. That name may be a macro the
+    catalog defines, and whether it is a fold is not something this pass can
+    know. The folds in `KEEPS_NULLS` read a null as a value rather than passing
+    over it, so a row the predicate drops and a row it turns into a null are not
+    the same row to them. `list(a) FILTER (WHERE a > 1)` is `[2, 3]` in DuckDB
+    and the `CASE` would make it `[NULL, 2, NULL, 3]`. `any_value` used to be in
+    that list alongside `first` and `last` and is not, because it skips nulls.
+    See #888, which is where the three stopped being one thing. A fold of more
+    than one argument takes the `CASE` around its first one when a null there
+    makes it pass over the whole row, which is what `WRAPS_FIRST` lists.
+
+    Args:
+        parts: The name of the call, outermost part first.
+        flags: The call's flags, for whether it was `f(*)`.
+        arguments: How many arguments the call was written with.
+
+    Returns:
+        Whether the rewrite answers what the clause asks.
+    """
+    var name = fold(parts[len(parts) - 1])
+    if not is_aggregate(name):
+        return False
+    if String(",", name, ",") in KEEPS_NULLS:
+        return False
+    if flags & CALL_STAR != 0:
+        return True
+    if arguments == 0:
+        return False
+    return arguments == 1 or String(",", name, ",") in WRAPS_FIRST
 
 
 struct Work(Movable):
@@ -2970,39 +3005,43 @@ struct Transform(Movable):
                 flags |= CALL_STAR
                 arguments = List[UInt32]()
 
+        var kept_filter = NO_NODE
         if predicate != NO_NODE:
             # `f(x) FILTER (WHERE c)` is `f(CASE WHEN c THEN x END)` for a fold
-            # that passes over a null, which is every fold this engine has, and
-            # the rewrite is done here so that nothing downstream has to carry a
-            # second place an expression can hide. A column written in the
-            # predicate is then an ordinary argument and is checked against the
-            # group key like any other.
+            # that passes over a null, which is nearly every fold this engine
+            # has, and the rewrite is done here so that nothing downstream has
+            # to carry a second place an expression can hide. A column written
+            # in the predicate is then an ordinary argument and is checked
+            # against the group key like any other.
             #
             # DuckDB keeps the clause instead of rewriting it, so `EXPLAIN` here
             # prints the `CASE` rather than the words that were written. The
             # rows are the same and the plan says what it is going to do, which
             # is the trade this makes.
-            var kept = self._filtered(
-                tree,
-                sql,
-                filtering,
-                parts,
-                work.value(predicate),
-                flags,
-                arguments,
-                ast,
-            )
-            if flags & CALL_STAR != 0:
-                # `count(*) FILTER (WHERE c)` has no argument to put under the
-                # `CASE`, so it counts a one on the rows the predicate keeps.
-                # Counting a constant is counting rows, and the star goes with
-                # the argument it no longer stands in for.
-                flags &= ~CALL_STAR
-            arguments = kept^
+            #
+            # Where the rewrite would answer something else the clause is kept
+            # as it was written, on the end of the run with a flag, so the query
+            # still prints back and lowering is what turns it down.
+            if _filter_folds(parts, flags, len(arguments)):
+                var kept = self._filtered(
+                    tree, work.value(predicate), flags, arguments, ast
+                )
+                if flags & CALL_STAR != 0:
+                    # `count(*) FILTER (WHERE c)` has no argument to put under
+                    # the `CASE`, so it counts a one on the rows the predicate
+                    # keeps. Counting a constant is counting rows, and the star
+                    # goes with the argument it no longer stands in for.
+                    flags &= ~CALL_STAR
+                arguments = kept^
+            else:
+                kept_filter = work.value(predicate)
+                flags |= CALL_FILTER
 
         var ordered = len(sorts)
         var entries = arguments^
         entries.extend(sorts^)
+        if kept_filter != NO_NODE:
+            entries.append(kept_filter)
         return ast.add(
             Expr(
                 kind=EXPR_FUNCTION,
@@ -3154,9 +3193,6 @@ struct Transform(Movable):
     def _filtered(
         self,
         tree: Parse,
-        sql: StringSlice,
-        node: UInt32,
-        parts: List[String],
         predicate: UInt32,
         flags: UInt32,
         arguments: List[UInt32],
@@ -3166,17 +3202,12 @@ struct Transform(Movable):
 
         A fold that passes over a null answers the same number whether the rows
         it is not meant to see are taken away or handed to it as nulls, so the
-        clause is a `CASE` with no `ELSE` around the argument. The folds that
-        keep a null say so by name, as does a name that is not a fold at all.
-        A fold of more than one argument takes the `CASE` around its first one
-        when a null there makes it pass over the whole row, which is what
-        `WRAPS_FIRST` lists, and refuses otherwise.
+        clause is a `CASE` with no `ELSE` around the argument. `_filter_folds`
+        is what says a call is one of those, and this is only asked about the
+        calls it says yes to.
 
         Args:
             tree: The parse.
-            sql: The query.
-            node: The `FilterClause` node, for where a refusal points.
-            parts: The name of the call, outermost part first.
             predicate: The expression the `WHERE` holds.
             flags: The call's flags, for whether it was `f(*)`.
             arguments: The arguments as they were written.
@@ -3184,29 +3215,8 @@ struct Transform(Movable):
 
         Returns:
             The arguments to build the call with instead.
-
-        Raises:
-            Error: If the clause is on something the rewrite does not hold for.
         """
-        var at = tree.nodes[Int(node)].token_start
-        var name = fold(parts[len(parts) - 1])
-        if not is_aggregate(name):
-            # A filter belongs to a fold, which is what DuckDB says about it
-            # too, and a name that is not one of the aggregates has nothing for
-            # the `CASE` to go inside. It refuses rather than erroring because
-            # the name may be a macro the catalog defines, and whether that is
-            # a fold is not something this pass can know.
-            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
-        if String(",", name, ",") in KEEPS_NULLS:
-            # These read a null as a value rather than passing over it, so a
-            # row the predicate drops and a row it turns into a null are not
-            # the same row to them, and the rewrite would answer a different
-            # question. `list(a) FILTER (WHERE a > 1)` is `[2, 3]` in DuckDB
-            # and the `CASE` would have made it `[NULL, 2, NULL, 3]`. There is
-            # nothing else to rewrite it into. `any_value` used to be refused
-            # here alongside `first` and `last` and is not, because it skips
-            # nulls. See #888, which is where the three stopped being one thing.
-            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
+        var at = ast.exprs[Int(predicate)].token
         if flags & CALL_STAR != 0:
             var arms = List[UInt32]()
             arms.append(predicate)
@@ -3214,10 +3224,6 @@ struct Transform(Movable):
             var counted = List[UInt32]()
             counted.append(ast.case(arms, NO_NODE, NO_NODE, at))
             return counted^
-        if len(arguments) == 0:
-            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
-        if len(arguments) > 1 and String(",", name, ",") not in WRAPS_FIRST:
-            raise _unsupported(tree, sql, node, AGGREGATE_FILTER, name)
         var arms = List[UInt32]()
         arms.append(predicate)
         arms.append(arguments[0])
