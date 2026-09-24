@@ -549,6 +549,33 @@ def shelf_frame() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def test_a_string_column_held_encoded_runs_as_though_it_were_flat() raises:
+    # The mask from `sample_frame` keeps rows 0, 2, 3 and 5. The codes put the
+    # long category on rows 0 and 5, so a long view has to survive the decode.
+    var codes = Array[DType.int32](6)
+    var picked: List[Int32] = [2, 0, 1, 0, 1, 2]
+    for i in range(6):
+        codes.set_valid(i, picked[i])
+    var encoded = AnyArray.dictionary_encoded(
+        codes^, strings_from_list(["ok", "late", "a status too long to inline"])
+    )
+    var columns = List[AnyArray]()
+    columns.append(encoded^)
+    columns.append(flags([True, False, True, True, False, True]))
+    var fields = List[Field]()
+    fields.append(Field("status", LogicalType.STRING))
+    fields.append(Field("keep", LogicalType.BOOL))
+    var pipeline = Pipeline(DataFrame(Schema(fields^), columns^))
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Unique([0])))
+    var out = pipeline^.run()
+    var got = out.column("status").as_strings().to_list()
+    assert_equal(len(got), 3, "three distinct statuses survive the mask")
+    assert_equal(got[0], "a status too long to inline")
+    assert_equal(got[1], "late")
+    assert_equal(got[2], "ok")
+
+
 def test_a_unique_keeps_the_first_row_of_each_group() raises:
     var pipeline = Pipeline(shelf_frame())
     pipeline.add(Node(Unique([0])))

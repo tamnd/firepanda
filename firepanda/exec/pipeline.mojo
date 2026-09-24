@@ -237,7 +237,17 @@ struct Scan(Movable):
             return None
         var row = List[AnyArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            row.append(self.columns[i].pop())
+            var piece = self.columns[i].pop()
+            # A column held encoded is decoded here, one morsel at a time,
+            # because none of the operators reads an encoding yet and every one
+            # of them would refuse it. Decoding the frame instead would put the
+            # flat copy back in memory for the whole query, which is the thing
+            # the encoding is there to avoid; a morsel's worth is a few
+            # megabytes and is gone when the morsel is. An operator taught to
+            # read codes is what removes this, one operator at a time.
+            if not piece.is_flat():
+                piece = piece.decoded()
+            row.append(piece^)
         self.remaining -= 1
         return Chunk(row^)
 

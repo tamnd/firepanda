@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a query decodes an encoded column one morsel at a time
+
+The pipeline's scan now decodes a column held in any encoding but flat as it hands each morsel out, instead of every operator refusing it. The flat copy only ever exists a morsel at a time, so a query over a frame of dictionary encoded strings pays for a few megabytes of views per morsel and not for the whole column. An operator taught to read the codes will skip this, one operator at a time (#979).
+
 ### Added
 
 - A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
