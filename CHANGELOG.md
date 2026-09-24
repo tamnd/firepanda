@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: right and full joins run
+
+A `RIGHT JOIN` and a `FULL JOIN` now run instead of being refused when the plan is lowered. The join operator marks each build row a pairing used as the probe side streams past, and once the probe side is done it hands out the build rows nothing matched, with the other side null. Because of that mark the operator is fed one chunk at a time rather than run in parallel. A right join also takes a condition part that reads only the left side, which is tested below the join since a left row that fails it just pairs with nothing. A full join still takes equalities only, and a full join with `USING` is still refused.
+
 ### Added: label lookup on instants and spans
 
 - An index of instants now answers `loc`, `at`, `[]`, `get_loc`, `slice_indexer` and `in` with a Timestamp, a `datetime` or text, the way pandas does. Text that names a year, quarter, month, day, hour or minute coarser than the labels picks every row inside that period, as a slice when the labels rise, and a slice with text bounds runs to the end of the period the upper bound names. Zoned labels read naive text on their own clock and refuse a naive Timestamp in pandas' words. An index of spans answers a Timedelta or its text the same way, and `index[i]` on either gives back the Timestamp or Timedelta.
@@ -200,9 +204,6 @@ A frame and a column now have `div`, `divide`, `rdiv`, `multiply` and `subtract`
 ### Added: `pandas.get_dummies`
 
 `firepanda.get_dummies` turns a column, a list, or the text and categorical columns of a frame into one column of flags per level, the way pandas does. The levels are the categories in order for a categorical column, unused ones included, and the distinct values sorted for anything else. `prefix` and `prefix_sep` take one value, a list with one per encoded column, or a mapping, and `dummy_na`, `columns`, `drop_first` and `dtype` all work, with pandas' messages for a prefix list of the wrong length, a `columns` that is not a list and an object dtype. `sparse=True` is refused, and so is a level that would label a column with something other than text, such as a number with no prefix, since a firepanda column label is text.
-### Added: right and full joins run
-
-A `RIGHT JOIN` and a `FULL JOIN` now run instead of being refused when the plan is lowered. The join operator marks each build row a pairing used as the probe side streams past, and once the probe side is done it hands out the build rows nothing matched, with the other side null. Because of that mark the operator is fed one chunk at a time rather than run in parallel. A right join also takes a condition part that reads only the left side, which is tested below the join since a left row that fails it just pairs with nothing. A full join still takes equalities only, and a full join with `USING` is still refused.
 
 ### Added: a semi or anti join asks the rest of its condition, and TPC-H q21 runs
 
