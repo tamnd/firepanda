@@ -1,7 +1,7 @@
 """The flags that change what a reduction answers rather than how it computes.
 
-`skipna=False`, `min_count` and `nunique(dropna=False)` on a column, and
-`dropna(how="all")` on a frame. Each one was refused by name until this file,
+`skipna=False`, `min_count` and `nunique(dropna=False)` on a column and on
+a frame, and `dropna(how="all")` on a frame. Each one was refused by name until this file,
 and each one is a rule applied to the answer, so the tests are about the edges
 where the rule decides: a column with one gap, a column with none, an integer
 column, an empty one, and a floor exactly at the count.
@@ -106,6 +106,50 @@ def test_a_frame_nunique_counts_the_gap_per_column(firepanda: ModuleType) -> Non
     assert mine.tolist() == theirs.tolist()
     assert list(mine.index) == list(theirs.index)
     assert mine.name == theirs.name
+
+
+MIXED = {"a": [1, 2, 3], "b": [1.0, None, 3.0]}
+INTEGERS = {"a": [1, 2], "b": [5, 6]}
+
+
+@pytest.mark.parametrize("name", ["sum", "prod", "mean", "min", "max", "std", "var", "median"])
+@pytest.mark.parametrize("data", [MIXED, INTEGERS], ids=["mixed", "integers"])
+def test_a_frame_with_skipna_false_answers_nan_per_column(
+    firepanda: ModuleType, name: str, data: dict[str, list[Any]]
+) -> None:
+    """Only a column with a gap is NaN, and the answer widens only when one is."""
+    import pandas as pd
+
+    mine = getattr(firepanda.DataFrame(data), name)(skipna=False)
+    theirs = getattr(pd.DataFrame(data), name)(skipna=False)
+    assert mine.dtype == str(theirs.dtype)
+    assert all(same(a, b) for a, b in zip(mine.tolist(), theirs.tolist(), strict=True))
+
+
+@pytest.mark.parametrize("name", ["sum", "prod"])
+@pytest.mark.parametrize("floor", [1, 2, 3])
+@pytest.mark.parametrize("data", [MIXED, INTEGERS], ids=["mixed", "integers"])
+def test_a_frame_min_count_is_a_floor_per_column(
+    firepanda: ModuleType, name: str, floor: int, data: dict[str, list[Any]]
+) -> None:
+    """A column with fewer values than the floor is NaN."""
+    import pandas as pd
+
+    mine = getattr(firepanda.DataFrame(data), name)(min_count=floor)
+    theirs = getattr(pd.DataFrame(data), name)(min_count=floor)
+    assert mine.dtype == str(theirs.dtype)
+    assert all(same(a, b) for a, b in zip(mine.tolist(), theirs.tolist(), strict=True))
+
+
+@pytest.mark.parametrize("flags", [{"skipna": False}, {"min_count": 2}, {"min_count": 5}], ids=str)
+def test_the_whole_frame_takes_the_flags_too(firepanda: ModuleType, flags: dict[str, Any]) -> None:
+    """With `axis=None` the floor counts every cell rather than each column."""
+    import pandas as pd
+
+    data = {"a": [1.0, None], "b": [None, 2.0]}
+    mine = firepanda.DataFrame(data).sum(axis=None, **flags)
+    theirs = pd.DataFrame(data).sum(axis=None, **flags)
+    assert same(mine, float(theirs))
 
 
 FRAME = {
