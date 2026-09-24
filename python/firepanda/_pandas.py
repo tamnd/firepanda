@@ -6977,6 +6977,130 @@ class DataFrameMixin:
         """`dot`, which is what `@` means."""
         return self.dot(other)
 
+    def pivot(self, *, columns: Any, index: Any = NO_DEFAULT, values: Any = NO_DEFAULT) -> Any:
+        """The frame reshaped so each value of one column becomes a column.
+
+        Each row of the answer is a value of `index`, or a row label when it is
+        left out, both axes are sorted, and a pair no row holds is missing.
+
+        Raises:
+            ValueError: When two rows hold the same pair, with pandas' words.
+            NotImplementedError: For `values` left out or given as a list and for
+                several keys, which pandas answers with a MultiIndex, and for a
+                columns key whose values are not text.
+        """
+        if values is NO_DEFAULT or isinstance(values, list | tuple):
+            raise NotImplementedError(
+                "pivot: without one values column pandas labels the columns with a"
+                " MultiIndex, which firepanda does not have"
+            )
+        across = _one_key(columns, "columns", "pivot")
+        if index is NO_DEFAULT:
+            keys = self.index.tolist()
+            row_name = self.index.name
+        else:
+            down = _one_key(index, "index", "pivot")
+            keys = self[down].tolist()
+            row_name = down
+        heads = self[across].tolist()
+        cells: dict[Any, Any] = {}
+        for key, head, value in zip(keys, heads, self[values].tolist(), strict=True):
+            if (key, head) in cells:
+                raise ValueError("Index contains duplicate entries, cannot reshape")
+            cells[key, head] = value
+        rows = sorted(set(keys))
+        names = _pivot_names(sorted(set(heads)), "pivot")
+        printed = str(self[values].dtype)
+        return _pivoted(rows, names, cells, printed, row_name=row_name)
+
+    def pivot_table(
+        self,
+        values: Any = None,
+        index: Any = None,
+        columns: Any = None,
+        aggfunc: Any = "mean",
+        fill_value: Any = None,
+        margins: bool = False,
+        dropna: bool = True,
+        margins_name: Any = "All",
+        observed: bool = True,
+        sort: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Aggregates of one column by the values of one or two others.
+
+        With no columns key it is a group by on the index key. With one, each
+        value of it becomes a column of aggregates, a pair no row holds is
+        missing or `fill_value`, and whole numbers with a gap become floats.
+
+        Raises:
+            NotImplementedError: For margins, several keys or values with a
+                columns key, and a list or dict of functions, which pandas
+                answers with a MultiIndex, and for a columns key whose values
+                are not text.
+        """
+        if margins:
+            raise NotImplementedError(
+                "pivot_table: margins adds a row and a column of totals, which firepanda"
+                " does not add yet"
+            )
+        if isinstance(aggfunc, list | tuple | dict):
+            raise NotImplementedError(
+                "pivot_table: a list or dict of functions labels the columns with a"
+                " MultiIndex, which firepanda does not have"
+            )
+        down = _one_key(index, "index", "pivot_table")
+        taken = {down} if columns is None else {down, _one_key(columns, "columns", "pivot_table")}
+        if values is None:
+            values = [name for name in self.columns if name not in taken]
+        if columns is None:
+            names = [values] if not isinstance(values, list | tuple) else list(values)
+            if callable(aggfunc):
+                from ._frame import DataFrame
+
+                pieces = [
+                    _grouped_by_hand(self, down, name, aggfunc, sort, dropna, kwargs)
+                    for name in names
+                ]
+                grouped = DataFrame(dict(zip(names, pieces, strict=True)))
+            else:
+                grouped = self.groupby(down, sort=sort, dropna=dropna)[names].agg(aggfunc, **kwargs)
+            if fill_value is not None:
+                grouped = grouped.fillna(fill_value)
+            return grouped
+        across = _one_key(columns, "columns", "pivot_table")
+        measured = _one_key(values, "values", "pivot_table")
+        keys = self[down].tolist()
+        heads = self[across].tolist()
+        pairs = [
+            (key, head)
+            for key, head in zip(keys, heads, strict=True)
+            if not dropna or not (_missing(key) or _missing(head))
+        ]
+        rows = list(dict.fromkeys(key for key, _ in pairs))
+        order = list(dict.fromkeys(head for _, head in pairs))
+        if sort:
+            rows, order = sorted(rows), sorted(order)
+        names = _pivot_names(order, "pivot_table")
+        cells: dict[Any, Any] = {}
+        printed = str(self[measured].dtype)
+        for name in names:
+            chosen = self[self[across] == name]
+            if callable(aggfunc):
+                answer = _grouped_by_hand(chosen, down, measured, aggfunc, sort, dropna, kwargs)
+            else:
+                answer = chosen.groupby(down, sort=sort, dropna=dropna)[measured].agg(
+                    aggfunc, **kwargs
+                )
+            printed = str(answer.dtype)
+            for key, value in zip(answer.index.tolist(), answer.tolist(), strict=True):
+                cells[key, name] = value
+        if dropna:
+            names = [
+                name for name in names if not all(_missing(cells.get((row, name))) for row in rows)
+            ]
+        return _pivoted(rows, names, cells, printed, row_name=down, fill_value=fill_value)
+
     def isetitem(self, loc: Any, value: Any) -> None:
         """Sets the column at a position, or the columns at several, by position.
 
@@ -18689,6 +18813,138 @@ def _downcast(values: Any, downcast: str) -> Any:
         if values.dtype == wanted:
             break
     return values
+
+
+def _one_key(key: Any, what: str, caller: str) -> Any:
+    """The one column name `pivot` or `pivot_table` was given for an axis.
+
+    Raises:
+        NotImplementedError: For several, which pandas answers with a MultiIndex.
+    """
+    if isinstance(key, list | tuple):
+        if len(key) != 1:
+            raise NotImplementedError(
+                f"{caller}: several {what} keys label the answer with a MultiIndex, which"
+                " firepanda does not have"
+            )
+        return key[0]
+    return key
+
+
+def _pivot_names(labels: list[Any], caller: str) -> list[str]:
+    """The column values `pivot` turns into column names, which must be text.
+
+    Raises:
+        NotImplementedError: For values that are not text, which pandas keeps as
+            labels of their own type and firepanda names columns with text.
+    """
+    if not all(isinstance(label, str) for label in labels):
+        raise NotImplementedError(
+            f"{caller}: the columns key holds values that are not text, and firepanda"
+            " names columns with text"
+        )
+    return labels
+
+
+def _pivot_column(values: list[Any], printed: str, fill_value: Any, labels: Any) -> Any:
+    """One column of a pivot, widened to float64 where a gap needs a NaN.
+
+    A gap in whole numbers or in true and false is NaN in pandas, so the column
+    becomes float64, unless `fill_value` fills it.
+
+    Raises:
+        NotImplementedError: For true and false with a gap, which pandas
+            answers as objects.
+    """
+    from ._frame import Series
+
+    gaps = any(_missing(value) for value in values)
+    if gaps and fill_value is not None:
+        values = [fill_value if _missing(value) else value for value in values]
+        if isinstance(fill_value, float) and _numeric_kind(printed) == "int64":
+            printed = "float64"
+    elif gaps and _numeric_kind(printed) == "int64":
+        printed = "float64"
+    elif gaps and printed == "bool":
+        raise NotImplementedError(
+            "pivot: true and false with a gap are objects in pandas, and firepanda has no"
+            " object type"
+        )
+    if printed == "float64":
+        values = [math.nan if value is None else value for value in values]
+    return Series(values, dtype=printed, index=labels)
+
+
+def _grouped_by_hand(
+    frame: Any, down: Any, measured: Any, func: Any, sort: bool, dropna: bool, kwargs: Any
+) -> Any:
+    """`func` called on each group of one column in Python, as pandas calls it.
+
+    The group by here takes the names of reductions, and a Python function is
+    handed each group as a column of its own, in the order of the keys.
+    """
+    from ._frame import Index, Series
+
+    places: dict[Any, list[int]] = {}
+    for place, key in enumerate(frame[down].tolist()):
+        if dropna and _missing(key):
+            continue
+        places.setdefault(key, []).append(place)
+    keys = sorted(places) if sort else list(places)
+    column = frame[measured]
+    answers = [func(column.take(places[key]), **kwargs) for key in keys]
+    readable = [answer.item() if hasattr(answer, "item") else answer for answer in answers]
+    return Series(_readable(readable), index=Index(keys, name=down), name=measured)
+
+
+def _pivoted(
+    rows: list[Any], names: list[str], cells: dict[Any, Any], printed: str, **kw: Any
+) -> Any:
+    """The frame with one row per row key and one column per name."""
+    from ._frame import DataFrame, Index
+
+    fill_value = kw.get("fill_value")
+    labels = Index(rows, name=kw.get("row_name"))
+    columns = {
+        name: _pivot_column([cells.get((row, name)) for row in rows], printed, fill_value, labels)
+        for name in names
+    }
+    return DataFrame(columns, index=labels)
+
+
+def pivot(data: Any, *, columns: Any, index: Any = NO_DEFAULT, values: Any = NO_DEFAULT) -> Any:
+    """A frame reshaped by the values of one column, which is `pandas.pivot`."""
+    return data.pivot(columns=columns, index=index, values=values)
+
+
+def pivot_table(
+    data: Any,
+    values: Any = None,
+    index: Any = None,
+    columns: Any = None,
+    aggfunc: Any = "mean",
+    fill_value: Any = None,
+    margins: bool = False,
+    dropna: bool = True,
+    margins_name: Any = "All",
+    observed: bool = True,
+    sort: bool = True,
+    **kwargs: Any,
+) -> Any:
+    """A frame of aggregates by two keys, which is `pandas.pivot_table`."""
+    return data.pivot_table(
+        values=values,
+        index=index,
+        columns=columns,
+        aggfunc=aggfunc,
+        fill_value=fill_value,
+        margins=margins,
+        dropna=dropna,
+        margins_name=margins_name,
+        observed=observed,
+        sort=sort,
+        **kwargs,
+    )
 
 
 def to_numeric(

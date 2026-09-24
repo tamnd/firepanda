@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pivot and pivot_table
+
+`DataFrame.pivot`, `DataFrame.pivot_table`, `firepanda.pivot` and `firepanda.pivot_table` turn each value of one column into a column of its own, with the rows and columns sorted as pandas sorts them. `pivot` refuses two rows with one pair in pandas' words. `pivot_table` aggregates by name or with a Python function called on each group, fills a missing pair with `fill_value`, and turns whole numbers with a gap into floats as pandas does. firepanda refuses several keys, `values` left out with a columns key, lists of functions and margins, which pandas labels with a MultiIndex, and column values that are not text.
+
 ### Added: to_numeric
 
 `firepanda.to_numeric` reads values as numbers the way pandas does. Whole numbers in text are int64 and a decimal point or an exponent makes float64, space may surround a number but not an infinity, and empty text is NaN. A column answers a column, an index an index, a list or an array a numpy array and one value one number. `errors="coerce"` reads what is not a number as NaN, and `downcast` walks pandas' own list of types from the smallest up. `dtype_backend` and whole numbers past int64 in a column are refused.
