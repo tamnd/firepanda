@@ -27,6 +27,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 from __future__ import annotations
 
 import collections
+import contextlib
 import datetime
 import math
 import operator
@@ -59,6 +60,198 @@ if TYPE_CHECKING:
         Series,
         SeriesGroupBy,
     )
+
+
+def _is_numpy(value: Any) -> bool:
+    """Whether a value is a numpy array, asked without importing numpy."""
+    return type(value).__module__ == "numpy" and hasattr(value, "ndim")
+
+
+def _numpy_values(array: Any, owner: str) -> tuple[list[Any], str | None]:
+    """A one dimensional numpy array as a list and the type pandas keeps for it.
+
+    pandas keeps a numpy array's own type, so an int32 array is an int32 column
+    and a `datetime64[s]` array keeps its seconds. The values cross as Python
+    objects and the type is put back with a cast after, which is the one road
+    into the extension that is written. Instants and spans cross at microsecond
+    resolution, since that is as fine as a Python `datetime` goes.
+
+    Args:
+        array: The array.
+        owner: The class being built, for the message.
+
+    Returns:
+        The values, and the type to cast them to, or `None` to keep what the
+        values say.
+
+    Raises:
+        InvalidArgumentError: If the array is not one dimensional.
+    """
+    if array.ndim != 1:
+        raise InvalidArgumentError(
+            f"Data must be 1-dimensional, got ndarray of shape {array.shape} instead"
+        )
+    kind = array.dtype.kind
+    if kind in "biuf":
+        return array.tolist(), str(array.dtype)
+    if kind == "M":
+        unit = str(array.dtype)[len("datetime64[") : -1]
+        if unit not in ("s", "ms", "us", "ns"):
+            array = array.astype("datetime64[s]")
+        counts = array.view("int64").tolist()
+        floor = -(2**63)
+        return [None if count == floor else count for count in counts], str(array.dtype)
+    if kind == "m":
+        raise UnsupportedError(
+            f"{owner}(array) of {array.dtype}, because a column of spans is not built from"
+            " numbers yet"
+        )
+    return array.tolist(), None
+
+
+def _retyped(inner: Any, typed: str) -> Any:
+    """An extension series cast to the type a numpy array had.
+
+    An instant crosses as its count of units since the epoch, since the cast
+    underneath would keep it a count, and is read back as an instant here.
+    """
+    from ._frame import Series
+
+    if typed.startswith("datetime64["):
+        unit = typed[len("datetime64[") : -1]
+        return to_datetime(Series._wrap(inner), unit=unit)._inner.relabel(inner.label())
+    return inner.cast(typed, True)
+
+
+def _unwrapped(values: Any) -> Any:
+    """A sequence with each numpy scalar in it made the Python value it holds.
+
+    Only asked for after the extension has refused the sequence, so a list of
+    plain values pays nothing for it.
+    """
+    if not isinstance(values, (list, tuple)):
+        return values
+    if not any(type(value).__module__ == "numpy" for value in values):
+        return values
+    return [
+        value.item() if type(value).__module__ == "numpy" and hasattr(value, "item") else value
+        for value in values
+    ]
+
+
+def _is_scalar(value: Any) -> bool:
+    """Whether a value is one value rather than a sequence of them."""
+    return isinstance(value, (str, bytes)) or not isinstance(value, collections.abc.Iterable)
+
+
+def _labels_of(index: Any) -> tuple[list[Any], Any]:
+    """The labels an `index=` argument names, and the level name it carries."""
+    return list(index), getattr(index, "name", None)
+
+
+def _mismatched(values: int, labels: int) -> InvalidArgumentError:
+    """pandas' complaint about a column and an index of different lengths."""
+    return InvalidArgumentError(
+        f"Length of values ({values}) does not match length of index ({labels})"
+    )
+
+
+def _put_labels(frame: Any, labels: list[Any], level: Any) -> Any:
+    """An extension frame with its rows labelled, the labels going in as an index.
+
+    Args:
+        frame: The extension frame, as tall as `labels`.
+        labels: The row labels.
+        level: The index's level name, or `None`.
+
+    Returns:
+        The extension frame, labelled.
+    """
+    from ._frame import DataFrame
+
+    names = frame.names()
+    key = "__index__"
+    while key in names:
+        key += "_"
+    made = DataFrame({key: labels})._inner.stack_columns([frame])
+    out = DataFrame._wrap(made).set_index(key)._inner
+    return out.renamed_axis(None if level is None else str(level))
+
+
+def _series_to_frame_inner(column: Any, name: str) -> Any:
+    """An extension series as an extension frame of one column."""
+    from ._frame import _series_to_frame
+
+    return _series_to_frame(column, name)._inner
+
+
+def _frame_columns(data: Any, columns: Any) -> tuple[dict[Any, Any], bool]:
+    """What a frame is built from, as a mapping of column name to values.
+
+    Args:
+        data: The mapping, records, rows or array given.
+        columns: The `columns=` argument, or `None`.
+
+    Returns:
+        The columns, and whether a missing row should widen a column the way
+        pandas widens one that records leave gaps in.
+
+    Raises:
+        InvalidArgumentError: For rows of the wrong width.
+        UnsupportedError: For a shape that needs integer column names or a
+            column of objects.
+    """
+    unnamed = (
+        "names the columns 0, 1 and on, and a column name in firepanda is a string,"
+        " so pass columns="
+    )
+    wanted = None if columns is None else list(columns)
+    if _is_numpy(data):
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        if data.ndim != 2:
+            raise InvalidArgumentError("Must pass 2-d input. shape=" + str(data.shape))
+        if wanted is None:
+            raise UnsupportedError(f"DataFrame(array) {unnamed}")
+        if len(wanted) != data.shape[1]:
+            raise InvalidArgumentError(
+                f"Shape of passed values is {data.shape}, indices imply"
+                f" ({data.shape[0]}, {len(wanted)})"
+            )
+        return {name: data[:, at] for at, name in enumerate(wanted)}, False
+    if isinstance(data, collections.abc.Mapping):
+        if wanted is None:
+            return dict(data), False
+        for name in wanted:
+            if name not in data:
+                raise UnsupportedError(
+                    f"DataFrame(columns=[..., {name!r}]) names a column the data does not"
+                    " have, which pandas makes a column of objects and firepanda has no"
+                    " object column to make"
+                )
+        return {name: data[name] for name in wanted}, False
+    if _is_scalar(data):
+        raise InvalidArgumentError("DataFrame constructor not properly called!")
+    rows = list(data)
+    if rows and all(isinstance(row, collections.abc.Mapping) for row in rows):
+        names = list(dict.fromkeys(name for row in rows for name in row))
+        if wanted is not None:
+            names = wanted
+        return {name: [row.get(name) for row in rows] for name in names}, True
+    if rows and all(not _is_scalar(row) for row in rows):
+        rows = [list(row) for row in rows]
+        width = max(len(row) for row in rows)
+        if wanted is None:
+            raise UnsupportedError(f"DataFrame(rows) {unnamed}")
+        if len(wanted) != width:
+            raise InvalidArgumentError(
+                f"{len(wanted)} columns passed, passed data had {width} columns"
+            )
+        return {
+            name: [row[at] if at < len(row) else None for row in rows]
+            for at, name in enumerate(wanted)
+        }, True
+    raise UnsupportedError(f"DataFrame(list of values) {unnamed}")
 
 
 def _refuse(name: str, value: object, why: str) -> None:
@@ -4505,13 +4698,15 @@ class DataFrameMixin:
         is the reading that decides what a value means, so the two agree on every
         answer and differ only in how much work they do.
         """
-        _refuse("index", index, "putting labels on a frame as it is built is not written")
-        _refuse("columns", columns, "selecting and reordering on the way in is not written")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
-        try:
-            self._inner = _firepanda.DataFrame(data)
-        except Exception as error:
-            raise translate(error) from None
+        if isinstance(data, DataFrameMixin):
+            self._inner = self._copied(data, index, columns)
+        elif data is None or (
+            isinstance(data, collections.abc.Mapping) and index is None and columns is None
+        ):
+            self._inner = self._built(data)
+        else:
+            self._inner = self._shaped(data, index, columns)
         if dtype is not None:
             names = self._inner.names()
             wanted = [_named_dtype(dtype)] * len(names)
@@ -4519,6 +4714,115 @@ class DataFrameMixin:
                 self._inner = self._inner.cast(names, wanted, True)
             except Exception as error:
                 raise translate(error) from None
+
+    @staticmethod
+    def _built(data: Any) -> Any:
+        """The extension frame for a mapping of column name to values.
+
+        A mapping whose values are all lists goes straight across. One with a
+        numpy array, a one value column or a series in it goes the long way,
+        through `_shaped`, which is where those are read.
+        """
+        if data and any(
+            _is_numpy(value) or _is_scalar(value) or isinstance(value, SeriesMixin)
+            for value in data.values()
+        ):
+            return DataFrameMixin._shaped(data, None, None)
+        return DataFrameMixin._across(data)
+
+    @staticmethod
+    def _across(data: Any) -> Any:
+        """A mapping of column name to values handed to the extension.
+
+        A list the extension refuses is tried once more with its numpy scalars
+        made Python values, so a list of plain values pays nothing for that.
+        """
+        try:
+            return _firepanda.DataFrame(data)
+        except Exception as error:
+            if data:
+                plain = {name: _unwrapped(values) for name, values in data.items()}
+                if any(plain[name] is not data[name] for name in data):
+                    try:
+                        return _firepanda.DataFrame(plain)
+                    except Exception:
+                        pass
+            raise translate(error) from None
+
+    @staticmethod
+    def _copied(data: Any, index: Any, columns: Any) -> Any:
+        """The extension frame for a frame, with `columns=` picking and `index=` reindexing."""
+        out = data
+        if columns is not None:
+            out = out[list(columns)]
+        if index is not None:
+            out = out.reindex(index)
+        return out._inner
+
+    @staticmethod
+    def _shaped(data: Any, index: Any, columns: Any) -> Any:
+        """The extension frame for everything that is not a plain mapping of lists.
+
+        The data is first made a mapping of column name to values. Then each
+        numpy array becomes a list and remembers its type, each series is lined
+        up on the row labels, which are `index=` when it is given and the union
+        of the series' labels when it is not, and each single value is repeated
+        down the rows. What is left is a mapping of lists, and it goes across.
+        A series whose type the crossing does not keep, a category or an
+        instant, is put back in its column once the rows have their labels.
+        """
+        from ._frame import DataFrame, Series
+
+        found, widen = _frame_columns(data, columns)
+        typed: dict[Any, str] = {}
+        for name, values in list(found.items()):
+            if _is_numpy(values):
+                found[name], cast_to = _numpy_values(values, "DataFrame")
+                if cast_to is not None:
+                    typed[name] = cast_to
+        labels, level = (None, None) if index is None else _labels_of(index)
+        series = {name: v for name, v in found.items() if isinstance(v, SeriesMixin)}
+        if series and labels is None:
+            seen = [v.index.tolist() for v in series.values()]
+            if all(mine == seen[0] for mine in seen):
+                labels = seen[0]
+            else:
+                labels = list(dict.fromkeys(label for mine in seen for label in mine))
+                with contextlib.suppress(TypeError):
+                    labels = sorted(labels)
+            level = next(iter(series.values())).index.name
+        for name, values in series.items():
+            if values.index.tolist() != labels:
+                values = values.reindex(labels)
+            found[name] = values
+        sized = [len(v) for v in found.values() if not _is_scalar(v)]
+        rows = len(labels) if labels is not None else (sized[0] if sized else None)
+        if rows is None and found:
+            raise InvalidArgumentError("If using all scalar values, you must pass an index")
+        for name, values in found.items():
+            if _is_scalar(values):
+                found[name] = [values] * rows
+            elif rows is not None and len(values) != rows:
+                raise _mismatched(len(values), rows)
+        out = DataFrame._wrap(DataFrameMixin._across(found))
+        cast = {name: kind for name, kind in typed.items() if not kind.startswith("datetime")}
+        if cast:
+            try:
+                out = DataFrame._wrap(out._inner.cast(list(cast), list(cast.values()), True))
+            except Exception as error:
+                raise translate(error) from None
+        for name, kind in typed.items():
+            if name not in cast:
+                instants = Series._wrap(_retyped(out[name]._inner, kind))
+                out = out._assigned(name, instants)
+        if widen:
+            out = DataFrame._wrap(out._inner._widened_for_missing())
+        if labels is not None:
+            out = DataFrame._wrap(_put_labels(out._inner, labels, level))
+        for name in series:
+            if out[name].dtype != found[name].dtype:
+                out = out._assigned(name, found[name])
+        return out._inner
 
     @classmethod
     def from_arrow(cls, data: Any) -> DataFrame:
@@ -7062,15 +7366,32 @@ class SeriesMixin:
         missing value. An empty mapping is the empty series.
         """
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
-        if not keyed:
-            _refuse("index", index, "putting labels on a series as it is built is not written")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
-        source = data._inner if isinstance(data, SeriesMixin) else data
+        typed = None
         try:
             if keyed:
                 self._inner = _keyed_series(data, index, name)
+            elif isinstance(data, SeriesMixin) and index is not None:
+                # pandas reads a series and an index together as a reindex,
+                # and the labels are the index given, name and all.
+                out = data.reindex(index).rename_axis(_labels_of(index)[1])
+                self._inner = out._inner if name is None else out._inner.relabel(str(name))
             else:
-                self._inner = _firepanda.Series(source, None if name is None else str(name))
+                if _is_numpy(data):
+                    data, typed = _numpy_values(data, "Series")
+                elif data is not None and _is_scalar(data):
+                    data = [data] * (1 if index is None else len(list(index)))
+                self._inner = self._made(data, name)
+                if typed is not None and dtype is None:
+                    self._inner = _retyped(self._inner, typed)
+                if index is not None:
+                    labels, level = _labels_of(index)
+                    rows = self._inner.length()
+                    if len(labels) != rows:
+                        raise _mismatched(rows, len(labels))
+                    frame = _series_to_frame_inner(self._inner, "values")
+                    held = _put_labels(frame, labels, level).column("values")
+                    self._inner = held.relabel(None if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:
@@ -7079,6 +7400,19 @@ class SeriesMixin:
                 self._inner = self._inner.cast(wanted, True)
             except Exception as error:
                 raise translate(error) from None
+
+    @staticmethod
+    def _made(data: Any, name: Any) -> Any:
+        """The extension series for a sequence, with a numpy scalar in it read as its value."""
+        source = data._inner if isinstance(data, SeriesMixin) else data
+        label = None if name is None else str(name)
+        try:
+            return _firepanda.Series(source, label)
+        except Exception:
+            plain = _unwrapped(source)
+            if plain is source:
+                raise
+            return _firepanda.Series(plain, label)
 
     def __getitem__(self, key: Any) -> Any:
         """Reads by label, except for a slice of numbers, which is by position.
