@@ -5696,6 +5696,108 @@ def _missing(value: Any) -> bool:
     return value is None or value != value
 
 
+_SPANS = re.compile(r"(datetime|timedelta)64\[(s|ms|us|ns)\]")
+"""The types numpy holds as counts of a unit, instants with no zone and spans."""
+
+
+def _numpy() -> Any:
+    """numpy, which `to_numpy` needs and firepanda does not depend on.
+
+    Raises:
+        ImportError: When numpy is not installed, saying which call needed it.
+    """
+    try:
+        import numpy
+    except ImportError:
+        raise ImportError("to_numpy answers a numpy array, and numpy is not installed") from None
+    return numpy
+
+
+def _numpy_type(printed: str, gaps: bool) -> str:
+    """The numpy type pandas gives a column of this type, `object` for the rest."""
+    if printed in _SIGNED or printed in _UNSIGNED:
+        return "float64" if gaps else printed
+    if printed in _FLOATING:
+        return printed
+    if printed == "bool":
+        return "object" if gaps else "bool"
+    if _SPANS.fullmatch(printed):
+        return printed
+    return "object"
+
+
+def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
+    """A column's values as the numpy array pandas' `to_numpy` hands back.
+
+    Numbers keep their type, a column of whole numbers with a gap becomes floats
+    with NaN in the gap, instants with no zone and spans are read as their counts
+    of the unit, and anything else is an array of objects with NaN for a missing
+    value, which is what pandas gives for text and categories.
+    """
+    np = _numpy()
+    printed = str(column.dtype)
+    gaps = bool(column.isna().any())
+    kind = _numpy_type(printed, gaps)
+    spans = _SPANS.fullmatch(printed)
+    if spans and na_value is NO_DEFAULT:
+        counts = iter(column.dropna().astype("int64").tolist())
+        least = int(np.iinfo(np.int64).min)
+        gap = column.isna().tolist()
+        read = np.array([least if blank else next(counts) for blank in gap], dtype="int64")
+        answer = read.view(printed)
+    else:
+        blank = na_value if na_value is not NO_DEFAULT else float("nan")
+        if spans:
+            kind = "object"
+        values = [blank if _missing(value) else value for value in column.tolist()]
+        if kind == "object" and na_value is NO_DEFAULT and gaps and printed == "bool":
+            values = [None if _missing(value) else value for value in column.tolist()]
+        answer = np.array(
+            values, dtype=kind if na_value is NO_DEFAULT or kind == "object" else None
+        )
+        if na_value is not NO_DEFAULT and answer.dtype.kind in "iufb" and kind != "object":
+            answer = answer.astype(np.result_type(answer.dtype, kind))
+    return answer if dtype is None else answer.astype(dtype)
+
+
+def _frame_to_numpy(frame: Any, dtype: Any, na_value: Any) -> Any:
+    """A frame's values as a two dimensional numpy array, a row per row.
+
+    The columns share one type: their own when they agree, the wider number
+    when every column holds numbers, and objects otherwise, which is pandas'
+    rule and is why a frame of whole numbers and flags gives objects.
+    """
+    np = _numpy()
+    columns = [_column_to_numpy(frame[name], None, na_value) for name in frame.columns]
+    if not columns:
+        return np.empty((len(frame), 0), dtype=dtype or "float64")
+    kinds = {column.dtype for column in columns}
+    if len(kinds) == 1:
+        shared = kinds.pop()
+    elif all(kind.kind in "iuf" for kind in kinds):
+        shared = np.result_type(*kinds)
+    else:
+        shared = np.dtype("object")
+    answer = np.empty((len(frame), len(columns)), dtype=shared)
+    for position, column in enumerate(columns):
+        answer[:, position] = column
+    return answer if dtype is None else answer.astype(dtype)
+
+
+def _values_array(column: Any) -> Any:
+    """What pandas' `values` hands back: numpy for numbers, flags and naive instants.
+
+    Text, categories and instants with a zone are an extension array in pandas,
+    and are a `FirepandaArray` here, which holds the values with their type.
+    """
+    from ._array import FirepandaArray
+
+    printed = str(column.dtype)
+    if _numpy_type(printed, False) == "object":
+        return FirepandaArray(column)
+    return _column_to_numpy(column, None, NO_DEFAULT)
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -6248,6 +6350,15 @@ class DataFrameMixin:
         """Each row label with its row as a column named by the label."""
         for position, label in enumerate(self.index.tolist()):
             yield label, self.iloc[position]
+
+    def to_numpy(self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT) -> Any:
+        """The values as a two dimensional numpy array, in the type the columns share."""
+        return _frame_to_numpy(self, dtype, na_value)
+
+    @property
+    def values(self) -> Any:
+        """The values as a two dimensional numpy array, which is `to_numpy()`."""
+        return _frame_to_numpy(self, None, NO_DEFAULT)
 
     def items(self) -> Iterator[tuple[str, Series]]:
         """Each column name with its column.
@@ -9306,6 +9417,17 @@ class SeriesMixin:
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
+
+    def to_numpy(
+        self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
+    ) -> Any:
+        """The values as a numpy array, in the type pandas gives this column."""
+        return _column_to_numpy(self, dtype, na_value)
+
+    @property
+    def values(self) -> Any:
+        """The values as numpy where pandas hands back numpy, else a `FirepandaArray`."""
+        return _values_array(self)
 
     def items(self) -> Iterator[tuple[Any, Any]]:
         """Each label with its value.
@@ -15424,6 +15546,12 @@ class IndexMixin:
             raise translate(error) from None
         made, positions = answer
         return Index._wrap(made), None if positions is None else list(positions)
+
+    def to_numpy(
+        self, dtype: Any = None, copy: bool = False, na_value: Any = NO_DEFAULT, **kwargs: Any
+    ) -> Any:
+        """The labels as a numpy array, in the type pandas gives them."""
+        return _column_to_numpy(self.to_series(), dtype, na_value)
 
     def all(self, *args: Any, **kwargs: Any) -> Any:
         """Whether every label is true, a missing label counting as true as numpy counts it."""
