@@ -6665,6 +6665,183 @@ class DataFrameMixin:
             answer = answer.astype(types.pop())
         return answer
 
+    def update(
+        self,
+        other: Any,
+        join: Any = "left",
+        overwrite: bool = True,
+        filter_func: Any = None,
+        errors: Any = "ignore",
+    ) -> None:
+        """Puts in the values of `other` column by column and label by label.
+
+        Only the columns and rows this frame has are touched. With `overwrite`
+        a value that is not missing in `other` replaces this frame's, and
+        without it only a missing value here is filled. `filter_func` picks the
+        values that may be replaced instead, and `errors="raise"` refuses when
+        both sides hold a value in the same place.
+
+        Raises:
+            NotImplementedError: For a join other than `"left"`, with pandas' words.
+            ValueError: For an `errors` pandas does not know, or with
+                `Data overlaps.` when `errors="raise"` finds an overlap.
+            TypeError: For a value a column cannot hold.
+        """
+        from ._frame import DataFrame
+
+        if join != "left":
+            raise NotImplementedError("Only left join is supported")
+        if errors not in ("ignore", "raise"):
+            raise InvalidArgumentError("The parameter errors must be either 'ignore' or 'raise'")
+        if not isinstance(other, DataFrame):
+            other = DataFrame(other) if not hasattr(other, "to_frame") else other.to_frame()
+        mine = set(self.columns)
+        for name in other.columns:
+            if name not in mine:
+                continue
+            this = self[name].tolist()
+            that = other[name].reindex(self.index).tolist()
+            if filter_func is not None:
+                allowed = self[name].map(filter_func).tolist()
+                keep = [not ok or _missing(new) for ok, new in zip(allowed, that, strict=True)]
+            else:
+                if errors == "raise" and any(
+                    not _missing(old) and not _missing(new)
+                    for old, new in zip(this, that, strict=True)
+                ):
+                    raise InvalidArgumentError("Data overlaps.")
+                keep = [
+                    _missing(new) if overwrite else not _missing(old)
+                    for old, new in zip(this, that, strict=True)
+                ]
+            if all(keep):
+                continue
+            column = self[name]
+            column.update(
+                type(column)(
+                    [None if held else new for held, new in zip(keep, that, strict=True)],
+                    index=self.index,
+                )
+            )
+            _settled(self, self.assign(**{name: column}), True)
+
+    def isetitem(self, loc: Any, value: Any) -> None:
+        """Sets the column at a position, or the columns at several, by position.
+
+        Raises:
+            IndexError: For a position the frame does not have.
+        """
+        names = list(self.columns)
+        places = loc if isinstance(loc, (list, tuple)) else [loc]
+        for place in places:
+            if not -len(names) <= place < len(names):
+                raise IndexError(
+                    f"index {place} is out of bounds for axis 0 with size {len(names)}"
+                )
+        if isinstance(loc, (list, tuple)):
+            pieces = [value[name] for name in value.columns]
+            wanted = {names[place]: one for place, one in zip(places, pieces, strict=True)}
+        else:
+            wanted = {names[loc]: value}
+        _settled(self, self.assign(**wanted), True)
+
+    def infer_objects(self, copy: Any = NO_DEFAULT) -> DataFrame:
+        """The frame itself, as a copy, since every column already has a type."""
+        return self.copy()
+
+    @classmethod
+    def from_dict(
+        cls, data: dict[Any, Any], orient: Any = "columns", dtype: Any = None, columns: Any = None
+    ) -> DataFrame:
+        """A frame from a dict of columns, a dict of rows, or pandas' tight form.
+
+        Raises:
+            ValueError: For an orient pandas does not know, or `columns` with
+                `orient="columns"`, with pandas' words.
+            NotImplementedError: For rows given as lists with no `columns`,
+                whose column names would be numbers.
+        """
+        if orient not in ("index", "columns", "tight"):
+            raise InvalidArgumentError(
+                f"Expected 'index', 'columns' or 'tight' for orient parameter. Got '{orient}'"
+                " instead"
+            )
+        if orient == "columns":
+            if columns is not None:
+                raise InvalidArgumentError("cannot use columns parameter with orient='columns'")
+            return cls(data, dtype=dtype)
+        if orient == "tight":
+            return cls(data["data"], index=data["index"], columns=data["columns"], dtype=dtype)
+        labels = list(data)
+        rows = list(data.values())
+        if rows and all(isinstance(row, dict) for row in rows):
+            names: list[Any] = []
+            for row in rows:
+                names.extend(name for name in row if name not in names)
+            wanted = names if columns is None else list(columns)
+            pieces = {name: _readable([row.get(name, math.nan) for row in rows]) for name in wanted}
+            return cls(pieces, index=labels, dtype=dtype)
+        if columns is None:
+            raise NotImplementedError(
+                "from_dict: rows given as lists take numbers as column names, and a firepanda"
+                " column is named by text, so pass columns="
+            )
+        return cls([list(row) for row in rows], index=labels, columns=list(columns), dtype=dtype)
+
+    @classmethod
+    def from_records(
+        cls,
+        data: Any,
+        index: Any = None,
+        exclude: Any = None,
+        columns: Any = None,
+        coerce_float: bool = False,
+        nrows: int | None = None,
+    ) -> DataFrame:
+        """A frame from a list of tuples or of dicts, one per row.
+
+        `index` names a column to take the row labels from, or gives them, and
+        `exclude` names columns to leave out. `coerce_float` is accepted and
+        unused, since a column here is read as floats when its values are.
+
+        Raises:
+            NotImplementedError: For tuples with no `columns`, whose column
+                names would be numbers.
+        """
+        rows = list(data)
+        if nrows is not None and not isinstance(data, (list, tuple)):
+            rows = rows[:nrows]
+        if rows and all(isinstance(row, dict) for row in rows):
+            names: list[Any] = []
+            for row in rows:
+                names.extend(name for name in row if name not in names)
+            if columns is not None:
+                names = list(columns)
+            pieces = {name: _readable([row.get(name, math.nan) for row in rows]) for name in names}
+        else:
+            if columns is None:
+                raise NotImplementedError(
+                    "from_records: tuples take numbers as column names, and a firepanda column"
+                    " is named by text, so pass columns="
+                )
+            names = list(columns)
+            pieces = {name: [row[place] for row in rows] for place, name in enumerate(names)}
+        labels, taken = None, None
+        if isinstance(index, str) and index in pieces:
+            taken = index
+        elif isinstance(index, (list, tuple)) and index and all(one in pieces for one in index):
+            if len(index) != 1:
+                raise NotImplementedError("from_records: several index columns make a MultiIndex")
+            taken = index[0]
+        elif index is not None:
+            labels = list(index)
+        if taken is not None:
+            labels = pieces.pop(taken)
+        for name in exclude or ():
+            pieces.pop(name, None)
+        answer = cls(pieces) if labels is None else cls(pieces, index=labels)
+        return answer if taken is None else answer.rename_axis(taken)
+
     def map(self, func: Any, na_action: Any = None, **kwargs: Any) -> DataFrame:
         """A function on each value, column by column, the labels kept."""
         if not callable(func):
@@ -9740,6 +9917,39 @@ class SeriesMixin:
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
+
+    def infer_objects(self, copy: Any = NO_DEFAULT) -> Series:
+        """The column itself, as a copy, since it already has a type."""
+        return self.copy()
+
+    def filter(
+        self, items: Any = None, like: str | None = None, regex: str | None = None, axis: Any = None
+    ) -> Series:
+        """The values whose labels one of three rules names.
+
+        `items` keeps the order it was written in and drops a label that is not
+        there. `like` keeps the labels it is a substring of and `regex` the ones
+        it matches, in the column's own order.
+
+        Raises:
+            TypeError: For none of the three or more than one, with pandas' words.
+        """
+        rules = [value for value in (items, like, regex) if value is not None]
+        if len(rules) > 1:
+            raise TypeError("Keyword arguments `items`, `like`, or `regex` are mutually exclusive")
+        if not rules:
+            raise TypeError("Must pass either `items`, `like`, or `regex`")
+        _align_axis(0 if axis is None else axis, "Series", (0,))
+        labels = self.index.tolist()
+        if items is not None:
+            places = {label: place for place, label in enumerate(labels)}
+            kept = [places[one] for one in items if one in places]
+        elif like is not None:
+            kept = [place for place, label in enumerate(labels) if str(like) in str(label)]
+        else:
+            pattern = re.compile(regex if isinstance(regex, str) else str(regex))
+            kept = [place for place, label in enumerate(labels) if pattern.search(str(label))]
+        return self.take(kept)
 
     def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
         """One or more reductions of the column, by name, function, list or dict.
@@ -16115,6 +16325,16 @@ class IndexMixin:
         return self
 
     def to_flat_index(self) -> Index:
+        """The index itself, which is flat already."""
+        return self
+
+    def map(self, mapper: Any, na_action: Any = None) -> Index:
+        """Each label through a function, a mapping or a column read as one."""
+        from ._frame import Index
+
+        return Index(self.to_series().map(mapper, na_action=na_action), name=self.name)
+
+    def ravel(self, order: str = "C") -> Index:
         """The index itself, which is flat already."""
         return self
 

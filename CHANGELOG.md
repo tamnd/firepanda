@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: update, isetitem, from_dict, from_records and infer_objects on a frame, filter on a column and map on an index
+
+`DataFrame.update` puts in another frame's or column's values column by column and label by label, with `overwrite`, `filter_func` and `errors="raise"` as pandas reads them, and refuses a join other than left with pandas' words. `DataFrame.isetitem` sets columns by position. `DataFrame.from_dict` reads a dict of columns, a dict of rows and pandas' tight form, and `DataFrame.from_records` reads tuples with `columns` or dicts, with `index` and `exclude`. Rows given as lists or tuples with no column names are refused, because their column names would be numbers. `infer_objects` on a frame and a column answers a copy. `Series.filter` keeps the values whose labels `items`, `like` or `regex` names. `Index.map` maps the labels and `Index.ravel` answers the index.
+
 ### Added: the rest of pandas.errors
 
 `firepanda.errors` now has a class for every class in `pandas.errors`, 40 more, from `AbstractMethodError` to `ValueLabelTypeMismatch`, each on the same builtins and under the same parents as pandas' class, so an `except` clause or a warnings filter that names one of them works unchanged. Most are raised by readers and writers firepanda does not have yet and are carried for the name.
