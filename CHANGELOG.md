@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: one row of a frame as a series, and names that are numbers
+
+`df.iloc[0]`, `df.iloc[-1, [1, 0]]` and `df.loc[label]` read one row across several columns, which used to raise. The answer is a series labelled by the column names and named by the row's label, and it holds the one type every column fits: columns of one type keep it, and numbers meet the way numpy's do, so int32 next to int8 is int32 and float32 next to int64 is float64. A number next to a flag or to text is an object column in pandas, and that is still refused with NotImplementedError, since firepanda has no object column.
+
+A series name can be a number now. The core keeps a name as text, so the wrapper keeps the number next to it and `name` answers the number while the core's text still spells it. `rename(5).name` is 5, a row's name is its label, and `DataFrame.quantile(0.5).name` is 0.5, where it used to be None. `quantile(1)` is named 1.0, as in pandas. An operation that makes a new column carries the name as text, so `rename(5) + 1` is still named "5".
+
 ### Fixed: a column labelled with empty text exports to Arrow
 
 A frame with a column labelled `""` could not be read by pyarrow, which raised a SystemError from `pa.table`, because the column's schema went out with a null name, the form Arrow keeps for an array with no name at all, and pyarrow refuses a struct child without one. `get_dummies` makes that label whenever a column holds an empty string. A frame's column now always carries its name, empty or not, and a lone column or index with no name still goes out with a null one.

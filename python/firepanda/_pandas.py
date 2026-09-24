@@ -73,6 +73,21 @@ def _values_of(inner: Any) -> list[Any]:
     return _outward(list(inner.to_list()), inner.dtype())
 
 
+def _named_as[Column](column: Column, name: Any) -> Column:
+    """The column, answering `name` as given where the core holds it as text.
+
+    The core keeps a column's name as text, which is right for every name that
+    came from a frame, since column labels here are text. A row read out of a
+    frame is named by the row's label and a quantile by its fraction, and
+    pandas hands those back as the number. The wrapper keeps the name as given,
+    and `name` answers it for as long as the core's text still spells it. A
+    later operation makes a new column and carries the text.
+    """
+    if name is not None and not isinstance(name, str):
+        column._typed_name = name  # type: ignore[attr-defined]
+    return column
+
+
 def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
     """One value out of a series, or out of a frame by row and column position."""
     if column is None:
@@ -492,6 +507,8 @@ def _kept[Answer](owner: Any, answer: Answer, inplace: bool) -> Answer:
         return answer
     settled: Any = answer
     owner._inner = settled._inner
+    if hasattr(type(owner), "_typed_name"):
+        owner._typed_name = getattr(settled, "_typed_name", None)
     return cast("Answer", owner)
 
 
@@ -4614,11 +4631,9 @@ class _Selection:
         by a set of things does not. Two collapsed axes are a value, one is a
         column, and none is a frame.
 
-        A single row with more than one column would be a row as a series, and
-        that is refused rather than approximated. A row read across the columns
-        has to find one type that all of them fit, which is a different
-        operation from anything in this file and is written up in section 6 of
-        document 36.
+        A single row with more than one column is a row as a series, labelled
+        by the column names and named by the row's label, and it takes the one
+        type every column fits, which `_row_type` works out.
         """
         from ._frame import DataFrame, Series
 
@@ -4634,11 +4649,8 @@ class _Selection:
                 narrowed = _narrowed(inner.select([picked]), where)
                 return Series._wrap(narrowed.column(picked))
             if where[0] == "one":
-                raise NotImplementedError(
-                    "reading one row across several columns is not supported yet,"
-                    " because a row has to find one type that every column fits"
-                    " and nothing here computes that type"
-                )
+                chosen = names if picked is EVERY else picked
+                return _one_row(self._owner, inner, where[1], chosen)
             if picked is not EVERY:
                 inner = inner.select(picked)
             return DataFrame._wrap(_narrowed(inner, where))
@@ -4646,6 +4658,48 @@ class _Selection:
             raise
         except Exception as error:
             raise translate(error) from None
+
+
+def _row_type(types: list[str]) -> str:
+    """The one type a row across columns of these types has, as pandas decides it.
+
+    Columns of one type keep it and numbers meet the way numpy's do. A flag next
+    to a number, text next to anything else, and every other mix are pandas'
+    object column.
+
+    Raises:
+        NotImplementedError: For a mix that pandas answers with object.
+    """
+    kinds = set(types)
+    if len(kinds) == 1:
+        return types[0]
+    common = None if "bool" in kinds else _numeric_type(kinds)
+    if common is None:
+        raise NotImplementedError(
+            f"reading one row across columns of {' and '.join(sorted(kinds))} is not"
+            " supported yet, because pandas answers it with an object column and"
+            " firepanda has no object column"
+        )
+    return common
+
+
+def _one_row(owner: Any, inner: Any, position: int, chosen: list[str]) -> Any:
+    """One row of a frame as a series: the column names as labels, the row label as name.
+
+    Each column's cell is cast to the row's type and the cells are stacked into
+    one column, so a value crosses as the column holds it rather than through
+    Python.
+    """
+    from ._frame import Series
+
+    if position < 0:
+        position += inner.length()
+    held = inner.select(list(chosen)).slice_rows(position, position + 1)
+    kind = _row_type([held.column(name).dtype() for name in chosen])
+    cells = [Series._wrap(held.column(name)).astype(kind) for name in chosen]
+    column = concat(cells, ignore_index=True)
+    label = owner.index[position]
+    return _with_row_labels(column, list(chosen)).rename_axis(None).rename(label)
 
 
 def _narrowed(inner: Any, where: tuple[Any, ...]) -> Any:
@@ -7211,7 +7265,9 @@ class DataFrameMixin:
         wanted, alone = _quantiles_asked(q)
         _interpolation_written(interpolation)
         if alone and interpolation == "linear":
-            return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0)
+            return self._reduce("quantile", wanted[0], axis, True, numeric_only, 0).rename(
+                float(wanted[0])
+            )
         if axis not in (0, "index"):
             raise NotImplementedError(
                 "axis=1 is not supported yet with a list of quantiles or an"
@@ -7224,7 +7280,7 @@ class DataFrameMixin:
         columns = {name: read[name]._quantiles(wanted, interpolation) for name in names}
         if alone:
             answer = [columns[name][0] for name in names]
-            return _labelled(names, answer).rename(None).rename_axis(None)
+            return _labelled(names, answer).rename_axis(None).rename(float(wanted[0]))
         return _quantile_rows(wanted, names, columns)
 
     def _nunique(self, axis: Any, dropna: bool) -> Series:
@@ -8141,10 +8197,22 @@ class DataFrameMixin:
 class SeriesMixin:
     """The hand written half of `Series`."""
 
-    __slots__ = ("_inner",)
-    """The one piece of state, for the reason `DataFrameMixin` gives."""
+    __slots__ = ("_inner", "_typed_name")
+    """The column the core holds, for the reason `DataFrameMixin` gives, and a
+    name given as a number, which `_named_as` explains."""
 
     _inner: _firepanda.Series
+
+    def _name_of(self, label: str | None) -> Any:
+        """The name to answer for the core's text, the number if one was given.
+
+        `_named_as` explains why a name given as a number is kept on the wrapper.
+        It is answered while the core's text still spells it.
+        """
+        typed = getattr(self, "_typed_name", None)
+        if typed is not None and label == str(typed):
+            return typed
+        return label
 
     if TYPE_CHECKING:
 
@@ -9175,11 +9243,8 @@ class SeriesMixin:
         if callable(index) or hasattr(index, "items"):
             raise NotImplementedError(f"a mapping is not supported yet, because {_NO_LABEL_MAP}")
         try:
-            return _kept(
-                self,
-                Series._wrap(self._inner.relabel(None if index is None else str(index))),
-                inplace,
-            )
+            renamed = Series._wrap(self._inner.relabel(None if index is None else str(index)))
+            return _kept(self, _named_as(renamed, index), inplace)
         except Exception as error:
             raise translate(error) from None
 

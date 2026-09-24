@@ -3269,10 +3269,10 @@ class Series(SeriesMixin):
             raise translate(error) from None
 
     @property
-    def name(self) -> str | None:
+    def name(self) -> Any:
         """The name of the series, and None when it has none."""
         try:
-            return self._inner.label()
+            return self._name_of(self._inner.label())
         except Exception as error:
             raise translate(error) from None
 
