@@ -341,7 +341,7 @@ def _release_exported_array(array: ArrayPtr) abi("C") -> None:
 
 
 def export_schema(
-    type: LogicalType, name: StringSlice = ""
+    type: LogicalType, name: StringSlice = "", named: Bool = False
 ) raises -> ArrowSchema:
     """Describes a firepanda type as an `ArrowSchema`.
 
@@ -355,6 +355,9 @@ def export_schema(
         type: The column type.
         name: The field name, or empty for a top level array, where Arrow wants
             a null name rather than an empty one.
+        named: Whether the field has a name even when the name is empty, which
+            is the case for a column of a frame, since a struct child with a
+            null name is refused by pyarrow and a column may be labelled "".
 
     Returns:
         A schema the caller owns and must release.
@@ -363,7 +366,7 @@ def export_schema(
         Error: If the type has no Arrow format string.
     """
     var format = _c_string(format_for(type))
-    var has_name = name.byte_length() > 0
+    var has_name = named or name.byte_length() > 0
     var name_bytes = _c_string(name)
 
     var box = external_call["malloc", Pointer[_SchemaBox, MutUntrackedOrigin]](
@@ -870,7 +873,7 @@ def export_frame_schema(
         )
     var children = List[ArrowSchema](capacity=len(types))
     for i in range(len(types)):
-        children.append(export_schema(types[i], names[i]))
+        children.append(export_schema(types[i], names[i], named=True))
 
     var box = external_call[
         "malloc", Pointer[_StructSchemaBox, MutUntrackedOrigin]
