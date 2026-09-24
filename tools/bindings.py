@@ -3095,6 +3095,17 @@ FRAME = Exposed(
         *_reductions("DataFrame"),
         *_correlations("DataFrame"),
         Member(
+            name="align",
+            kind="method",
+            signature=(
+                'other: Any, join: Any = "outer", axis: Any = None, level: Any = None,'
+                " copy: Any = NO_DEFAULT, fill_value: Any = None"
+            ),
+            body="self._align(other, join, axis, level, copy, fill_value)",
+            doc="This frame and another object given the same labels, as a pair.",
+            returns="tuple[Any, Any]",
+        ),
+        Member(
             name="combine_first",
             kind="method",
             signature="other: Any",
@@ -3839,6 +3850,17 @@ SERIES = Exposed(
         ),
         *_reductions("Series"),
         *_correlations("Series"),
+        Member(
+            name="align",
+            kind="method",
+            signature=(
+                'other: Any, join: Any = "outer", axis: Any = None, level: Any = None,'
+                " copy: Any = NO_DEFAULT, fill_value: Any = None"
+            ),
+            body="self._align(other, join, axis, level, copy, fill_value)",
+            doc="This column and another object given the same labels, as a pair.",
+            returns="tuple[Any, Any]",
+        ),
         Member(
             name="combine_first",
             kind="method",
