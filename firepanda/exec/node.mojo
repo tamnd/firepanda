@@ -111,6 +111,7 @@ from firepanda.join.pairs import (
     bucket_side,
     mark_probe,
     pair_probe,
+    seen_side,
 )
 from firepanda.kernel.accum import accumulator
 from firepanda.kernel.binary import (
@@ -4613,15 +4614,30 @@ struct Join(Movable):
         self._absent = absent^
         self._left_at = here
         self._right_at = there
-        self._table = bucket_side(
-            codes,
-            0,
-            rows,
-            self._absent,
-            0,
-            len(self._absent) > 0,
-            self._side.groups(),
-        )
+        if (
+            self.kind == JoinKind.SEMI
+            or self.kind == JoinKind.ANTI
+            or self.kind == JoinKind.MARK
+        ):
+            self._table = seen_side(
+                codes,
+                0,
+                rows,
+                self._absent,
+                0,
+                len(self._absent) > 0,
+                self._side.groups(),
+            )
+        else:
+            self._table = bucket_side(
+                codes,
+                0,
+                rows,
+                self._absent,
+                0,
+                len(self._absent) > 0,
+                self._side.groups(),
+            )
 
         if len(self.wanted) != 0:
             return self._marked(self._picked(input))
