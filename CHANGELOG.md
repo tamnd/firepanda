@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: instants and spans cast to text
+
+`astype(str)` on a column, a frame or an index of instants or spans wrote the count of units since the epoch, `1577836800000000`, where pandas writes `2020-01-01`. It now writes what pandas writes: the date alone when every instant is at midnight, as many fraction digits as the finest instant needs, a zone's offset at the end, and each span as `1 days 02:03:04`, with missing values left missing.
+
 ### Added: `to_csv` on frames and columns
 
 `DataFrame.to_csv` and `Series.to_csv` write the text pandas writes. Floats come out the shortest way that reads back the same, or through `float_format` and `decimal`, missing values as `na_rep`, and instants with one shape for the whole column: the date alone when every instant is at midnight, and otherwise as many fraction digits as the finest one needs. `sep`, `quoting`, `quotechar`, `escapechar`, `doublequote`, `lineterminator`, `header` aliases, `index_label`, `columns` and `date_format` all follow pandas. With no path the text is answered. A path is written, appended to with `mode="a"`, and compressed with gzip, bz2, xz or zip when its name or `compression` asks for it, and a text or byte handle gets the text.

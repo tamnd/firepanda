@@ -9989,7 +9989,7 @@ class DataFrameMixin:
         catching before anything converts, so the keys are all checked first and
         the frame is either converted whole or not touched.
         """
-        from ._frame import DataFrame
+        from ._frame import DataFrame, Series
 
         strictly = _cast_keywords(copy, errors)
         if isinstance(dtype, dict):
@@ -10006,11 +10006,16 @@ class DataFrameMixin:
             names = self._inner.names()
             dtypes = [_named_dtype(dtype)] * len(names)
         try:
-            return DataFrame._wrap(self._inner.cast(names, dtypes, True))
+            answer = DataFrame._wrap(self._inner.cast(names, dtypes, True))
         except Exception as error:
             if strictly:
                 raise translate(error) from None
             return DataFrame._wrap(self._inner)
+        for name, wanted in zip(names, dtypes, strict=True):
+            texts = _temporal_texts(self[name]) if wanted == "string" else None
+            if texts is not None:
+                answer = answer.assign(**{name: Series(texts, dtype="str", index=answer.index)})
+        return answer
 
 
 class SeriesMixin:
@@ -12378,6 +12383,9 @@ class SeriesMixin:
 
         strictly = _cast_keywords(copy, errors)
         wanted = _named_dtype(dtype)
+        texts = _temporal_texts(self) if wanted == "string" else None
+        if texts is not None:
+            return Series(texts, dtype="str", index=self.index, name=self.name)
         try:
             return Series._wrap(self._inner.cast(wanted, True))
         except Exception as error:
@@ -19836,6 +19844,20 @@ def to_datetime(
 
 
 _CSV_ZIPPED = {".gz": "gzip", ".bz2": "bz2", ".xz": "xz", ".zip": "zip"}
+
+
+def _temporal_texts(column: Any) -> list[Any] | None:
+    """Instants or spans as the text pandas makes of them, and None for other columns.
+
+    The core casts them to the count of units since the epoch, and pandas
+    writes them the way it prints them, which is what `to_csv` writes too.
+    """
+    printed = str(column.dtype)
+    if printed.startswith("datetime"):
+        return _instant_texts(column.tolist(), None)
+    if printed.startswith("timedelta"):
+        return [None if _missing(value) else str(value) for value in column.tolist()]
+    return None
 
 
 def _instant_texts(values: list[Any], date_format: Any) -> list[Any]:
