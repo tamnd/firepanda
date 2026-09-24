@@ -29,6 +29,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import datetime
+import itertools
 import math
 import operator
 import re
@@ -1789,6 +1790,133 @@ def _no_boolean_quantile(printed: list[str]) -> None:
             "numpy boolean subtract, the `-` operator, is not supported, use the"
             " bitwise_xor, the `^` operator, or the logical_xor function instead."
         )
+
+
+def _kurt_refusal(printed: str) -> None:
+    """Raises pandas' error for a column `kurt` cannot read, and nothing otherwise.
+
+    A number or a flag is read. Text, categories, moments and spans are
+    refused, each with the sentence pandas' own array type gives for it.
+
+    Args:
+        printed: The column's type as `dtype` spells it.
+
+    Raises:
+        TypeError: For any column that is not a number or a flag.
+    """
+    if _counts_as_numeric(printed):
+        return
+    if printed == "category":
+        owner = "Categorical"
+    elif printed.startswith("datetime64"):
+        owner = "DatetimeArray"
+    elif printed.startswith("timedelta64"):
+        owner = "TimedeltaArray"
+    else:
+        raise TypeError("Cannot perform reduction 'kurt' with string dtype")
+    raise TypeError(f"'{owner}' with dtype {printed} does not support operation 'kurt'")
+
+
+def _kurtosis(values: Any) -> float:
+    """The unbiased excess kurtosis of a float column with no missing values.
+
+    This is the sum pandas does in `nankurt`, with its guard against a column
+    that is constant up to rounding: the second and fourth moments are set to
+    zero when they are smaller than the error the sums could carry, and a zero
+    below the line answers zero rather than a quotient of two roundings.
+
+    Args:
+        values: A float64 series with the missing values dropped.
+
+    Returns:
+        The kurtosis, NaN under four values.
+    """
+    count = len(values)
+    if count == 0:
+        return math.nan
+    mean = values.sum() / count
+    adjusted = values - mean
+    squared = adjusted * adjusted
+    m2 = squared.sum()
+    m4 = (squared * squared).sum()
+    largest = values.abs().max()
+    eps = sys.float_info.epsilon
+    if abs(m2) < (eps * largest) ** 2 * count:
+        m2 = 0.0
+    if abs(m4) < (eps * largest) ** 4 * count:
+        m4 = 0.0
+    if count < 4:
+        return math.nan
+    numerator = count * (count + 1) * (count - 1) * m4
+    denominator = (count - 2) * (count - 3) * m2**2
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator - 3 * (count - 1) ** 2 / ((count - 2) * (count - 3))
+
+
+def _percentiles_asked(percentiles: Any) -> list[float]:
+    """The percentiles `describe` reports, checked and sorted the way pandas does.
+
+    Args:
+        percentiles: None for the quartiles, or a list of numbers.
+
+    Returns:
+        The percentiles in rising order.
+
+    Raises:
+        InvalidArgumentError: For one outside zero and one, or one twice.
+        TypeError: For one that is not a number, or a number not in a list.
+    """
+    if percentiles is None:
+        return [0.25, 0.5, 0.75]
+    if isinstance(percentiles, (int, float)):
+        raise TypeError("len() of unsized object")
+    asked = list(percentiles)
+    for each in asked:
+        if isinstance(each, bool) or not isinstance(each, (int, float)):
+            raise TypeError(
+                f"'<=' not supported between instances of 'int' and '{type(each).__name__}'"
+            )
+        if not 0 <= each <= 1:
+            raise InvalidArgumentError("percentiles should all be in the interval [0, 1]")
+    rising = sorted({float(each) for each in asked})
+    if len(rising) < len(asked):
+        raise InvalidArgumentError("percentiles cannot contain duplicates")
+    return rising
+
+
+def _percentile_precision(values: list[float]) -> int:
+    """The decimals that keep neighbouring percentiles apart, pandas' `get_precision`."""
+    gaps = [b - a for a, b in itertools.pairwise(values)]
+    if values[0] > 0:
+        gaps.insert(0, values[0])
+    if values[-1] < 100:
+        gaps.append(100 - values[-1])
+    return max(1, -math.floor(math.log10(min(abs(gap) for gap in gaps))))
+
+
+def _percentile_labels(percentiles: list[float]) -> list[str]:
+    """The row labels `describe` gives its percentiles, pandas' `format_percentiles`.
+
+    A whole percent prints with no decimals, and the rest with as many as it
+    takes to keep every label apart from its neighbours, so `0.333333` next to
+    `0.25` is `33.3%`.
+    """
+    if not percentiles:
+        return []
+    scaled = [100 * each for each in percentiles]
+    places = _percentile_precision(scaled)
+    rounded = [int(round(each, places)) for each in scaled]
+    whole = [
+        abs(r - each) <= 1e-8 + 1e-5 * abs(each) for r, each in zip(rounded, scaled, strict=True)
+    ]
+    if all(whole):
+        return [f"{r}%" for r in rounded]
+    places = _percentile_precision(sorted(set(scaled)))
+    return [
+        f"{round(each)}%" if flat else f"{round(each, places)}%"
+        for each, flat in zip(scaled, whole, strict=True)
+    ]
 
 
 def _dtype_family(printed: str) -> frozenset[str]:
@@ -6323,6 +6451,62 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def kurt(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The unbiased excess kurtosis of every column, a float64 series by column name.
+
+        Each column is `Series.kurt` on its own, so a column of text raises
+        pandas' error unless `numeric_only=True` leaves it out.
+        """
+        from ._frame import Series
+
+        _refuses_a_fold(axis, "kurt")
+        _reducing_axis(axis, "DataFrame")
+        skipna = _flag("skipna", skipna)
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        names = list(read.columns)
+        for printed in read._inner.dtypes():
+            _kurt_refusal(printed)
+        answers = [column.kurt(skipna=skipna) for _, column in read.items()]
+        return Series(answers, index=names, dtype="float64")
+
+    kurtosis = kurt
+
+    def describe(self, percentiles: Any = None, include: Any = None, exclude: Any = None) -> Any:
+        """`Series.describe` for the columns of numbers, a column a column.
+
+        With neither `include` nor `exclude` the columns described are the
+        numbers and the moments, or every column when there are none of those,
+        and `include="all"` is every column. A column that is not a number is
+        refused as `Series.describe` refuses it, and so are `include` and
+        `exclude` as lists of types.
+        """
+        from ._frame import DataFrame
+
+        if not len(self.columns):
+            raise InvalidArgumentError("Cannot describe a DataFrame without columns")
+        asked = _percentiles_asked(percentiles)
+        if include == "all" and exclude is not None:
+            raise InvalidArgumentError("exclude must be None when include is 'all'")
+        if include != "all" and (include is not None or exclude is not None):
+            raise NotImplementedError(
+                "include and exclude as lists of types are not supported yet, because"
+                " the one shape firepanda describes is a column of numbers"
+            )
+        columns = list(self.items())
+        if include is None:
+            kept = [
+                (name, column)
+                for name, column in columns
+                if column.dtype in _SIGNED | _UNSIGNED | _FLOATING
+                or column.dtype.startswith("datetime64")
+            ]
+            columns = kept or columns
+        described = [(name, column.describe(asked)) for name, column in columns]
+        labels = described[0][1].index.tolist()
+        return DataFrame({name: answer.tolist() for name, answer in described}, index=labels)
+
     def _reduce(
         self,
         kind: str,
@@ -8823,6 +9007,65 @@ class SeriesMixin:
         if answer is None:
             return float("nan")
         return _reduced_outward(answer, kind, self.dtype)
+
+    def kurt(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> float:
+        """The unbiased excess kurtosis, which is zero for a normal distribution.
+
+        It is pandas' sum rather than a kernel of its own: the moments are
+        built out of the column's own arithmetic and sums, so the answer agrees
+        with pandas to the last few bits, which is as far as two different
+        orders of adding agree.
+        """
+        _reducing_axis(axis, "Series")
+        skipna = _flag("skipna", skipna)
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "refusing a column a reduction cannot read is what the reduction"
+            " already does, and it says so with the dtype in the message",
+        )
+        _kurt_refusal(self.dtype)
+        if not skipna and self.hasnans:
+            return math.nan
+        return _kurtosis(self.dropna().astype("float64"))
+
+    kurtosis = kurt
+
+    def describe(self, percentiles: Any = None, include: Any = None, exclude: Any = None) -> Any:
+        """The count, mean, spread, extremes and percentiles of a column of numbers.
+
+        The answer is a float64 series labelled `count`, `mean`, `std`, `min`,
+        the percentiles and `max`, under the column's name. `include` and
+        `exclude` are read by a frame and ignored here, as in pandas. A column
+        of text, flags, moments or spans is described with a mix of numbers and
+        values that only an object column holds, which firepanda does not
+        have, so it is refused by name.
+        """
+        from ._frame import Series
+
+        asked = _percentiles_asked(percentiles)
+        printed = self.dtype
+        if printed not in _SIGNED | _UNSIGNED | _FLOATING:
+            raise NotImplementedError(
+                f"describe is not supported yet for a {printed} column, because pandas"
+                " answers it with a column of mixed values and firepanda has no object"
+                " column to hold them"
+            )
+        numbers = self.astype("float64")
+        quantiles = numbers.quantile(asked).tolist() if asked else []
+        values = [
+            float(numbers.count()),
+            numbers.mean(),
+            numbers.std(),
+            numbers.min(),
+            *quantiles,
+            numbers.max(),
+        ]
+        labels = ["count", "mean", "std", "min", *_percentile_labels(asked), "max"]
+        return Series(values, index=labels, name=self.name, dtype="float64")
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
         """Runs `any` or `all` over the whole column.
