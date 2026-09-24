@@ -479,6 +479,7 @@ comptime _MARK_SAMPLE_FUNCTION: UInt8 = 222
 comptime _MARK_SAMPLE_METHOD: UInt8 = 223
 comptime _MARK_SAMPLE_REPEATABLE: UInt8 = 224
 comptime _MARK_JOIN_BY: UInt8 = 225
+comptime _MARK_JOIN_NEAREST: UInt8 = 226
 
 # Where the parts of a statement sit in the small runs that carry them up. A
 # rule that has more than one thing to hand its parent puts them in a run of
@@ -747,6 +748,7 @@ struct Transform(Movable):
             "AliasedExpression",
             "SubqueryReference",
             "InnerTableRef",
+            "NearestBareTableRef",
             "TableFunction",
             "CTEBody",
             "CTESelectBody",
@@ -1069,6 +1071,18 @@ struct Transform(Movable):
         self._set(names, "RegularJoinClause", _MARK_JOIN_ON)
         self._set(names, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
         self._set(names, "JoinByClause", _MARK_JOIN_BY)
+        self._set(names, "NearestJoinClause", _MARK_JOIN_NEAREST)
+        self._set(names, "NearestJoinAliased", _MARK_JOIN_NEAREST)
+        self._set(names, "NearestJoinBare", _MARK_JOIN_NEAREST)
+        # The right side of a `NEAREST` join without an alias has rules of its
+        # own, so a name in front of `NEAREST` is not read as the alias. Each
+        # is its usual rule with the alias taken out, and the builders find
+        # their parts by rule, so the usual builder reads it as it is.
+        self._set(names, "NearestBaseTableRef", _BASE_TABLE)
+        self._set(names, "NearestTableSubquery", _TABLE_SUBQUERY)
+        self._set(names, "NearestParensTableRef", _PARENS_TABLE)
+        self._set(names, "NearestValuesRef", _VALUES_REF)
+        self._set(names, "NearestTableFunction", _TABLE_FUNCTION)
         self._set(names, "TablePivotClause", _MARK_TABLE_PIVOT)
         self._set(names, "PivotOn", _MARK_PIVOT_ON)
         self._set(names, "PivotUsing", _MARK_PIVOT_USING)
@@ -1326,18 +1340,9 @@ struct Transform(Movable):
             "NamedParameterAssignment",
             "NaturalJoinPrefix",
             "NearestApprox",
-            "NearestBareTableRef",
-            "NearestBaseTableRef",
             "NearestDistance",
             "NearestExact",
-            "NearestJoinAliased",
-            "NearestJoinBare",
-            "NearestJoinClause",
-            "NearestParensTableRef",
             "NearestSimilarity",
-            "NearestTableFunction",
-            "NearestTableSubquery",
-            "NearestValuesRef",
             "NestedColumnName",
             "NestedSchemaTableColumnName",
             "NotExpression",
@@ -4970,6 +4975,11 @@ struct Transform(Movable):
                 wanted.append(self._unpivot_clause_targets(tree, sql, clause))
                 continue
             var form = self._join_form(tree, sql, kids[i])
+            if self._marked(tree, form, _MARK_JOIN_NEAREST):
+                var parts = tree.children(form)
+                wanted.append(parts[_nearest_right(tree, sql, form)])
+                wanted.append(parts[len(parts) - 1])
+                continue
             wanted.append(self._join_right(tree, form))
             var on = self._join_on(tree, sql, form)
             if on != NO_NODE:
@@ -4988,6 +4998,19 @@ struct Transform(Movable):
             var form = self._join_form(tree, sql, kids[i])
             var at = tree.nodes[Int(form)].token_start
             var text = _join_text(tree, sql, form)
+            if self._marked(tree, form, _MARK_JOIN_NEAREST):
+                var parts = tree.children(form)
+                var side = parts[_nearest_right(tree, sql, form)]
+                var ranked = parts[len(parts) - 1]
+                built = ast.join_nearest(
+                    text,
+                    built,
+                    work.value(side),
+                    _nearest_words(tree, sql, side, ranked),
+                    work.value(ranked),
+                    at,
+                )
+                continue
             if self._marked(tree, form, _MARK_JOIN_BY):
                 text = _join_by_text(tree, sql, form)
             var right = work.value(self._join_right(tree, form))
@@ -5029,6 +5052,10 @@ struct Transform(Movable):
                 tree, sql, node, TABLE_MODIFIER, _word(tree, sql, node)
             )
         var form = self._only(tree, clause)
+        if self._marked(tree, form, _MARK_JOIN_NEAREST):
+            # `NearestJoinClause` offers the bare and the aliased spelling, and
+            # the one that matched is the form.
+            return self._only(tree, form)
         if (
             self._marked(tree, form, _MARK_JOIN_ON)
             or self._marked(tree, form, _MARK_JOIN_PLAIN)
@@ -7054,6 +7081,72 @@ def _join_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:
         "the parse tree holds a join with no JOIN in it, which is a bug in"
         " firepanda rather than in the query"
     )
+
+
+def _nearest_right(tree: Parse, sql: StringSlice, form: UInt32) raises -> Int:
+    """Finds the right side of a `NEAREST` join among the form's children.
+
+    The join type in front of `JOIN` is optional, so the right side is not at
+    a fixed place. It is the first child that starts after the word `JOIN`.
+
+    Args:
+        tree: The parse.
+        sql: The query.
+        form: The `NearestJoinBare` or `NearestJoinAliased` node.
+
+    Returns:
+        The position of the right side among the form's children.
+
+    Raises:
+        Error: If there is no `JOIN` or nothing after it, which the grammar
+            forbids.
+    """
+    var start = Int(tree.nodes[Int(form)].token_start)
+    var word = -1
+    for i in range(start, Int(tree.nodes[Int(form)].token_end)):
+        if String(token_text(sql, tree.tokens[i])).upper() == "JOIN":
+            word = i
+            break
+    var kids = tree.children(form)
+    for k in range(len(kids)):
+        if Int(tree.nodes[Int(kids[k])].token_start) > word >= 0:
+            return k
+    raise Error(
+        "the parse tree holds a NEAREST join with no right side, which is a bug"
+        " in firepanda rather than in the query"
+    )
+
+
+def _nearest_words(
+    tree: Parse, sql: StringSlice, side: UInt32, ranked: UInt32
+) -> String:
+    """Reads the words of a `NEAREST` join between its right side and ranking.
+
+    That is `APPROX` or `EXACT` if one was written, `NEAREST`, the count if
+    one was written, `BY` and `DISTANCE` or `SIMILARITY`. The keywords come
+    back in upper case and the count as it was written.
+
+    Args:
+        tree: The parse.
+        sql: The query.
+        side: The right side node.
+        ranked: The expression the rows are ranked by.
+
+    Returns:
+        The words, one space between each.
+    """
+    var out = String()
+    var end = Int(tree.nodes[Int(ranked)].token_start)
+    for i in range(Int(tree.nodes[Int(side)].token_end), end):
+        var text = String(token_text(sql, tree.tokens[i]))
+        if out.byte_length() > 0:
+            out += " "
+        var first = Int(text.as_bytes()[0])
+        if (first >= ord("0") and first <= ord("9")) or first == ord("."):
+            out += text
+        else:
+            out += text.upper()
+    return out^
 
 
 def _join_by_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:

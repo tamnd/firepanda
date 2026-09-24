@@ -914,6 +914,48 @@ def test_join_by_a_type_is_the_join_that_type_names() raises:
         )
 
 
+def test_a_nearest_join_prints_back_as_written() raises:
+    # The right side may carry an alias or not, and a name in front of
+    # `NEAREST` is the alias only when one is written, which is why the
+    # grammar has the bare rules. The keywords come back in capitals.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed(
+            (
+                "SELECT * FROM q INNER JOIN products t approx nearest 2 by"
+                " similarity f(q.e, t.e)"
+            ),
+            g,
+            rules,
+        ),
+        (
+            "SELECT * FROM q INNER JOIN products AS t APPROX NEAREST 2 BY"
+            " SIMILARITY f(q.e, t.e)"
+        ),
+    )
+    assert_equal(
+        _printed(
+            "SELECT * FROM q JOIN products NEAREST BY DISTANCE t.y", g, rules
+        ),
+        "SELECT * FROM q JOIN products NEAREST BY DISTANCE t.y",
+    )
+    assert_equal(
+        _printed(
+            (
+                "SELECT * FROM q LEFT OUTER JOIN p EXACT NEAREST 1 BY DISTANCE"
+                " abs(q.x - p.y) JOIN u ON (a = b)"
+            ),
+            g,
+            rules,
+        ),
+        (
+            "SELECT * FROM q LEFT OUTER JOIN p EXACT NEAREST 1 BY DISTANCE"
+            " abs((q.x - p.y)) JOIN u ON (a = b)"
+        ),
+    )
+
+
 def test_grouping_prints_back_in_capitals() raises:
     # GROUPING_ID is the same call under another name, and DuckDB names the
     # column it answers GROUPING either way.

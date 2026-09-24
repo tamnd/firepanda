@@ -795,6 +795,16 @@ expression there, and one kind holding either would be a wrong read waiting to
 happen.
 """
 
+comptime REF_JOIN_NEAREST: UInt8 = 7
+"""A `NEAREST` join, `JOIN t NEAREST 2 BY DISTANCE f(q.e, t.e)`.
+
+`a` and `b` are the two sides. `payload` is a run of two interned strings: the
+join text as `REF_JOIN` keeps it, and the words between the right side and the
+expression, such as `APPROX NEAREST 2 BY SIMILARITY`, with the keywords in upper
+case and the count as it was written. `children` is a run of one holding the
+expression the rows are ranked by. The words are kept as text because nothing
+reads them yet but the printer, and the plan turns the join down.
+"""
 
 comptime REF_PARENS: UInt8 = 6
 """A table reference the query wrote in parentheses.
@@ -2603,6 +2613,44 @@ struct Ast(Movable):
                 b=right,
                 children=self.names(columns),
                 payload=self.intern(operator),
+            )
+        )
+
+    def join_nearest(
+        mut self,
+        operator: StringSlice,
+        left: UInt32,
+        right: UInt32,
+        words: StringSlice,
+        ranked: UInt32,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds a `NEAREST` join.
+
+        Args:
+            operator: The join as SQL spells it, such as `INNER JOIN`.
+            left: The left reference.
+            right: The right reference.
+            words: The `NEAREST` words, such as `EXACT NEAREST 3 BY DISTANCE`.
+            ranked: The expression the right rows are ranked by.
+            token: The token the join word is at.
+
+        Returns:
+            The reference node index.
+        """
+        var texts = List[UInt32]()
+        texts.append(self.intern(operator))
+        texts.append(self.intern(words))
+        var ranking = List[UInt32]()
+        ranking.append(ranked)
+        return self.add_ref(
+            Ref(
+                kind=REF_JOIN_NEAREST,
+                token=token,
+                a=left,
+                b=right,
+                children=self.run(ranking),
+                payload=self.run(texts),
             )
         )
 
