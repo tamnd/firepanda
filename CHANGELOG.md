@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.33] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, a group by gains `head`, `tail`, `nth`, `idxmax` and `idxmin`, `agg` and `aggregate` take functions by name and `NamedAgg`, the `DataFrame` and `Series` constructors read records, rows, numpy arrays, `index=` and `columns=` as pandas does, and temporal columns hand out and take in moments, spans and dates. A boolean mask now lines up on the row labels and an operator against a moment or a span keeps the column's name. On the engine side, a semi or anti join marks the keys the other side has instead of bucketing its rows, a small text filter or gather writes its column directly, and the regex kernels cut a column finer and walk a greedy repeat in a loop, which takes ClickBench q28 from about 520 ms to about 390 ms on 1M rows.
+
 ### Added: `head`, `tail`, `nth`, `idxmax` and `idxmin` on a group by
 
 A group by now keeps the first or last `n` rows of every group with `head` and `tail`, a negative `n` dropping that many from the other end, and picks rows by their place in the group with `nth[...]` or `nth(n)`, one place or a list of them, counting from the end when negative. All three answer rows of the frame in the frame's order under its own labels, and a row whose key is missing is in no group, as in pandas. `idxmax` and `idxmin` answer the label of each group's largest or smallest value, the first one on a tie, for one column or for every column that is not a key, in the key order `sort` asks for, and a group with only missing values raises pandas' error. `nth` with `dropna` and `idxmax` with `as_index=False` are refused by name. `python/tests/test_group_filters.py` checks 57 cases against pandas.
