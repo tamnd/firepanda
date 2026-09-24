@@ -137,7 +137,7 @@ def test_a_missing_key_is_a_key_error(firepanda: ModuleType) -> None:
 def test_the_unwritten_options_are_refused(firepanda: ModuleType) -> None:
     """Refused by name rather than ignored."""
     left, right = firepanda.DataFrame(NUMBERS), firepanda.DataFrame(OTHERS)
-    for options in ({"how": "cross"}, {"left_index": True}, {"indicator": True}):
+    for options in ({"how": "cross"}, {"indicator": True}):
         with pytest.raises(NotImplementedError):
             firepanda.merge(left, right, **options)
 

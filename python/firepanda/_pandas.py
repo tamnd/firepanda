@@ -5986,6 +5986,53 @@ class DataFrameMixin:
             validate,
         )
 
+    def join(
+        self,
+        other: Any,
+        on: Any = None,
+        how: str = "left",
+        lsuffix: str = "",
+        rsuffix: str = "",
+        sort: bool = False,
+        validate: Any = None,
+    ) -> DataFrame:
+        """Joins another frame on its row labels, the way `DataFrame.join` does.
+
+        This is `merge` with the other side keyed on its labels, and this side
+        keyed on its own labels or on the columns named by `on`. A named series
+        is a column. A list of one frame is that frame, and a longer list is
+        refused, since pandas joins those by a different road.
+
+        Raises:
+            InvalidArgumentError: For a series with no name, or overlapping
+                columns and no suffix.
+            UnsupportedError: For a list of more than one frame, or a cross
+                join.
+        """
+        from ._frame import Series
+
+        if isinstance(other, (list, tuple)):
+            if len(other) != 1:
+                raise UnsupportedError(
+                    "join of a list of frames is not written yet, so join them one at a time"
+                )
+            (other,) = other
+        if isinstance(other, Series) and other.name is None:
+            raise InvalidArgumentError("Other Series must have a name")
+        if how == "cross":
+            raise UnsupportedError("join(how='cross') is not written yet")
+        return merge(
+            self,
+            other,
+            how,
+            left_on=on,
+            left_index=on is None,
+            right_index=True,
+            sort=sort,
+            suffixes=(lsuffix, rsuffix),
+            validate=validate,
+        )
+
     def _sort_values(
         self,
         by: Any,
@@ -12241,12 +12288,13 @@ def merge(
     missing key paired with a missing key, the sort an outer join always has,
     and an integer column with a gap in it read back as float64 with NaN.
 
-    `left_index`, `right_index`, `indicator` and the joins other than the four
-    are refused by name. `copy` is accepted and does nothing, as it does in
-    pandas 3.
+    With `left_index` or `right_index` a side's key is its row labels, and the
+    answer's labels are those of the other side, or the key when both sides are
+    on their labels. `indicator` and the joins other than the four are refused
+    by name. `copy` is accepted and does nothing, as it does in pandas 3.
 
     Returns:
-        A new frame with the default index.
+        A new frame, with the default index when both keys are columns.
 
     Raises:
         MergeError: For keys that are missing, given in a combination pandas
@@ -12257,7 +12305,7 @@ def merge(
         KeyError: For a key that is not a column.
         UnsupportedError: For what is not written yet.
     """
-    from ._frame import DataFrame, Series
+    from ._frame import DataFrame
 
     left, right = _merge_side(left), _merge_side(right)
     if how not in MERGE_HOWS:
@@ -12267,13 +12315,52 @@ def merge(
             f"'{how}' is not a valid Merge type: left, right, inner, outer, left_anti,"
             " right_anti, cross, asof"
         )
-    if left_index or right_index:
-        raise UnsupportedError(
-            "merge on the index is not written yet, so the keys have to be columns"
-        )
     if indicator is not False:
         raise UnsupportedError("merge(indicator=) is not written yet")
-    lefts, rights = _merge_keys(left, right, on, left_on, right_on)
+    if _flag("left_index", left_index) or _flag("right_index", right_index):
+        out = _merge_on_index(
+            left,
+            right,
+            how,
+            on,
+            left_on,
+            right_on,
+            left_index,
+            right_index,
+            sort,
+            suffixes,
+            validate,
+        )
+    else:
+        lefts, rights = _merge_keys(left, right, on, left_on, right_on)
+        out, _, _ = _merged(left, right, how, lefts, rights, sort, suffixes, validate)
+    if any(out.null_counts()):
+        out = out._widened_for_missing()
+    return DataFrame._wrap(out)
+
+
+def _merged(
+    left: DataFrame,
+    right: DataFrame,
+    how: str,
+    lefts: list[str],
+    rights: list[str],
+    sort: Any,
+    suffixes: Any,
+    validate: Any,
+) -> tuple[Any, list[str], list[str]]:
+    """The inner frame of a merge on key columns, before any column is widened.
+
+    Returns:
+        The frame and the two key lists under the names a suffix gave them.
+
+    Raises:
+        MergeError: For keys that fail `validate`.
+        InvalidArgumentError: For overlapping columns and no suffix, or two key
+            types pandas will not merge.
+    """
+    from ._frame import Series
+
     _merge_validated(left, right, lefts, rights, validate)
     left_inner, right_inner, lefts, rights = _merge_suffixed(left, right, lefts, rights, suffixes)
     left_inner, right_inner = _merge_key_types(left_inner, right_inner, lefts, rights)
@@ -12299,9 +12386,113 @@ def merge(
     if sort or how == "outer":
         # The sort carries the labels along, and pandas numbers the rows again.
         out = _merge_sorted(out, lefts, rights, how).reset_index(True)
-    if any(out.null_counts()):
+    return out, lefts, rights
+
+
+MERGE_KEY = "\x00firepanda merge key"
+"""The column a row label is put in to be joined on, a name no caller writes."""
+
+MERGE_LABELS = "\x00firepanda merge labels"
+"""The column that carries a side's row labels through a join to the answer."""
+
+
+def _with_labels(frame: DataFrame, name: str) -> DataFrame:
+    """The frame with its row labels as a first column, under `name`."""
+    from ._frame import DataFrame
+
+    return DataFrame._wrap(frame._inner.renamed_axis(name).reset_index(False))
+
+
+def _merge_on_index(
+    left: DataFrame,
+    right: DataFrame,
+    how: str,
+    on: Any,
+    left_on: Any,
+    right_on: Any,
+    left_index: Any,
+    right_index: Any,
+    sort: Any,
+    suffixes: Any,
+    validate: Any,
+) -> Any:
+    """The inner frame of a merge where one side's key, or both, is its row labels.
+
+    The labels go into a column and the merge is the one on columns. With both
+    sides on their labels the key goes back to being the labels, named for the
+    right side's labels in a right join and for the left side's otherwise. With
+    one side on its labels, the other side's key column takes the label where
+    its own row is missing, and the answer keeps the row labels of the side
+    keyed on a column, which go missing on a row that side does not have, so
+    they lose their name there and an integer label becomes float64 with NaN.
+
+    Raises:
+        MergeError: For the index flags in a combination pandas refuses.
+        InvalidArgumentError: For more than one key against one level of labels.
+        KeyError: For a key that is not a column.
+        UnsupportedError: For text labels that go missing, which pandas answers
+            with an object index.
+    """
+    left_index, right_index = bool(left_index), bool(right_index)
+    if on is not None:
+        raise MergeError(
+            'Can only pass argument "on" OR "left_index" and "right_index", not a combination'
+            " of both."
+        )
+    if left_index and left_on is not None:
+        raise MergeError('Can only pass argument "left_on" OR "left_index" not both.')
+    if right_index and right_on is not None:
+        raise MergeError('Can only pass argument "right_on" OR "right_index" not both.')
+    if not right_index and right_on is None:
+        raise MergeError("Must pass right_on or right_index=True")
+    if not left_index and left_on is None:
+        raise MergeError("Must pass left_on or left_index=True")
+    if left_index and right_index:
+        name = (right if how == "right" else left).index.name
+        out, _, _ = _merged(
+            _with_labels(left, MERGE_KEY),
+            _with_labels(right, MERGE_KEY),
+            how,
+            [MERGE_KEY],
+            [MERGE_KEY],
+            sort,
+            suffixes,
+            validate,
+        )
+        return out.set_index(MERGE_KEY, True).renamed_axis(name)
+    keyed, side = (left_on, "right") if right_index else (right_on, "left")
+    keys = _sequence(keyed)
+    if len(keys) != 1:
+        raise InvalidArgumentError(
+            f"len({'left' if right_index else 'right'}_on) must equal the number of levels"
+            f' in the index of "{side}"'
+        )
+    (column,) = keys
+    if right_index:
+        name = left.index.name
+        lefted, righted = _with_labels(left, MERGE_LABELS), _with_labels(right, MERGE_KEY)
+        lefts, rights = [column], [MERGE_KEY]
+    else:
+        name = right.index.name
+        lefted, righted = _with_labels(left, MERGE_KEY), _with_labels(right, MERGE_LABELS)
+        lefts, rights = [MERGE_KEY], [column]
+    for names, frame in ((lefts, lefted), (rights, righted)):
+        if names[0] not in frame.columns:
+            raise KeyError(names[0])
+    out, lefts, rights = _merged(lefted, righted, how, lefts, rights, sort, suffixes, validate)
+    column = lefts[0] if right_index else rights[0]
+    out = out.fill_null(column, out.column(MERGE_KEY)).drop([MERGE_KEY])
+    labels = out.column(MERGE_LABELS)
+    if labels.null_count():
+        if out.dtypes()[out.names().index(MERGE_LABELS)] == "string":
+            raise UnsupportedError(
+                "a merge on the index of one side that leaves a row with no label gives"
+                " pandas' object index when the labels are text, and firepanda has no object"
+                " column"
+            )
+        name = None
         out = out._widened_for_missing()
-    return DataFrame._wrap(out)
+    return out.set_index(MERGE_LABELS, True).renamed_axis(name)
 
 
 CONCAT_AXES = {0: 0, "index": 0, "rows": 0, 1: 1, "columns": 1}
