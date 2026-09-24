@@ -2454,20 +2454,44 @@ def test_a_narrowed_scan_narrows_the_build_side_too() raises:
     same(read_back(out, "qty"), [20, 3, 40], "the matched quantities")
 
 
-def test_a_right_join_is_refused_by_name() raises:
+def test_a_right_join_hands_out_the_band_nothing_sold_at() raises:
+    # The pairings come out in the order the sales stream past, and band 99,
+    # which no quantity hit, comes out last once the sales are done.
     var plan = Plan()
     var root = joined(plan, JoinKind.RIGHT)
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="not known until the last chunk"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 4)
+    same(read_back(out, "band"), [20, 3, 40, 99], "every band")
+    valid(present(out, "qty"), [True, True, True, False], "the padded sale")
 
 
-def test_an_outer_join_is_refused_by_name() raises:
+def test_a_full_join_keeps_the_rows_of_both_sides() raises:
     var plan = Plan()
     var root = joined(plan, JoinKind.OUTER)
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="not known until the last chunk"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 11)
+    valid(
+        present(out, "band"),
+        [
+            False,
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+        ],
+        "a band where a quantity was one, and the band nothing hit",
+    )
+    valid(
+        present(out, "qty"),
+        [True, True, True, True, True, True, True, True, True, True, False],
+        "every sale and then the padded one",
+    )
 
 
 def test_a_cross_join_onto_more_than_one_row_is_refused() raises:

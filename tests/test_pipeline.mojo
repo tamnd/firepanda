@@ -3422,18 +3422,12 @@ def test_a_join_asked_for_a_column_neither_side_has_says_so() raises:
         )
 
 
-def test_an_outer_join_in_a_pipeline_is_refused() raises:
-    """It has to emit right rows nothing matched, which is not known until the
-    last chunk, so it is a breaker wearing this node's clothes."""
+def test_a_full_join_by_name_is_refused() raises:
+    """A full join pads both sides, and a join by name has no columns picked to
+    pad, so it needs its columns asked for by position like a right join."""
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="not known until the last chunk"):
+    with assert_raises(contains="asked for by position"):
         pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.OUTER)))
-
-
-def test_a_right_join_in_a_pipeline_is_refused() raises:
-    var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="not known until the last chunk"):
-        pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.RIGHT)))
 
 
 def test_a_join_on_a_text_key_gives_what_the_frame_join_gives() raises:
