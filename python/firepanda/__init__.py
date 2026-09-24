@@ -35,6 +35,7 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda, api, errors
+from ._date_range import date_range
 from ._datetime import DatetimeIndex
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._pandas import (
@@ -65,6 +66,7 @@ __all__ = [
     "__version__",
     "api",
     "concat",
+    "date_range",
     "errors",
     "factorize",
     "from_arrow",
