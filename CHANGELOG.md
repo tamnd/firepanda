@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: filter reads a missing label as pandas does
+
+`filter` with `like` or `regex` now matches a missing label as the text `nan`, or `NaT` for instants, because pandas renders every label with `str` before it looks. A search for `a` over text labels with a gap now keeps the gap, as pandas does.
+
 ### Added: update, isetitem, from_dict, from_records and infer_objects on a frame, filter on a column and map on an index
 
 `DataFrame.update` puts in another frame's or column's values column by column and label by label, with `overwrite`, `filter_func` and `errors="raise"` as pandas reads them, and refuses a join other than left with pandas' words. `DataFrame.isetitem` sets columns by position. `DataFrame.from_dict` reads a dict of columns, a dict of rows and pandas' tight form, and `DataFrame.from_records` reads tuples with `columns` or dicts, with `index` and `exclude`. Rows given as lists or tuples with no column names are refused, because their column names would be numbers. `infer_objects` on a frame and a column answers a copy. `Series.filter` keeps the values whose labels `items`, `like` or `regex` names. `Index.map` maps the labels and `Index.ravel` answers the index.
