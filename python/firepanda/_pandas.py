@@ -12304,6 +12304,326 @@ def merge(
     return DataFrame._wrap(out)
 
 
+CONCAT_AXES = {0: 0, "index": 0, "rows": 0, 1: 1, "columns": 1}
+"""The spellings `concat` takes for its two axes."""
+
+_INTEGER_BITS = {"int8": 8, "int16": 16, "int32": 32, "int64": 64}
+_UNSIGNED_BITS = {"uint8": 8, "uint16": 16, "uint32": 32, "uint64": 64}
+_FLOAT_BITS = {"float32": 32, "float64": 64}
+
+
+def _numeric_type(types: set[str]) -> str | None:
+    """The type numpy gives a mix of numeric types, or None if one is not numeric.
+
+    A signed and an unsigned integer meet at the signed type twice the width of
+    the unsigned one, which runs out at 64 bits and becomes float64. A float
+    holds an integer of up to 16 bits in float32 and anything wider in float64.
+    A boolean next to a number takes the number's type.
+    """
+    signed = unsigned = floating = 0
+    for name in types:
+        if name in _INTEGER_BITS:
+            signed = max(signed, _INTEGER_BITS[name])
+        elif name in _UNSIGNED_BITS:
+            unsigned = max(unsigned, _UNSIGNED_BITS[name])
+        elif name in _FLOAT_BITS:
+            floating = max(floating, _FLOAT_BITS[name])
+        elif name != "bool":
+            return None
+    if signed and unsigned:
+        whole = max(signed, 2 * unsigned)
+        if whole > 64:
+            return "float64"
+        name = f"int{whole}"
+    elif signed or unsigned:
+        whole = signed or unsigned
+        name = f"int{whole}" if signed else f"uint{whole}"
+    else:
+        whole, name = 0, "bool"
+    if not floating:
+        return name
+    return f"float{max(floating, 32 if whole <= 16 else 64)}"
+
+
+def _concat_type(types: list[str], gap: bool, what: str) -> str:
+    """The one type a column of several parts ends up with, as pandas decides it.
+
+    `gap` says a part has no such column, so that part's rows are missing, and
+    a missing row makes an integer column float64 and a boolean one object.
+
+    Raises:
+        UnsupportedError: Where pandas answers object, which firepanda has no
+            column type for.
+    """
+    kinds = set(types)
+    if len(kinds) == 1:
+        (only,) = kinds
+    else:
+        only = _numeric_type(kinds) or ""
+        if not only:
+            raise UnsupportedError(
+                f"concat of {what} as {' and '.join(sorted(kinds))} gives pandas' object"
+                " column, and firepanda has no object column"
+            )
+    if gap and (only in _INTEGER_BITS or only in _UNSIGNED_BITS):
+        return "float64"
+    if gap and only == "bool":
+        raise UnsupportedError(
+            f"concat of {what} where a part lacks it gives pandas' object column, since a"
+            " boolean column has no missing value of its own, and firepanda has no object"
+            " column"
+        )
+    return only
+
+
+def _concat_parts(objs: Any, keys: Any) -> list[Any]:
+    """The parts to stack, in order, with the ones that are None left out.
+
+    Raises:
+        InvalidArgumentError: For no parts at all, in pandas' words.
+        TypeError: For a part that is neither a frame nor a series.
+        UnsupportedError: For keys, which build a MultiIndex.
+    """
+    from ._frame import DataFrame, Series
+
+    if isinstance(objs, (DataFrame, Series, str)):
+        raise TypeError(
+            "first argument must be an iterable of pandas objects, you passed an object of"
+            f' type "{type(objs).__name__}"'
+        )
+    if hasattr(objs, "keys") and hasattr(objs, "values"):
+        keys = list(objs.keys()) if keys is None else keys
+        objs = list(objs.values())
+    if keys is not None:
+        raise UnsupportedError(
+            "concat(keys=) labels the rows with a MultiIndex, and firepanda has no MultiIndex yet"
+        )
+    parts = list(objs)
+    if not parts:
+        raise InvalidArgumentError("No objects to concatenate")
+    parts = [part for part in parts if part is not None]
+    if not parts:
+        raise InvalidArgumentError("All objects passed were None")
+    for part in parts:
+        if not isinstance(part, (DataFrame, Series)):
+            raise TypeError(
+                f"cannot concatenate object of type '{type(part)}'; only Series and DataFrame"
+                " objs are valid"
+            )
+    return parts
+
+
+def _concat_framed(part: Any, axis: int) -> DataFrame:
+    """A part as a frame, which is what a series is on the frame side of a concat.
+
+    Raises:
+        UnsupportedError: For a series with no name, which pandas calls by its
+            position and firepanda cannot, since a column name is a string.
+    """
+    from ._frame import DataFrame
+
+    if isinstance(part, DataFrame):
+        return part
+    if part.name is None:
+        raise UnsupportedError(
+            "concat names a series with no name by its position, and a column name in"
+            " firepanda is a string"
+        )
+    return part.to_frame()
+
+
+def _concat_overlap(labels: list[Any], dtype: str) -> None:
+    """Raises pandas' error for labels that repeat, for `verify_integrity`.
+
+    Raises:
+        InvalidArgumentError: Naming the labels that repeat.
+    """
+    seen: set[Any] = set()
+    repeats: list[Any] = []
+    for label in labels:
+        if label in seen and label not in repeats:
+            repeats.append(label)
+        seen.add(label)
+    if repeats:
+        shown = "str" if dtype == "string" else dtype
+        raise InvalidArgumentError(
+            f"Indexes have overlapping values: Index({repeats!r}, dtype='{shown}')"
+        )
+
+
+def _concat_categories(frames: list[DataFrame], name: str) -> bool:
+    """Whether every part that has a category column holds the same categories."""
+    first = None
+    for frame in frames:
+        if name in frame.columns:
+            categories = frame[name].cat.categories.tolist()
+            if first is None:
+                first = categories
+            elif categories != first:
+                return False
+    return True
+
+
+def _concat_rows(
+    frames: list[DataFrame], join: str, ignore_index: bool, verify: bool, sort: bool
+) -> Any:
+    """The inner frame of frames stacked down the rows."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for frame in frames:
+        for name in frame.columns:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    if join == "inner":
+        names = [n for n in names if all(n in frame.columns for frame in frames)]
+    if sort:
+        names = sorted(names)
+    wanted: dict[str, str] = {}
+    for name in names:
+        types = [str(frame.dtypes[name]) for frame in frames if name in frame.columns]
+        gap = any(name not in frame.columns for frame in frames)
+        if set(types) == {"category"} and not _concat_categories(frames, name):
+            types = ["string"]
+        wanted[name] = _concat_type(types, gap, f"column '{name}'")
+    parts = []
+    for frame in frames:
+        inner = frame._inner
+        mine = [n for n in names if n in frame.columns and str(frame.dtypes[n]) != wanted[n]]
+        if mine:
+            try:
+                inner = inner.cast(mine, [wanted[n] for n in mine], True)
+            except Exception as error:
+                raise translate(error) from None
+        parts.append(inner)
+    if not ignore_index:
+        kinds = {frame.index.dtype for frame in frames}
+        if len(kinds) > 1:
+            raise UnsupportedError(
+                f"concat of row labels as {' and '.join(sorted(kinds))} gives pandas' object"
+                " index, and firepanda has no object column"
+            )
+        if verify:
+            labels = [label for frame in frames for label in frame.index.tolist()]
+            _concat_overlap(labels, next(iter(kinds)))
+    try:
+        return parts[0].stack_rows(parts[1:], names, not ignore_index)
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _concat_columns(
+    frames: list[DataFrame], join: str, ignore_index: bool, verify: bool, sort: bool
+) -> Any:
+    """The inner frame of frames put side by side, aligned on their row labels."""
+    if ignore_index:
+        raise UnsupportedError(
+            "concat(axis=1, ignore_index=True) names the columns by position, and a column"
+            " name in firepanda is a string"
+        )
+    names = [name for frame in frames for name in frame.columns]
+    if verify:
+        _concat_overlap(names, "string")
+    if len(set(names)) != len(names):
+        raise UnsupportedError(
+            "concat(axis=1) of parts that share a column name gives two columns of one name,"
+            " and a frame in firepanda holds one column per name"
+        )
+    labels = [frame.index.tolist() for frame in frames]
+    if sort or any(mine != labels[0] for mine in labels):
+        if join == "inner":
+            common = set(labels[0]).intersection(*labels[1:])
+            wanted = [label for label in labels[0] if label in common]
+        else:
+            wanted = list(dict.fromkeys(label for mine in labels for label in mine))
+        if sort:
+            wanted = sorted(wanted)
+        frames = [frame.reindex(wanted) for frame in frames]
+    try:
+        return frames[0]._inner.stack_columns([frame._inner for frame in frames[1:]])
+    except Exception as error:
+        raise translate(error) from None
+
+
+def concat(
+    objs: Any,
+    *,
+    axis: Any = 0,
+    join: str = "outer",
+    ignore_index: bool = False,
+    keys: Any = None,
+    levels: Any = None,
+    names: Any = None,
+    verify_integrity: bool = False,
+    sort: Any = NO_DEFAULT,
+    copy: Any = NO_DEFAULT,
+) -> DataFrame | Series:
+    """Stacks frames and series, the way `pandas.concat` does.
+
+    Down the rows, the columns are the union of the parts' columns in the order
+    they first appear, or the columns every part has with `join="inner"`, and a
+    part without a column is missing on its rows. Each column takes the one type
+    pandas gives its parts, which is numpy's rule for numbers, float64 for an
+    integer column with a gap and the text of a category column whose parts
+    disagree on the categories. The row labels come along unless `ignore_index`
+    is set. Series stacked on series give a series, named if they all share the
+    name.
+
+    Across, with `axis=1`, the parts are lined up on their row labels, the union
+    of them or with `join="inner"` the labels every part has, in the order they
+    first appear.
+
+    `keys`, `levels` and `names` build a MultiIndex and are refused by name, as
+    is anything whose answer is pandas' object column. `copy` is accepted and
+    does nothing, as in pandas 3.
+
+    Raises:
+        InvalidArgumentError: For no parts, a `join` or `axis` pandas does not
+            take, or labels that repeat under `verify_integrity`.
+        TypeError: For a part that is neither a frame nor a series.
+        UnsupportedError: For what is not written yet.
+    """
+    from ._frame import DataFrame, Series
+
+    parts = _concat_parts(objs, keys)
+    if levels is not None or names is not None:
+        raise UnsupportedError(
+            "concat(levels=, names=) name the levels of a MultiIndex, and firepanda has no"
+            " MultiIndex yet"
+        )
+    if axis not in CONCAT_AXES:
+        kind = "DataFrame" if any(isinstance(p, DataFrame) for p in parts) else "Series"
+        raise InvalidArgumentError(f"No axis named {axis} for object type {kind}")
+    if join not in ("inner", "outer"):
+        raise InvalidArgumentError(
+            "Only can inner (intersect) or outer (union) join the other axis"
+        )
+    ignore_index = _flag("ignore_index", ignore_index)
+    verify = _flag("verify_integrity", verify_integrity)
+    ordered = sort is not NO_DEFAULT and _flag("sort", sort)
+    if CONCAT_AXES[axis] == 0 and all(isinstance(p, Series) for p in parts):
+        named = {p.name for p in parts}
+        name = parts[0].name if len(named) == 1 else None
+        types = {p.dtype for p in parts}
+        if len(types) > 1 and "bool" in types:
+            raise UnsupportedError(
+                f"concat of series as {' and '.join(sorted(types))} gives pandas' object"
+                " column, and firepanda has no object column"
+            )
+        frames = [p.to_frame("values") for p in parts]
+        out = _concat_rows(frames, "outer", ignore_index, verify, False)
+        column = Series._wrap(out.column("values"))
+        return column.rename(name)
+    frames = [_concat_framed(p, CONCAT_AXES[axis]) for p in parts]
+    if CONCAT_AXES[axis] == 0:
+        out = _concat_rows(frames, join, ignore_index, verify, ordered)
+    else:
+        out = _concat_columns(frames, join, ignore_index, verify, ordered)
+    if any(out.null_counts()):
+        out = out._widened_for_missing()
+    return DataFrame._wrap(out)
+
+
 def to_datetime(
     arg: Any,
     errors: str = "raise",

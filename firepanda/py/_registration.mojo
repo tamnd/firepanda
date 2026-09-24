@@ -210,6 +210,12 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.join_on](
         "join_on", docstring="The rows of two frames paired on key columns."
     )
+    _ = dataframe.def_method[PyDataFrame.stack_rows](
+        "stack_rows", docstring="This frame and others stacked down the rows."
+    )
+    _ = dataframe.def_method[PyDataFrame.stack_columns](
+        "stack_columns", docstring="This frame and others side by side."
+    )
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
