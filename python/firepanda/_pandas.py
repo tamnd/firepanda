@@ -8674,7 +8674,8 @@ class SeriesMixin:
         one difference that `name` is honoured, since a series carries its name
         and there is nothing to implement. `name=None` is no name rather than a
         name that is empty, and the two are different states because pandas
-        tells them apart.
+        tells them apart. A name that is not text is answered as given, the way
+        `_named_as` keeps it.
 
         A series arriving as the data is unwrapped and handed across as the
         extension object it holds, so the extension can copy the column instead
@@ -8727,6 +8728,7 @@ class SeriesMixin:
                 self._inner = self._inner.cast(wanted, True)
             except Exception as error:
                 raise translate(error) from None
+        _named_as(self, name)
 
     @staticmethod
     def _made(data: Any, name: Any) -> Any:
@@ -12107,6 +12109,105 @@ def _door_flags(flags: int, name: str) -> int:
     return out
 
 
+def _cat_columns(others: Any, data: Any, series: Any, frame: Any, array: Any) -> list[Any]:
+    """`others` for `str.cat` as a list of columns, the way pandas reads it."""
+    if isinstance(others, series):
+        return [others]
+    if isinstance(others, frame):
+        return [others[name] for name in others.columns]
+    if _is_numpy(others) and others.ndim == 2:
+        return [_cat_column(list(others[:, at]), data, series) for at in range(others.shape[1])]
+    if isinstance(others, array) or (_is_numpy(others) and others.ndim == 1):
+        return [_cat_column(list(others), data, series)]
+    if hasattr(others, "names") and hasattr(others, "equals"):
+        return [_cat_column(list(others), data, series)]
+    if hasattr(others, "__iter__") and not isinstance(others, (str, bytes, dict, set)):
+        items = list(others)
+        nested = [
+            isinstance(item, (series, array))
+            or (hasattr(item, "names") and hasattr(item, "equals"))
+            or (_is_numpy(item) and item.ndim == 1)
+            for item in items
+        ]
+        if all(nested):
+            return [
+                column
+                for item in items
+                for column in _cat_columns(item, data, series, frame, array)
+            ]
+        if not any(hasattr(item, "__iter__") and not isinstance(item, str) for item in items):
+            return [_cat_column(items, data, series)]
+    raise TypeError(
+        "others must be Series, Index, DataFrame, np.ndarray or list-like (either containing"
+        " only strings or containing only objects of type Series/Index/np.ndarray[1-dim])"
+    )
+
+
+def _cat_column(values: list[Any], data: Any, series: Any) -> Any:
+    """A list of pieces labelled like the column they are joined to."""
+    if len(values) != len(data):
+        raise ValueError(
+            f"Length of values ({len(values)}) does not match length of index ({len(data)})"
+        )
+    values = [value.item() if type(value).__module__ == "numpy" else value for value in values]
+    if all(value is None or isinstance(value, str) for value in values):
+        return series(values, index=data.index, dtype="string")
+    return series(values, index=data.index)
+
+
+def _cat_labels(data: Any, columns: list[Any], join: Any) -> list[Any]:
+    """The labels the rows of `str.cat` meet on when they do not already agree.
+
+    pandas lines the others up among themselves first, keeping the labels any of
+    them has in the order they first appear, or only the ones all of them have
+    for `inner`, and then lines this column up against that under `join`.
+    """
+    if join not in ("left", "right", "inner", "outer"):
+        raise InvalidArgumentError(f"do not recognize join method {join}")
+    mine = data.index.tolist()
+    if join == "left":
+        return mine
+    theirs: dict[Any, None] = dict.fromkeys(columns[0].index.tolist())
+    for column in columns[1:]:
+        labels = column.index.tolist()
+        if join == "inner":
+            present = set(labels)
+            theirs = {label: None for label in theirs if label in present}
+        else:
+            theirs.update(dict.fromkeys(labels))
+    if join == "right":
+        return list(theirs)
+    if join == "inner":
+        return [label for label in mine if label in theirs]
+    every = dict.fromkeys(mine)
+    every.update(theirs)
+    try:
+        return sorted(every)
+    except TypeError:
+        return list(every)
+
+
+def _cat_missing(value: Any) -> bool:
+    """Whether one piece of a `str.cat` row is missing, a null or a NaN."""
+    return value is None or (isinstance(value, float) and value != value)
+
+
+def _cat_kind(values: list[Any]) -> str:
+    """What numpy's `infer_dtype` calls a column of pieces that are not all text."""
+    kinds = {type(value) for value in values}
+    if kinds == {bool}:
+        return "boolean"
+    if kinds == {int}:
+        return "integer"
+    if kinds == {float}:
+        return "floating"
+    if kinds <= {int, float}:
+        return "mixed-integer-float"
+    if int in kinds and str in kinds:
+        return "mixed-integer"
+    return "mixed"
+
+
 class StringMixin:
     """The hand written half of `StringAccessor`.
 
@@ -12989,20 +13090,13 @@ class StringMixin:
             return built.astype("bool")
         return built
 
-    def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> str:
-        """The whole column folded into one string.
+    def _joined(self, others: Any, sep: Any, na_rep: Any, join: Any) -> Any:
+        """The whole column folded into one string, or lined up with others.
 
         `str.cat` is two operations wearing one name. With `others` it lines a
         second column up against this one and concatenates row by row, and the
-        answer is a column. With no `others` it folds this column into a single
-        string, and the answer is a scalar. Only the second is written here.
-
-        The first is refused rather than approximated because of what pandas
-        does before it concatenates anything: it aligns the two columns on their
-        labels, so a row of `others` meets the row of this column with the same
-        label and not the one in the same position. Alignment is not written in
-        this library yet, and doing it by position instead would answer a
-        different question quietly, which is the worst of the three options.
+        answer is a column, which `_concatenated` writes. With no `others` it
+        folds this column into a single string, and the answer is a scalar.
 
         `na_rep` decides both what a missing row becomes and whether it survives
         at all, and pandas reads that off whether the argument was given. It
@@ -13015,17 +13109,12 @@ class StringMixin:
         sequence items. Those name an implementation and not the mistake, so
         both are refused here with a message that says which argument was wrong.
 
-        `join` is dropped unread. It says how to line `others` up against this
-        column and there is no `others` to line up, so it has nothing to do.
-        pandas does not check it either, and takes `join="bogus"` without a
-        word even when there is an `others` for it to have applied to.
+        `join` is dropped unread when there is no `others`. It says how to line
+        `others` up against this column and there is nothing to line up, so it
+        has nothing to do. pandas does not check it either.
         """
         if others is not None:
-            raise UnsupportedError(
-                "firepanda:unsupported: str.cat with others aligns the two columns on"
-                " their labels before it concatenates, and alignment is not written"
-                " yet, so only the form that folds one column into a string is"
-            )
+            return self._concatenated(others, sep, na_rep, join)
         del join
         if sep is None:
             sep = ""
@@ -13037,6 +13126,79 @@ class StringMixin:
             return self._series._inner.string_join(sep, na_rep or "", na_rep is None)
         except Exception as error:
             raise translate(error) from None
+
+    def _concatenated(self, others: Any, sep: Any, na_rep: Any, join: Any) -> Series:
+        """This column and others joined row by row, after pandas' alignment.
+
+        pandas turns `others` into a list of columns first: a series is itself,
+        a frame is its columns, and an index, an array or a list of strings is
+        one column labelled like this one, which has to be as long as this one.
+        A list of series, indexes and arrays is each of those in turn. When every
+        label list is this column's the rows meet by position. Otherwise they
+        meet by label under `join`: `left` keeps this column's labels, `right`
+        the others' in the order they first appear, `inner` the labels in both
+        in this column's order and `outer` all of them sorted.
+
+        A row with a missing piece is missing in the answer, and with `na_rep`
+        the missing piece is `na_rep` instead. A piece that is not text is
+        pandas' TypeError, naming what numpy's `infer_dtype` calls the first
+        column holding one, among the rows that reach the concatenation.
+
+        The rows are joined in the interpreter, one Python string each, since
+        the engine has no row by row concatenation yet. The alignment is whole
+        column work.
+        """
+        from ._array import FirepandaArray
+        from ._frame import DataFrame, Series
+
+        data = self._series
+        if isinstance(others, str):
+            raise InvalidArgumentError("Did you mean to supply a `sep` keyword?")
+        if sep is None:
+            sep = ""
+        if not isinstance(sep, str):
+            raise DTypeError(f"firepanda:dtype: sep must be str, not {type(sep).__name__}")
+        if na_rep is not None and not isinstance(na_rep, str):
+            raise DTypeError(f"firepanda:dtype: na_rep must be str, not {type(na_rep).__name__}")
+        try:
+            columns = _cat_columns(others, data, Series, DataFrame, FirepandaArray)
+        except ValueError as error:
+            raise InvalidArgumentError(
+                "If `others` contains arrays or lists (or other list-likes without an"
+                " index), these must all be of the same length as the calling"
+                " Series/Index."
+            ) from error
+        labels = data.index
+        if any(not labels.equals(column.index) for column in columns):
+            labels = _cat_labels(data, columns, join)
+            data = data.reindex(labels)
+            columns = [column.reindex(labels) for column in columns]
+        rows = [data.tolist(), *(column.tolist() for column in columns)]
+        gaps = [[_cat_missing(value) for value in values] for values in rows]
+        if na_rep is None:
+            kept = [not any(row) for row in zip(*gaps, strict=True)]
+            pieces = [
+                [value for value, keep in zip(values, kept, strict=True) if keep] for values in rows
+            ]
+        else:
+            kept = [True] * len(rows[0])
+            pieces = [
+                [na_rep if gap else value for value, gap in zip(values, gap_row, strict=True)]
+                for values, gap_row in zip(rows, gaps, strict=True)
+            ]
+        for values in pieces:
+            if not all(isinstance(value, str) for value in values):
+                raise TypeError(
+                    "Concatenation requires list-likes containing only strings (or"
+                    f" missing values). Offending values found in column {_cat_kind(values)}"
+                )
+        joined = iter(sep.join(row) for row in zip(*pieces, strict=True))
+        answer = Series(
+            [next(joined) if keep else None for keep in kept], index=labels, dtype="string"
+        )
+        if not isinstance(labels, list):
+            return answer.rename(self._series.name)
+        return answer.rename_axis(self._series.index.name).rename(self._series.name)
 
 
 BROADCAST = frozenset(
