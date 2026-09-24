@@ -8,9 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.31] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. `read_parquet` now holds a string column that repeats as int32 codes into its distinct values by default, with `dtype` still string, so TPC-H sf1 lineitem reads into 813 MB instead of 1150 in the same time, which is less than DuckDB's 1138 MB for the same table. To get there, sorts, Arrow export, the IPC writer, every per row `Series.chars_*` method and the rest of the string kernels learned the encoding: the text methods run once per distinct value, and concat, cast, the fills, `pick`, the text reductions, joins, grouped aggregation and the per cell readers decode first. `encode_strings=False` on `Session.run` gives the old flat columns. A group by on a text column now inserts its new keys on every core. On the pandas side, `pd.merge` and `DataFrame.merge` answer a merge on key columns the way pandas does. SQL reads a `NEAREST` join and a slice whose end is written as a minus.
+
 ### Changed: `read_parquet` holds a string column that repeats as codes by default
 
 `Session.run(encode_strings=...)` now defaults to on, so `read_parquet` and everything built on it hand back a string column where each value repeats at least sixteen times on average as int32 codes into its distinct values (#979). The dtype still says string, and every frame and Series method reads the encoding or decodes first, so nothing a caller does changes except memory and speed. On TPC-H sf1 lineitem the frame is 813 MB rather than 1150 MB, and the read takes the same time. `encode_strings=False` gives every column flat, for a caller that reads the buffers directly.
+
+### Added: `merge` and `DataFrame.merge` on key columns
+
+The core pairs the rows through a new `join_on` binding and the Python layer does the rest the way pandas does it. `on`, `left_on` and `right_on` work, as does a merge on the shared columns when no key is named. A suffix goes on both sides of an overlapping column, an int key against a float key becomes a float64 key, and a missing key matches a missing key. Inner and left joins keep the left order, a right join keeps the right order, and an outer join is sorted on the key, all as pandas 3 does. `sort`, `suffixes`, `validate` and a named series on either side work, and the mistakes raise the pandas class with the pandas message, with `MergeError` added to `firepanda.errors`. A cross or asof join, `left_index`, `right_index` and `indicator` are refused by name for now.
 
 ### Added
 
@@ -53,10 +63,6 @@ With `encode_strings` on, each string column now goes through a `RepeatEncoder` 
 ### Added: a Parquet read can hold the string columns that repeat as codes
 
 `Session.run` takes `encode_strings`, and with it on, each string column of the answer whose values repeat sixteen times on average comes back dictionary encoded, with `dtype` still string. `encode_repetitive` in `kernel/dictionary.mojo` makes the call: it hashes the first 64K rows and gives up there if they do not repeat enough, so a comment column costs one hash of a sample, and otherwise hashes the whole column and keeps the distinct values in the order they first appear. A column of only nulls is left flat. On TPC-H sf1 lineitem, `l_returnflag`, `l_linestatus`, `l_shipinstruct` and `l_shipmode` go from 96, 96, 146 and 96 MB to 24 MB each and `l_comment` stays flat, which takes the frame from 1150 MB to 813 and the peak of the read from 2.80 GB to 2.58 on a six core Linux machine. The option is off by default until every kernel the TPC-H queries reach can read the encoding (#979).
-
-### Added: `merge` and `DataFrame.merge` on key columns
-
-The core pairs the rows through a new `join_on` binding and the Python layer does the rest the way pandas does it. `on`, `left_on` and `right_on` work, as does a merge on the shared columns when no key is named. A suffix goes on both sides of an overlapping column, an int key against a float key becomes a float64 key, and a missing key matches a missing key. Inner and left joins keep the left order, a right join keeps the right order, and an outer join is sorted on the key, all as pandas 3 does. `sort`, `suffixes`, `validate` and a named series on either side work, and the mistakes raise the pandas class with the pandas message, with `MergeError` added to `firepanda.errors`. A cross or asof join, `left_index`, `right_index` and `indicator` are refused by name for now.
 
 ### Added: `value_counts` and `mode` on a series
 
