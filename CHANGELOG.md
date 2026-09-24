@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_numeric
+
+`firepanda.to_numeric` reads values as numbers the way pandas does. Whole numbers in text are int64 and a decimal point or an exponent makes float64, space may surround a number but not an infinity, and empty text is NaN. A column answers a column, an index an index, a list or an array a numpy array and one value one number. `errors="coerce"` reads what is not a number as NaN, and `downcast` walks pandas' own list of types from the smallest up. `dtype_backend` and whole numbers past int64 in a column are refused.
+
 ### Fixed: AbstractMethodError and PyperclipWindowsException are made as pandas makes them
 
 `AbstractMethodError` now takes the object and the kind of method and says which class should have written it, and `PyperclipWindowsException` adds the last Windows error to its message, as pandas' classes do. Their signatures now match pandas', which the compat Board checks.

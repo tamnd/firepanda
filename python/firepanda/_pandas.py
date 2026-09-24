@@ -18590,6 +18590,184 @@ def concat(
     return DataFrame._wrap(out)
 
 
+_WHOLE_TEXT = re.compile(r"\s*[+-]?\d+\s*")
+_DECIMAL_TEXT = re.compile(r"\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*")
+_INFINITE_TEXT = re.compile(r"[+-]?(?:inf|infinity)", re.IGNORECASE)
+_DOWNCASTS = {
+    "integer": "bhilqp",
+    "signed": "bhilqp",
+    "unsigned": "BHILQP",
+    "float": "fdg",
+}
+
+
+def _parsed_number(value: Any, position: int, coerce: bool) -> int | float:
+    """One value read as a number the way pandas' `to_numeric` reads it.
+
+    Whole numbers in text stay whole, a decimal point or an exponent makes a
+    float, empty text and a missing value are NaN, and `inf` or `infinity` in
+    any case is infinite when it has no space around it.
+
+    Raises:
+        ValueError: For text that is not a number, with pandas' words, unless
+            `coerce` reads it as NaN.
+    """
+    if value is None or isinstance(value, bool | int | float):
+        return math.nan if value is None else value
+    text = str(value)
+    if _WHOLE_TEXT.fullmatch(text):
+        return int(text)
+    if text == "":
+        return math.nan
+    if _DECIMAL_TEXT.fullmatch(text) or _INFINITE_TEXT.fullmatch(text):
+        return float(text)
+    if coerce:
+        return math.nan
+    raise ValueError(f'Unable to parse string "{text}" at position {position}')
+
+
+def _numbers_array(values: list[Any], coerce: bool) -> Any:
+    """A numpy array of the values read as numbers, in the type pandas picks.
+
+    Whole numbers are int64, or uint64 past its top, and any float or gap
+    makes the lot float64.
+
+    Raises:
+        NotImplementedError: For whole numbers only an object column holds.
+    """
+    numpy = _numpy()
+    read = [_parsed_number(value, place, coerce) for place, value in enumerate(values)]
+    if any(isinstance(number, float) for number in read):
+        return numpy.array(read, dtype="float64")
+    if all(isinstance(number, bool) for number in read) and read:
+        return numpy.array(read, dtype="bool")
+    if all(-(2**63) <= number < 2**63 for number in read):
+        return numpy.array(read, dtype="int64")
+    if all(0 <= number < 2**64 for number in read):
+        return numpy.array(read, dtype="uint64")
+    raise NotImplementedError(
+        "to_numeric: a whole number past uint64 is held by pandas as an object, and"
+        " firepanda has no object type"
+    )
+
+
+def _downcast(values: Any, downcast: str) -> Any:
+    """The smallest numpy type of the kind asked for that holds the values.
+
+    This is pandas' own walk: each type from the smallest up is tried, and a
+    whole type is taken only when every value is present and comes back
+    close, a float type when every value comes back within its tolerance.
+    """
+    numpy = _numpy()
+    codes = _DOWNCASTS[downcast]
+    if downcast == "unsigned" and len(values) and numpy.min(values) < 0:
+        return values
+    tolerances = {4: 5e-4, 8: 5e-8, 16: 5e-16}
+    for code in codes:
+        wanted = numpy.dtype(code)
+        if wanted.itemsize > values.dtype.itemsize:
+            continue
+        kept = wanted.kind == values.dtype.kind and values.dtype.itemsize <= wanted.itemsize
+        if kept and values.size:
+            pass
+        elif wanted.kind in "biu":
+            if not values.size:
+                values = values.astype(wanted)
+            elif values.dtype.kind != "b" and not numpy.isnan(values.astype("float64")).any():
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    moved = values.astype(wanted)
+                if numpy.allclose(moved, values, rtol=0):
+                    values = moved
+        elif values.dtype.kind != "b":
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                moved = values.astype(wanted)
+            atol = tolerances.get(moved.dtype.itemsize, 0.0)
+            if numpy.allclose(moved, values, equal_nan=True, rtol=0.0, atol=atol):
+                values = moved
+        if values.dtype == wanted:
+            break
+    return values
+
+
+def to_numeric(
+    arg: Any,
+    errors: Any = "raise",
+    downcast: Any = None,
+    dtype_backend: Any = NO_DEFAULT,
+) -> Any:
+    """Values read as numbers, which is `pandas.to_numeric`.
+
+    A column answers a column with the same labels and name, an index an index,
+    a list or an array a numpy array, and one value one number. Numbers, true
+    and false pass through, instants and spans become their counts, and text is
+    read as pandas reads it.
+
+    Args:
+        arg: A value, a list, a numpy array, a column or an index.
+        errors: `raise` for text that is not a number, or `coerce` to read it
+            as NaN.
+        downcast: `integer`, `signed`, `unsigned` or `float`, to answer the
+            smallest type of that kind that holds every value.
+        dtype_backend: Refused, because firepanda has one kind of column.
+
+    Raises:
+        ValueError: For text that is not a number, or an unknown `errors`,
+            `downcast` or `dtype_backend`, with pandas' words.
+        NotImplementedError: For a `dtype_backend`, and for whole numbers only
+            an object column holds.
+    """
+    from ._frame import Index, Series
+
+    if errors not in ("raise", "coerce"):
+        raise ValueError("invalid error value specified")
+    if downcast not in (None, "integer", "signed", "unsigned", "float"):
+        raise ValueError("invalid downcasting method provided")
+    if dtype_backend is not NO_DEFAULT:
+        if dtype_backend not in ("numpy_nullable", "pyarrow"):
+            raise ValueError(
+                f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and"
+                " 'pyarrow' are allowed."
+            )
+        raise NotImplementedError(
+            f"to_numeric: dtype_backend={dtype_backend!r} answers pandas' nullable or arrow"
+            " types, and firepanda has one kind of column"
+        )
+    numpy = _numpy()
+    coerce = errors == "coerce"
+    if isinstance(arg, Series | Index):
+        printed = str(arg.dtype)
+        if printed.startswith(("datetime", "timedelta")):
+            values = arg.astype("int64").to_numpy()
+        elif _numeric_kind(printed) is not None or printed == "bool":
+            values = arg.to_numpy()
+        else:
+            values = _numbers_array(arg.tolist(), coerce)
+        if downcast is not None:
+            values = _downcast(values, downcast)
+        if values.dtype.kind == "u" and values.size and int(values.max()) >= 2**63:
+            raise NotImplementedError(
+                "to_numeric: pandas answers uint64 for whole numbers past int64, and a"
+                " firepanda column cannot be built from them yet"
+            )
+        column = Series(values.tolist(), dtype=str(values.dtype))
+        if isinstance(arg, Index):
+            return Index(column, name=arg.name)
+        return Series(column.tolist(), dtype=str(values.dtype), index=arg.index, name=arg.name)
+    if isinstance(arg, list | tuple) or hasattr(arg, "__array__"):
+        values = numpy.asarray(arg)
+        if values.dtype.kind not in "biuf":
+            values = _numbers_array(values.tolist(), coerce)
+        return _downcast(values, downcast) if downcast is not None else values
+    if isinstance(arg, bool | int | float | numpy.number | numpy.bool_):
+        return arg
+    number = _numbers_array([arg], coerce)
+    if downcast is not None:
+        number = _downcast(number, downcast)
+    return number[0]
+
+
 def to_datetime(
     arg: Any,
     errors: str = "raise",

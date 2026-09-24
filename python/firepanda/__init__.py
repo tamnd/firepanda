@@ -51,6 +51,7 @@ from ._pandas import (
     notnull,
     read_csv,
     to_datetime,
+    to_numeric,
     unique,
 )
 from ._scalars import Timedelta, Timestamp
@@ -79,6 +80,7 @@ __all__ = [
     "notnull",
     "read_csv",
     "to_datetime",
+    "to_numeric",
     "unique",
 ]
 
