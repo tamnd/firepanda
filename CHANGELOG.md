@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: an operator against a moment or a span keeps the column's name
+
+`s - s.min()`, `s > datetime(2024, 1, 1)` and the other operators with a `Timestamp`, `datetime`, `Timedelta` or `timedelta` on one side answered a series with no name, because the scalar was lined up as an unnamed column first. It is now lined up under the column's own name, so the answer keeps it the way pandas does and the way an operator against a number already did.
+
 ### Fixed: a temporal column hands out moments, spans and dates, and takes them in
 
 `tolist`, iterating a series or an index, `items`, `itertuples`, reading one cell with `iloc`, `loc`, `iat` or `at`, and the reductions that answer a value of the column's own kind now hand out a `Timestamp` for a moment, with its unit and zone, a `Timedelta` for a span and a `datetime.date` for a day, where they used to hand out the stored count. A missing value stays None. The other way round, a list of `datetime` or `Timestamp` values given to `Series` or `DataFrame` is a column of moments at the finest unit any value is quoted at, with a zone every value shares kept, and a list of `timedelta` values is a column of spans, which is what pandas infers. A `datetime` or `timedelta` on the other side of an operator is lined up as a column, so `s - s.min()` and `s > datetime(2024, 1, 1)` answer what pandas answers. This closes #348. `python/tests/test_temporal_values.py` checks 48 cases against pandas.

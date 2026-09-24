@@ -152,3 +152,24 @@ def test_a_count_is_still_a_number(firepanda: ModuleType) -> None:
     column = moments(firepanda)
     assert column.count() == 3
     assert column.dt.year.tolist() == [2024, None, 2023, 2024]
+
+
+NAMED: list[Callable[[Any], Any]] = [
+    lambda m: moments(m).rename("t") - moments(m).min(),
+    lambda m: moments(m).rename("t") > datetime.datetime(2024, 1, 1),
+    lambda m: moments(m).rename("t").sub(m.Timestamp("2024-01-01")),
+    lambda m: (moments(m) - moments(m).min()).rename("d") + datetime.timedelta(hours=1),
+    lambda m: datetime.datetime(2025, 1, 1) - moments(m).rename("t"),
+]
+
+
+@pytest.mark.parametrize("build", NAMED)
+def test_a_scalar_operand_keeps_the_name(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """The answer carries the column's name, as it does against a number."""
+    import pandas as pd
+
+    mine, theirs = build(firepanda), build(pd)
+    assert mine.name == theirs.name
+    assert same(mine.tolist(), theirs.tolist())
