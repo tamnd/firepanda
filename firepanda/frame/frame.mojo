@@ -98,6 +98,7 @@ from firepanda.kernel.group import (
 )
 from firepanda.kernel.nulls import all_valid_mask, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
+from firepanda.kernel.rank import rank_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import (
     argsort_any,
@@ -3162,6 +3163,80 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             fields.append(Field(name, produced.type))
             columns.append(produced^)
         var out = Self(Schema(fields^), columns^)
+        out.index = Index(copy=self.index)
+        return out^
+
+    def group_rank(
+        self,
+        by: List[String],
+        method: Int,
+        ascending: Bool,
+        na: Int,
+        pct: Bool,
+        dropna: Bool = True,
+    ) raises -> Self:
+        """Ranks every row of every column that is not a key within its group.
+
+        With no keys at all this is `DataFrame.rank`, one group holding every
+        row. Otherwise the groups are the grouping's ordinals, in whatever order
+        they come, because a rank only ever compares rows of one group.
+
+        Args:
+            by: The key columns, possibly none.
+            method: How a tie is settled, one of the kernel's `RANK_` codes.
+            ascending: Rank the smallest value first.
+            na: Where a missing value ranks, one of the kernel's `NA_` codes.
+            pct: Answer the rank as a fraction of the group.
+            dropna: Rank the rows with a null in their key as NaN rather than as
+                a group of their own.
+
+        Returns:
+            A float64 frame as tall as this one, with this one's labels and
+            every column that is not a key.
+
+        Raises:
+            Error: If a key is missing or a column's type cannot be sorted.
+        """
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            at.append(self.schema.index_of(by[i]))
+        var groups = List[Int]()
+        var count = 1
+        if len(at) > 0:
+            var grouping = self._grouping(at)
+            count = grouping.groups
+            var ordinals = grouping.codes.unsafe_ptr()
+            groups = List[Int](capacity=self.rows)
+            for i in range(self.rows):
+                groups.append(Int(ordinals.unsafe_offset(i).unsafe_load()))
+            if dropna:
+                for k in range(len(at)):
+                    ref key = self.columns[at[k]]
+                    if key.null_count() == 0:
+                        continue
+                    for i in range(self.rows):
+                        if not key.only().is_valid(i):
+                            groups[i] = -1
+
+        var fields = List[Field]()
+        var columns = List[AnyArray]()
+        for c in range(len(self.columns)):
+            if c in at:
+                continue
+            fields.append(Field(self.schema[c].name, LogicalType.FLOAT64))
+            columns.append(
+                rank_any(
+                    self.columns[c].only(),
+                    groups,
+                    count,
+                    method,
+                    ascending,
+                    na,
+                    pct,
+                )
+            )
+        var out = Self(Schema(fields^), columns^)
+        out.rows = self.rows
         out.index = Index(copy=self.index)
         return out^
 

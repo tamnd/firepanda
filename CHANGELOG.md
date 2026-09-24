@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `rank` on a series, a frame and a group by
+
+`Series.rank`, `DataFrame.rank` and `groupby(...).rank()` are written, with every method pandas has (`average`, `min`, `max`, `first` and `dense`), the three placements for a missing value, both directions and `pct`. All three are one kernel in the core, a stable sort and a pass over the ties that reads equality off the factorize codes, so numbers, text, flags and times all rank the same way. An ordered category ranks by its place in the categories and an unordered one by its value, and a group by refuses the unordered one, all as pandas does. The answer is float64, as pandas' is, a row whose group key is missing ranks NaN under `dropna`, and `transform("rank")` now answers rather than being refused. A rank across a row, `axis=1` on a frame, is still refused.
+
 ### Fixed: `Series` built from a mapping
 
 `Series({"a": 1, "b": 2})` used to read the mapping as a sequence and hold its keys as the values. It now holds the values under the keys as row labels, in the mapping's order, as pandas does, and `index=` beside a mapping picks those keys out in its own order with a missing value for a key the mapping does not have. `name=` and `dtype=` work with it as they do with a list.

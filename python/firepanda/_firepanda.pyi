@@ -148,6 +148,11 @@ class DataFrame:
     def group_broadcast(self, by: list[str], kind: str, param: float, dropna: bool) -> DataFrame:
         """Each row answered with its group's reduction."""
         ...
+    def group_rank(
+        self, by: list[str], method: str, ascending: bool, na_option: str, pct: bool, dropna: bool
+    ) -> DataFrame:
+        """Every column that is not a key ranked within its group."""
+        ...
     def group_scan(
         self, by: list[str], kind: str, periods: int, dropna: bool, sort: bool
     ) -> DataFrame:
@@ -395,6 +400,9 @@ class Series:
         ...
     def unary(self, op: str) -> Series:
         """One of the four unary operations, over every row."""
+        ...
+    def rank(self, method: str, ascending: bool, na_option: str, pct: bool) -> Series:
+        """Every row ranked against the whole column, as a float."""
         ...
     def round(self, decimals: int) -> Series:
         """Every row rounded to some decimal places, half to even."""

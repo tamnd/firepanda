@@ -2501,6 +2501,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.group_rank",
+            name="group_rank",
+            doc="Every column that is not a key ranked within its group.",
+            params=(
+                ("by", "list[str]"),
+                ("method", "str"),
+                ("ascending", "bool"),
+                ("na_option", "str"),
+                ("pct", "bool"),
+                ("dropna", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.group_scan",
             name="group_scan",
             doc="One value a row, worked out within the row's group.",
@@ -3417,6 +3431,18 @@ SERIES = Exposed(
             name="unary",
             doc="One of the four unary operations, over every row.",
             params=(("op", "str"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.rank",
+            name="rank",
+            doc="Every row ranked against the whole column, as a float.",
+            params=(
+                ("method", "str"),
+                ("ascending", "bool"),
+                ("na_option", "str"),
+                ("pct", "bool"),
+            ),
             returns="Series",
         ),
         Binding(

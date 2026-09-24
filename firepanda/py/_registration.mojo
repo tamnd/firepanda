@@ -211,6 +211,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "group_broadcast",
         docstring="Each row answered with its group's reduction.",
     )
+    _ = dataframe.def_method[PyDataFrame.group_rank](
+        "group_rank",
+        docstring="Every column that is not a key ranked within its group.",
+    )
     _ = dataframe.def_method[PyDataFrame.group_scan](
         "group_scan",
         docstring="One value a row, worked out within the row's group.",
@@ -463,6 +467,10 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.unary](
         "unary", docstring="One of the four unary operations, over every row."
+    )
+    _ = series.def_method[PySeries.rank](
+        "rank",
+        docstring="Every row ranked against the whole column, as a float.",
     )
     _ = series.def_method[PySeries.round](
         "round",

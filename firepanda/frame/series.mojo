@@ -120,6 +120,7 @@ from firepanda.kernel.pattern import (
     text_starts_with_folded,
 )
 from firepanda.kernel.pick import pick_any
+from firepanda.kernel.rank import rank_any
 from firepanda.kernel.regex.column import (
     text_count_regex,
     text_extract_regex,
@@ -4412,6 +4413,28 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name.copy(), round_any(self.values, decimals)
+        )
+
+    def rank(
+        self, method: Int, ascending: Bool, na: Int, pct: Bool
+    ) raises -> Self:
+        """Ranks every row against the whole column.
+
+        Args:
+            method: How a tie is settled, one of the kernel's `RANK_` codes.
+            ascending: Rank the smallest value first.
+            na: Where a missing value ranks, one of the kernel's `NA_` codes.
+            pct: Answer the rank as a fraction of the column.
+
+        Returns:
+            A float64 series under the same labels and the same name.
+
+        Raises:
+            Error: If the column's type cannot be sorted.
+        """
+        return self._relabelled(
+            self.name.copy(),
+            rank_any(self.values, List[Int](), 1, method, ascending, na, pct),
         )
 
     def __neg__(self) raises -> Self:

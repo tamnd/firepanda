@@ -29,6 +29,7 @@ from firepanda.frame.concat import concat_series, stack_columns, stack_rows
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.join import JoinKind
+from firepanda.kernel.rank import rank_method, rank_missing
 from firepanda.kernel.reduce import reduce_any
 from firepanda.io.arrow_c import (
     ArrowArray,
@@ -1577,6 +1578,60 @@ struct PyDataFrame(Movable, Writable):
         ref frame = Self._frame(py_self)[].frame[]
         try:
             var out = frame.group_broadcast(keys, wanted, drop)
+            return PythonObject(alloc=Self(ArcPointer(out^)))
+        except cause:
+            var text = String(cause)
+            if "no column named" in text or "given twice" in text:
+                raise retagged(COLUMN, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def group_rank(
+        py_self: PythonObject,
+        by: PythonObject,
+        method: PythonObject,
+        ascending: PythonObject,
+        na_option: PythonObject,
+        pct: PythonObject,
+        dropna: PythonObject,
+    ) raises -> PythonObject:
+        """Ranks every column that is not a key, within the groups of the keys.
+
+        With no keys this is `DataFrame.rank` over the whole frame.
+
+        Args:
+            py_self: The frame.
+            by: The key columns, possibly none.
+            method: How a tie is settled, as pandas spells it.
+            ascending: Rank the smallest value first.
+            na_option: Where a missing value ranks, as pandas spells it.
+            pct: Answer the rank as a fraction of the group.
+            dropna: Rank the rows whose key is missing as NaN.
+
+        Returns:
+            A new float64 frame with this one's rows and labels.
+
+        Raises:
+            Error: Tagged `value` for a method or placement pandas does not
+                have, `column` if a key is missing or named twice, and `dtype`
+                if a column has a type that cannot be sorted.
+        """
+        var keys = List[String](capacity=Int(len(by)))
+        for name in by:
+            keys.append(String(name))
+        var how: Int
+        var placed: Int
+        try:
+            how = rank_method(words(method, "method"))
+            placed = rank_missing(words(na_option, "na_option"))
+        except cause:
+            raise retagged(VALUE, cause)
+        var up = flag(ascending, "ascending")
+        var share = flag(pct, "pct")
+        var drop = flag(dropna, "dropna")
+        ref frame = Self._frame(py_self)[].frame[]
+        try:
+            var out = frame.group_rank(keys, how, up, placed, share, drop)
             return PythonObject(alloc=Self(ArcPointer(out^)))
         except cause:
             var text = String(cause)
