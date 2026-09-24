@@ -3506,9 +3506,9 @@ SERIES = Exposed(
         Member(
             name="name",
             kind="property",
-            body="self._inner.label()",
+            body="self._name_of(self._inner.label())",
             doc="The name of the series, and None when it has none.",
-            returns="str | None",
+            returns="Any",
         ),
         Member(
             name="dtype",

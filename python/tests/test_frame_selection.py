@@ -201,9 +201,11 @@ def test_take_refuses_a_keyword_pandas_only_accepts_to_ignore(firepanda):
         made(firepanda).take([0], mode="clip")
 
 
-def test_one_row_across_several_columns_is_not_written_yet(firepanda):
-    with pytest.raises(NotImplementedError):
-        made(firepanda).iloc[0]
+def test_one_row_across_several_columns_is_a_row(firepanda):
+    mine, them = made(firepanda).iloc[0], theirs().iloc[0]
+    assert mine.tolist() == them.tolist()
+    assert list(mine.index) == list(them.index)
+    assert (mine.name, mine.dtype) == (them.name, them.dtype)
 
 
 def test_more_than_two_axes_is_refused(firepanda):
