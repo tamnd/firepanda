@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.32] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, `concat` stacks frames and series down the rows and side by side, `DataFrame.join` and `merge` join on the row labels, `merge(indicator=)` says which side each row came from, and `DataFrame.assign`, attribute access to a column, `rank`, `round`, the grouped transforms and grouped `diff` and `transform` by name are new. `Series` built from a mapping now holds its values under its keys. On the engine side, a join probed by many more rows than it builds indexes by value, a hashed join table that most probes miss keeps a bit per key value in front of it, a join in a pipeline hands its probe side on as positions, a sum of an integer column and a constant builds no column, which takes ClickBench q29 from 146 ms to 37 ms, and a streaming group on one integer key writes its map on every core.
+
 ### Added: `DataFrame.assign` and a column read as an attribute
 
 `df.assign(**columns)` adds or replaces columns and hands back a new frame. The keywords are taken in order and each one sees the frame the earlier ones made, so `assign(c=lambda f: f.a * 2, d=lambda f: f.c + 1)` works as it does in pandas. A value can be a function of the frame, a series lined up on the row labels, a frame of one column, a mapping, a list, a tuple, a range or a numpy array as long as the frame, or one value for every row. A replaced column keeps its place and a new one goes on the end. A wrong length, a frame of several columns and a set raise pandas' errors, and `None` is refused, because pandas makes it an object column. `df.name` now reads a column as an attribute when no method has that name, and `dir(df)` lists the columns that are identifiers.
