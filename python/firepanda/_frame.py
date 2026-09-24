@@ -535,6 +535,50 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def split(
+        self, pat: Any = None, *, n: Any = -1, expand: Any = False, regex: Any = None
+    ) -> DataFrame:
+        """Every row cut at a separator or a pattern, one column per piece."""
+        try:
+            return self._split(pat, n, expand, regex, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rsplit(self, pat: Any = None, *, n: Any = -1, expand: Any = False) -> DataFrame:
+        """Every row cut at a separator counted from the right, one column per piece."""
+        try:
+            return self._split(pat, n, expand, None, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def join(self, sep: Any) -> Series:
+        """Every row with the separator put between each pair of its characters."""
+        try:
+            return self._characters_joined(sep)
+        except Exception as error:
+            raise translate(error) from None
+
+    def wrap(
+        self,
+        width: Any,
+        expand_tabs: Any = True,
+        tabsize: Any = 8,
+        replace_whitespace: Any = True,
+        drop_whitespace: Any = True,
+        initial_indent: Any = "",
+        subsequent_indent: Any = "",
+        fix_sentence_endings: Any = False,
+        break_long_words: Any = True,
+        break_on_hyphens: Any = True,
+        max_lines: Any = None,
+        placeholder: Any = " [...]",
+    ) -> Series:
+        """Every row broken into lines no wider than `width`, joined by newlines."""
+        try:
+            return self._wrapped_lines(locals())
+        except Exception as error:
+            raise translate(error) from None
+
     def extract(self, pat: Any, flags: Any = 0, expand: Any = True) -> DataFrame | Series:
         """What each group of the first match held, one column per group."""
         try:

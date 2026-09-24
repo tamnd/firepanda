@@ -8,6 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: str.split, str.rsplit, str.join and str.wrap
+
+- `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
+- `str.join` puts a separator between the characters of every row, and `str.wrap` breaks every row into lines with `textwrap` and every argument pandas takes.
+
 ### Added: right and full joins run
 
 A `RIGHT JOIN` and a `FULL JOIN` now run instead of being refused when the plan is lowered. The join operator marks each build row a pairing used as the probe side streams past, and once the probe side is done it hands out the build rows nothing matched, with the other side null. Because of that mark the operator is fed one chunk at a time rather than run in parallel. A right join also takes a condition part that reads only the left side, which is tested below the join since a left row that fails it just pairs with nothing. A full join still takes equalities only, and a full join with `USING` is still refused.

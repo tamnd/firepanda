@@ -1153,6 +1153,45 @@ def _string_members() -> tuple[Member, ...]:
             returns="DataFrame",
         ),
         Member(
+            name="split",
+            kind="method",
+            signature="pat: Any = None, *, n: Any = -1, expand: Any = False, regex: Any = None",
+            body="self._split(pat, n, expand, regex, False)",
+            doc="Every row cut at a separator or a pattern, one column per piece.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="rsplit",
+            kind="method",
+            signature="pat: Any = None, *, n: Any = -1, expand: Any = False",
+            body="self._split(pat, n, expand, None, True)",
+            doc="Every row cut at a separator counted from the right, one column per piece.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="join",
+            kind="method",
+            signature="sep: Any",
+            body="self._characters_joined(sep)",
+            doc="Every row with the separator put between each pair of its characters.",
+            returns="Series",
+        ),
+        Member(
+            name="wrap",
+            kind="method",
+            signature=(
+                "width: Any, expand_tabs: Any = True, tabsize: Any = 8,"
+                " replace_whitespace: Any = True, drop_whitespace: Any = True,"
+                ' initial_indent: Any = "", subsequent_indent: Any = "",'
+                " fix_sentence_endings: Any = False, break_long_words: Any = True,"
+                " break_on_hyphens: Any = True, max_lines: Any = None,"
+                ' placeholder: Any = " [...]"'
+            ),
+            body="self._wrapped_lines(locals())",
+            doc="Every row broken into lines no wider than `width`, joined by newlines.",
+            returns="Series",
+        ),
+        Member(
             name="extract",
             kind="method",
             signature="pat: Any, flags: Any = 0, expand: Any = True",
