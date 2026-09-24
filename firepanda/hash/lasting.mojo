@@ -107,6 +107,7 @@ which the single key maps cannot say.
 """
 
 from std.memory import unsafe_memcpy
+from std.sys.info import simd_width_of
 from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
@@ -129,8 +130,8 @@ from firepanda.kernel.concat import concat_any
 from firepanda.kernel.select import take_any
 
 from .factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
-from .function import DEFAULT_SEED, hash_bytes, hash_chunk
-from .table import PROBE_LOOKAHEAD, HashTable
+from .function import DEFAULT_SEED, hash_bytes, key_bits, mix
+from .table import PROBE_LOOKAHEAD
 
 
 comptime LASTING_SPAN = 1 << 18
@@ -206,6 +207,62 @@ def _part_tasks(rows: Int) -> Int:
     return max(1, min(LASTING_TEXT_PARTS, rows // LASTING_TEXT_GRAIN))
 
 
+struct _Parts(Movable):
+    """A table of hashes cut into parts, which both lasting maps write through.
+
+    Two words a slot, the parts one after another: the key's hash, and its
+    ordinal plus one so that a fresh buffer of zeros reads as all empty. While a
+    chunk is being taken the second word can instead be `LASTING_TEXT_PENDING`
+    and a row. `LastingText`'s docstring says why it is cut into parts and how a
+    chunk goes through it.
+    """
+
+    var slots: Buffer
+    """The slots."""
+
+    var capacity: Int
+    """The slot count of each part, a power of two."""
+
+    var held: List[Int]
+    """How many keys each part holds."""
+
+    def __init__(out self):
+        """Constructs an empty table with nothing allocated yet."""
+        self.slots = Buffer(0)
+        self.capacity = 0
+        self.held = List[Int]()
+
+    def make_room(mut self, starts: List[Int]) raises:
+        """Grows the table to room for every row of a chunk being new.
+
+        Args:
+            starts: Where each part's rows begin in the chunk's bucketed rows,
+                with the chunk's height after the last.
+        """
+        if self.capacity == 0:
+            self.slots = Buffer(LASTING_TEXT_PARTS * LASTING_TEXT_SLOTS * 2 * 8)
+            self.capacity = LASTING_TEXT_SLOTS
+            self.held = List[Int](length=LASTING_TEXT_PARTS, fill=0)
+        var want = 0
+        for p in range(LASTING_TEXT_PARTS):
+            want = max(want, (self.held[p] + starts[p + 1] - starts[p]) * 2)
+        if want > self.capacity:
+            var grown = self.capacity
+            while grown < want:
+                grown *= 2
+            self.slots = _rehash(self.slots, self.capacity, grown)
+            self.capacity = grown
+
+    def add(mut self, added: List[Int]):
+        """Counts the slots a chunk opened into each part.
+
+        Args:
+            added: How many slots each part opened.
+        """
+        for p in range(LASTING_TEXT_PARTS):
+            self.held[p] += added[p]
+
+
 struct LastingText(Movable):
     """The text keys a streaming operator has seen, and the ordinal each got.
 
@@ -251,26 +308,15 @@ struct LastingText(Movable):
     than the fullest being a little emptier than they need to be.
     """
 
-    var slots: Buffer
-    """Two words a slot, the parts one after another: the key's hash, and its
-    ordinal plus one so that a fresh buffer of zeros reads as all empty. While a
-    chunk is being taken the second word can instead be `LASTING_TEXT_PENDING`
-    and a row."""
-
-    var capacity: Int
-    """The slot count of each part, a power of two."""
-
-    var held: List[Int]
-    """How many keys each part holds."""
+    var parts: _Parts
+    """The table of hashes."""
 
     var store: _TextStore
     """The distinct keys, in ordinal order."""
 
     def __init__(out self):
         """Constructs an empty map with no table allocated yet."""
-        self.slots = Buffer(0)
-        self.capacity = 0
-        self.held = List[Int]()
+        self.parts = _Parts()
         self.store = _TextStore()
 
     def __len__(self) -> Int:
@@ -298,26 +344,12 @@ struct LastingText(Movable):
         """
         if rows <= 0:
             return
-        if self.capacity == 0:
-            self.slots = Buffer(LASTING_TEXT_PARTS * LASTING_TEXT_SLOTS * 2 * 8)
-            self.capacity = LASTING_TEXT_SLOTS
-            self.held = List[Int](length=LASTING_TEXT_PARTS, fill=0)
-
         var hashes = Buffer(rows * 8)
         _hash_rows(col, rows, hashes)
 
         var order = Array[DType.uint32](overwritten=rows)
         var starts = _bucket(rows, hashes, order)
-
-        var want = 0
-        for p in range(LASTING_TEXT_PARTS):
-            want = max(want, (self.held[p] + starts[p + 1] - starts[p]) * 2)
-        if want > self.capacity:
-            var grown = self.capacity
-            while grown < want:
-                grown *= 2
-            self.slots = _rehash(self.slots, self.capacity, grown)
-            self.capacity = grown
+        self.parts.make_room(starts)
 
         # What the walk found out about each row: zero for a key the map held,
         # one for the first row of a new key and two for a repeat of one.
@@ -325,8 +357,8 @@ struct LastingText(Movable):
         var kind = Array[DType.uint8](overwritten=rows)
         var lead = Array[DType.uint32](overwritten=rows)
         var added = _walk(
-            self.slots,
-            self.capacity,
+            self.parts.slots,
+            self.parts.capacity,
             self.store,
             col,
             hashes,
@@ -336,15 +368,14 @@ struct LastingText(Movable):
             kind,
             lead,
         )
-        for p in range(LASTING_TEXT_PARTS):
-            self.held[p] += added[p]
+        self.parts.add(added)
 
         var firsts = _rank(rows, kind, codes, self.store.groups)
         if len(firsts) > 0:
             self.store.add(
                 take_any(AnyArray(col.copy()), firsts).strings().copy()
             )
-        _place(self.slots, order, starts, codes, kind, lead)
+        _place(self.parts.slots, order, starts, codes, kind, lead)
 
     def take_keys(mut self) raises -> StringArray:
         """Gives up the key store as a column.
@@ -356,9 +387,7 @@ struct LastingText(Movable):
             If the pieces cannot be stacked.
         """
         var out = self.store.stacked()
-        self.slots = Buffer(0)
-        self.capacity = 0
-        self.held = List[Int]()
+        self.parts = _Parts()
         self.store = _TextStore()
         return out^
 
@@ -546,6 +575,102 @@ def _walk(
     return added^
 
 
+def _walk_exact(
+    mut slots: Buffer,
+    capacity: Int,
+    hashes: Buffer,
+    order: Array[DType.uint32],
+    starts: List[Int],
+    mut codes: Array[DType.uint32],
+    mut kind: Array[DType.uint8],
+    mut lead: Array[DType.uint32],
+) raises -> List[Int]:
+    """`_walk` for a key whose hash is the key, so a matching hash is a match.
+
+    A fixed width key is hashed by a bijection on its bits, so two keys with one
+    hash are one key and there is nothing to compare. That takes the column and
+    the key store out of the walk, and it is a function of its own rather than a
+    parameter on `_walk` because those are what `_walk` is built around.
+
+    Args:
+        slots: The table.
+        capacity: The slot count of each part.
+        hashes: One hash per row, indexed by row.
+        order: The chunk's rows bucketed by part.
+        starts: Where each part's rows begin in `order`.
+        codes: The ordinal of every row whose key the map held.
+        kind: What the walk found for each row.
+        lead: The slot a first row opened, or the first row of a repeat.
+
+    Returns:
+        How many slots each part opened.
+    """
+    var added = List[Int](length=LASTING_TEXT_PARTS, fill=0)
+
+    var tasks = _part_tasks(starts[LASTING_TEXT_PARTS])
+
+    def walk(
+        t: Int,
+    ) raises {mut slots, mut codes, mut kind, mut lead, mut added, imm}:
+        for p in range(
+            t * LASTING_TEXT_PARTS // tasks,
+            (t + 1) * LASTING_TEXT_PARTS // tasks,
+        ):
+            var table = slots.mut_bitcast[DType.uint64]()
+            var hash = hashes.bitcast[DType.uint64]()
+            var rows_of = order.unsafe_ptr()
+            var found = codes.unsafe_mut_ptr()
+            var kinds = kind.unsafe_mut_ptr()
+            var leads = lead.unsafe_mut_ptr()
+            var mask = UInt64(capacity - 1)
+            var base = p * capacity
+            var stop = starts[p + 1]
+            var opened = 0
+            for k in range(starts[p], stop):
+                if k + PROBE_LOOKAHEAD < stop:
+                    var next_row = Int(
+                        rows_of.unsafe_offset(k + PROBE_LOOKAHEAD).unsafe_load()
+                    )
+                    var ahead = (
+                        hash.unsafe_offset(next_row).unsafe_load() & mask
+                    )
+                    prefetch[PrefetchOptions().for_read().high_locality()](
+                        table.unsafe_offset((base + Int(ahead)) * 2)
+                    )
+                var i = Int(rows_of.unsafe_offset(k).unsafe_load())
+                var wanted = hash.unsafe_offset(i).unsafe_load()
+                var at = wanted & mask
+                while True:
+                    var slot = (base + Int(at)) * 2
+                    var word = table.unsafe_offset(slot + 1).unsafe_load()
+                    if word == 0:
+                        table.unsafe_offset(slot).unsafe_store(wanted)
+                        table.unsafe_offset(slot + 1).unsafe_store(
+                            LASTING_TEXT_PENDING | UInt64(i)
+                        )
+                        kinds.unsafe_offset(i).unsafe_write(UInt8(1))
+                        leads.unsafe_offset(i).unsafe_write(UInt32(slot))
+                        opened += 1
+                        break
+                    if table.unsafe_offset(slot).unsafe_load() == wanted:
+                        if word & LASTING_TEXT_PENDING != 0:
+                            kinds.unsafe_offset(i).unsafe_write(UInt8(2))
+                            leads.unsafe_offset(i).unsafe_write(
+                                UInt32(Int(word & ~LASTING_TEXT_PENDING))
+                            )
+                        else:
+                            kinds.unsafe_offset(i).unsafe_write(UInt8(0))
+                            found.unsafe_offset(i).unsafe_write(
+                                UInt32(Int(word) - 1)
+                            )
+                        break
+                    at = (at + 1) & mask
+            added[p] = opened
+
+    parallel_for(walk, tasks)
+    return added^
+
+
 def _place(
     mut slots: Buffer,
     order: Array[DType.uint32],
@@ -614,6 +739,39 @@ def _hash_rows(col: StringArray, rows: Int, mut hashes: Buffer) raises:
             out.unsafe_offset(i).unsafe_store(
                 hash_bytes(col.unsafe_bytes(i), DEFAULT_SEED)
             )
+
+    parallel_morsels(body, rows, LASTING_TEXT_MORSEL)
+
+
+def _hash_keys[
+    dt: DType
+](col: Array[dt], start: Int, rows: Int, mut hashes: Buffer) raises:
+    """Hashes a run of a fixed width column like `hash_chunk`, on the cores.
+
+    A whole register at a time, the tail too, for the reason `hash_chunk`
+    gives. A morsel is a multiple of the register width, so only the last one
+    has a tail, and it runs into the padding of both buffers rather than into
+    another morsel's rows.
+
+    Args:
+        col: The key column.
+        start: The first row to hash.
+        rows: How many rows to hash.
+        hashes: Filled with one hash per row, indexed from `start`.
+
+    Parameters:
+        dt: The key dtype.
+    """
+    comptime width = simd_width_of[DType.uint64]()
+
+    def body(begin: Int, stop: Int) raises {mut hashes, imm}:
+        var src = col.unsafe_ptr().unsafe_offset(start)
+        var out = hashes.mut_bitcast[DType.uint64]()
+        var i = begin
+        while i < stop:
+            var k = key_bits(src.unsafe_offset(i).unsafe_load[width=width]())
+            out.unsafe_offset(i).unsafe_store(mix(k, DEFAULT_SEED))
+            i += width
 
     parallel_morsels(body, rows, LASTING_TEXT_MORSEL)
 
@@ -789,8 +947,9 @@ struct LastingKeys(Movable):
     table, if a later chunk holds a key the direct table's window does not cover.
     """
 
-    var table: HashTable
-    """The hash route's map. Empty while the direct route is live."""
+    var parts: _Parts
+    """The hash route's map, the same table `LastingText` writes and written
+    the same way. Empty while the direct route is live."""
 
     var slots: Array[DType.uint32]
     """The direct route's table, one slot per value in the window, holding the
@@ -805,10 +964,6 @@ struct LastingKeys(Movable):
 
     var groups: Int
     """Ordinals handed out so far."""
-
-    var seen: Int
-    """Rows given so far. The hash table's sizing schedule counts in these, so it
-    has to carry across chunks the way the table does."""
 
     var opened: Bool
     """Whether the first chunk has arrived and picked a route."""
@@ -827,12 +982,11 @@ struct LastingKeys(Movable):
 
     def __init__(out self):
         """Constructs an empty map that has not yet picked a route."""
-        self.table = HashTable()
+        self.parts = _Parts()
         self.slots = Array[DType.uint32](1)
         self.span = 0
         self.base = 0
         self.groups = 0
-        self.seen = 0
         self.opened = False
         self.keys = List[AnyArray]()
         self.text = LastingText()
@@ -983,7 +1137,6 @@ struct LastingKeys(Movable):
                 out.unsafe_offset(i).unsafe_store(found - 1)
             i += 1
         self.groups = n
-        self.seen += i
         return i
 
     def _hashed[
@@ -995,39 +1148,70 @@ struct LastingKeys(Movable):
         rows: Int,
         mut codes: Array[DType.uint32],
         mut firsts: List[Int],
-    ):
-        """Inserts a chunk into the hash table.
+    ) raises:
+        """Takes the rows of a chunk from `start` on through the hash table.
 
-        This is the same call the join's build makes, for the same reason: hash a
-        thousand rows into a scratch buffer while they are in cache, insert them,
-        move on.
+        The steps `LastingText` lists, with the comparison gone because the
+        hash is the key. This was one table written by one thread, the join's
+        build called a thousand rows at a time, and on ClickBench's UserID that
+        thread was most of what q15 cost.
 
-        The chunk's height goes in as the total the table should expect, which is
-        a lie on the second chunk and every one after it, and it is the right
-        lie. Both of the sizing checkpoints fall inside a chunk of the size the
-        engine uses, so the table is sized once from the first chunk and doubles
-        from there, and a stream has no honest total to give it anyway.
+        The rows before `start` are the ones the direct table took before a key
+        left its window, which happens at most once in a query, so the rows
+        after it go through arrays of their own and are copied back.
         """
-        var hashes = Buffer(CHUNK_ROWS * 8)
-        var at = start
-        while at < rows:
-            var count = min(CHUNK_ROWS, rows - at)
-            hash_chunk(col, at, count, DEFAULT_SEED, hashes)
-            self.table.build(
-                hashes,
-                col.data.validity,
-                False,
-                at,
-                self.seen + at - start,
-                count,
-                rows - start,
-                0,
-                codes,
-                firsts,
-            )
-            at += count
-        self.seen += rows - start
-        self.groups = len(self.table)
+        var count = rows - start
+        if count <= 0:
+            return
+        if start == 0:
+            self._take[dt](col, 0, count, codes, firsts)
+            return
+        var ours = Array[DType.uint32](overwritten=count)
+        self._take[dt](col, start, count, ours, firsts)
+        unsafe_memcpy(
+            dest=codes.unsafe_mut_ptr().unsafe_offset(start),
+            src=ours.unsafe_ptr(),
+            count=count,
+        )
+
+    def _take[
+        dt: DType
+    ](
+        mut self,
+        col: Array[dt],
+        start: Int,
+        count: Int,
+        mut ours: Array[DType.uint32],
+        mut firsts: List[Int],
+    ) raises:
+        """Does what `_hashed` says for `count` rows from `start`, writing
+        their ordinals to the front of `ours`."""
+        var hashes = Buffer(count * 8)
+        _hash_keys[dt](col, start, count, hashes)
+
+        var order = Array[DType.uint32](overwritten=count)
+        var starts = _bucket(count, hashes, order)
+        self.parts.make_room(starts)
+
+        var kind = Array[DType.uint8](overwritten=count)
+        var lead = Array[DType.uint32](overwritten=count)
+        var added = _walk_exact(
+            self.parts.slots,
+            self.parts.capacity,
+            hashes,
+            order,
+            starts,
+            ours,
+            kind,
+            lead,
+        )
+        self.parts.add(added)
+
+        var fresh = _rank(count, kind, ours, self.groups)
+        _place(self.parts.slots, order, starts, ours, kind, lead)
+        self.groups += len(fresh)
+        for f in fresh:
+            firsts.append(start + f)
 
     def _rehash(mut self) raises:
         """Rebuilds the hash table from the keys the direct table collected.
@@ -1038,8 +1222,7 @@ struct LastingKeys(Movable):
         """
         self.span = 0
         self.slots = Array[DType.uint32](1)
-        self.table = HashTable()
-        self.seen = 0
+        self.parts = _Parts()
         var held = self.groups
         self.groups = 0
         if held == 0:
