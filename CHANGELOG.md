@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.34] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, a frame and a column gain `interpolate`, `corr`, `cov`, `autocorr`, `unique`, `factorize`, `describe`, `kurt`, `melt`, `get_dummies`, `query`, `eval` and `resample`, a group by gains `ffill`, `bfill`, `pct_change` and `filter`, and `iloc` reads one row across columns and raises pandas' IndexError past the end. In SQL, a semi or anti join checks the rest of its condition, so TPC-H q21 runs. Text is hashed sixteen bytes a step in two lanes, which makes hashing a short string about four times faster and helps every text group by and join.
+
 ### Fixed: a gap interpolate leaves is NaN
 
 The gaps `interpolate` leaves behind, at the front of a forward fill, past a `limit` or outside a `limit_area`, and every row of a column with no value at all, are NaN now rather than null, since NaN is the only missing value a float column has in pandas. Before this they crossed to Arrow as nulls and a consumer counting nulls saw a different column from the one pandas answers.
