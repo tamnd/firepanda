@@ -14,6 +14,8 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- A `NEAREST` join, such as `JOIN products t APPROX NEAREST 2 BY SIMILARITY f(q.e, t.e)`, now parses and prints back, with or without an alias on the right side and with the join type, `APPROX` or `EXACT` and the count all optional. The plan still refuses it as a kind of join firepanda does not run.
+
 - A slice whose end is written as a minus, such as `a[1:-:2]` or `a[:-:-1]`, which is how DuckDB says the end of the list when a step follows. It now parses and prints back as written, and the plan refuses it the way it refuses any other step. `a[1:-]` with no second colon is a syntax error, as it is in DuckDB.
 ### Added: the text methods and the rest of the string kernels read a column held as codes
 

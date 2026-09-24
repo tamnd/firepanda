@@ -4219,6 +4219,11 @@ def test_join_by_a_type_builds_the_join_that_type_names() raises:
     )
 
 
+def test_a_nearest_join_is_turned_down_in_the_plan() raises:
+    with assert_raises(contains="this kind of join"):
+        _ = _plan("SELECT a FROM t JOIN u NEAREST 1 BY DISTANCE t.a - u.k")
+
+
 def test_any_and_all_over_a_written_list_are_one_test_per_item() raises:
     assert_equal(
         _plan("SELECT a FROM t WHERE a = ANY ([1, 2])"),

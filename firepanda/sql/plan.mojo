@@ -557,6 +557,7 @@ from .ast import (
     NULLS_LAST,
     REF_FUNCTION,
     REF_JOIN,
+    REF_JOIN_NEAREST,
     REF_JOIN_USING,
     REF_PARENS,
     REF_SUBQUERY,
@@ -592,6 +593,7 @@ from .unsupported import (
     COLUMNS,
     FIELD_ACCESS,
     INTERVAL,
+    JOIN_FORM,
     LAMBDA,
     LIST_COMPREHENSION,
     LIST_VALUE,
@@ -5434,6 +5436,8 @@ def _source(
         )
     if source.kind == REF_JOIN_USING:
         return _joined(ast, at, catalog, grammar, plan, sources, scope, ctes)
+    if source.kind == REF_JOIN_NEAREST:
+        raise not_implemented(JOIN_FORM, "", "")
     if source.kind == REF_SUBQUERY:
         return _subquery(ast, at, catalog, grammar, plan, sources, scope, ctes)
     if source.kind == REF_FUNCTION:
@@ -6369,7 +6373,11 @@ def _from_names(ast: Ast, at: UInt32, mut names: List[String]) raises:
     if source.kind == REF_PARENS:
         _from_names(ast, source.a, names)
         return
-    if source.kind == REF_JOIN or source.kind == REF_JOIN_USING:
+    if (
+        source.kind == REF_JOIN
+        or source.kind == REF_JOIN_USING
+        or source.kind == REF_JOIN_NEAREST
+    ):
         _from_names(ast, source.a, names)
         _from_names(ast, source.b, names)
         return
@@ -6495,7 +6503,11 @@ def _from_columns(
     if source.kind == REF_PARENS:
         _from_columns(ast, source.a, catalog, ctes, columns, certain)
         return
-    if source.kind == REF_JOIN or source.kind == REF_JOIN_USING:
+    if (
+        source.kind == REF_JOIN
+        or source.kind == REF_JOIN_USING
+        or source.kind == REF_JOIN_NEAREST
+    ):
         _from_columns(ast, source.a, catalog, ctes, columns, certain)
         _from_columns(ast, source.b, catalog, ctes, columns, certain)
         return

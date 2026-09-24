@@ -55,6 +55,7 @@ from .ast import (
     NO_NODE,
     REF_FUNCTION,
     REF_JOIN,
+    REF_JOIN_NEAREST,
     REF_JOIN_USING,
     REF_PARENS,
     REF_SUBQUERY,
@@ -371,10 +372,14 @@ def reference_count(
             if item.kind == REF_PARENS:
                 refs.append(item.a)
                 continue
-            if item.kind == REF_JOIN or item.kind == REF_JOIN_USING:
+            if (
+                item.kind == REF_JOIN
+                or item.kind == REF_JOIN_USING
+                or item.kind == REF_JOIN_NEAREST
+            ):
                 refs.append(item.a)
                 refs.append(item.b)
-                if item.kind == REF_JOIN:
+                if item.kind != REF_JOIN_USING:
                     for condition in ast.items(item.children):
                         exprs.append(condition)
                 continue

@@ -125,6 +125,7 @@ from .ast import (
     NULLS_LAST,
     REF_FUNCTION,
     REF_JOIN,
+    REF_JOIN_NEAREST,
     REF_JOIN_USING,
     REF_PARENS,
     REF_SUBQUERY,
@@ -2049,6 +2050,18 @@ def _write_ref(
         if condition == 1:
             out += " ON "
             _write(ast, ast.at(item.children, 0), grammar, out)
+        return
+
+    if kind == REF_JOIN_NEAREST:
+        _write_ref(ast, item.a, grammar, out)
+        out += " "
+        out += ast.text(ast.at(item.payload, 0))
+        out += " "
+        _write_ref(ast, item.b, grammar, out)
+        out += " "
+        out += ast.text(ast.at(item.payload, 1))
+        out += " "
+        _write(ast, ast.at(item.children, 0), grammar, out)
         return
 
     if kind == REF_JOIN_USING:
