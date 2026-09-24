@@ -1196,8 +1196,8 @@ def test_a_refusal_says_where_it_was() raises:
     # them would do and this one changes as the list gets shorter.
     var g = Grammar()
     var rules = Transform(g)
-    var sql = "MAP {'a': 1}"
-    with assert_raises(contains="LINE 1: MAP {'a': 1}"):
+    var sql = "DEFAULT"
+    with assert_raises(contains="LINE 1: DEFAULT"):
         _ = _printed(sql, g, rules)
     with assert_raises(contains="issues/"):
         _ = _printed(sql, g, rules)

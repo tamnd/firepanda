@@ -55,6 +55,7 @@ from .ast import (
     EXPR_PARAMETER,
     EXPR_POSITIONAL,
     EXPR_GROUPING,
+    EXPR_MAP,
     EXPR_QUANTIFIED,
     EXPR_ROW,
     EXPR_STAR,
@@ -779,6 +780,27 @@ def _write_step(
         var entry = phase - 1
         if entry > 0:
             out += ", "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, entry), 0))
+        return
+
+    if kind == EXPR_MAP:
+        # The run alternates a key and a value and both are expressions, so
+        # each gets a phase of its own.
+        var entries = ast.length(item.children)
+        if phase == 0:
+            out += "MAP {"
+            stack.append(_Step(node, 1))
+            return
+        if phase == entries + 1:
+            out += "}"
+            return
+        var entry = phase - 1
+        if entry % 2 == 0:
+            if entry > 0:
+                out += ", "
+        else:
+            out += ": "
         stack.append(_Step(node, UInt32(phase + 1)))
         stack.append(_Step(ast.at(item.children, entry), 0))
         return

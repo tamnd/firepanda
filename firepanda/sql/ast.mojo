@@ -402,6 +402,12 @@ out, one bit each with the first column the highest.
 `GROUPING_ID` is the same thing under another name and lands here too.
 """
 
+comptime EXPR_MAP: UInt8 = 32
+"""`MAP {k: v, ...}`, a map written out in the query.
+
+`children` alternates a key and its value, and both are expressions.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -2062,6 +2068,40 @@ struct Ast(Movable):
         """
         return self.add(
             Expr(kind=EXPR_GROUPING, token=token, children=self.run(args))
+        )
+
+    def map_of(
+        mut self, keys: List[UInt32], values: List[UInt32], token: UInt32 = 0
+    ) raises -> UInt32:
+        """Builds `MAP {k: v, ...}`.
+
+        Args:
+            keys: The keys, in the order written.
+            values: The value for each key.
+            token: The token the keyword is at.
+
+        Returns:
+            The node index.
+
+        Raises:
+            Error: If there is not one value per key.
+        """
+        if len(keys) != len(values):
+            raise Error(
+                String(
+                    "a map with ",
+                    len(keys),
+                    " keys and ",
+                    len(values),
+                    " values",
+                )
+            )
+        var flat = List[UInt32]()
+        for i in range(len(keys)):
+            flat.append(keys[i])
+            flat.append(values[i])
+        return self.add(
+            Expr(kind=EXPR_MAP, token=token, children=self.run(flat))
         )
 
     def star(

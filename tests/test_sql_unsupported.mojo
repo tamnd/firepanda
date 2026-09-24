@@ -184,7 +184,7 @@ def test_the_transformer_refuses_in_the_table_shape() raises:
     var g = Grammar()
     var rules = Transform(g)
     var ast = Ast()
-    var sql = "SELECT MAP {'a': 1} FROM t"
+    var sql = "SELECT DEFAULT FROM t"
     var text = String()
     try:
         _ = rules.parse_statement(sql, g, ast)
@@ -205,10 +205,10 @@ def test_the_caret_points_at_the_thing_that_was_refused() raises:
     var ast = Ast()
     var text = String()
     try:
-        _ = rules.parse_statement("SELECT MAP {'a': 1}", g, ast)
+        _ = rules.parse_statement("SELECT DEFAULT", g, ast)
     except error:
         text = String(error)
-    assert_true("LINE 1: SELECT MAP {'a': 1}\n               ^" in text, text)
+    assert_true("LINE 1: SELECT DEFAULT\n               ^" in text, text)
 
 
 def test_a_refusal_on_the_second_line_counts_lines() raises:
@@ -217,10 +217,10 @@ def test_a_refusal_on_the_second_line_counts_lines() raises:
     var ast = Ast()
     var text = String()
     try:
-        _ = rules.parse_statement("SELECT 1\nFROM t WHERE MAP {'a': 1}", g, ast)
+        _ = rules.parse_statement("SELECT 1\nFROM t WHERE DEFAULT", g, ast)
     except error:
         text = String(error)
-    assert_true("LINE 2: FROM t WHERE MAP {'a': 1}" in text, text)
+    assert_true("LINE 2: FROM t WHERE DEFAULT" in text, text)
 
 
 def test_the_readme_table_is_the_refusal_table() raises:
