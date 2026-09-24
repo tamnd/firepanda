@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: instants and spans cast to text
 
 `astype(str)` on a column, a frame or an index of instants or spans wrote the count of units since the epoch, `1577836800000000`, where pandas writes `2020-01-01`. It now writes what pandas writes: the date alone when every instant is at midnight, as many fraction digits as the finest instant needs, a zone's offset at the end, and each span as `1 days 02:03:04`, with missing values left missing.
+### Fixed: a frame from labels or names with no values
+
+`DataFrame(index=...)`, `DataFrame(columns=...)` and the two together dropped what they were given and built a frame with no rows and no columns. They now keep the rows and the columns the way pandas does, with every cell missing. pandas makes such columns objects, which firepanda does not have, so they are floats unless `dtype=` names another type.
 
 ### Added: `to_csv` on frames and columns
 

@@ -6194,6 +6194,8 @@ class DataFrameMixin:
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         if isinstance(data, DataFrameMixin):
             self._inner = self._copied(data, index, columns)
+        elif data is None and (index is not None or columns is not None):
+            self._inner = self._empty(index, columns)
         elif data is None or (
             isinstance(data, collections.abc.Mapping) and index is None and columns is None
         ):
@@ -6207,6 +6209,21 @@ class DataFrameMixin:
                 self._inner = self._inner.cast(names, wanted, True)
             except Exception as error:
                 raise translate(error) from None
+
+    @staticmethod
+    def _empty(index: Any, columns: Any) -> Any:
+        """The extension frame for labels and names with no values, every cell missing."""
+        from ._frame import DataFrame
+
+        names = [] if columns is None else list(columns)
+        if index is None:
+            return DataFrameMixin._shaped({name: [] for name in names}, None, None)
+        if names:
+            return DataFrameMixin._shaped(dict.fromkeys(names), index, None)
+        # The extension builds rows from columns, so rows with no columns are one
+        # column of gaps with the column taken away again.
+        rows = DataFrame._wrap(DataFrameMixin._shaped({"rows": None}, index, None))
+        return rows[[]]._inner
 
     @staticmethod
     def _built(data: Any) -> Any:
