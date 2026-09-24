@@ -507,3 +507,15 @@ def test_an_empty_series_exports(firepanda: ModuleType, tmp_path: Path) -> None:
     array = pa.array(frame_of(firepanda, tmp_path, "name,qty\n")["qty"])
     assert len(array) == 0
     assert array.to_pylist() == []
+
+
+@needs["pyarrow"]
+def test_a_column_labelled_with_empty_text_exports(firepanda: ModuleType) -> None:
+    """An empty label is a name, and a struct child with no name is refused."""
+    import pyarrow as pa
+
+    frame = firepanda.DataFrame({"": [True, False], "a": [1, 2]})
+    table = pa.table(frame)
+    assert table.column_names == ["", "a"]
+    assert table.column(0).to_pylist() == [True, False]
+    assert pa.record_batch(frame).schema.names == ["", "a"]
