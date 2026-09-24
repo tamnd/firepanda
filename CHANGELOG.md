@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the rest of pandas.errors
+
+`firepanda.errors` now has a class for every class in `pandas.errors`, 40 more, from `AbstractMethodError` to `ValueLabelTypeMismatch`, each on the same builtins and under the same parents as pandas' class, so an `except` clause or a warnings filter that names one of them works unchanged. Most are raised by readers and writers firepanda does not have yet and are carried for the name.
+
 ### Added: apply, agg, transform, mode and transpose on a frame, and agg and transform on a column
 
 `DataFrame.apply` calls a function on each column, or on each row with `axis=1`, and puts the answers together as pandas does, values into a column and columns into a frame, with a name, a list or a dict going to `agg`. `DataFrame.agg` and `aggregate` take a name, a function, a list, which answers a row per function, or a dict, which picks the functions for each column and leaves NaN where a column was not asked for one. `DataFrame.transform` transforms each column. `DataFrame.mode` answers the most common values of each column, NaN after a column's last one. `DataFrame.T` and `transpose` swap rows and columns when the row labels are text, keeping the one type the columns share. `Series.agg`, `aggregate` and `transform` take a name or a function, and a list or a dict for `agg`. A transform that does not answer the same labels is refused with pandas' `Function did not transform`.
