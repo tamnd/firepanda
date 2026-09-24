@@ -13,6 +13,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 - A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
 
 - `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
+### Added: a string column can be held as codes into its distinct values
+
+`AnyArray.dictionary_encoded(codes, categories)` builds a string column whose rows are int32 codes into a list of distinct strings, with `Encoding.DICTIONARY` on it and `dtype` still string. That last part is what separates it from the category type: nothing the user can see changes. `decoded()` turns it back into a flat column by copying one sixteen byte view per row and sharing the categories' payload, so no string bytes are copied. `slice` and `window` keep it encoded and `nbytes` counts the codes plus the categories. Ten million rows over seventeen strings of about thirty bytes weigh 41 MB this way against 485 MB flat, and decoding them took 41 ms on a six core Linux machine. Nothing builds one yet outside the tests; the Arrow and Parquet readers are the next step (#979).
 
 ### Added: every read of a column's values asks whether the column is flat first
 
