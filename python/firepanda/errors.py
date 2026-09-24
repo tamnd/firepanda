@@ -50,6 +50,7 @@ __all__ = [
     "OutOfBoundsError",
     "ReaderError",
     "SpecificationError",
+    "UndefinedVariableError",
     "UnsupportedError",
 ]
 
@@ -132,6 +133,15 @@ class SpecificationError(FirepandaError):
     mapping handed to a column's `agg`, which would name a column inside a
     column. It is a plain `Exception` there, so it is one here, and the name is
     carried for the reason `IntCastingNaNError` gives.
+    """
+
+
+class UndefinedVariableError(FirepandaError, NameError):
+    """A name in a `query` expression that is not a column, a label or a variable.
+
+    pandas has a class with this name in `pandas.errors` and it is a `NameError`
+    there, which is what Python raises for a name it cannot find, so it is one
+    here, and the name is carried for the reason `IntCastingNaNError` gives.
     """
 
 

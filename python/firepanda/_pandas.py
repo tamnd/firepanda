@@ -6273,6 +6273,92 @@ class DataFrameMixin:
         """
         return _melt(self, id_vars, value_vars, var_name, value_name, col_level, ignore_index)
 
+    def query(
+        self,
+        expr: str,
+        *,
+        parser: str = "pandas",
+        engine: str | None = None,
+        local_dict: dict[str, Any] | None = None,
+        global_dict: dict[str, Any] | None = None,
+        resolvers: list[Any] | None = None,
+        level: int = 0,
+        inplace: bool = False,
+    ) -> DataFrame | None:
+        """The rows where an expression over the columns is True.
+
+        The expression is Python with pandas' three changes: `&` and `|` bind
+        looser than a comparison, a name in backticks may hold spaces, and
+        `@name` is a variable of the caller. Each node is worked out over whole
+        columns, and `_query.py` gives the rules.
+
+        Args:
+            expr: The expression.
+            parser: `pandas`, or `python` to keep Python's binding of `&` and `|`.
+            engine: Accepted and not used, since there is one way to work it out.
+            local_dict: Variables for `@name`, read before the caller's.
+            global_dict: Variables for `@name`, read before the caller's.
+            resolvers: Mappings of names, read before the columns.
+            level: How many more frames up the caller is.
+            inplace: Puts the answer into this frame and hands back None.
+
+        Returns:
+            The rows kept, or None with `inplace`.
+
+        Raises:
+            UndefinedVariableError: For a name that is nothing the query can read.
+            NotImplementedError: For a node or a function a query does not read.
+        """
+        from ._query import query
+
+        inplace = _flag("inplace", inplace)
+        answer = query(self, expr, parser, engine, local_dict, global_dict, resolvers, level)
+        return _settled(self, answer, inplace)
+
+    def eval(self, expr: str, *, inplace: bool = False, **kwargs: Any) -> Any:
+        """The value of an expression over the columns, or a column assigned from one.
+
+        `c = a + b` answers the frame with `c` set, and anything else answers
+        the value itself. The expression is read the way `query` reads it and
+        the keywords are `query`'s.
+
+        Args:
+            expr: The expression.
+            inplace: With an assignment, puts the column into this frame and
+                hands back None.
+            **kwargs: `parser`, `engine`, `local_dict`, `global_dict`,
+                `resolvers` and `level`, as `query` takes them.
+
+        Returns:
+            The value, the frame with the column, or None with `inplace`.
+
+        Raises:
+            TypeError: For a keyword `query` does not take.
+        """
+        from ._frame import DataFrame
+        from ._query import evaluate
+
+        known = ("parser", "engine", "local_dict", "global_dict", "resolvers", "level")
+        unknown = [name for name in kwargs if name not in known]
+        if unknown:
+            raise TypeError(f"eval() got an unexpected keyword argument '{unknown[0]}'")
+        inplace = _flag("inplace", inplace)
+        answer = evaluate(
+            self,
+            expr,
+            kwargs.get("parser", "pandas"),
+            kwargs.get("engine"),
+            kwargs.get("local_dict"),
+            kwargs.get("global_dict"),
+            kwargs.get("resolvers"),
+            kwargs.get("level", 0),
+        )
+        if not isinstance(answer, DataFrame):
+            if inplace:
+                raise InvalidArgumentError("Cannot operate inplace if there is no assignment")
+            return answer
+        return _settled(self, answer, inplace)
+
     def rename_axis(
         self,
         mapper: Any = NO_DEFAULT,
