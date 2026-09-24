@@ -57,6 +57,7 @@ from .nested import (
     subtree_of,
 )
 from .strings import StringArray
+from .strview import VIEW_SIZE
 
 
 comptime ColumnRefs[o: ImmOrigin] = List[Pointer[AnyArray, o]]
@@ -214,6 +215,34 @@ struct AnyArray(Copyable, Movable, Sized):
         return out^
 
     @staticmethod
+    def dictionary_encoded(
+        var codes: Array[DType.int32], var categories: StringArray
+    ) -> Self:
+        """Builds a string column held as codes into its distinct values.
+
+        The column says string and reads as string once decoded. It is a
+        different thing from `dictionary`, which builds pandas' category type
+        and is a dtype the user asked for. This one is a storage decision and
+        the user never sees it.
+
+        Nothing here checks the codes, for the reason `dictionary` gives, and
+        the categories are expected to have no nulls: a null row is a null bit
+        in the codes' validity, never a code pointing at a null category.
+
+        Args:
+            codes: One position per row into the categories. Its validity is
+                the column's.
+            categories: The distinct strings.
+
+        Returns:
+            A string column in `Encoding.DICTIONARY`.
+        """
+        var out = Self(codes^.into_data(), LogicalType.STRING)
+        out.text = categories^
+        out.encoding = Encoding.DICTIONARY
+        return out^
+
+    @staticmethod
     def nested_from(var nodes: List[NestedNode]) raises -> Self:
         """Turns a flattened tree whose root is node zero into a column.
 
@@ -271,6 +300,7 @@ struct AnyArray(Copyable, Movable, Sized):
             If the column is nested or dictionary encoded, neither of which fits
             in one node and both of which the caller has to take apart itself.
         """
+        self.require_flat()
         if self.is_nested() or self.is_dictionary():
             raise Error(
                 "column is "
@@ -387,6 +417,16 @@ struct AnyArray(Copyable, Movable, Sized):
             The size in bytes.
         """
         var out = self.data.validity.byte_length()
+        if self.encoding == Encoding.DICTIONARY:
+            # The codes and the distinct strings, which is the number the
+            # encoding exists to make small.
+            ref held = self.text.value()
+            return (
+                out
+                + len(self.data.values)
+                + len(held.views)
+                + len(held.payload)
+            )
         if self.text:
             ref held = self.text.value()
             return out + len(held.views) + len(held.payload)
@@ -466,10 +506,9 @@ struct AnyArray(Copyable, Movable, Sized):
     def is_flat(self) -> Bool:
         """Reports whether the values are one per row in row order.
 
-        True of every column today, so nothing asks it yet. It is here for the
-        change that adds a second encoding, where a kernel that has only been
-        taught the flat layout has to ask before it reads, so that it decodes
-        first rather than reading codes as values.
+        A kernel that has only been taught the flat layout asks this, or lets
+        `require_flat` ask it, before it reads, so that it decodes first rather
+        than reading codes as values.
 
         Returns:
             True if the column's encoding is flat.
@@ -508,11 +547,16 @@ struct AnyArray(Copyable, Movable, Sized):
         """Returns the column laid out flat, whatever it is held as.
 
         A flat column comes back as a copy that shares its buffers, which costs
-        a reference count and not a pass over the rows. There is no other
-        encoding yet, so there is no decoder yet either: the one for a
-        dictionary encoded string column lands with it, as the third box of
-        issue #979, and until then anything but flat is a column this library
-        did not build and is refused.
+        a reference count and not a pass over the rows.
+
+        A dictionary encoded string column comes back as one view per row and
+        no string bytes copied. A view longer than twelve bytes names an offset
+        into the payload, and the rows' views are the categories' views, so the
+        decoded column shares the categories' payload as it is and the pass
+        over the rows moves sixteen bytes each. A null row gets the empty view,
+        which is what the string builder writes for one. That is the reason the
+        encoding holds views and not a list of strings: decoding it is a
+        gather, not a rebuild.
 
         Returns:
             A flat column with the same logical type and the same values.
@@ -522,6 +566,8 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         if self.encoding == Encoding.FLAT:
             return Self(copy=self)
+        if self.encoding == Encoding.DICTIONARY:
+            return self._decode_dictionary()
         raise Error(
             "column is "
             + String(self.type)
@@ -529,6 +575,89 @@ struct AnyArray(Copyable, Movable, Sized):
             + String(self.encoding)
             + ", and there is no decoder for that encoding"
         )
+
+    def _decode_dictionary(self) raises -> Self:
+        """Gathers the categories' views by code. See `decoded`.
+
+        Returns:
+            The flat string column.
+
+        Raises:
+            If a code on a valid row is outside the categories.
+        """
+        ref categories = self.text.value()
+        var rows = self.data.length
+        var count = len(categories)
+        var views = Buffer(rows * VIEW_SIZE)
+        var codes = self.data.values.bitcast[DType.int32]()
+        # Two words a view, so the copy is two loads and two stores and not a
+        # call to memcpy per row.
+        var src = categories.views.bitcast[DType.uint64]()
+        var dst = views.mut_bitcast[DType.uint64]()
+        ref validity = self.data.validity
+        var all_valid = validity.all_valid()
+        for i in range(rows):
+            if not all_valid and not validity.get(i):
+                continue
+            var code = Int(codes.unsafe_offset(i).unsafe_load())
+            if code < 0 or code >= count:
+                raise Error(
+                    String(
+                        "row ",
+                        i,
+                        " has code ",
+                        code,
+                        " and the column has ",
+                        count,
+                        " categories",
+                    )
+                )
+            dst.unsafe_offset(2 * i).unsafe_write(
+                src.unsafe_offset(2 * code).unsafe_load()
+            )
+            dst.unsafe_offset(2 * i + 1).unsafe_write(
+                src.unsafe_offset(2 * code + 1).unsafe_load()
+            )
+        var out = Self(
+            StringArray(
+                views^,
+                Buffer(copy=categories.payload),
+                Bitmap(copy=validity),
+                rows,
+            )
+        )
+        out.type = self.type
+        return out^
+
+    def _codes(self) -> Self:
+        """Views a dictionary encoded column's codes as an int32 column.
+
+        Shares the buffers. It is how `slice` and `window` reuse the fixed
+        width path for the codes rather than having a second copy of it.
+
+        Returns:
+            A flat int32 column over the codes.
+        """
+        return Self(ColumnData(copy=self.data), logical_for(DType.int32))
+
+    def _with_categories(self, var codes: Self) -> Self:
+        """Puts the categories and the encoding back on a run of codes.
+
+        A run of rows is still a run of positions into the same categories, so
+        they come across whole, unused ones included, as a category column's
+        do in `slice`.
+
+        Args:
+            codes: The codes, as `_codes` hands them out and a slice or window
+                of that returns them.
+
+        Returns:
+            The run as a dictionary encoded string column.
+        """
+        codes.type = self.type
+        codes.text = StringArray(copy=self.text.value())
+        codes.encoding = self.encoding
+        return codes^
 
     def is_dictionary(self) -> Bool:
         """Reports whether the column stores positions into a category list.
@@ -906,6 +1035,8 @@ struct AnyArray(Copyable, Movable, Sized):
         Raises:
             If the range is outside a string column.
         """
+        if self.encoding == Encoding.DICTIONARY:
+            return self._with_categories(self._codes().slice(start, end))
         if self.is_string():
             return Self(self.strings().slice(start, end))
         if self.is_nested():
@@ -989,6 +1120,8 @@ struct AnyArray(Copyable, Movable, Sized):
                 + String(self.type)
                 + " and windowing a nested column is not implemented yet"
             )
+        if self.encoding == Encoding.DICTIONARY:
+            return self._with_categories(self._codes().window(at, length))
         if self.is_string():
             return Self(self.strings().window(at, length)).retyped(self.type)
         var out = Self(

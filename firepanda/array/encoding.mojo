@@ -15,9 +15,10 @@ of those are a different layout of the same logical type, and neither fits in
 not do. So the layout gets its own field, and a kernel that has only been taught
 the flat layout can ask for it and decode anything else first.
 
-Nothing sets anything but flat yet. The field comes first on its own so that the
-change adding the second encoding is about that encoding and not also about the
-struct it lives in.
+The first encoding past flat is the dictionary one, for string columns. The
+second box of #979 put a check in front of every read of a column's values, so a
+kernel that has not been taught it gets an error naming `decoded()` rather than
+codes it takes for text.
 """
 
 
@@ -38,7 +39,14 @@ struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     comptime FLAT = Self(0)
     """One value per row in row order, in the buffers `LogicalType` describes.
-    Every column is this today."""
+    Every column the library builds is this unless it asks otherwise."""
+
+    comptime DICTIONARY = Self(1)
+    """A string column held as one int32 code per row into a list of distinct
+    strings. The codes are the column's `data.values` and its validity is the
+    rows' validity, and the distinct strings are its `text`. The logical type
+    stays string, which is the difference from `astype("category")`: a user
+    who reads `dtype` cannot tell."""
 
     def __init__(out self, code: UInt64):
         """Names a layout by its code.
@@ -78,5 +86,7 @@ struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         if self == Self.FLAT:
             writer.write("flat")
+        elif self == Self.DICTIONARY:
+            writer.write("dictionary")
         else:
             writer.write("encoding ", self.code)

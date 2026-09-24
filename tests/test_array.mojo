@@ -620,9 +620,9 @@ def test_every_column_is_flat() raises:
 
 
 def test_a_column_not_held_flat_is_refused_at_every_door() raises:
-    # No encoding but flat exists yet, so this makes one up. The point is that
-    # when a real one lands, a kernel nobody taught about it cannot read its
-    # codes as values, because every way to the values asks first.
+    # This makes up an encoding nothing knows. The point is that a kernel
+    # nobody taught about an encoding cannot read its codes as values, because
+    # every way to the values asks first.
     var ints = AnyArray(from_list[DType.int64]([1, 2, 3]))
     ints.encoding = Encoding(7)
     assert_false(ints.is_flat())
@@ -645,6 +645,87 @@ def test_decoding_a_flat_column_shares_its_values() raises:
     assert_equal(flat.as_typed_view[DType.int64]()[2], 6)
     assert_true(
         flat.unsafe_ptr[DType.int64]() == ints.unsafe_ptr[DType.int64]()
+    )
+
+
+def _encoded() -> AnyArray:
+    # Two short categories and one long enough to live in the payload, so the
+    # gather is checked on both kinds of view. Row 3 is null.
+    var codes = from_list[DType.int32]([2, 0, 1, 0, 2, 2])
+    codes.set_null(3)
+    return AnyArray.dictionary_encoded(
+        codes^,
+        strings_from_list(["red", "green", "a colour with a long name"]),
+    )
+
+
+def test_a_dictionary_encoded_column_still_says_string() raises:
+    var col = _encoded()
+    assert_equal(len(col), 6)
+    assert_true(col.type == LogicalType.STRING)
+    assert_true(col.is_string())
+    assert_false(col.is_dictionary())
+    assert_false(col.is_flat())
+    assert_equal(String(col.encoding), "dictionary")
+    with assert_raises(contains="call decoded() first"):
+        _ = len(col.strings())
+
+
+def test_decoding_a_dictionary_gives_the_rows_back() raises:
+    var col = _encoded()
+    var flat = col.decoded()
+    assert_true(flat.is_flat())
+    assert_true(flat.type == LogicalType.STRING)
+    ref s = flat.strings()
+    assert_equal(len(s), 6)
+    assert_equal(s[0], "a colour with a long name")
+    assert_equal(s[1], "red")
+    assert_equal(s[2], "green")
+    assert_false(s.is_valid(3))
+    assert_equal(s[4], "a colour with a long name")
+    assert_equal(s[5], "a colour with a long name")
+    assert_equal(s.null_count(), 1)
+    # No string bytes were copied: the long rows point into the categories'
+    # own payload.
+    assert_true(
+        s.payload.unsafe_ptr() == col.text.value().payload.unsafe_ptr()
+    )
+
+
+def test_a_code_outside_the_categories_is_refused() raises:
+    var col = AnyArray.dictionary_encoded(
+        from_list[DType.int32]([0, 5]), strings_from_list(["x"])
+    )
+    with assert_raises(contains="has code 5"):
+        _ = col.decoded()
+
+
+def test_a_run_of_a_dictionary_column_keeps_its_encoding() raises:
+    var col = _encoded()
+    var cut = col.slice(1, 4)
+    assert_equal(len(cut), 3)
+    assert_false(cut.is_flat())
+    assert_true(cut.type == LogicalType.STRING)
+    ref a = cut.decoded().strings()
+    assert_equal(a[0], "red")
+    assert_equal(a[1], "green")
+    assert_false(a.is_valid(2))
+    var win = col.window(4, 2)
+    assert_false(win.is_flat())
+    ref b = win.decoded().strings()
+    assert_equal(b[0], "a colour with a long name")
+    assert_equal(b[1], "a colour with a long name")
+
+
+def test_a_dictionary_column_counts_codes_and_categories() raises:
+    var col = _encoded()
+    ref cats = col.text.value()
+    assert_equal(
+        col.nbytes(),
+        col.data.validity.byte_length()
+        + 6 * 4
+        + len(cats.views)
+        + len(cats.payload),
     )
 
 
