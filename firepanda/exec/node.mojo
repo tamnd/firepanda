@@ -5267,6 +5267,96 @@ struct Settle(Movable):
         return Chunk(out^, kept)
 
 
+struct Cross(Movable):
+    """Pairs every row of a chunk with every row of a frame it holds.
+
+    A cross join onto one row is a constant per right column and is lowered to
+    `Constant` nodes. Onto more rows it is this: each probe row comes out once
+    per right row, the probe row first and the right rows in their order under
+    it, so a chunk of n rows leaves as n times the right side's rows.
+
+    Nothing is written between chunks, since the right side is held whole and
+    only read, so it is row local like `Join`. The price is the size of what it
+    hands on, which is the size of the answer, and a cross join is asked for
+    because that answer is wanted.
+    """
+
+    var side: Schema
+    """The right side's columns, appended after the chunk's."""
+
+    var right: List[AnyArray]
+    """The right side, one array per column."""
+
+    var height: Int
+    """How many rows the right side has."""
+
+    def __init__(out self, var right: DataFrame) raises:
+        """Takes the right side in.
+
+        Args:
+            right: The frame every chunk row is paired with. Consumed.
+
+        Raises:
+            If a column's chunks cannot be stacked.
+        """
+        self.side = Schema(copy=right.schema)
+        self.height = right.rows
+        var columns = right^.into_columns()
+        var backwards = List[AnyArray](capacity=len(columns))
+        while len(columns) > 0:
+            backwards.append(columns.pop().combine())
+        self.right = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            self.right.append(backwards.pop())
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the right side's columns after it.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            Both schemas end to end.
+        """
+        var out = input^
+        for c in range(len(self.side)):
+            out.append(self.side[c].copy())
+        return out^
+
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
+        """Pairs every row of the chunk with every right row.
+
+        Args:
+            chunk: The chunk. Consumed.
+            spread: Whether the gathers may hand themselves out to workers.
+
+        Returns:
+            The pairs, or nothing when either side has no rows.
+
+        Raises:
+            If a column cannot be gathered.
+        """
+        var rows = len(chunk)
+        if rows == 0 or self.height == 0:
+            return None
+        var total = rows * self.height
+        var left_at = List[Int](capacity=total)
+        var right_at = List[Int](capacity=total)
+        for i in range(rows):
+            for j in range(self.height):
+                left_at.append(i)
+                right_at.append(j)
+        var columns = chunk^.into_columns()
+        var out = List[AnyArray](capacity=len(columns) + len(self.right))
+        for c in range(len(columns)):
+            out.append(take_any(columns[c], left_at, spread))
+        for c in range(len(self.right)):
+            out.append(take_any(self.right[c], right_at, spread))
+        return Chunk(out^, total)
+
+
 def _names_include(fields: List[Field], name: String) -> Bool:
     """Reports whether a field of that name has already been planned.
 
@@ -7671,6 +7761,7 @@ comptime Node = Variant[
     Cast,
     Join,
     Settle,
+    Cross,
     Limit,
     Sort,
     Window,
@@ -7753,6 +7844,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Join].bind(input^)
     if node.isa[Settle]():
         return node[Settle].bind(input^)
+    if node.isa[Cross]():
+        return node[Cross].bind(input^)
     if node.isa[Sort]():
         return node[Sort].bind(input^)
     if node.isa[Window]():
@@ -7884,8 +7977,9 @@ def node_is_row_local(node: Node) -> Bool:
         `Truncate`,
         `Presence`,
         `Fill`,
-        `Choose`, `Constant`, `Cast`, `Join` and `Settle`, except a right or a
-        full `Join`, which notes the build rows it used as chunks go past.
+        `Choose`, `Constant`, `Cast`, `Join`, `Settle` and `Cross`, except a
+        right or a full `Join`, which notes the build rows it used as chunks go
+        past.
     """
     return (
         node.isa[Filter]()
@@ -7912,6 +8006,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Cast]()
         or (node.isa[Join]() and not node[Join].holds_hits())
         or node.isa[Settle]()
+        or node.isa[Cross]()
     )
 
 
@@ -8180,6 +8275,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Join].process(chunk^)
     if node.isa[Settle]():
         return node[Settle].process(chunk^)
+    if node.isa[Cross]():
+        return node[Cross].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
     if node.isa[Sort]():
@@ -8272,6 +8369,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Join].process(chunk^, False)
     if node.isa[Settle]():
         return node[Settle].process(chunk^)
+    if node.isa[Cross]():
+        return node[Cross].process(chunk^, False)
     raise Error("apply: this node carries state between chunks")
 
 

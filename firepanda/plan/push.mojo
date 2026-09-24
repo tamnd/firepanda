@@ -125,13 +125,11 @@ it is by the rule above rather than by a rule of its own.
 A right or a full outer join passes into neither side. It is the left join's
 argument in both directions at once.
 
-A cross join passes into the left side only. Both sides would be sound, since a
-cross join is an inner join with nothing asked of the pair, and the right side
-is left alone for a reason about the operator rather than about the answer: the
-lowering pairs a whole frame against a right side of a single row, and a
-predicate pushed into that side can leave it holding no row at all, which is a
-shape it refuses. The left side has no such requirement and is the side a
-predicate that came from a `where` over a comma separated `from` wants anyway.
+A cross join passes into both sides, since it is an inner join with nothing
+asked of the pair. It used to pass into the left side only, because the lowering
+paired a whole frame against a right side of a single row and a predicate pushed
+into that side could leave it holding none. The `Cross` operator takes a right
+side of any size, none included, so that reason is gone.
 
 What this is worth is not a constant factor. The two halves compose: a predicate
 that gets past a mark join reaches the cross join under it, and `_condition`
@@ -558,9 +556,8 @@ def _join(
     # the left side's predicates go and nothing else: a right row dropped below
     # a left join does not drop the left row it matched, it null extends it
     # instead, and a null is not what the predicate was asked about. A cross
-    # join is the left half of that same rule, for a reason about the operator
-    # rather than about the answer, and the paragraph in the module docstring
-    # says which. A right or an outer join keeps everything where it was.
+    # join is an inner join with nothing asked of the pair, so it lets one go
+    # either way too. A right or an outer join keeps everything where it was.
     var leftwards = (
         inner
         or kind == JoinKind.CROSS
@@ -590,7 +587,7 @@ def _join(
                 all_right = False
         if all_left:
             to_left.append(carried[i])
-        elif inner and all_right:
+        elif (inner or kind == JoinKind.CROSS) and all_right:
             to_right.append(carried[i])
         else:
             # Either it reads both sides, which makes it a join condition

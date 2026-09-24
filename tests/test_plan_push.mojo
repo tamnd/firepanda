@@ -513,7 +513,7 @@ def test_a_cross_join_with_nothing_to_pair_on_filters_its_left_side() raises:
     )
 
 
-def test_a_cross_join_keeps_a_predicate_on_its_right_side_above_it() raises:
+def test_a_cross_join_filters_its_right_side_first_too() raises:
     var plan = Plan()
     var left = plan.scan("part", List[String](), 0)
     var right = plan.scan("lineitem", List[String](), 1)
@@ -529,11 +529,14 @@ def test_a_cross_join_keeps_a_predicate_on_its_right_side_above_it() raises:
         ),
     )
     var at = push(plan, root, [_part(), _lineitem()])
-    # Sound to move and still not moved. The operator behind a cross join pairs
-    # a frame against a single row, and a predicate pushed into that side can
-    # leave it holding no row, which is a shape the lowering refuses.
-    assert_true("JOIN cross" in explain(plan, at), "it is still a product")
-    assert_equal(_under(plan, at), "JOIN", "with the filter still on top")
+    # A cross join is an inner join with nothing asked of the pair, so a
+    # predicate on its right side goes under it like one on its left.
+    var printed = explain(plan, at)
+    assert_true("JOIN cross" in printed, "it is still a product")
+    assert_true(
+        printed.find("FILTER") > printed.find("JOIN"),
+        "with its right side filtered first",
+    )
 
 
 def _nation() -> Schema:

@@ -4706,9 +4706,59 @@ def test_the_one_row_of_a_cross_join_is_readable() raises:
     )
 
 
-def test_a_cross_join_onto_more_than_one_row_says_why_it_is_refused() raises:
-    with assert_raises(contains="right side of 4 rows"):
-        _ = run("SELECT qty FROM sales CROSS JOIN tiers", session())
+def test_a_cross_join_onto_more_than_one_row_runs() raises:
+    same(
+        answer("SELECT count(*) AS n FROM sales CROSS JOIN tiers", "n"),
+        [40],
+        "n",
+    )
+
+
+def test_a_comma_between_two_tables_is_the_same_product() raises:
+    same(answer("SELECT count(*) AS n FROM sales, shops", "n"), [30], "n")
+
+
+def test_a_filter_on_the_right_side_of_a_cross_join_goes_under_it() raises:
+    # Only band 99 is left, so every sale comes out once.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales CROSS JOIN tiers WHERE band = 99"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_cross_join_onto_no_row_is_no_row() raises:
+    same(
+        answer(
+            (
+                "SELECT count(*) AS n FROM sales CROSS JOIN"
+                " (SELECT band FROM tiers WHERE band > 1000)"
+            ),
+            "n",
+        ),
+        [0],
+        "n",
+    )
+
+
+def test_a_cross_join_pairs_each_band_with_each_shop() raises:
+    same(
+        answer(
+            (
+                "SELECT band + floor AS total FROM tiers CROSS JOIN shops"
+                " WHERE band < 40 ORDER BY total"
+            ),
+            "total",
+        ),
+        [14, 25, 31, 36, 42, 53],
+        "total",
+    )
 
 
 def test_a_right_join_keeps_the_shop_that_sold_nothing() raises:
