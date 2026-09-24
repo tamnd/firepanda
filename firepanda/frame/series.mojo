@@ -896,6 +896,28 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name.copy(), pick_any(cond, self.values, otherwise.values)
         )
 
+    def _spread(
+        self, var per_value: Array[DType.bool]
+    ) raises -> Array[DType.bool]:
+        """Spreads a mask worked out once per distinct value over the rows.
+
+        The `str_` tests below all answer a row from its text alone, so on a
+        column held as codes each one runs over the distinct values, which is
+        a handful of rows rather than millions, and the answer goes out to the
+        rows by code.
+
+        Args:
+            per_value: One answer per distinct value, in their order.
+
+        Returns:
+            One answer per row, null wherever the row is null.
+
+        Raises:
+            If the column is not dictionary encoded.
+        """
+        var rows = self.values.through_codes(AnyArray(per_value^))
+        return rows.as_typed[DType.bool]().copy()
+
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
         """Returns a mask that is true where the text holds a substring.
 
@@ -913,6 +935,11 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not text.
         """
+        if not self.values.is_flat():
+            var distinct = self.values.distinct()
+            return self._spread(
+                text_contains(distinct.strings(), needle.as_bytes())
+            )
         return text_contains(self.values.strings(), needle.as_bytes())
 
     def str_contains_in_order(
@@ -935,6 +962,13 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not text.
         """
+        if not self.values.is_flat():
+            var distinct = self.values.distinct()
+            return self._spread(
+                text_contains_in_order(
+                    distinct.strings(), first.as_bytes(), second.as_bytes()
+                )
+            )
         return text_contains_in_order(
             self.values.strings(), first.as_bytes(), second.as_bytes()
         )
@@ -953,6 +987,11 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not text.
         """
+        if not self.values.is_flat():
+            var distinct = self.values.distinct()
+            return self._spread(
+                text_starts_with(distinct.strings(), prefix.as_bytes())
+            )
         return text_starts_with(self.values.strings(), prefix.as_bytes())
 
     def str_ends_with(self, suffix: StringSlice) raises -> Array[DType.bool]:
@@ -969,6 +1008,11 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not text.
         """
+        if not self.values.is_flat():
+            var distinct = self.values.distinct()
+            return self._spread(
+                text_ends_with(distinct.strings(), suffix.as_bytes())
+            )
         return text_ends_with(self.values.strings(), suffix.as_bytes())
 
     def str_slice(self, offset: Int, length: Int = TO_END) raises -> Self:
@@ -992,9 +1036,13 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the series is not text.
         """
+        # An encoded column is decoded rather than cut once per distinct
+        # value, because the answer is text and holding it encoded would need
+        # the cut values deduplicated again before anything could group on it.
+        var flat = self.values.decoded()
         return self._relabelled(
             self.name.copy(),
-            AnyArray(text_substring(self.values.strings(), offset, length)),
+            AnyArray(text_substring(flat.strings(), offset, length)),
         )
 
     def chars_is_text(self) -> Bool:

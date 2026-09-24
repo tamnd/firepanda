@@ -19,6 +19,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Removed
 
 - The shortcut from 0.8.29 that answered a whole input `SUM(x + c)`, `SUM(x - c)`, `SUM(c - x)` or `SUM(x * c)` from the sum and the count of `x`. The lowering of an aggregation already says not to do this: ClickBench q29 exists to measure whether an engine fuses an expression into a reduction, and answering it with algebra reports a number the engine did not earn. The reduction builds and sums every column again, one at a time, as it did in 0.8.28.
+### Changed: the text tests on a series read an encoded column once per distinct value
+
+`str_contains`, `str_contains_in_order`, `str_starts_with` and `str_ends_with` on a series whose column is dictionary encoded run over the distinct values and spread the answer over the rows by code, so a test on six million rows of seven values is seven tests and a gather. `str_slice` decodes first, because its answer is text and keeping it encoded would mean deduplicating the cut values again. These are the text calls the TPC-H bench makes on columns the Parquet read can now encode (#979).
 
 ## [0.8.29] - 2026-09-24
 
