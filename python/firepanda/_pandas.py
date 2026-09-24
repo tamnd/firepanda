@@ -2701,6 +2701,172 @@ def _filled_with_false(inner: Any) -> Any:
     return inner.fill_null(Series([False])._inner)
 
 
+LOGICAL = {"and": "mul", "or": "add", "xor": "ne"}
+"""The three logical operators, each as the arithmetic that answers it on two
+bools. `*` on two bools is the logical and and `+` the logical or, which
+`bool_arithmetic_type` in the kernel keeps as bools, and two bools differ
+exactly when one of them is true, so `!=` is the exclusive or."""
+
+LOGICAL_SYMBOL = {"and": "&", "or": "|", "xor": "^"}
+
+
+def _logical_operand(value: Any, op: str) -> None:
+    """Refuses an operand the logical operators are not written for yet.
+
+    pandas answers `&`, `|` and `^` on any two dtypes it can cast to bool, and
+    on two integers it answers the bitwise operation instead. firepanda has
+    written the two boolean case, which is the one a mask is built from, and a
+    constant that is not a bool gets the `TypeError` pandas raises for it.
+    """
+    if isinstance(value, SeriesMixin):
+        dtypes = [value._inner.dtype()]
+    elif isinstance(value, DataFrameMixin):
+        dtypes = value.dtypes.tolist()
+    elif isinstance(value, bool):
+        return
+    else:
+        if isinstance(value, (float, str, type(None))):
+            raise TypeError(
+                f"Cannot perform '{op}_' with a dtyped [bool] array and scalar of type"
+                f" [{type(value).__name__}]"
+            )
+        raise UnsupportedError(
+            f"`{LOGICAL_SYMBOL[op]}` against a {type(value).__name__} constant, where"
+            " firepanda has only written it against True and False so far"
+        )
+    for dtype in dtypes:
+        if str(dtype) != "bool":
+            raise UnsupportedError(
+                f"`{LOGICAL_SYMBOL[op]}` on a {dtype} column, where firepanda has only"
+                " written it for two boolean operands so far, and pandas casts anything"
+                " else to bool or, for two integers, answers the bitwise operation"
+            )
+
+
+def _logical_series(left: Any, right: Any, op: str) -> Any:
+    """`left op right` between two boolean series, aligned the way pandas aligns them.
+
+    pandas lines the two up and then reads a gap on the right as False and a
+    gap on the left as a False answer, whatever the operator. That is not
+    symmetric, so `a | b` and `b | a` differ on a row only one of them has, and
+    `left` here is the operand written on the left, which for a reflected
+    operator is the other one.
+
+    Args:
+        left: The series written on the left.
+        right: The series written on the right.
+        op: `and`, `or` or `xor`.
+
+    Returns:
+        The inner series of the answer.
+    """
+    from ._frame import Series
+
+    kernel = LOGICAL[op]
+    answer = left._inner.binary_series(right._inner, kernel, False, None)
+    if not _labels_differ(left, right, 0):
+        return answer
+    rows = Series._wrap(answer).index.to_list()
+    lined = [side.reindex(rows) for side in (left, right)]
+    present = lined[0].notna()._inner
+    left_inner, right_inner = (_filled_with_false(side._inner) for side in lined)
+    answer = left_inner.binary_series(right_inner, kernel, False, None)
+    return present.binary_series(answer, "mul", False, None)
+
+
+def _logical_frame(left: Any, right: Any, op: str) -> Any:
+    """`left op right` between two boolean frames, column by column.
+
+    A column both have is `_logical_series` over it, and a column only one of
+    them has is all NaN, which pandas gives it because a whole column missing
+    is a column of object NaN before anything is cast.
+
+    Args:
+        left: The frame written on the left.
+        right: The frame written on the right.
+        op: `and`, `or` or `xor`.
+
+    Returns:
+        The inner frame of the answer.
+    """
+    from ._frame import DataFrame, Series
+
+    answer = left._inner.binary_frame(right._inner, LOGICAL[op], False, None)
+    if not _labels_differ(left, right, 0):
+        return answer
+    shape = DataFrame._wrap(answer)
+    rows, index = shape.index.to_list(), shape.index
+    columns: dict[Any, Any] = {}
+    for name in shape.columns:
+        if name in left.columns and name in right.columns:
+            inner = _logical_series(left[name], right[name], op)
+            columns[name] = Series._wrap(inner).reindex(rows).tolist()
+        else:
+            columns[name] = [float("nan")] * len(rows)
+    return _framed(columns, index)
+
+
+def _framed(columns: dict[Any, Any], index: Any) -> Any:
+    """The inner frame of some columns of values, labelled by `index`.
+
+    `DataFrame` does not take `index=` yet, so the labels go in as one more
+    column and come back out as the index, which is the same frame by a longer
+    road. A default index is left as the one the frame is built with.
+    """
+    from ._frame import DataFrame
+
+    labels = index.to_list()
+    if labels == list(range(len(labels))) and index.name is None:
+        return DataFrame(columns)._inner
+    key = "index"
+    while key in columns:
+        key = f"_{key}"
+    framed = DataFrame({key: labels, **columns}).set_index(key)
+    return framed.rename_axis(index.name)._inner
+
+
+def _logical_broadcast(frame: Any, series: Any, op: str, flip: bool) -> Any:
+    """`frame op series`, with the series lined up against the columns.
+
+    A column the series has no label for reads the series as False there, and
+    a label the frame has no column for is a column of False, which is the rule
+    `_logical_series` follows turned on its side.
+
+    Args:
+        frame: The frame.
+        series: The series, broadcast along the rows.
+        op: `and`, `or` or `xor`.
+        flip: Whether the series was written on the left.
+
+    Returns:
+        The inner frame of the answer.
+    """
+    from ._frame import Series
+
+    labels = series.index.to_list()
+    if list(frame.columns) == [str(label) for label in labels]:
+        return frame._inner.binary_series(series._inner, LOGICAL[op], 1, flip)
+    if flip:
+        raise UnsupportedError(
+            f"a series `{LOGICAL_SYMBOL[op]}` a frame whose columns are not the series'"
+            " labels, where firepanda has only written the frame on the left so far"
+        )
+    values = dict(zip([str(label) for label in labels], series.tolist(), strict=True))
+    # pandas sorts the union of two sets of labels that are not the same, even
+    # when one of them holds every label the other has.
+    order = sorted(set(frame.columns) | set(values))
+    rows = len(frame)
+    columns: dict[Any, Any] = {}
+    for name in order:
+        if name not in frame.columns:
+            columns[name] = [False] * rows
+            continue
+        constant = bool(values.get(name, False))
+        inner = frame[name]._inner.binary_value(constant, LOGICAL[op], False)
+        columns[name] = Series._wrap(inner).tolist()
+    return _framed(columns, frame.index)
+
+
 def _two_valued_frame(inner: Any, op: str) -> Any:
     """`_two_valued` over every column of a frame of comparisons."""
     from ._frame import Series
@@ -5403,6 +5569,28 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _logical(self, other: Any, op: str, flip: bool) -> Any:
+        """Runs `&`, `|` or `^`, on a frame, a series or a constant.
+
+        Two boolean operands only so far, which `_logical_operand` checks. A
+        constant is the same arithmetic `LOGICAL` names, run against every
+        column, and needs no care over which side it was written on, because
+        all three operators are symmetric once there is no gap to hold.
+        """
+        from ._frame import DataFrame
+
+        _logical_operand(self, op)
+        _logical_operand(other, op)
+        try:
+            if isinstance(other, DataFrameMixin):
+                pair = (other, self) if flip else (self, other)
+                return DataFrame._wrap(_logical_frame(*pair, op))
+            if isinstance(other, SeriesMixin):
+                return DataFrame._wrap(_logical_broadcast(self, other, op, flip))
+            return DataFrame._wrap(self._inner.binary_value(other, LOGICAL[op], False))
+        except Exception as error:
+            raise translate(error) from None
+
     def _unary(self, op: str) -> Any:
         """Runs one of the four unary operations over every column."""
         from ._frame import DataFrame
@@ -7515,6 +7703,27 @@ class SeriesMixin:
             self._named(other, "floordiv", axis, level, fill_value, flip),
             self._named(other, "mod", axis, level, fill_value, flip),
         )
+
+    def _logical(self, other: Any, op: str, flip: bool) -> Any:
+        """Runs `&`, `|` or `^`, on a series or a constant.
+
+        A frame on the right is handed back, for the reason `_operator` gives,
+        and two series are lined up by `_logical_series`, which is where the one
+        rule that is not symmetric lives.
+        """
+        from ._frame import Series
+
+        if isinstance(other, DataFrameMixin):
+            return NotImplemented
+        _logical_operand(self, op)
+        _logical_operand(other, op)
+        try:
+            if isinstance(other, SeriesMixin):
+                pair = (other, self) if flip else (self, other)
+                return Series._wrap(_logical_series(*pair, op))
+            return Series._wrap(self._inner.binary_value(other, LOGICAL[op], False))
+        except Exception as error:
+            raise translate(error) from None
 
     def _unary(self, op: str) -> Any:
         """Runs one of the four unary operations over every row."""
