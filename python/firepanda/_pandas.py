@@ -130,14 +130,15 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
 
     The extension's operators take a number or a column, and a `datetime` or a
     `timedelta` is neither, so it is repeated down a column on the owner's own
-    labels and the operator runs column against column, which is written for
-    every temporal pair pandas allows. Anything else comes back as it was.
+    labels and name, so the answer keeps the name as it does against a scalar,
+    and the operator runs column against column, which is written for every
+    temporal pair pandas allows. Anything else comes back as it was.
     """
     from ._frame import Series
 
     if not isinstance(other, (datetime.datetime, datetime.timedelta)):
         return other
-    return Series([other] * len(owner), index=owner.index)
+    return Series([other] * len(owner), index=owner.index, name=owner.name)
 
 
 def _is_numpy(value: Any) -> bool:
