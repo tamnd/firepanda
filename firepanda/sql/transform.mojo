@@ -143,7 +143,6 @@ from .unsupported import (
     SELECT_CLAUSE,
     STATEMENT_LATER,
     STATEMENT_NEVER,
-    SUBSCRIPT,
     TABLE_MODIFIER,
     UNPIVOT_GROUPS,
     UNPIVOT_NULLS,
@@ -2831,13 +2830,19 @@ struct Transform(Movable):
 
         var sliced = next < len(parts)
         var end = NO_NODE
+        var to_the_end = False
         if sliced:
-            end = self._slice_value(tree, sql, parts[next])
+            end = self._slice_value(tree, sql, parts[next], to_the_end)
             next += 1
 
         var step = NO_NODE
         if next < len(parts):
-            step = self._slice_value(tree, sql, parts[next])
+            var never = False
+            step = self._slice_value(tree, sql, parts[next], never)
+        elif to_the_end:
+            # `x[1:-]` matches the grammar and DuckDB's own parser stops on the
+            # bracket, because the minus is only an end when a step follows.
+            raise Error('Parser Error: syntax error at or near "]"')
 
         var wanted: List[UInt32] = [start, end, step]
         work.warm(wanted)
@@ -2848,10 +2853,11 @@ struct Transform(Movable):
             NO_NODE if step == NO_NODE else work.value(step),
             sliced,
             at,
+            to_the_end,
         )
 
     def _slice_value(
-        self, tree: Parse, sql: StringSlice, node: UInt32
+        self, tree: Parse, sql: StringSlice, node: UInt32, mut minus: Bool
     ) raises -> UInt32:
         """The expression a colon bound holds, or nothing for a bare colon.
 
@@ -2863,13 +2869,11 @@ struct Transform(Movable):
             tree: The parse.
             sql: The query.
             node: The `EndSliceBound` or `StepSliceBound` node.
+            minus: Set when the bound is the `-` that means the end.
 
         Returns:
             The expression node, or the null node for a colon with nothing
-            after it.
-
-        Raises:
-            Error: If the bound is the one spelling DuckDB does not take.
+            after it or with the minus after it.
         """
         var kids = tree.children(node)
         if len(kids) == 0:
@@ -2878,7 +2882,8 @@ struct Transform(Movable):
         var value = kids[0]
         while self._action(tree, value) == _CONSUMED:
             if tree.nodes[Int(value)].rule == self.slice_minus:
-                raise _unsupported(tree, sql, node, SUBSCRIPT)
+                minus = True
+                return NO_NODE
             value = self._only(tree, value)
         return value
 

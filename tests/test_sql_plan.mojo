@@ -1493,6 +1493,8 @@ def test_a_subscript_with_no_substring_behind_it_is_refused() raises:
     with assert_raises(contains="a slice or a subscript"):
         _ = _plan("SELECT g[1:3:1] FROM t")
     with assert_raises(contains="a slice or a subscript"):
+        _ = _plan("SELECT g[1:-:] FROM t")
+    with assert_raises(contains="a slice or a subscript"):
         _ = _plan("SELECT g[-3:2] FROM t")
     with assert_raises(contains="a slice or a subscript"):
         _ = _plan("SELECT g[1.5] FROM t")

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- A slice whose end is written as a minus, such as `a[1:-:2]` or `a[:-:-1]`, which is how DuckDB says the end of the list when a step follows. It now parses and prints back as written, and the plan refuses it the way it refuses any other step. `a[1:-]` with no second colon is a syntax error, as it is in DuckDB.
+
 ### Added: a sort and an Arrow export read a string column held as codes
 
 A sort on a column held as codes (#979) sorts its few distinct strings once and then radix sorts the rows on each one's rank, an int32, rather than comparing strings row by row. `argsort_any`, `argsort_multi`, `is_sorted_any`, `DataFrame.argsort`, `sort_values` and the bounded `argsort_limit` all go through it, and the order is the one the decoded column gives, ties and nulls included. `export_array`, `export_array_borrowed` and the IPC writers hand such a column out as the strings it stands for, since a consumer handed an Arrow dictionary would call it a category. `DataFrame.is_flat()` and `DataFrame.decoded()` are new, for a writer that reads buffers as they lie.
