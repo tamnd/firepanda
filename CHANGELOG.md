@@ -8,14 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a Parquet read can hold the string columns that repeat as codes
+
+`Session.run` takes `encode_strings`, and with it on, each string column of the answer whose values repeat sixteen times on average comes back dictionary encoded, with `dtype` still string. `encode_repetitive` in `kernel/dictionary.mojo` makes the call: it hashes the first 64K rows and gives up there if they do not repeat enough, so a comment column costs one hash of a sample, and otherwise hashes the whole column and keeps the distinct values in the order they first appear. A column of only nulls is left flat. On TPC-H sf1 lineitem, `l_returnflag`, `l_linestatus`, `l_shipinstruct` and `l_shipmode` go from 96, 96, 146 and 96 MB to 24 MB each and `l_comment` stays flat, which takes the frame from 1150 MB to 813 and the peak of the read from 2.80 GB to 2.58 on a six core Linux machine. The option is off by default until every kernel the TPC-H queries reach can read the encoding (#979).
+
+### Removed
+
+- The shortcut from 0.8.29 that answered a whole input `SUM(x + c)`, `SUM(x - c)`, `SUM(c - x)` or `SUM(x * c)` from the sum and the count of `x`. The lowering of an aggregation already says not to do this: ClickBench q29 exists to measure whether an engine fuses an expression into a reduction, and answering it with algebra reports a number the engine did not earn. The reduction builds and sums every column again, one at a time, as it did in 0.8.28.
+
 ## [0.8.29] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
 
 A patch release. SQL reads `GROUPING SETS`, `CUBE`, `ROLLUP` and `GROUPING()`, and a MAP literal parses. A string column can now be held as codes into its distinct values, and take, filter, a comparison, `is_in` and a group by read it without decoding it, while the scan decodes one morsel at a time for everything else. Two ClickBench shapes got faster through the planner: a group by on several keys with text among them keeps a map across chunks, which took q18 from 80 to 48 ms and q39 from 112 to 67 ms at 1M, and a sum of a column and a constant is answered from one sum and one count, which took q29 from 4.7 times the hand written port to faster than it. On the pandas side, a power across two labelled operands and the whole frame `sum` and `prod` answer what pandas answers where there is a gap or a NaN, and a frame reduction takes `skipna=False` and `min_count`.
-### Added: a Parquet read can hold the string columns that repeat as codes
-
-`Session.run` takes `encode_strings`, and with it on, each string column of the answer whose values repeat sixteen times on average comes back dictionary encoded, with `dtype` still string. `encode_repetitive` in `kernel/dictionary.mojo` makes the call: it hashes the first 64K rows and gives up there if they do not repeat enough, so a comment column costs one hash of a sample, and otherwise hashes the whole column and keeps the distinct values in the order they first appear. A column of only nulls is left flat. On TPC-H sf1 lineitem, `l_returnflag`, `l_linestatus`, `l_shipinstruct` and `l_shipmode` go from 96, 96, 146 and 96 MB to 24 MB each and `l_comment` stays flat, which takes the frame from 1150 MB to 813 and the peak of the read from 2.80 GB to 2.58 on a six core Linux machine. The option is off by default until every kernel the TPC-H queries reach can read the encoding (#979).
 
 ### Changed: take, filter, compare, is_in and group by read an encoded string column without decoding it
 
