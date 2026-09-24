@@ -141,7 +141,7 @@ class _Reader:
         if name.startswith(_AT):
             wanted = name[len(_AT) :]
             if wanted not in self._variables:
-                raise UndefinedVariableError(f"local variable '{wanted}' is not defined")
+                raise UndefinedVariableError(wanted, is_local=True)
             return self._variables[wanted]
         name = self._quoted.get(name, name)
         for resolver in self._resolvers:
@@ -155,7 +155,7 @@ class _Reader:
             return labels.to_series().rename(labels.name)
         if name in ("True", "False", "None"):
             return {"True": True, "False": False, "None": None}[name]
-        raise UndefinedVariableError(f"name '{name}' is not defined")
+        raise UndefinedVariableError(name)
 
     def _BoolOp(self, node: ast.BoolOp) -> Any:
         values = [self.read(each) for each in node.values]

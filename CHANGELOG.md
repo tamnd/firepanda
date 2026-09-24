@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas' aliases and small helpers on a frame and a column
+
+A frame and a column now have `div`, `divide`, `rdiv`, `multiply` and `subtract` as the names pandas gives the arithmetic already there, `isnull` and `notnull` beside `isna` and `notna`, and `add_prefix`, `add_suffix`, `pipe`, `first_valid_index`, `last_valid_index`, `pop`, `equals` and `to_dict`. A frame has `insert`, which puts a column at a position and refuses a label it already holds, as pandas does, and a column has `item`, `to_list` and `is_unique`, where two missing values count as the same value. `firepanda.isna`, `notna`, `isnull` and `notnull` answer for a scalar, a column or a frame. `to_dict` takes each of pandas' orients for a frame and a mapping class for `into`, and each signature matches pandas' parameter for parameter. `UndefinedVariableError` is now built from the name and whether it was the caller's, the way pandas builds it, so the compat signature check agrees.
+
 ### Added: `pandas.get_dummies`
 
 `firepanda.get_dummies` turns a column, a list, or the text and categorical columns of a frame into one column of flags per level, the way pandas does. The levels are the categories in order for a categorical column, unused ones included, and the distinct values sorted for anything else. `prefix` and `prefix_sep` take one value, a list with one per encoded column, or a mapping, and `dummy_na`, `columns`, `drop_first` and `dtype` all work, with pandas' messages for a prefix list of the wrong length, a `columns` that is not a list and an object dtype. `sparse=True` is refused, and so is a level that would label a column with something other than text, such as a number with no prefix, since a firepanda column label is text.
