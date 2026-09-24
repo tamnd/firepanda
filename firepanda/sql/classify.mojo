@@ -64,7 +64,6 @@ from .ast import (
     EXPR_NAMED_ARGUMENT,
     EXPR_PARAMETER,
     EXPR_POSITIONAL,
-    EXPR_GROUPING,
     EXPR_QUANTIFIED,
     EXPR_ROW,
     EXPR_STAR,
@@ -247,7 +246,7 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         for child in ast.items(item.children):
             out.append(child)
         return out^
-    if kind == EXPR_LIST or kind == EXPR_GROUPING:
+    if kind == EXPR_LIST:
         for child in ast.items(item.children):
             out.append(child)
         return out^
@@ -779,7 +778,7 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         or kind == EXPR_STAR
     ):
         return String(node)
-    if kind == EXPR_CASE or kind == EXPR_LIST or kind == EXPR_GROUPING:
+    if kind == EXPR_CASE or kind == EXPR_LIST:
         return String()
     raise Error("an expression kind with no tag rule")
 

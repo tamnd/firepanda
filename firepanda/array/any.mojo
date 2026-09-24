@@ -437,8 +437,9 @@ struct AnyArray(Copyable, Movable, Sized):
             A reference to the string column, valid as long as this one is.
 
         Raises:
-            If the column is not a string column.
+            If the column is not a string column, or is not held flat.
         """
+        self.require_flat()
         if not self.text:
             raise Error(
                 "column is " + String(self.type) + ", not a string column"
@@ -452,8 +453,9 @@ struct AnyArray(Copyable, Movable, Sized):
             The string column.
 
         Raises:
-            If the column is not a string column.
+            If the column is not a string column, or is not held flat.
         """
+        self.require_flat()
         if not self.text:
             raise Error(
                 "column is " + String(self.type) + ", not a string column"
@@ -473,6 +475,60 @@ struct AnyArray(Copyable, Movable, Sized):
             True if the column's encoding is flat.
         """
         return self.encoding == Encoding.FLAT
+
+    def require_flat(self) raises:
+        """Raises unless the column's values are laid out flat.
+
+        This is the check that makes a second encoding safe to add. Every read
+        of a column's values goes through one of four doors: `check_dtype`,
+        which `as_typed`, `as_typed_view` and `into_typed` all call, `strings`
+        and `into_strings`, and the two dispatches in `dtype/dispatch.mojo`.
+        Each of them calls this. A kernel that has not been taught an encoding
+        therefore cannot read codes or positions as though they were values,
+        which is the dictionary column's trap from `check_dtype` over again,
+        and it does not have to remember to ask.
+
+        One compare against a field in cache, once a column per kernel call and
+        never once a row.
+
+        Raises:
+            If the column is held in any encoding but flat, naming the encoding
+            and saying that `decoded` is the way through.
+        """
+        if self.encoding != Encoding.FLAT:
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " held "
+                + String(self.encoding)
+                + ", which this kernel does not read; call decoded() first"
+            )
+
+    def decoded(self) raises -> Self:
+        """Returns the column laid out flat, whatever it is held as.
+
+        A flat column comes back as a copy that shares its buffers, which costs
+        a reference count and not a pass over the rows. There is no other
+        encoding yet, so there is no decoder yet either: the one for a
+        dictionary encoded string column lands with it, as the third box of
+        issue #979, and until then anything but flat is a column this library
+        did not build and is refused.
+
+        Returns:
+            A flat column with the same logical type and the same values.
+
+        Raises:
+            If the column is held in an encoding there is no decoder for.
+        """
+        if self.encoding == Encoding.FLAT:
+            return Self(copy=self)
+        raise Error(
+            "column is "
+            + String(self.type)
+            + " held "
+            + String(self.encoding)
+            + ", and there is no decoder for that encoding"
+        )
 
     def is_dictionary(self) -> Bool:
         """Reports whether the column stores positions into a category list.
@@ -735,9 +791,10 @@ struct AnyArray(Copyable, Movable, Sized):
             dt: The expected dtype.
 
         Raises:
-            If the column's dtype differs, or if it is a string, dictionary,
-            list or struct column.
+            If the column is not held flat, if its dtype differs, or if it is
+            a string, dictionary, list or struct column.
         """
+        self.require_flat()
         if self.is_string():
             raise Error(
                 "column is "

@@ -131,6 +131,7 @@ from .unsupported import (
     CUSTOM_OPERATOR,
     DEFAULT_VALUE,
     DOTTED_NAME,
+    GROUPING,
     JOIN_FORM,
     LIKE_ESCAPE,
     MAP_LITERAL,
@@ -289,9 +290,6 @@ comptime _OVERLAY: UInt8 = 88
 
 comptime _POSITIONAL: UInt8 = 89
 """`PositionalExpression`, `#n`, which is a column of the FROM by where it is."""
-
-comptime _GROUPING: UInt8 = 90
-"""`GroupingExpression`, which asks which columns a grouping set left out."""
 
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
@@ -999,12 +997,12 @@ struct Transform(Movable):
         self._set(names, "ListComprehensionExpression", _COMPREHENSION)
         self._set(names, "ColumnsExpression", _COLUMNS)
         self._set(names, "PositionalExpression", _POSITIONAL)
-        self._set(names, "GroupingExpression", _GROUPING)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
         self._refuse(names, "MapExpression", MAP_LITERAL)
+        self._refuse(names, "GroupingExpression", GROUPING)
         self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
 
         # The last three the grammar gives a rule of their own. All three read
@@ -1855,20 +1853,6 @@ struct Transform(Movable):
 
         if action == _POSITIONAL:
             return self._positional(tree, sql, node, ast)
-
-        if action == _GROUPING:
-            # `GROUPING Parens(List(Expression)?)`. The grammar lets the list
-            # be empty and DuckDB's parser does not, so an empty one fails
-            # the way DuckDB fails it.
-            var kids = tree.children(node)
-            var items = self._items(tree, kids[len(kids) - 1])
-            if len(items) == 0:
-                raise Error('Parser Error: syntax error at or near ")"')
-            var arguments = List[UInt32]()
-            work.warm(items)
-            for item in items:
-                arguments.append(work.value(item))
-            return ast.grouping(arguments, at)
 
         if action == _COALESCE:
             # `COALESCE Parens(List(Expression))`.

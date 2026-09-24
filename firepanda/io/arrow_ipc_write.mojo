@@ -559,12 +559,15 @@ def _plan(frame: DataFrame) raises -> _Batch:
         The plan.
 
     Raises:
-        Error: If a column has a type that cannot be written, or is a string
-            column with no text storage.
+        Error: If a column has a type that cannot be written, is a string
+            column with no text storage, or is not held flat.
     """
     var out = _Batch(frame.width())
     for c in range(frame.width()):
         ref column = frame[c]
+        # This reads the buffers straight out of the column rather than through
+        # the accessors, so it asks the question they would have asked.
+        column.require_flat()
         var rows = len(column)
         var nulls = column.data.validity.null_count()
         out.lengths.append(Int64(rows))

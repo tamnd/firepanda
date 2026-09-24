@@ -619,5 +619,34 @@ def test_every_column_is_flat() raises:
     assert_equal(String(Encoding.FLAT), "flat")
 
 
+def test_a_column_not_held_flat_is_refused_at_every_door() raises:
+    # No encoding but flat exists yet, so this makes one up. The point is that
+    # when a real one lands, a kernel nobody taught about it cannot read its
+    # codes as values, because every way to the values asks first.
+    var ints = AnyArray(from_list[DType.int64]([1, 2, 3]))
+    ints.encoding = Encoding(7)
+    assert_false(ints.is_flat())
+    with assert_raises(contains="call decoded() first"):
+        _ = ints.as_typed[DType.int64]()
+    with assert_raises(contains="call decoded() first"):
+        _ = ints.as_typed_view[DType.int64]()[0]
+    with assert_raises(contains="no decoder"):
+        _ = ints.decoded()
+    var text = AnyArray(strings_from_list(["a", "b"]))
+    text.encoding = Encoding(7)
+    with assert_raises(contains="call decoded() first"):
+        _ = len(text.strings())
+
+
+def test_decoding_a_flat_column_shares_its_values() raises:
+    var ints = AnyArray(from_list[DType.int64]([4, 5, 6]))
+    var flat = ints.decoded()
+    assert_true(flat.is_flat())
+    assert_equal(flat.as_typed_view[DType.int64]()[2], 6)
+    assert_true(
+        flat.unsafe_ptr[DType.int64]() == ints.unsafe_ptr[DType.int64]()
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

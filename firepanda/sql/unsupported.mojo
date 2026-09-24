@@ -174,31 +174,34 @@ comptime COLUMNS: UInt16 = 28
 comptime MAP_LITERAL: UInt16 = 29
 """`MAP {'a': 1}`, a map written out in the query."""
 
-comptime POSITIONAL: UInt16 = 30
+comptime GROUPING: UInt16 = 30
+"""`GROUPING(a)`, which reports the grouping set a row came from."""
+
+comptime POSITIONAL: UInt16 = 31
 """`#1`, a column named by its place in the FROM, where it cannot be read."""
 
-comptime DEFAULT_VALUE: UInt16 = 31
+comptime DEFAULT_VALUE: UInt16 = 32
 """`DEFAULT` where a value goes."""
 
-comptime UNPIVOT_NULLS: UInt16 = 32
+comptime UNPIVOT_NULLS: UInt16 = 33
 """`INCLUDE NULLS` on an `UNPIVOT`."""
 
-comptime UNPIVOT_GROUPS: UInt16 = 33
+comptime UNPIVOT_GROUPS: UInt16 = 34
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime QUANTIFIED_VALUE: UInt16 = 34
+comptime QUANTIFIED_VALUE: UInt16 = 35
 """`ANY` or `ALL` over a value rather than over a subquery."""
 
-comptime NO_CASE: UInt16 = 35
+comptime NO_CASE: UInt16 = 36
 """A grammar rule the transformer has no case for at all."""
 
-comptime AGGREGATE_FILTER: UInt16 = 36
+comptime AGGREGATE_FILTER: UInt16 = 37
 """`FILTER` on a fold the clause cannot be rewritten into an argument of."""
 
-comptime LIST_VALUE: UInt16 = 37
+comptime LIST_VALUE: UInt16 = 38
 """A list written out, `[1, 2]` or `ARRAY[1, 2]`."""
 
-comptime MODIFIER_SCHEMA: UInt16 = 38
+comptime MODIFIER_SCHEMA: UInt16 = 39
 """A star modifier naming a column by three parts or more."""
 
 
@@ -506,6 +509,17 @@ def sql_support() -> List[Refusal]:
             (
                 "A map holds keys and values in one value and a firepanda"
                 " column holds one scalar. It arrives with the nested types."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "grouping",
+            "GROUPING",
+            (
+                "It reports which grouping set a row came from, which only"
+                " means anything next to ROLLUP, CUBE and GROUPING SETS, and"
+                " firepanda does not carry that number out of the aggregate"
+                " yet."
             ),
             STAGE_ISSUE,
         ),

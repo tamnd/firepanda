@@ -45,8 +45,16 @@ def dispatch[
     Raises:
         If the column's dtype is not in `list`. This is not a bug in the caller's
         data, it is a gap in the kernel, and the message says which dtype is
-        missing so that the fix is obvious.
+        missing so that the fix is obvious. Also if the column is not held
+        flat.
     """
+    # Before the loop and not inside it, so it is one compare a call and not
+    # one per candidate. `dispatch_typed` needs no line of its own, since
+    # `as_typed_view` asks the same thing through `check_dtype`. A kernel
+    # behind here reads through `unsafe_ptr`, which checks nothing, so this is
+    # the only thing between it and a column held in an encoding it was never
+    # taught. `AnyArray.require_flat` says why.
+    col.require_flat()
     comptime for candidate in list:
         if col.dtype() == candidate:
             return operation[candidate](col)
