@@ -38,21 +38,61 @@ moves. That is why it is built this way round.
 from __future__ import annotations
 
 __all__ = [
+    "AbstractMethodError",
+    "AttributeConflictWarning",
+    "CSSWarning",
     "CancelledError",
+    "CategoricalConversionWarning",
+    "ChainedAssignmentError",
+    "ClosedFileError",
     "ColumnNotFoundError",
     "DTypeError",
+    "DataError",
+    "DatabaseError",
+    "DtypeWarning",
+    "DuplicateLabelError",
+    "EmptyDataError",
     "FirepandaError",
+    "IncompatibilityWarning",
+    "IncompatibleFrequency",
     "IndexingError",
     "IntCastingNaNError",
     "InvalidArgumentError",
+    "InvalidColumnName",
+    "InvalidComparison",
     "InvalidIndexError",
+    "InvalidVersion",
+    "LossySetitemError",
     "MergeError",
+    "NoBufferPresent",
+    "NullFrequencyError",
+    "NumExprClobberingError",
+    "NumbaUtilError",
     "NumericOverflowError",
+    "OptionError",
+    "OutOfBoundsDatetime",
     "OutOfBoundsError",
+    "OutOfBoundsTimedelta",
+    "Pandas4Warning",
+    "Pandas5Warning",
+    "PandasChangeWarning",
+    "PandasDeprecationWarning",
+    "PandasFutureWarning",
+    "PandasPendingDeprecationWarning",
+    "ParserError",
+    "ParserWarning",
+    "PerformanceWarning",
+    "PossibleDataLossError",
+    "PossiblePrecisionLoss",
+    "PyperclipException",
+    "PyperclipWindowsException",
     "ReaderError",
     "SpecificationError",
     "UndefinedVariableError",
+    "UnsortedIndexError",
     "UnsupportedError",
+    "UnsupportedFunctionCall",
+    "ValueLabelTypeMismatch",
 ]
 
 
@@ -210,6 +250,172 @@ class CancelledError(KeyboardInterrupt):
     a Ctrl-C. That is the exact behaviour `KeyboardInterrupt` exists to avoid,
     so the marker is what gets dropped.
     """
+
+
+# The rest of `pandas.errors`, by the same name and on the same builtins, so
+# that `except pandas.errors.X` written against pandas has a class to name here.
+# Most are raised by readers and writers firepanda does not have, and are
+# carried so that code naming them imports and catches as it did.
+
+
+class AbstractMethodError(FirepandaError, NotImplementedError):
+    """A method a subclass was meant to write and did not."""
+
+
+class ClosedFileError(FirepandaError):
+    """An operation on a store file that has been closed."""
+
+
+class DataError(FirepandaError):
+    """An operation that needs numbers, asked of values that are not numbers."""
+
+
+class DatabaseError(FirepandaError, OSError):
+    """SQL that did not run, from a bad statement or the database itself."""
+
+
+class DuplicateLabelError(FirepandaError, ValueError):
+    """An operation that would repeat a label where labels must not repeat."""
+
+
+class EmptyDataError(FirepandaError, ValueError):
+    """A file with nothing in it to read, not even a header."""
+
+
+class IncompatibleFrequency(FirepandaError, TypeError):
+    """Two periods or offsets of frequencies that cannot be combined."""
+
+
+class InvalidComparison(FirepandaError):
+    """A value that cannot be compared with the values on the other side."""
+
+
+class InvalidVersion(FirepandaError, ValueError):
+    """A version string that is not a version in the sense of PEP 440."""
+
+
+class LossySetitemError(FirepandaError):
+    """A value that cannot be put into a column without changing it."""
+
+
+class NoBufferPresent(FirepandaError):
+    """A buffer asked for in the interchange protocol that a column does not have."""
+
+
+class NullFrequencyError(FirepandaError, ValueError):
+    """An operation that needs a frequency, on labels that have none."""
+
+
+class NumExprClobberingError(FirepandaError, NameError):
+    """A variable in an expression named after one of numexpr's own names."""
+
+
+class NumbaUtilError(FirepandaError):
+    """A routine the numba engine does not support."""
+
+
+class OptionError(FirepandaError, AttributeError, KeyError):
+    """An option name that is unknown or names more than one option."""
+
+
+class OutOfBoundsDatetime(FirepandaError, ValueError):
+    """An instant outside the range its unit can count."""
+
+
+class OutOfBoundsTimedelta(FirepandaError, ValueError):
+    """A span outside the range its unit can count."""
+
+
+class ParserError(FirepandaError, ValueError):
+    """File contents that could not be parsed."""
+
+
+class PossibleDataLossError(FirepandaError):
+    """A store file opened again while it is still open."""
+
+
+class PyperclipException(FirepandaError, RuntimeError):
+    """The clipboard is not available on this machine."""
+
+
+class PyperclipWindowsException(PyperclipException):
+    """The clipboard is not available on this Windows machine."""
+
+
+class UnsortedIndexError(FirepandaError, KeyError):
+    """A slice of labels in several levels that are not sorted."""
+
+
+class UnsupportedFunctionCall(FirepandaError, ValueError):
+    """A numpy function called with arguments firepanda does not take."""
+
+
+class PandasChangeWarning(Warning):
+    """A change that is coming in a later version."""
+
+
+class PandasDeprecationWarning(PandasChangeWarning, DeprecationWarning):
+    """A coming change that is a deprecation."""
+
+
+class PandasPendingDeprecationWarning(PandasChangeWarning, PendingDeprecationWarning):
+    """A coming change that will become a deprecation."""
+
+
+class PandasFutureWarning(PandasChangeWarning, FutureWarning):
+    """A coming change in what a call answers."""
+
+
+class Pandas4Warning(PandasDeprecationWarning):
+    """A change pandas makes in its version 4."""
+
+
+class Pandas5Warning(PandasPendingDeprecationWarning):
+    """A change pandas makes in its version 5."""
+
+
+class AttributeConflictWarning(Warning):
+    """Index attributes that disagree between a store and what is written."""
+
+
+class CSSWarning(UserWarning):
+    """A style that could not be turned into the format asked for."""
+
+
+class CategoricalConversionWarning(Warning):
+    """A partly labelled Stata file read a piece at a time."""
+
+
+class ChainedAssignmentError(Warning):
+    """A value set through two selections, which sets it on a copy."""
+
+
+class DtypeWarning(Warning):
+    """A column of a file read with values of different types."""
+
+
+class IncompatibilityWarning(Warning):
+    """A where condition on a store file that cannot take one."""
+
+
+class InvalidColumnName(Warning):
+    """A column name Stata cannot hold, changed on the way out."""
+
+
+class ParserWarning(Warning):
+    """A file read with a parser other than the one asked for."""
+
+
+class PerformanceWarning(Warning):
+    """A call that works and is likely to be slow."""
+
+
+class PossiblePrecisionLoss(Warning):
+    """A whole number too large for Stata, written as a float."""
+
+
+class ValueLabelTypeMismatch(Warning):
+    """A category column with labels that are not text, written to Stata."""
 
 
 # The table from document 07 section 5, and the only place the mapping is
