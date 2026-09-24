@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_json on frames and columns
+
+`DataFrame.to_json` and `Series.to_json` take pandas' whole signature and write the same text pandas writes. Floats go through a port of pandas' own encoder, so `double_precision` cuts and rounds the digits the way pandas does, and very large or very small values switch to exponent form at the same places. Every orient pandas knows except `table` works: columns, index, records, split and values, with `lines`, `indent`, `force_ascii`, `default_handler`, and `index=False` where pandas allows it. Instants and spans are counts in `date_unit` since the epoch, with pandas' deprecation warning, or ISO text with `date_format="iso"`, zoned instants in UTC with a Z. The text is answered with no path, or written to a handle or a file, compressed by its name, and `mode="a"` appends lines. Misused options fail with pandas' messages.
+
 ### Fixed: instants and spans cast to text
 
 `astype(str)` on a column, a frame or an index of instants or spans wrote the count of units since the epoch, `1577836800000000`, where pandas writes `2020-01-01`. It now writes what pandas writes: the date alone when every instant is at midnight, as many fraction digits as the finest instant needs, a zone's offset at the end, and each span as `1 days 02:03:04`, with missing values left missing.
