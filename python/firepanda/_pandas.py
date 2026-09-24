@@ -12646,7 +12646,12 @@ class GroupByMixin[Answer]:
             if str(taken.dtype) in _SIGNED | _UNSIGNED and bool(gone.any()):
                 # pandas holds a missing integer as NaN, so the column widens.
                 taken = taken.astype("float64")
-            out = out.assign(**{name: taken.mask(gone)})
+            if str(taken.dtype) in _FLOATING:
+                # pandas marks a float it could not fill with NaN, not a null.
+                taken = taken.mask(gone, float("nan"))
+            else:
+                taken = taken.mask(gone)
+            out = out.assign(**{name: taken})
         if backward:
             out = out.iloc[::-1]
         out = out.set_index(label).rename_axis(self._frame.index.name)

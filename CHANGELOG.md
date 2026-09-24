@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a group fill leaves NaN, not a null, in a float column
+
+A row that `groupby(...).ffill()` or `bfill()` could not fill, because its key is missing or its group has no value yet, is NaN in a float column now, which is what pandas holds there. Before it was a null, which reads the same through `isna` but is a different value in the column.
+
 ### Fixed: `kurt` over a column with an infinity answers NaN
 
 An infinity makes the mean NaN and every moment NaN with it, and the sums skipped those NaNs, so `kurt` answered zero where pandas answers NaN. The moments are now summed without skipping, and `python/tests/test_describe.py` checks two columns with infinities against pandas.
