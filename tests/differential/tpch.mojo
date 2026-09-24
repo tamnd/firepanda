@@ -7,9 +7,9 @@ a place an answer can go wrong in a way no expression comparison reaches. So
 this one asks whole queries, and it asks the three S4 names as its exit
 criteria, TPC-H q1, q3 and q6, and it asks all twenty two of them.
 
-Twenty one agree today. The last one is refused rather than wrong: a correlated
-EXISTS that matches on an inequality as well as an equality. `recorded` below
-carries its reason and issue #816 has it written out.
+All twenty two agree today, and `recorded` below is empty. The last one to
+join them was q21, whose correlated EXISTS matches on an inequality as well as
+an equality, and issue #816 has the story.
 
 The data is DuckDB's own `tpch` generator, exported to Parquet, and both engines
 read the same files. Two generators seeded the same way is a claim about two
@@ -118,8 +118,8 @@ def recorded(number: Int) -> String:
     beside the refusal itself. Anything not named here is a failure, so a query
     that stops running is noticed the run after it stops.
 
-    One entry left, and the day it goes this list is empty. Issue #816 has it
-    written out with the refusal it comes back with.
+    Empty today. A query that comes back refused after this goes here with its
+    reason and an issue, or it is a failure.
 
     Args:
         number: The query number.
@@ -127,11 +127,7 @@ def recorded(number: Int) -> String:
     Returns:
         The reason, or the empty string if a refusal is not expected.
     """
-    if number == 21:
-        return String(
-            "a correlated EXISTS that matches on an inequality as well as an"
-            " equality, which is not a key pair. Issue #816"
-        )
+    _ = number
     return String()
 
 

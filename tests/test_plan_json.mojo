@@ -888,6 +888,27 @@ def test_a_mark_join_writes_what_its_column_is_called_and_reads_it_back() raises
     )
 
 
+def test_a_semi_join_writes_the_rest_of_its_condition_and_reads_it_back() raises:
+    var plan = Plan()
+    var left = plan.scan("t", List[String](), 0)
+    var right = plan.scan("u", List[String](), 1)
+    var at = plan.join(
+        left,
+        right,
+        [plan.exprs.column("a")],
+        [plan.exprs.column("k")],
+        JoinKind.SEMI,
+        residual=[
+            plan.exprs.binary(
+                BinaryOp.GT, plan.exprs.column("j"), plan.exprs.column("b")
+            )
+        ],
+    )
+    var text = to_json(plan, at)
+    assert_true(text.find('"where": [') != -1, "the rest is written")
+    _ = _trip(plan, at)
+
+
 def test_a_plan_can_be_written_by_hand() raises:
     # The whole point of the form. Nothing here came out of the writer.
     var back = from_json(

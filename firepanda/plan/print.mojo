@@ -365,6 +365,9 @@ def _line(plan: Plan, at: Int) raises -> String:
             pairs += render_expr(plan.exprs, node.exprs[node.parts + i])
         var how = JoinKind(UInt8(node.op))
         var written = String("JOIN ", how, " [", pairs, "]")
+        for i in range(2 * node.parts, len(node.exprs)):
+            written += " and " if i != 2 * node.parts else " where "
+            written += render_expr(plan.exprs, node.exprs[i])
         if how == JoinKind.MARK:
             # The one kind that adds a column, so the one kind whose line has
             # to say what the column is called.

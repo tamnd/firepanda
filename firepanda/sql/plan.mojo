@@ -226,11 +226,12 @@ it has been lowered: its tables are taken back out of the scope, and what the
 rest of the query may write is the left side alone, which is what DuckDB does
 and is why `SELECT u.k FROM t SEMI JOIN u USING (b)` is a missing table there.
 
-Both need at least one equality between the two sides and nothing else, which is
-tighter than DuckDB, where the condition may be any predicate. The join node
-carries key pairs rather than a predicate, and the rest of a condition is
-ordinarily tested in a filter above the join, which here would be a filter over
-columns the join did not keep.
+Both need at least one equality between the two sides, which is tighter than
+DuckDB, where the condition may be any predicate. The rest of a condition cannot
+be a filter above the join the way it is over an inner join, because that would
+be a filter over columns the join did not keep. So it rides on the join node as
+its residual and is asked of each pairing the keys make, and a left row is kept
+or dropped on the pairings that passed.
 
 ### An `IN` over a subquery is that join rather than a predicate
 
@@ -283,7 +284,10 @@ which is what puts both sides of the join in reach at once, and then splits its
 `WHERE` the way a join condition is split. A part with one side out and one side
 in is a key pair. A part that reads the subquery's own tables and nothing else
 is a filter under the join, where it runs once rather than once per outer row.
-A part that reads the outer query any other way is refused, which is the
+A part that reads the outer query any other way is the join's residual, asked of
+each pairing, which is what TPC-H q21 needs for its
+`l2.l_suppkey <> l1.l_suppkey`. At least one key pair is still needed, because without one every
+outer row pairs with every inner row before anything is asked, and that is the
 dependent join a decorrelation pass removes rather than one this rewrite can.
 
 An `EXISTS` that reads no outer column at all does not come here. It asks
@@ -4595,6 +4599,7 @@ def _pair(
     var left_keys: List[Int],
     var right_keys: List[Int],
     kind: JoinKind,
+    var residual: List[Int] = List[Int](),
 ) raises -> _From:
     """Puts one join over two inputs and says what the result produces.
 
@@ -4605,6 +4610,8 @@ def _pair(
         left_keys: The keys on the left.
         right_keys: The keys on the right, one per left key.
         kind: Which rows the join keeps.
+        residual: The rest of the condition of a semi or an anti join, asked of
+            each pairing. Consumed.
 
     Returns:
         The join, with the two schemas end to end, which is the order binding
@@ -4615,7 +4622,9 @@ def _pair(
     Raises:
         Whatever `plan.join` raises.
     """
-    var at = plan.join(left.at, right.at, left_keys^, right_keys^, kind)
+    var at = plan.join(
+        left.at, right.at, left_keys^, right_keys^, kind, residual=residual^
+    )
     var schema = Schema(copy=left.schema)
     var origin = left.origin.copy()
     if kind.keeps_right_columns():
@@ -5331,6 +5340,14 @@ def _joined(
     if not kind.keeps_right_columns():
         scope.hide(reach, pairs)
 
+    # A semi and an anti join hand out no pairing, so the rest of the condition
+    # cannot be a filter above them. It goes on the join instead, which asks it
+    # of each pairing the keys make before deciding about the left row.
+    var residual = List[Int]()
+    if kind == JoinKind.SEMI or kind == JoinKind.ANTI:
+        residual = rest^
+        rest = List[Int]()
+
     if len(rest) != 0 and kind != JoinKind.INNER:
         raise Error(
             String(
@@ -5372,7 +5389,9 @@ def _joined(
         # with the condition tested over it, which is a cross join and a filter
         # and is what the rest of the list below builds.
         built = JoinKind.CROSS
-    var out = _pair(plan, left, right, left_keys^, right_keys^, built)
+    var out = _pair(
+        plan, left, right, left_keys^, right_keys^, built, residual^
+    )
     for i in range(len(rest)):
         out.at = plan.filter(out.at, rest[i])
     return out^
@@ -7735,6 +7754,7 @@ def _exists_join(
     var left_keys = List[Int]()
     var right_keys = List[Int]()
     var inside = List[Int]()
+    var residual = List[Int]()
     var walk = _Walk()
     for i in range(len(conjuncts)):
         var one = ast.exprs[Int(conjuncts[i])]
@@ -7751,33 +7771,25 @@ def _exists_join(
                 left_keys.append(b)
                 right_keys.append(a)
                 continue
+            var equal = plan.exprs.binary(BinaryOp.EQ, a, b)
             if (
                 first != _LEFT
                 and first != _BOTH
                 and second != _LEFT
                 and (second != _BOTH)
             ):
-                inside.append(plan.exprs.binary(BinaryOp.EQ, a, b))
-                continue
+                inside.append(equal)
+            else:
+                residual.append(equal)
+            continue
+        var whole = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
+        var reads = _side(plan, whole, left, right)
+        if reads != _LEFT and reads != _BOTH:
+            inside.append(whole)
         else:
-            var whole = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
-            var reads = _side(plan, whole, left, right)
-            if reads != _LEFT and reads != _BOTH:
-                inside.append(whole)
-                continue
-        raise Error(
-            String(
-                "firepanda decorrelates a ",
-                word,
-                (
-                    " whose subquery reads the query around it through"
-                    " equalities and nothing else, and this part of its"
-                    " condition reads it another way, which is the dependent"
-                    " join that a decorrelation pass removes rather than one"
-                    " this rewrite can"
-                ),
-            )
-        )
+            # Anything else that reads the query around it is asked of each
+            # pairing the keys make, which is what the join's residual is for.
+            residual.append(whole)
 
     # Back out of reach, for the reason a written out semi join's right side
     # goes out of reach: the join hands out no column of it. The line between
@@ -7786,6 +7798,21 @@ def _exists_join(
     scope.floor = outside
     scope.positions = held^
 
+    if len(left_keys) == 0 and len(residual) != 0:
+        raise Error(
+            String(
+                "firepanda decorrelates a ",
+                word,
+                (
+                    " whose subquery reads the query around it through at"
+                    " least one equality, and this one reads it through"
+                    " nothing but other comparisons, which pairs every row"
+                    " with every row before asking and is the dependent join"
+                    " a decorrelation pass removes rather than one this"
+                    " rewrite can"
+                ),
+            )
+        )
     if len(left_keys) == 0:
         raise Error(
             String(
@@ -7805,7 +7832,7 @@ def _exists_join(
     # once over that table instead of once per pairing.
     for i in range(len(inside)):
         right.at = plan.filter(right.at, inside[i])
-    return _pair(plan, left, right, left_keys^, right_keys^, kind)
+    return _pair(plan, left, right, left_keys^, right_keys^, kind, residual^)
 
 
 def _block(
