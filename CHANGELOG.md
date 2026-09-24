@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.29] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. SQL reads `GROUPING SETS`, `CUBE`, `ROLLUP` and `GROUPING()`, and a MAP literal parses. A string column can now be held as codes into its distinct values, and take, filter, a comparison, `is_in` and a group by read it without decoding it, while the scan decodes one morsel at a time for everything else. Two ClickBench shapes got faster through the planner: a group by on several keys with text among them keeps a map across chunks, which took q18 from 80 to 48 ms and q39 from 112 to 67 ms at 1M, and a sum of a column and a constant is answered from one sum and one count, which took q29 from 4.7 times the hand written port to faster than it. On the pandas side, a power across two labelled operands and the whole frame `sum` and `prod` answer what pandas answers where there is a gap or a NaN, and a frame reduction takes `skipna=False` and `min_count`.
+
 ### Changed: take, filter, compare, is_in and group by read an encoded string column without decoding it
 
 `take_any`, `gather_any` and `filter_any` move the codes of a dictionary encoded string column and hand back a column that is still encoded, so moving its rows costs four bytes a row instead of sixteen and the string bytes are never touched. A comparison with a constant and `is_in` work out the answer once per distinct value and spread it over the rows by code, `factorize_any` groups on the codes, and `DataFrame.group_by` does both and decodes only the keys it returns, one row a group. On six million rows over seven distinct values on a six core Linux machine the column is 24 MB against 96 MB flat, a filter took 1.0 to 1.3 ms against 12, `is_in` 7 ms against 25 and a group by with a sum 24 ms against 65, while an equality with a constant was within noise of flat at 7 ms. This is the third box of #979.
@@ -9336,7 +9342,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.28...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.8.29...HEAD
+[0.8.29]: https://github.com/tamnd/firepanda/releases/tag/v0.8.29
 [0.8.28]: https://github.com/tamnd/firepanda/releases/tag/v0.8.28
 [0.8.27]: https://github.com/tamnd/firepanda/releases/tag/v0.8.27
 [0.8.26]: https://github.com/tamnd/firepanda/releases/tag/v0.8.26
