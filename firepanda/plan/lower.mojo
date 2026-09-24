@@ -3384,6 +3384,10 @@ def _lower_join(
     over each pairing, and `Settle` keeps the probe rows that had a pairing it
     passed, or had none, and hands out the probe side's columns alone.
 
+    A right or a full join is the same operator. It notes which build rows
+    were paired as the probe side goes past and hands out the rest, with the
+    probe side's columns null, once the last chunk has.
+
     A join on more than one key pair hands the operator both lists of positions
     and the operator packs the tuple into one byte string per row on each side.
     It used to build the table from the first pair and ask the rest afterwards,
@@ -3406,18 +3410,6 @@ def _lower_join(
             refuses.
     """
     var kind = JoinKind(UInt8(plan.nodes[at].op))
-    if kind == JoinKind.RIGHT or kind == JoinKind.OUTER:
-        raise Error(
-            String(
-                "lower: a ",
-                kind,
-                (
-                    " join has to emit right rows that nothing matched, which"
-                    " is not known until the last chunk has gone past, so it is"
-                    " a breaker rather than an operator"
-                ),
-            )
-        )
     var right = plan.nodes[at].inputs[1]
     if kind == JoinKind.CROSS:
         _lower_cross(plan, right, frames, taken, pipe)

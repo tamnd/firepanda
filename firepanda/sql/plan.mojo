@@ -95,6 +95,13 @@ instead, because an outer join's condition decides which rows are padded as well
 as which rows match, and a filter above one would test the padding and drop the
 row.
 
+The exception is a part that reads only the side that gets padded, which is the
+right side of a left join and the left side of a right join. It only narrows
+which rows on that side are candidates for a match, so it goes under that input
+as a filter, and a row it takes away is one that was never going to match. A
+full join keeps every row of both sides, so a part there is refused like any
+other.
+
 Which side a part reads is answered by the relation a qualified column carries,
 and by the name for one that is not qualified. A comma in the `FROM` is a join
 with no condition, which is why `FROM a, b WHERE a.x = b.y` and the same query
@@ -5306,6 +5313,10 @@ def _joined(
     var pushable = (
         kind == JoinKind.LEFT or kind == JoinKind.SEMI or kind == JoinKind.ANTI
     )
+    # A right join is a left join read the other way round, so a part that
+    # reads only the left side goes under the left input for the same reason.
+    var over = List[Int]()
+    var mirrored = kind == JoinKind.RIGHT
 
     # A join condition is not part of any block, so the aggregates it finds
     # belong to nothing. It cannot hold one, which `_lower_expr` refuses on its
@@ -5329,11 +5340,17 @@ def _joined(
             if pushable and first == _RIGHT and second == _RIGHT:
                 under.append(plan.exprs.binary(BinaryOp.EQ, a, b))
                 continue
+            if mirrored and first == _LEFT and second == _LEFT:
+                over.append(plan.exprs.binary(BinaryOp.EQ, a, b))
+                continue
             rest.append(plan.exprs.binary(BinaryOp.EQ, a, b))
             continue
         var one_expr = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
         if pushable and _side(plan, one_expr, left, right) == _RIGHT:
             under.append(one_expr)
+            continue
+        if mirrored and _side(plan, one_expr, left, right) == _LEFT:
+            over.append(one_expr)
             continue
         rest.append(one_expr)
 
@@ -5382,6 +5399,8 @@ def _joined(
     # and before the join is built because the join is what reads them.
     for i in range(len(under)):
         right.at = plan.filter(right.at, under[i])
+    for i in range(len(over)):
+        left.at = plan.filter(left.at, over[i])
 
     var built = kind
     if len(left_keys) == 0:

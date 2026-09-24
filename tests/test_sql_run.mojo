@@ -4711,10 +4711,107 @@ def test_a_cross_join_onto_more_than_one_row_says_why_it_is_refused() raises:
         _ = run("SELECT qty FROM sales CROSS JOIN tiers", session())
 
 
-def test_a_right_join_has_no_operator_yet_either() raises:
-    with assert_raises(contains="breaker rather than an operator"):
+def test_a_right_join_keeps_the_shop_that_sold_nothing() raises:
+    # Shop 3 has no sale, so its one row comes out with the sale side null.
+    same(
+        answer(
+            (
+                "SELECT floor FROM sales RIGHT JOIN shops ON sales.shop ="
+                " shops.shop ORDER BY floor"
+            ),
+            "floor",
+        ),
+        [11, 11, 11, 11, 11, 22, 22, 22, 22, 22, 33],
+        "floor",
+    )
+
+
+def test_a_count_over_a_right_join_counts_nothing_for_the_padded_row() raises:
+    # The padded row is there and its quantity is null, which a count skips.
+    same(
+        answer(
+            (
+                "SELECT shops.shop, count(qty) AS n FROM sales RIGHT JOIN shops"
+                " ON sales.shop = shops.shop GROUP BY shops.shop ORDER BY"
+                " shops.shop"
+            ),
+            "n",
+        ),
+        [5, 5, 0],
+        "n",
+    )
+
+
+def test_a_right_join_with_using_takes_the_key_from_the_right_side() raises:
+    # The merged column is the right side's, so the padded row still has one.
+    same(
+        answer(
+            (
+                "SELECT shop FROM sales RIGHT JOIN shops USING (shop) ORDER BY"
+                " shop"
+            ),
+            "shop",
+        ),
+        [1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3],
+        "shop",
+    )
+
+
+def test_a_right_join_tests_a_left_only_condition_below_the_join() raises:
+    # Only three sales are over 20, and the shop with none left still comes
+    # out once, padded.
+    same(
+        answer(
+            (
+                "SELECT floor FROM sales RIGHT JOIN shops ON sales.shop ="
+                " shops.shop AND sales.qty > 20 ORDER BY floor"
+            ),
+            "floor",
+        ),
+        [11, 11, 22, 33],
+        "floor",
+    )
+
+
+def test_a_full_join_keeps_the_rows_neither_side_matched() raises:
+    # Three pairs, seven sales with no band and band 99 with no sale.
+    same(
+        answer(
+            (
+                "SELECT count(*) AS n FROM tiers FULL JOIN sales ON tiers.band"
+                " = sales.qty"
+            ),
+            "n",
+        ),
+        [11],
+        "n",
+    )
+
+
+def test_a_full_join_pads_the_build_side_row_that_matched_nothing() raises:
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers FULL JOIN sales ON tiers.band ="
+                " sales.qty WHERE qty IS NULL"
+            ),
+            "band",
+        ),
+        [99],
+        "band",
+    )
+
+
+def test_a_full_join_with_more_than_equalities_is_refused() raises:
+    # A full join keeps every row of both sides, so the rest of the condition
+    # decides which rows are padded and cannot be a filter anywhere.
+    with assert_raises(contains="rest of this condition"):
         _ = run(
-            "SELECT shop FROM sales RIGHT JOIN shops USING (shop)", session()
+            (
+                "SELECT band FROM tiers FULL JOIN sales"
+                " ON tiers.band = sales.qty AND sales.price > 3"
+            ),
+            session(),
         )
 
 
