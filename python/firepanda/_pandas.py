@@ -16784,6 +16784,141 @@ def _searched_one(index: Any, value: Any, side: str) -> int:
     return find(labels, value)
 
 
+_PARTIAL_TEXT = re.compile(
+    r"(\d{4})(?:-(\d{1,2})(?:-(\d{1,2})(?:[ T](\d{1,2})"
+    r"(?::(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?)?)?)?)?"
+)
+"""An ISO date and time cut short at any field, which pandas reads as the whole period."""
+
+_QUARTER_TEXT = re.compile(r"(\d{4})[Qq]([1-4])")
+"""A year and a quarter, such as 2020Q1."""
+
+_RESOLUTIONS = [(6, 86_400_000_000_000), (5, 3_600_000_000_000), (4, 60_000_000_000)]
+_RESOLUTIONS += [(3, 1_000_000_000), (2, 1_000_000), (1, 1_000), (0, 1)]
+"""pandas' resolutions from a day down to a nanosecond, as ranks and lengths in nanoseconds."""
+
+_UNIT_NANOS = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}
+"""How many nanoseconds one count of each storage unit is."""
+
+
+def _text_period(text: str) -> tuple[Any, Any, int] | None:
+    """The period a date written in text covers, as its start, its end and its rank.
+
+    The end is the start of the next period, and the rank is pandas'
+    resolution, a year being 9, a quarter 8, a month 7 and a day 6 down to a
+    nanosecond at 0. Text that is not a cut short ISO date answers None.
+    """
+    from ._scalars import Timedelta, Timestamp
+
+    quarter = _QUARTER_TEXT.fullmatch(text.strip())
+    if quarter:
+        year, first = int(quarter[1]), 3 * int(quarter[2]) - 2
+        after = (year + 1, 1) if first == 10 else (year, first + 3)
+        return Timestamp(year, first, 1), Timestamp(after[0], after[1], 1), 8
+    found = _PARTIAL_TEXT.fullmatch(text.strip())
+    if not found:
+        return None
+    fields = [int(v) for v in found.groups()[:6] if v is not None]
+    year = fields[0]
+    if len(fields) == 1:
+        return Timestamp(year, 1, 1), Timestamp(year + 1, 1, 1), 9
+    if len(fields) == 2:
+        month = fields[1]
+        after = (year + 1, 1) if month == 12 else (year, month + 1)
+        return Timestamp(year, month, 1), Timestamp(after[0], after[1], 1), 7
+    start = Timestamp(*fields)
+    fraction = found[7]
+    if fraction is None:
+        rank = {3: 6, 4: 5, 5: 4, 6: 3}[len(fields)]
+    else:
+        rank = 2 if len(fraction) <= 3 else 1 if len(fraction) <= 6 else 0
+        start = start + Timedelta(int(fraction.ljust(9, "0")), unit="ns")
+    step = dict(_RESOLUTIONS)[rank]
+    return start, start + Timedelta(step, unit="ns"), rank
+
+
+def _labels_resolution(values: Any) -> int:
+    """pandas' resolution of a column of instants: the finest field any of them uses.
+
+    A day at most, and read off the wall clock for instants with a zone.
+    """
+    if values.dt.tz is not None:
+        values = values.dt.tz_localize(None)
+    unit = str(values.dtype)[len("datetime64[") :].split(",")[0].rstrip("]")
+    counts = values.dropna().astype("int64")
+    for rank, nanos in _RESOLUTIONS:
+        if nanos < _UNIT_NANOS[unit]:
+            break
+        if not bool((counts % (nanos // _UNIT_NANOS[unit]) != 0).any()):
+            return rank
+    return {"s": 3, "ms": 2, "us": 1, "ns": 0}[unit]
+
+
+def _span_step(span: Any) -> Any:
+    """The length of the finest field a span uses, which is what a span in text rounds to."""
+    from ._scalars import Timedelta
+
+    nanos = abs(span.value)
+    for _, length in _RESOLUTIONS:
+        if nanos % length == 0:
+            return Timedelta(length, unit="ns")
+    return Timedelta(1, unit="ns")
+
+
+def _temporal_key(values: Any, key: Any) -> Any:
+    """A label as the instant or span a column of them holds, or None when it cannot be one.
+
+    Text is read, a Python datetime becomes an instant and a Python timedelta
+    a span. An instant must carry a zone exactly when the labels do.
+    """
+    from ._scalars import Timedelta, Timestamp
+
+    if isinstance(key, bool):
+        return None
+    try:
+        if str(values.dtype).startswith("timedelta64"):
+            if isinstance(key, (str, datetime.timedelta)):
+                return Timedelta(key)
+            return None
+        if not isinstance(key, (str, datetime.datetime)):
+            return None
+        moment = Timestamp(key)
+    except (TypeError, ValueError):
+        return None
+    zone = values.dt.tz
+    if (zone is None) != (moment.tz is None):
+        if zone is None or not isinstance(key, str):
+            return None
+        return moment.tz_localize(zone)
+    return moment if zone is None else moment.tz_convert(zone)
+
+
+def _temporal_bounds(values: Any, key: Any, sliced: bool) -> tuple[Any, Any, bool] | None:
+    """The half open range a slice bound or a lookup covers, for labels of instants or spans.
+
+    Answers the first label in range, the first past it, and whether the key
+    is a period to be sliced rather than one label, or None when the key is
+    not an instant or a span. Text coarser than the labels covers the whole
+    period it names, and a `sliced` bound in text always does.
+    """
+    from ._scalars import Timedelta
+
+    if isinstance(key, str) and str(values.dtype).startswith("datetime64"):
+        period = _text_period(key)
+        if period is not None and (sliced or period[2] > _labels_resolution(values)):
+            zone = values.dt.tz
+            start, end, _ = period
+            if zone is not None:
+                start, end = start.tz_localize(zone), end.tz_localize(zone)
+            return start, end, True
+    moment = _temporal_key(values, key)
+    if moment is None:
+        return None
+    if sliced and isinstance(key, str) and isinstance(moment, datetime.timedelta):
+        return moment, moment + _span_step(moment), True
+    return moment, moment + Timedelta(1, unit="ns"), False
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -16865,6 +17000,12 @@ class IndexMixin:
         try:
             if isinstance(key, bool):
                 raise TypeError("cannot index an index with a bool; pass a list of them")
+            if isinstance(key, int) and self._temporal:
+                size = self._inner.length()
+                at = key + size if key < 0 else key
+                if not 0 <= at < size:
+                    raise IndexError(f"index {key} is out of bounds for axis 0 with size {size}")
+                return Index._wrap(self._inner.slice_rows(at, at + 1)).tolist()[0]
             if isinstance(key, int):
                 return self._inner.at(key)
             if isinstance(key, slice):
@@ -16905,6 +17046,12 @@ class IndexMixin:
         pandas answers False for a key of the wrong type rather than raising,
         because `in` is a question and not a lookup, and this does the same.
         """
+        if self._temporal:
+            try:
+                self._temporal_loc(key)
+            except KeyError:
+                return False
+            return True
         try:
             return self._inner.contains(key)
         except Exception as error:
@@ -16991,7 +17138,14 @@ class IndexMixin:
         an integer, several hits in a row on a sorted index are a slice, and
         anything else is a boolean mask. Callers branch on the type, so getting
         the rule right matters more than it looks.
+
+        Labels of instants or spans are looked up here, by an instant, a span
+        or text, and text coarser than the labels, such as "2020-01" on labels
+        with hours, finds every label in that period, as a slice when the
+        labels rise and a mask otherwise.
         """
+        if self._temporal:
+            return self._temporal_loc(key)
         try:
             found = list(self._inner.get_loc(key))
         except Exception as error:
@@ -17002,6 +17156,40 @@ class IndexMixin:
         if run and self._inner.is_monotonic_increasing():
             return slice(found[0], found[-1] + 1, None)
         return [i in set(found) for i in range(self._inner.length())]
+
+    @property
+    def _temporal(self) -> bool:
+        """Whether the labels are instants or spans."""
+        return str(self.dtype).startswith(("datetime64", "timedelta64"))
+
+    def _temporal_loc(self, key: Any) -> Any:
+        """`get_loc` on labels of instants or spans, which the core cannot compare with.
+
+        Raises:
+            KeyError: For a key that is not there, or not an instant or a span.
+        """
+        values = self.to_series()
+        bounds = _temporal_bounds(values, key, False)
+        if bounds is None:
+            raise KeyError(key)
+        start, end, period = bounds
+        hits = ((values >= start) & (values < end)).tolist()
+        found = [i for i, hit in enumerate(hits) if hit]
+        rising = self.is_monotonic_increasing
+        if period:
+            if not rising:
+                return hits
+            if len(hits) and (end <= values.iloc[0] or start > values.iloc[-1]):
+                raise KeyError(key)
+            first = int((values < start).sum())
+            return slice(first, first + len(found), None)
+        if not found:
+            raise KeyError(key)
+        if len(found) == 1:
+            return found[0]
+        if rising and found[-1] - found[0] + 1 == len(found):
+            return slice(found[0], found[-1] + 1, None)
+        return hits
 
     def get_indexer(
         self,
@@ -17744,7 +17932,18 @@ class IndexMixin:
         The one range in the library that is not half open, because label based
         slicing in pandas includes its end and a caller who writes
         `df.loc["b":"d"]` means through d rather than up to it.
+
+        On rising labels of instants or spans, a bound in text covers the whole
+        period it names, so `df.loc["2020-01":"2020-02"]` runs from the first
+        of January through the end of February.
         """
+        if self._temporal and self.is_monotonic_increasing:
+            values = self.to_series()
+            ends = [None if b is None else _temporal_bounds(values, b, True) for b in (start, end)]
+            if (start is None or ends[0]) and (end is None or ends[1]):
+                first = 0 if ends[0] is None else int((values < ends[0][0]).sum())
+                last = len(values) if ends[1] is None else int((values < ends[1][1]).sum())
+                return slice(first, last, step)
         try:
             first, last, stride = self._inner.slice_indexer(
                 start, end, 1 if step is None else int(step)

@@ -678,7 +678,11 @@ class Timestamp(_datetime.datetime):
             TypeError: If the year, month and day are not all there.
         """
         if ts_input is not _KEEP:
-            year, month, day = ts_input, year, month
+            # Spelled out by position, every field sits one slot later than its
+            # name, the way pandas reads `Timestamp(2020, 1, 1, 6, 30)`.
+            year, month, day, hour, minute, second, microsecond = (
+                ts_input, year, month, day, hour, minute, second,
+            )  # fmt: skip
         if year is None or month is None or day is None:
             raise DTypeError(
                 "a Timestamp built from fields needs at least a year, a month and a day"

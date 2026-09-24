@@ -8,6 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: label lookup on instants and spans
+
+- An index of instants now answers `loc`, `at`, `[]`, `get_loc`, `slice_indexer` and `in` with a Timestamp, a `datetime` or text, the way pandas does. Text that names a year, quarter, month, day, hour or minute coarser than the labels picks every row inside that period, as a slice when the labels rise, and a slice with text bounds runs to the end of the period the upper bound names. Zoned labels read naive text on their own clock and refuse a naive Timestamp in pandas' words. An index of spans answers a Timedelta or its text the same way, and `index[i]` on either gives back the Timestamp or Timedelta.
+- `Timestamp(2020, 1, 1, 6, 30)` spelled out by position now keeps the hour, minute, second and microsecond, where it used to read them one slot off.
+
 ### Changed: an inner or semi join steps over probe rows that matched nothing
 
 When the built side of an inner or semi join is small, most probe rows usually find nothing: TPC-H q8 probes six million lines against about 1,300 parts and under one in a hundred hits. The pairing walk still visited every row, twice, once to count and once to write. It now reads sixteen probe codes at a time and steps past the block in one go when all sixteen are the miss code, which has no rows behind it. Left, outer and anti joins walk every row as before, since a miss there still makes a row. On a busy 8 core VM this cut the instructions per run by about a fifth on q8 and a sixth on q5. The load on that box was too high for the wall clock to show it cleanly.
