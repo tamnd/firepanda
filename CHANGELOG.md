@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `JOIN BY (TYPE t)`, the spelling DuckDB gives its internal join types, for the six that are ordinary joins: inner, left, right, full (or outer), semi and anti, with an optional `_join` on the end and in any case. Each one builds and prints as the regular join it names. The mark, single, right_semi and right_anti types are still refused by name, and a name that is no join type at all is a parser error that says so.
+
 ### Added: a Parquet read can hold the string columns that repeat as codes
 
 `Session.run` takes `encode_strings`, and with it on, each string column of the answer whose values repeat sixteen times on average comes back dictionary encoded, with `dtype` still string. `encode_repetitive` in `kernel/dictionary.mojo` makes the call: it hashes the first 64K rows and gives up there if they do not repeat enough, so a comment column costs one hash of a sample, and otherwise hashes the whole column and keeps the distinct values in the order they first appear. A column of only nulls is left flat. On TPC-H sf1 lineitem, `l_returnflag`, `l_linestatus`, `l_shipinstruct` and `l_shipmode` go from 96, 96, 146 and 96 MB to 24 MB each and `l_comment` stays flat, which takes the frame from 1150 MB to 813 and the peak of the read from 2.80 GB to 2.58 on a six core Linux machine. The option is off by default until every kernel the TPC-H queries reach can read the encoding (#979).
@@ -19,6 +23,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Removed
 
 - The shortcut from 0.8.29 that answered a whole input `SUM(x + c)`, `SUM(x - c)`, `SUM(c - x)` or `SUM(x * c)` from the sum and the count of `x`. The lowering of an aggregation already says not to do this: ClickBench q29 exists to measure whether an engine fuses an expression into a reduction, and answering it with algebra reports a number the engine did not earn. The reduction builds and sums every column again, one at a time, as it did in 0.8.28.
+
 ### Changed: the text tests on a series read an encoded column once per distinct value
 
 `str_contains`, `str_contains_in_order`, `str_starts_with` and `str_ends_with` on a series whose column is dictionary encoded run over the distinct values and spread the answer over the rows by code, so a test on six million rows of seven values is seven tests and a gather. `str_slice` decodes first, because its answer is text and keeping it encoded would mean deduplicating the cut values again. These are the text calls the TPC-H bench makes on columns the Parquet read can now encode (#979).
@@ -38,8 +43,6 @@ A patch release. SQL reads `GROUPING SETS`, `CUBE`, `ROLLUP` and `GROUPING()`, a
 The pipeline's scan now decodes a column held in any encoding but flat as it hands each morsel out, instead of every operator refusing it. The flat copy only ever exists a morsel at a time, so a query over a frame of dictionary encoded strings pays for a few megabytes of views per morsel and not for the whole column. An operator taught to read the codes will skip this, one operator at a time (#979).
 
 ### Added
-
-- `JOIN BY (TYPE t)`, the spelling DuckDB gives its internal join types, for the six that are ordinary joins: inner, left, right, full (or outer), semi and anti, with an optional `_join` on the end and in any case. Each one builds and prints as the regular join it names. The mark, single, right_semi and right_anti types are still refused by name, and a name that is no join type at all is a parser error that says so.
 
 - A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
 
