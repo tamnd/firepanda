@@ -21,6 +21,9 @@ An infinity makes the mean NaN and every moment NaN with it, and the sums skippe
 ### Added: group ffill, bfill, pct_change and filter
 
 `groupby(...).ffill()` and `bfill()` fill each missing value from the last or next value in its group, and `limit` stops after that many missing rows in a row. A row whose key is missing answers missing, and an integer column that gets a missing value widens to float64, as it does in pandas. `pct_change` divides each value by the group's own shift and subtracts one, with no fill first, as pandas 3 does, and refuses `freq`. `filter` calls the function once per group on the group's rows and keeps the rows of the groups it answers True for. On a frame, an answer that is not one flag raises pandas' TypeError, and on a column any truthy value keeps the group. `dropna=False` is refused. All four carry repeated row labels through unchanged, and `python/tests/test_group_fills.py` checks them against pandas.
+### Changed: text is hashed sixteen bytes a step in two lanes
+
+`hash_bytes`, which every text key goes through on its way into a group by, a join, a factorize or an `isin`, used to take a word of eight bytes at a time through the whole splitmix finalizer, so a key was one long chain of multiplies. It now takes sixteen bytes a step in two lanes of xxHash64's round, reads the bytes left over as overlapping words rather than one at a time, and finishes with the same `mix`. A 90 byte URL hashes in 5 ns rather than 20 and a short key in 1.5 ns rather than 2.2, with the same spread over both the low and the high bits.
 
 ### Added: `describe` and `kurt` on a series and a frame
 
