@@ -2624,6 +2624,48 @@ def _nan_over_gaps_frame(inner: Any, op: str, left: Any, right: Any, axis: int =
     return inner._widened_for_missing()
 
 
+def _power_realigned(inner: Any, op: str, left: Any, right: Any, flip: bool) -> Any:
+    """An aligned power worked out again over NaN, which is what pandas raises.
+
+    pandas lines the two operands up first, so a gap is a NaN before the power
+    is taken, and numpy answers `1 ** nan` and `nan ** 0` with 1. The kernel
+    answers a gap with a null before it looks at either value, so for a power
+    the two sides are lined up here, with NaN in each gap, and the power is
+    taken again over operands that are labelled the same.
+
+    Args:
+        inner: What the kernel answered, a series or a frame.
+        op: The operator's name.
+        left: The series or frame the operator was called on.
+        right: The other operand, of the same kind.
+        flip: Whether the operator was the reflected one.
+
+    Returns:
+        The power taken over the lined up operands when `op` is a power that
+        opened a gap, and `inner` unchanged otherwise, including when a side
+        has a repeated label and cannot be lined up by label.
+    """
+    from ._frame import DataFrame, Series
+
+    if op != "pow" or not _labels_differ(left, right, 0):
+        return inner
+    try:
+        if isinstance(right, DataFrameMixin):
+            if not any(inner.null_counts()):
+                return inner
+            answer = DataFrame._wrap(inner)
+            rows, columns = answer.index.to_list(), list(answer.columns)
+            lined = [side.reindex(index=rows, columns=columns) for side in (left, right)]
+            return lined[0]._inner.binary_frame(lined[1]._inner, op, flip, None)
+        if inner.null_count() == 0:
+            return inner
+        rows = Series._wrap(inner).index.to_list()
+        lined = [side.reindex(rows) for side in (left, right)]
+        return lined[0]._inner.binary_series(lined[1]._inner, op, flip, None)
+    except Exception:
+        return inner
+
+
 def _broadcast_widened(frame: Any, series: Any, op: str) -> Any:
     """A series to broadcast along a frame's columns, widened the way pandas widens it.
 
@@ -5309,6 +5351,7 @@ class DataFrameMixin:
                         _two_valued_frame(self._inner.compare_frame(other._inner, op), op)
                     )
                 answer = self._inner.binary_frame(other._inner, op, flip, None)
+                answer = _power_realigned(answer, op, self, other, flip)
                 return DataFrame._wrap(
                     _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
@@ -5344,6 +5387,8 @@ class DataFrameMixin:
         try:
             if isinstance(other, DataFrameMixin):
                 answer = self._inner.binary_frame(other._inner, op, flip, fill_value)
+                if fill_value is None:
+                    answer = _power_realigned(answer, op, self, other, flip)
                 return DataFrame._wrap(
                     _nan_over_gaps_frame(_two_valued_frame(answer, op), op, self, other)
                 )
@@ -7387,6 +7432,7 @@ class SeriesMixin:
                         _two_valued(self._inner.compare_series(other._inner, op), op)
                     )
                 answer = self._inner.binary_series(other._inner, op, flip, None)
+                answer = _power_realigned(answer, op, self, other, flip)
                 return Series._wrap(_nan_over_gaps(_two_valued(answer, op), op, self, other))
             return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:
@@ -7412,6 +7458,8 @@ class SeriesMixin:
         try:
             if isinstance(other, SeriesMixin):
                 answer = self._inner.binary_series(other._inner, op, flip, fill_value)
+                if fill_value is None:
+                    answer = _power_realigned(answer, op, self, other, flip)
                 return Series._wrap(_nan_over_gaps(_two_valued(answer, op), op, self, other))
             return Series._wrap(_two_valued(self._inner.binary_value(other, op, flip), op))
         except Exception as error:

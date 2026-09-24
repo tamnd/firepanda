@@ -12,6 +12,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 - A streaming group by on two keys or more, when one of them is text, keeps its groups in a map that lasts across chunks rather than stacking the running table with every chunk's table and grouping the two again. Each row's tuple is written out as bytes, a presence byte per key and a length in front of text, on the cores, and looked up in the text map the single key route already used, so a null in a key no longer matters to the route either. ClickBench q18 at 1M went from 80.2 to 48.2 ms and q39 from 112.2 to 67.4 ms through the SQL planner, and the planner's total over the 43 queries against the hand written port went from 1.42 to 1.28, with all 43 still agreeing. A table that arrives in one chunk and a tuple of integers alone stay on the old route, because the map inserts its groups one at a time and loses to one parallel pass there. A float key does too.
 
+### Fixed
+
+- A power between two labelled operands answers what pandas answers in a row only one side has, which is 1 where numpy's `1 ** nan` or `nan ** 0` is 1 and NaN everywhere else. The kernel answers a gap with a null before it looks at either value, so the pandas facing layer lines the two sides up by label with NaN in each gap and takes the power again. That covers a series with a series and a frame with a frame, through `**`, its reflection and `pow` and `rpow` without a `fill_value`. A side with a repeated label cannot be lined up that way and keeps the NaN it had. (Issue #8)
+
 ## [0.8.28] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
