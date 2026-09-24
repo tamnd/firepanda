@@ -5387,6 +5387,121 @@ class DataFrameMixin:
         """What Python's own `round` calls, which is `round` with no extras."""
         return self.round(decimals)
 
+    def __getattr__(self, name: str) -> Any:
+        """A column read as an attribute, `df.price` for `df["price"]`.
+
+        Python asks here only once the ordinary lookup has failed, so a method
+        wins over a column of the same name, as it does in pandas: `df.sum` is
+        the method even when there is a column called `sum`.
+
+        Args:
+            name: The attribute asked for.
+
+        Returns:
+            The column of that name, as a series.
+
+        Raises:
+            AttributeError: If the frame has no column of that name.
+        """
+        if not name.startswith("__") and name != "_inner":
+            try:
+                names = self._inner.names()
+            except AttributeError:
+                names = []
+            if name in names:
+                return self[name]
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __dir__(self) -> list[str]:
+        """The attributes, with the columns that can be read as one among them."""
+        names = [name for name in self._inner.names() if name.isidentifier()]
+        return sorted(set(super().__dir__()) | set(names))
+
+    def assign(self, **kwargs: Any) -> DataFrame:
+        """The frame with some columns added or replaced, one keyword a column.
+
+        The keywords are taken in order and each one sees the frame the ones
+        before it made, so a later column can be worked out from an earlier
+        one, which is what pandas does. A name the frame has keeps its place and
+        a new name goes on the end.
+
+        Args:
+            **kwargs: The columns, by name. A value is a function of the frame
+                so far, a series lined up on the row labels, a frame of one
+                column, a mapping read as a series, a list as long as the frame,
+                or one value for every row.
+
+        Returns:
+            A new frame. This one is not changed.
+        """
+        from ._frame import DataFrame
+
+        out = DataFrame._wrap(self._inner)
+        for name, value in kwargs.items():
+            out = out._assigned(name, value(out) if callable(value) else value)
+        return out
+
+    def _assigned(self, name: str, value: Any) -> DataFrame:
+        """The frame with one column added or replaced, for `assign`.
+
+        Args:
+            name: The column's name.
+            value: What `assign` was given for it, after calling it.
+
+        Returns:
+            A new frame.
+
+        Raises:
+            InvalidArgumentError: For a frame of several columns or a list of
+                the wrong length, in pandas' words.
+            TypeError: For a set, which has no order to give the rows.
+            UnsupportedError: For `None`, which pandas makes an object column.
+        """
+        from ._frame import DataFrame, Series, _series_to_frame
+
+        rows = len(self)
+        if isinstance(value, DataFrame):
+            if len(value.columns) != 1:
+                raise InvalidArgumentError(
+                    f"Cannot set a DataFrame with multiple columns to the single column {name}"
+                )
+            value = value[value.columns[0]]
+        if isinstance(value, (set, frozenset)):
+            raise TypeError("'set' type is unordered")
+        if value is None:
+            raise UnsupportedError(
+                "assign(name=None) is a column of None, which pandas holds as objects"
+                " and firepanda has no object column to hold"
+            )
+        if isinstance(value, collections.abc.Mapping):
+            value = Series(dict(value))
+        if hasattr(value, "tolist") and not isinstance(value, Series):
+            value = value.tolist()
+        if isinstance(value, Series):
+            if value.index.tolist() != self.index.tolist():
+                value = value.reindex(self.index)
+            column = value
+        elif isinstance(value, (str, bytes)) or not isinstance(value, collections.abc.Iterable):
+            column = Series([value]).head(rows) if rows <= 1 else Series([value] * rows)
+        else:
+            values = list(value)
+            if not len(self.columns) and not rows:
+                return DataFrame({name: values})
+            if len(values) != rows:
+                raise InvalidArgumentError(
+                    f"Length of values ({len(values)}) does not match length of index ({rows})"
+                )
+            column = Series(values)
+        piece = _series_to_frame(column._inner, name)._inner
+        try:
+            if name not in self.columns:
+                return DataFrame._wrap(self._inner.stack_columns([piece]))
+            order = list(self.columns)
+            rest = self._inner.drop([name])
+            return DataFrame._wrap(rest.stack_columns([piece]).select(order))
+        except Exception as error:
+            raise translate(error) from None
+
     def rank(
         self,
         axis: Any = 0,
