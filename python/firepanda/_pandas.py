@@ -4705,6 +4705,131 @@ def _one_row(owner: Any, inner: Any, position: int, chosen: list[str]) -> Any:
     return _with_row_labels(column, list(chosen)).rename_axis(None).rename(label)
 
 
+_CORRELATIONS = ("pearson", "spearman", "kendall")
+"""The methods pandas names, of which the first two are written here."""
+
+
+def _correlation_method(method: Any) -> None:
+    """Checks a correlation method the way pandas does, after the values are read.
+
+    Raises:
+        ValueError: For a name pandas does not know, with pandas' message.
+        NotImplementedError: For Kendall and a callable, which pandas hands to
+            scipy and to the caller's function one pair of columns at a time.
+    """
+    if method in _CORRELATIONS[:2]:
+        return
+    if method == "kendall" or callable(method):
+        raise NotImplementedError(
+            f"method={method!r} is not supported yet, because Kendall's tau counts the pairs"
+            " of rows that agree in order, which is a different computation from the"
+            " sums Pearson and Spearman share"
+        )
+    raise InvalidArgumentError(
+        "method must be either 'pearson', 'spearman', 'kendall', or a callable,"
+        f" '{method}' was supplied"
+    )
+
+
+def _first_text(columns: list[Series]) -> Any:
+    """The value numpy stops at when it reads text columns as floats: the first
+    present one in row order, the leftmost column first within a row."""
+    best: tuple[int, int] | None = None
+    for at, column in enumerate(columns):
+        present = column.notna().tolist()
+        if True in present and (best is None or present.index(True) < best[0]):
+            best = (present.index(True), at)
+    return None if best is None else columns[best[1]].iloc[best[0]]
+
+
+def _as_floats(columns: list[Series]) -> list[Series]:
+    """The columns as float64, the way pandas reads them for a correlation.
+
+    Integers and flags become floats. A text column holding a value raises
+    pandas' ValueError, and one holding nothing reads as missing, as numpy
+    reads it. Anything else, a date or a category, is refused.
+
+    Raises:
+        ValueError: For a text column with a value in it.
+        NotImplementedError: For a column that is neither a number nor text.
+    """
+    text = [column for column in columns if column.dtype == "string"]
+    first = _first_text(text)
+    if first is not None:
+        raise InvalidArgumentError(f"could not convert string to float: {first!r}")
+    out = []
+    for column in columns:
+        kind = column.dtype
+        if kind == "string":
+            out.append(column.isna().astype("float64") * math.nan)
+        elif _counts_as_numeric(kind):
+            out.append(column if kind == "float64" else column.astype("float64"))
+        else:
+            raise NotImplementedError(
+                f"a correlation over a {kind} column is not supported yet, because pandas"
+                " reads it as numbers through numpy and firepanda has no such reading"
+            )
+    return out
+
+
+def _paired(x: Series, y: Series) -> tuple[Series, Series]:
+    """The rows where both columns hold a value, which is the only rows pandas uses."""
+    both = x.notna() & y.notna()
+    if bool(both.all()):
+        return x, y
+    return x[both], y[both]
+
+
+def _pearson(x: Series, y: Series, method: str, least: Any) -> float:
+    """Pearson's r over the rows both columns have, or Spearman's as r of the ranks.
+
+    NaN where fewer than `least` rows are shared or either side is constant,
+    which is what pandas answers there too.
+    """
+    x, y = _paired(x, y)
+    rows = len(x)
+    if rows == 0 or rows < (1 if least is None else least):
+        return math.nan
+    if method == "spearman":
+        x, y = x.rank(), y.rank()
+    dx, dy = x - x.mean(), y - y.mean()
+    spread = math.sqrt(float((dx * dx).sum())) * math.sqrt(float((dy * dy).sum()))
+    if spread == 0 or spread != spread:
+        return math.nan
+    return float((dx * dy).sum()) / spread
+
+
+def _covariance(x: Series, y: Series, least: Any, ddof: Any) -> float:
+    """The covariance over the rows both columns have, divided by rows less `ddof`.
+
+    Where that divisor is not above zero the answer is numpy's: NaN for a sum
+    of zero, and an infinity of the sum's sign otherwise.
+    """
+    x, y = _paired(x, y)
+    rows = len(x)
+    if rows == 0 or rows < (1 if least is None else least):
+        return math.nan
+    total = float(((x - x.mean()) * (y - y.mean())).sum())
+    divisor = rows - (1 if ddof is None else ddof)
+    if divisor <= 0:
+        return math.nan if total == 0 else math.copysign(math.inf, total)
+    return total / divisor
+
+
+def _square(names: list[str], cell: Callable[[int, int], float]) -> DataFrame:
+    """A frame labelled by `names` both ways, symmetric, with `cell` for each pair."""
+    from ._frame import DataFrame
+
+    values = [[math.nan] * len(names) for _ in names]
+    for row in range(len(names)):
+        for column in range(row, len(names)):
+            values[row][column] = values[column][row] = cell(row, column)
+    return DataFrame(
+        {name: [values[row][at] for row in range(len(names))] for at, name in enumerate(names)},
+        index=list(names),
+    )
+
+
 def _narrowed(inner: Any, where: tuple[Any, ...]) -> Any:
     """Applies a row selection that has already been read to a frame.
 
@@ -7286,6 +7411,37 @@ class DataFrameMixin:
             return _labelled(names, answer).rename_axis(None).rename(float(wanted[0]))
         return _quantile_rows(wanted, names, columns)
 
+    def _corr_matrix(self, method: Any, min_periods: Any, numeric_only: bool) -> DataFrame:
+        """Every numeric column correlated with every other, over the rows each pair shares.
+
+        A pair's rows are the ones where both hold a value, so the answer for
+        one pair does not depend on a gap in a third column, which is pandas'
+        pairwise reading. Spearman ranks those rows before it correlates them.
+        """
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        names = list(read._inner.names())
+        columns = _as_floats([read[name] for name in names])
+        _correlation_method(method)
+        return _square(names, lambda a, b: _pearson(columns[a], columns[b], method, min_periods))
+
+    def _cov_matrix(self, min_periods: Any, ddof: Any, numeric_only: bool) -> DataFrame:
+        """Every numeric column's covariance with every other, pairwise.
+
+        pandas takes two roads here and they differ. With no gap anywhere it asks
+        numpy, which divides by rows less `ddof` and ignores `min_periods` unless
+        it is above the height, where every cell is NaN. With a gap it takes the
+        pairwise road, which divides by rows less one whatever `ddof` says and
+        makes a pair with fewer than `min_periods` rows NaN. Both are matched.
+        """
+        read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
+        names = list(read._inner.names())
+        columns = _as_floats([read[name] for name in names])
+        if any(int(column.isna().sum()) for column in columns):
+            return _square(names, lambda a, b: _covariance(columns[a], columns[b], min_periods, 1))
+        if min_periods is not None and min_periods > len(self):
+            return _square(names, lambda a, b: math.nan)
+        return _square(names, lambda a, b: _covariance(columns[a], columns[b], None, ddof))
+
     def _nunique(self, axis: Any, dropna: bool) -> Series:
         """Counts the distinct values in every column.
 
@@ -9858,6 +10014,42 @@ class SeriesMixin:
             return self._inner.reduce(kind, 0.0)
         except Exception as error:
             raise translate(error) from None
+
+    def _aligned_with(self, other: Series) -> tuple[Series, Series]:
+        """This column and another over the labels both have, as pandas aligns them."""
+        from ._frame import Series
+
+        if not isinstance(other, Series):
+            raise TypeError(f"other must be a Series, not {type(other).__name__}")
+        if self.index.equals(other.index):
+            return cast("Series", self), other
+        both = concat(
+            [self.rename("__firepanda_left"), other.rename("__firepanda_right")],
+            axis=1,
+            join="inner",
+        )
+        return both["__firepanda_left"], both["__firepanda_right"]
+
+    def _corr(self, other: Series, method: Any, min_periods: Any) -> float:
+        """The correlation with another column over the labels both have."""
+        mine, theirs = self._aligned_with(other)
+        if len(mine) == 0:
+            return math.nan
+        mine, theirs = _as_floats([mine, theirs])
+        _correlation_method(method)
+        return _pearson(mine, theirs, method, min_periods)
+
+    def _cov(self, other: Series, min_periods: Any, ddof: Any) -> float:
+        """The covariance with another column over the labels both have."""
+        mine, theirs = self._aligned_with(other)
+        if len(mine) == 0:
+            return math.nan
+        mine, theirs = _as_floats([mine, theirs])
+        return _covariance(mine, theirs, min_periods, ddof)
+
+    def _autocorr(self, lag: int) -> float:
+        """The correlation with the column moved `lag` rows along, as pandas writes it."""
+        return self._corr(cast("Any", self).shift(lag), "pearson", None)
 
     def _quantile(self, q: Any, interpolation: str) -> Any:
         """Runs the quantile over the whole column.

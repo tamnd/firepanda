@@ -562,6 +562,69 @@ SPREAD: tuple[tuple[str, str], ...] = (
 """The three that also take a delta degrees of freedom."""
 
 
+def _correlations(py: str) -> tuple[Member, ...]:
+    """Writes `corr` and `cov` for one class, and `autocorr` on a series.
+
+    A series pairs itself with another column and answers a number, and a frame
+    pairs every numeric column with every other and answers the square of them.
+    The signatures are pandas' own and differ between the two classes, and the
+    work is in `_pandas.py` where it is written with column arithmetic.
+
+    Args:
+        py: The class name, `DataFrame` or `Series`.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    if py == "DataFrame":
+        return (
+            Member(
+                name="corr",
+                kind="method",
+                signature=(
+                    'method: Any = "pearson", min_periods: int = 1, numeric_only: bool = False'
+                ),
+                body="self._corr_matrix(method, min_periods, numeric_only)",
+                doc="The correlation of every numeric column with every other, pairwise.",
+                returns="DataFrame",
+            ),
+            Member(
+                name="cov",
+                kind="method",
+                signature="min_periods: Any = None, ddof: Any = 1, numeric_only: bool = False",
+                body="self._cov_matrix(min_periods, ddof, numeric_only)",
+                doc="The covariance of every numeric column with every other, pairwise.",
+                returns="DataFrame",
+            ),
+        )
+    return (
+        Member(
+            name="corr",
+            kind="method",
+            signature='other: Any, method: Any = "pearson", min_periods: Any = None',
+            body="self._corr(other, method, min_periods)",
+            doc="The correlation with another column, over the rows both have a value in.",
+            returns="Any",
+        ),
+        Member(
+            name="cov",
+            kind="method",
+            signature="other: Any, min_periods: Any = None, ddof: Any = 1",
+            body="self._cov(other, min_periods, ddof)",
+            doc="The covariance with another column, over the rows both have a value in.",
+            returns="Any",
+        ),
+        Member(
+            name="autocorr",
+            kind="method",
+            signature="lag: int = 1",
+            body="self._autocorr(lag)",
+            doc="The correlation of the column with itself moved `lag` rows along.",
+            returns="Any",
+        ),
+    )
+
+
 def _reductions(py: str) -> tuple[Member, ...]:
     """Writes the sixteen reduction members for one class, fifteen on a series.
 
@@ -3012,6 +3075,7 @@ FRAME = Exposed(
             returns="Resampler",
         ),
         *_reductions("DataFrame"),
+        *_correlations("DataFrame"),
         *_transformations("DataFrame"),
         *_operators("DataFrame"),
     ),
@@ -3748,6 +3812,7 @@ SERIES = Exposed(
             returns="tuple[object, ...]",
         ),
         *_reductions("Series"),
+        *_correlations("Series"),
         *_transformations("Series"),
         Member(
             name="rolling",
