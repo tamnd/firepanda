@@ -97,6 +97,19 @@ def test_a_mix_pandas_holds_as_object_is_refused(
         firepanda.DataFrame(table).iloc[0]
 
 
+@pytest.mark.parametrize("position", [3, -4, 9999])
+def test_a_position_past_the_end_is_pandas_mistake(firepanda: ModuleType, position: int) -> None:
+    """IndexError with pandas' words, from either end."""
+    import pandas as pd
+
+    table = TABLES["whole"]
+    with pytest.raises(IndexError) as theirs:
+        pd.DataFrame(table).iloc[position]
+    with pytest.raises(IndexError) as mine:
+        firepanda.DataFrame(table).iloc[position]
+    assert str(mine.value) == str(theirs.value)
+
+
 NAMES: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame({"a": [1, 2, 4], "b": [1.0, 3.0, 9.0]}).quantile(0.5),
     lambda m: m.DataFrame({"a": [1, 2, 4], "b": [1.0, 3.0, 9.0]}).quantile(1),

@@ -4692,8 +4692,11 @@ def _one_row(owner: Any, inner: Any, position: int, chosen: list[str]) -> Any:
     """
     from ._frame import Series
 
+    height = inner.length()
+    if not -height <= position < height:
+        raise IndexError("single positional indexer is out-of-bounds")
     if position < 0:
-        position += inner.length()
+        position += height
     held = inner.select(list(chosen)).slice_rows(position, position + 1)
     kind = _row_type([held.column(name).dtype() for name in chosen])
     cells = [Series._wrap(held.column(name)).astype(kind) for name in chosen]
