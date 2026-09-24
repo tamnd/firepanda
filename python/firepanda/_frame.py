@@ -3260,6 +3260,27 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def value_counts(
+        self,
+        normalize: bool = False,
+        sort: bool = True,
+        ascending: bool = False,
+        bins: Any = None,
+        dropna: bool = True,
+    ) -> Any:
+        """How often each distinct value occurs, the most common first."""
+        try:
+            return self._value_counts(normalize, sort, ascending, bins, dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mode(self, dropna: bool = True) -> Any:
+        """The values that occur most often, in order."""
+        try:
+            return self._mode(dropna)
+        except Exception as error:
+            raise translate(error) from None
+
     def idxmax(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The label of the first largest value."""
         try:

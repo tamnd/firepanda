@@ -3463,6 +3463,25 @@ SERIES = Exposed(
             returns="Any",
         ),
         Member(
+            name="value_counts",
+            kind="method",
+            signature=(
+                "normalize: bool = False, sort: bool = True, ascending: bool = False,"
+                " bins: Any = None, dropna: bool = True"
+            ),
+            body="self._value_counts(normalize, sort, ascending, bins, dropna)",
+            doc="How often each distinct value occurs, the most common first.",
+            returns="Any",
+        ),
+        Member(
+            name="mode",
+            kind="method",
+            signature="dropna: bool = True",
+            body="self._mode(dropna)",
+            doc="The values that occur most often, in order.",
+            returns="Any",
+        ),
+        Member(
             name="idxmax",
             kind="method",
             signature="axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any",
