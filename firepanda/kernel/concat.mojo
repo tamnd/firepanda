@@ -178,6 +178,16 @@ def concat_refs_any(
         check_same_categories(parts[0][], parts[p][], "concat")
         total += len(parts[p][])
 
+    # A part held as codes is stacked as the strings it stands for. Two parts
+    # can hold different categories, and the flat stack below is the path a
+    # read takes and the one that is fast.
+    for p in range(len(parts)):
+        if not parts[p][].is_flat():
+            var flat = List[AnyArray](capacity=len(parts))
+            for q in range(len(parts)):
+                flat.append(parts[q][].decoded())
+            return concat_any(flat)
+
     if parts[0][].is_string():
         var payload_bytes = 0
         var pieces = List[_Piece](capacity=len(parts))
@@ -246,6 +256,8 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + String(b.type)
         )
     check_same_categories(a, b, "concat")
+    if not a.is_flat() or not b.is_flat():
+        return concat_two_any(a.decoded(), b.decoded())
     if a.is_string():
         var out = _StringStack(
             len(a) + len(b),

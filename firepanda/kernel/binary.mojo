@@ -816,6 +816,10 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     # for it.
     if (a.is_dictionary() or b.is_dictionary()) and op.is_comparison():
         return _dictionary_erased(a, b, op)
+    # Two columns held as codes have categories of their own, so a row of one
+    # and a row of the other only compare as the strings they stand for.
+    if not a.is_flat() or not b.is_flat():
+        return binary_any(a.decoded(), b.decoded(), op)
 
     # Checked first and for its own sake. Everything below assumes the pair has
     # a common type and that the operation is defined on it.
@@ -1350,7 +1354,7 @@ def compare_value_positions(
     Raises:
         If the constant cannot be read at the column's dtype.
     """
-    if not op.is_comparison() or a.is_dictionary():
+    if not op.is_comparison() or a.is_dictionary() or not a.is_flat():
         return None
     var scalar = resolve_constant(a.type, b, op)
     if scalar.is_null():

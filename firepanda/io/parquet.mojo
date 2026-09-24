@@ -880,8 +880,8 @@ def _cast_projection(
     for i in range(described.rows):
         if i != 0:
             out += ", "
-        var name = _quoted_name(described[0].strings()[i])
-        if described[1].strings()[i].startswith("DECIMAL("):
+        var name = _quoted_name(described[0].text_at(i))
+        if described[1].text_at(i).startswith("DECIMAL("):
             out += String("CAST(", name, " AS DOUBLE) AS ", name)
         else:
             out += name

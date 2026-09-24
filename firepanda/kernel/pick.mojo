@@ -609,6 +609,8 @@ def pick_any(
             StringArray(copy=a.categories()),
             a.type.ordered,
         )
+    if not a.is_flat() or not b.is_flat():
+        return pick_any(cond, a.decoded(), b.decoded())
     if a.is_string():
         return AnyArray(text_pick(cond, a.strings(), b.strings())).retyped(
             a.type

@@ -1007,6 +1007,38 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     return False
         return True
 
+    def _flat_at(self, at: List[Int]) -> Bool:
+        """Reports whether the columns at some positions are all held flat.
+
+        Args:
+            at: The column positions.
+
+        Returns:
+            False if any chunk of any of them is held in an encoding.
+        """
+        for k in range(len(at)):
+            for c in range(len(self.columns[at[k]].chunks)):
+                if not self.columns[at[k]].chunks[c].is_flat():
+                    return False
+        return True
+
+    def _decoded_at(self, at: List[Int]) raises -> Self:
+        """Returns the frame with the columns at some positions held flat.
+
+        Args:
+            at: The column positions.
+
+        Returns:
+            The same values, those columns one value a row.
+        """
+        var out = Self(copy=self)
+        for k in range(len(at)):
+            ref column = out.columns[at[k]]
+            for c in range(len(column.chunks)):
+                if not column.chunks[c].is_flat():
+                    column.chunks[c] = column.chunks[c].decoded()
+        return out^
+
     def decoded(self) raises -> Self:
         """Returns the frame with every column held one value a row.
 
@@ -3028,6 +3060,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
             left_at.append(here)
             right_at.append(there)
+
+        # A key held as codes is matched as the strings it stands for, since
+        # the two sides' categories are their own. The other columns keep
+        # their encoding and are gathered as codes.
+        if not self._flat_at(left_at) or not other._flat_at(right_at):
+            return self._decoded_at(left_at).join_on(
+                other._decoded_at(right_at),
+                left_on,
+                right_on,
+                kind,
+                suffix,
+                columns,
+            )
 
         var pairs = join_indices(
             self.column_refs(),
@@ -5677,7 +5722,7 @@ def _label_names(index: Index) raises -> List[String]:
         )
     var out = List[String](capacity=len(labels))
     for i in range(len(labels)):
-        out.append(String(labels.strings()[i]))
+        out.append(labels.text_at(i))
     return out^
 
 

@@ -657,7 +657,7 @@ def render_value(col: AnyArray, i: Int, options: DisplayOptions) -> String:
     # where escaping belongs and is where it happens.
     if col.is_string():
         try:
-            return col.strings()[i]
+            return col.text_at(i)
         except:
             return String("<", col.type, ">")
     if col.type.is_variable_width():

@@ -201,6 +201,11 @@ def reduce_any(
     if col.type.is_temporal():
         return _reduce_temporal(col, kind)
 
+    # Not over the categories. A filter keeps them all, so the smallest one may
+    # be a value no row holds any more.
+    if not col.is_flat():
+        return reduce_any(col.decoded(), kind, as_float)
+
     if col.is_string() and _reports_a_row(kind):
         return _reduce_text(col.strings(), kind)
 
@@ -297,6 +302,8 @@ def distinct_count_any(col: AnyArray) raises -> Int:
         return 0
     # Before the numeric dispatch, because uint8 is in ALL and a string column
     # would match it and count distinct first bytes.
+    if not col.is_flat():
+        return _distinct_codes(col)
     if col.is_string():
         return distinct_strings(col.strings())
 
@@ -304,6 +311,36 @@ def distinct_count_any(col: AnyArray) raises -> Int:
         if col.dtype() == candidate:
             return distinct_count(col.as_typed_view[candidate]())
     raise Error("nunique: unsupported dtype")
+
+
+def _distinct_codes(col: AnyArray) -> Int:
+    """Counts the categories a column held as codes still uses.
+
+    Its categories are distinct, so the count is how many of them some valid
+    row names, which is a mark per row and never a string compared.
+
+    Args:
+        col: A dictionary encoded column.
+
+    Returns:
+        How many distinct non-null values it holds.
+    """
+    var count = len(col.text.value())
+    var seen = List[Bool](length=count, fill=False)
+    var codes = col.data.values.bitcast[DType.int32]()
+    ref validity = col.data.validity
+    var all_valid = validity.all_valid()
+    var found = 0
+    for i in range(len(col)):
+        if not all_valid and not validity.get(i):
+            continue
+        var code = Int(codes.unsafe_offset(i).unsafe_load())
+        if not seen[code]:
+            seen[code] = True
+            found += 1
+            if found == count:
+                break
+    return found
 
 
 def distinct_count[dt: DType](col: Array[dt]) raises -> Int:

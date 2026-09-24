@@ -369,6 +369,11 @@ def cast_any(
     # look like an answer.
     if col.is_dictionary():
         return cast_any(AnyArray(decode_dictionary(col)), to, strict, nearest)
+    # Not through the categories, though there are fewer of them. A category no
+    # row uses any more, after a filter, would be parsed as well, and a strict
+    # cast would raise on a value the column no longer holds.
+    if not col.is_flat():
+        return cast_any(col.decoded(), to, strict, nearest)
     # A string column must not fall through to the number path: its physical
     # dtype is uint8, so `_cast_erased` would find the uint8 source arm and
     # convert the first byte of every 16 byte view.
@@ -411,6 +416,8 @@ def cast_any(
         Error: If the type has no conversion from this column's type, or the
             column is text holding a value that is not a number.
     """
+    if not col.is_flat():
+        return cast_any(col.decoded(), to, strict, nearest)
     if to.kind == TypeKind.DICTIONARY:
         return _cast_to_dictionary(col, to)
     # A dictionary source is decoded first and then cast as text. That is one

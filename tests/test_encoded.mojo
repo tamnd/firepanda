@@ -23,6 +23,11 @@ from firepanda.io.arrow_export import export_array, export_schema
 from firepanda.io.arrow_import import import_array
 from firepanda.io.arrow_ipc import read_ipc_stream
 from firepanda.io.arrow_ipc_write import write_ipc_stream_bytes
+from firepanda.io.write import WriteOptions, write_csv_bytes
+from firepanda.kernel.cast import cast_any
+from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.nulls import coalesce_any, fill_forward_any
+from firepanda.kernel.reduce import distinct_count_any, reduce_any
 from firepanda.kernel.member import is_in_any
 from firepanda.kernel.sort import argsort_any, argsort_multi, is_sorted_any
 from firepanda.kernel.select import filter_any, gather_any, take_any
@@ -206,6 +211,108 @@ def test_an_export_hands_out_the_strings() raises:
     var read = read_ipc_stream(Span(bytes))
     assert_true(read[0].is_flat())
     same_text(read[0], status())
+
+
+def same_numbers[dt: DType](a: AnyArray, b: AnyArray) raises:
+    ref x = a.as_typed_view[dt]()
+    ref y = b.as_typed_view[dt]()
+    assert_equal(len(x), len(y), "rows")
+    for i in range(len(x)):
+        assert_equal(x.is_valid(i), y.is_valid(i), "null at " + String(i))
+        if x.is_valid(i):
+            assert_equal(x[i], y[i], "row " + String(i))
+
+
+def test_the_text_methods_match_the_flat_ones() raises:
+    var held = Series(String("s"), status())
+    var flat = Series(String("s"), status().decoded())
+    same_text(held.chars_upper().values, flat.chars_upper().values)
+    same_text(
+        held.chars_replace("at", "AT", -1).values,
+        flat.chars_replace("at", "AT", -1).values,
+    )
+    same_text(held.chars_get(1).values, flat.chars_get(1).values)
+    same_numbers[DType.int64](
+        held.chars_length().values, flat.chars_length().values
+    )
+    same_numbers[DType.int64](
+        held.chars_find("t", None, None, False).values,
+        flat.chars_find("t", None, None, False).values,
+    )
+    same_numbers[DType.bool](
+        held.chars_is_alpha().values, flat.chars_is_alpha().values
+    )
+    var parts = held.chars_partition(" ", False)
+    var bare = flat.chars_partition(" ", False)
+    for k in range(3):
+        same_text(parts[k].values, bare[k].values)
+    for i in range(8):
+        assert_equal(held.text(i), flat.text(i), "text " + String(i))
+    same_text(AnyArray(held.as_strings()), AnyArray(flat.as_strings()))
+    assert_equal(held.chars_upper().name.value(), "s")
+
+
+def test_a_string_answer_per_category_goes_out_flat() raises:
+    # Upper casing two categories into one answer has to leave codes into a
+    # list without a repeat in it, so the answer comes back flat.
+    var codes = Array[DType.int32](4)
+    var picked: List[Int32] = [0, 1, 1, 0]
+    for i in range(4):
+        codes.set_valid(i, picked[i])
+    var col = AnyArray.dictionary_encoded(codes^, strings_from_list(["a", "A"]))
+    var up = Series(String("s"), col^).chars_upper()
+    assert_true(up.values.is_flat())
+    for i in range(4):
+        assert_equal(up.text(i), "A")
+
+
+def test_the_kernels_that_decode_match_the_flat_ones() raises:
+    var col = status()
+    var flat = col.decoded()
+    same_text(concat_two_any(col, flat), concat_two_any(flat, flat))
+    same_text(fill_forward_any(col), fill_forward_any(flat))
+    same_text(coalesce_any(col, flat), coalesce_any(flat, flat))
+    same_text(
+        cast_any(col, LogicalType.STRING), cast_any(flat, LogicalType.STRING)
+    )
+    same_text(reduce_any(col, AggKind.MIN), reduce_any(flat, AggKind.MIN))
+    same_text(reduce_any(col, AggKind.MAX), reduce_any(flat, AggKind.MAX))
+    assert_equal(distinct_count_any(col), 3)
+    # A filter keeps every category, so a count of them would say three here.
+    var mask = Array[DType.bool](8)
+    for i in range(8):
+        mask.set_valid(i, i != 0 and i != 5)
+    var kept = filter_any(col, mask)
+    assert_false(kept.is_flat())
+    assert_equal(distinct_count_any(kept), 2)
+    same_text(
+        reduce_any(kept, AggKind.MAX), reduce_any(kept.decoded(), AggKind.MAX)
+    )
+
+
+def test_a_frame_with_a_column_held_as_codes_joins_and_writes() raises:
+    var on: List[String] = ["status"]
+    var got = frame(status()).join_on(frame(status()), on, on)
+    var want = frame(status().decoded()).join_on(
+        frame(status().decoded()), on, on
+    )
+    assert_equal(len(got), len(want), "rows")
+    for c in range(got.width()):
+        if want[c].is_string():
+            same_text(got[c], want[c])
+    var specs: List[AggSpec] = [AggSpec("status", AggKind.MAX, "top")]
+    var by: List[String] = ["n"]
+    var grouped = frame(status()).group_by(by.copy(), specs.copy(), False, True)
+    var bare = frame(status().decoded()).group_by(by^, specs^, False, True)
+    same_text(grouped[1], bare[1])
+    assert_equal(
+        String(from_utf8=Span(write_csv_bytes(frame(status()), WriteOptions()))),
+        String(
+            from_utf8=Span(
+                write_csv_bytes(frame(status().decoded()), WriteOptions())
+            )
+        ),
+    )
 
 
 def main() raises:
