@@ -54,6 +54,7 @@ from .errors import (
 )
 
 if TYPE_CHECKING:
+    from ._array import FirepandaArray
     from ._frame import (
         DataFrame,
         DataFrameGroupBy,
@@ -4975,6 +4976,53 @@ def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
     return work if frame else work[values].rename(owner.name)
 
 
+def _first_seen(column: Series) -> Series:
+    """Flags for the first row holding each value, a missing value counting once.
+
+    A categorical column is keyed by its codes, since the core does not look for
+    duplicates among categorical values and two equal values have equal codes.
+    """
+    key = column.cat.codes if column.dtype == "category" else column
+    return ~key.duplicated()
+
+
+def _factorized(column: Series, sort: Any, use_na_sentinel: Any) -> tuple[Series, Series]:
+    """The code of each row and the values the codes point at, both as columns.
+
+    The codes are the group numbers of a group by on the column, which numbers
+    the groups in first seen order, or in sorted order under `sort`. A float
+    NaN is a group of its own there and a null is not, so when the NaN group
+    is there and pandas wants it left out, every code after it moves down one.
+
+    Raises:
+        NotImplementedError: For a categorical column, whose uniques pandas
+            gives as a categorical index, which firepanda does not hold yet.
+    """
+    sort = _flag("sort", sort)
+    use_na_sentinel = _flag("use_na_sentinel", use_na_sentinel)
+    if column.dtype == "category":
+        raise UnsupportedError(
+            "firepanda:unsupported: factorize on a categorical column answers a "
+            "categorical index, which firepanda does not hold yet"
+        )
+    column = column.reset_index(drop=True).rename(None)
+    missing = column.isna()
+    grouped = column.to_frame("values").groupby("values", sort=sort, dropna=use_na_sentinel)
+    codes = grouped.ngroup()
+    kept = _first_seen(column)
+    if use_na_sentinel:
+        kept = kept & ~missing
+        if bool(missing.any()):
+            stray = codes[missing].dropna()
+            if len(stray):
+                codes = codes - (codes > stray.iloc[0]).astype("int64")
+            codes = codes.where(~missing, -1)
+    uniques = column[kept].reset_index(drop=True)
+    if sort:
+        uniques = uniques.sort_values(ignore_index=True)
+    return codes.astype("int64"), uniques
+
+
 class DataFrameMixin:
     """The hand written half of `DataFrame`."""
 
@@ -9242,6 +9290,45 @@ class SeriesMixin:
     def to_list(self) -> list[Any]:
         """The values as a Python list, the same as `tolist`."""
         return self.tolist()
+
+    @property
+    def array(self) -> FirepandaArray:
+        """The values with no row labels and no name, which is pandas' `array`."""
+        from ._array import FirepandaArray
+
+        return FirepandaArray(self)
+
+    def unique(self) -> FirepandaArray:
+        """Each value once, in the order first seen, a missing value kept once.
+
+        An array rather than a column, as in pandas. A categorical column keeps
+        every one of its categories, used or not, which is pandas too.
+        """
+        from ._array import FirepandaArray
+
+        return FirepandaArray(self[_first_seen(self)])
+
+    def factorize(
+        self, sort: bool = False, use_na_sentinel: bool = True
+    ) -> tuple[FirepandaArray, Index]:
+        """The code of each value and the values the codes point at.
+
+        Args:
+            sort: Number the values in sorted order rather than first seen order.
+            use_na_sentinel: Give a missing value the code -1 and leave it out of
+                the uniques. When False it gets a code of its own and is kept.
+
+        Returns:
+            The codes as an array of int64 and the uniques as an index.
+
+        Raises:
+            NotImplementedError: For a categorical column.
+        """
+        from ._array import FirepandaArray
+        from ._frame import Index
+
+        codes, uniques = _factorized(self, sort, use_na_sentinel)
+        return FirepandaArray(codes), Index(uniques)
 
     @property
     def is_unique(self) -> bool:
@@ -14410,6 +14497,19 @@ class IndexMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def factorize(
+        self, sort: bool = False, use_na_sentinel: bool = True
+    ) -> tuple[FirepandaArray, Index]:
+        """The code of each label and the labels the codes point at, unnamed.
+
+        See `Series.factorize`.
+        """
+        from ._array import FirepandaArray
+        from ._frame import Index
+
+        codes, uniques = _factorized(self.to_series(), sort, use_na_sentinel)
+        return FirepandaArray(codes), Index(uniques)
+
     def to_series(self, index: Any = None, name: Any = None) -> Series:
         """The labels as a column, which carries the labels twice.
 
@@ -15291,6 +15391,50 @@ def isnull(obj: Any) -> Any:
 def notnull(obj: Any) -> Any:
     """The same as `notna`."""
     return notna(obj)
+
+
+def _array_like(values: Any, name: str) -> Any:
+    """A column, an index or an array, and pandas' TypeError for anything else."""
+    from ._array import FirepandaArray
+    from ._frame import Index, Series
+
+    if isinstance(values, (Series, Index, FirepandaArray)):
+        return values
+    raise TypeError(
+        f"{name} requires a Series, Index, ExtensionArray, np.ndarray or "
+        f"NumpyExtensionArray got {type(values).__name__}."
+    )
+
+
+def unique(values: Any) -> Any:
+    """Each value once, in the order first seen.
+
+    An index for an index, and an array for a column or an array, as in pandas.
+
+    Raises:
+        TypeError: For a list or anything else that is not one of the three.
+    """
+    return _array_like(values, "unique").unique()
+
+
+def factorize(
+    values: Any, sort: bool = False, use_na_sentinel: bool = True, size_hint: int | None = None
+) -> tuple[Any, Any]:
+    """The code of each value and the values the codes point at.
+
+    The uniques are an index for a column or an index and an array for an
+    array, as in pandas. `size_hint` is accepted and not needed.
+
+    Raises:
+        TypeError: For a list or anything else that is not one of the three.
+    """
+    from ._array import FirepandaArray
+
+    values = _array_like(values, "factorize")
+    if isinstance(values, FirepandaArray):
+        codes, uniques = _factorized(values.to_series(), sort, use_na_sentinel)
+        return FirepandaArray(codes), FirepandaArray(uniques)
+    return values.factorize(sort=sort, use_na_sentinel=use_na_sentinel)
 
 
 def get_dummies(
