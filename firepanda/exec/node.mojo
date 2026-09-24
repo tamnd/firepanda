@@ -90,7 +90,7 @@ from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.lists import ALL
+from firepanda.dtype.lists import ALL, SIGNED
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit, TimeZone
@@ -6236,6 +6236,73 @@ struct Group(Movable):
                 self.emit.append(out[i].slice(begin, stop))
 
 
+@fieldwise_init
+struct _Facts(Copyable, Movable):
+    """What `Reduce._by_algebra` reads off one signed integer column of a
+    chunk, once however many slots ask."""
+
+    var source: Int
+    """The input column it was read from."""
+
+    var sum: Int64
+    """The sum of the values that were there, wrapping as an int64 sum does."""
+
+    var count: Int64
+    """How many values were there."""
+
+    var low: Int64
+    """The smallest value, or zero when `count` is."""
+
+    var high: Int64
+    """The largest value, or zero when `count` is."""
+
+
+def _facts_of(col: AnyArray, source: Int) raises -> _Facts:
+    """Reads the sum, the count and the range of a signed integer column.
+
+    Args:
+        col: The column, whose dtype is one of `SIGNED`.
+        source: Its position in the input, kept so it can be looked up again.
+
+    Returns:
+        The facts, all zero when the column holds no values.
+
+    Raises:
+        If a reduction fails.
+    """
+    var count = Int64(len(col) - col.null_count())
+    if count == 0:
+        return _Facts(source, 0, 0, 0, 0)
+    var sum = reduce_any(col, AggKind.SUM)
+    var low = reduce_any(col, AggKind.MIN)
+    var high = reduce_any(col, AggKind.MAX)
+    return _Facts(
+        source,
+        sum.unsafe_ptr[DType.int64]()[0],
+        count,
+        _signed_at_zero(low),
+        _signed_at_zero(high),
+    )
+
+
+def _signed_at_zero(col: AnyArray) raises -> Int64:
+    """Reads the first value of a signed integer column as an Int64.
+
+    Args:
+        col: The column.
+
+    Returns:
+        Its first value, widened.
+
+    Raises:
+        If the column is not a signed integer.
+    """
+    comptime for dt in SIGNED:
+        if col.dtype() == dt:
+            return col.unsafe_ptr[dt]()[0].cast[DType.int64]()
+    raise Error("reduce: expected a signed integer column")
+
+
 struct Reduce(Movable):
     """Reduces every row that goes past to one row, a chunk at a time.
 
@@ -6394,6 +6461,30 @@ struct Reduce(Movable):
     var _kept_shift: List[Int]
     """Per held slot, its entry in `_shifts`, or minus one."""
 
+    var _algebra: List[Bool]
+    """Per state slot, whether `_by_algebra` may answer it from the sum and the
+    count of the column its operation reads. False for a slot with no
+    operation."""
+
+    var _times: List[Int64]
+    """Per state slot marked in `_algebra`, what the column's sum is multiplied
+    by in the answer."""
+
+    var _plus: List[Int64]
+    """Per state slot marked in `_algebra`, what the column's count is
+    multiplied by in the answer."""
+
+    var _wide: List[Bool]
+    """Per state slot marked in `_algebra`, whether the operation runs in 64
+    bits, where it wraps the way the algebra does and no range is checked."""
+
+    var _floor: List[Int64]
+    """Per state slot marked in `_algebra` and not `_wide`, the smallest value
+    the operation's type holds."""
+
+    var _ceiling: List[Int64]
+    """The largest value, beside `_floor`."""
+
     var _late: List[AggKind]
     """Per held slot, the reduction to run over the whole column at the end."""
 
@@ -6425,6 +6516,12 @@ struct Reduce(Movable):
         self.held = List[ChunkedArray]()
         self._kept = List[Int]()
         self._kept_shift = List[Int]()
+        self._algebra = List[Bool]()
+        self._times = List[Int64]()
+        self._plus = List[Int64]()
+        self._wide = List[Bool]()
+        self._floor = List[Int64]()
+        self._ceiling = List[Int64]()
         self._late = List[AggKind]()
         self.started = False
         self.ran = False
@@ -6565,8 +6662,130 @@ struct Reduce(Movable):
                 self._merge.append(_merge_kind(kind))
                 self._as_float.append(False)
 
+        self._mark_algebra()
         self.output = Schema(fields^)
         return Schema(copy=self.output)
+
+    def _mark_algebra(mut self) raises:
+        """Marks the slots that can be answered without building their column.
+
+        A sum of `x + c` is the sum of `x` plus `c` once per value that was
+        there, a sum of `c - x` is the other way round, a sum of `x * c` is `c`
+        times the sum of `x`, and a count of any of them is the count of `x`,
+        since none of the three makes a null out of a value. So every slot of
+        that shape over one column can be answered out of that column's sum and
+        count, which `partial` reads once a chunk, rather than out of a column
+        built for the slot and reduced. That is ClickBench q29, ninety sums of
+        one column plus ninety constants, where building the ninety columns was
+        almost all of the time.
+
+        Only for signed integers, where both routes add in int64 and so agree
+        to the bit, which a float sum taken in another order would not. The
+        operation runs in its own type, which can be narrower than 64 bits and
+        wrap where the algebra does not, so a slot in a narrow type records the
+        range of that type and `_by_algebra` checks the chunk's smallest and
+        largest values against it before it answers. In 64 bits both routes
+        wrap modulo the same number and nothing needs checking.
+
+        Raises:
+            If the constant does not fit the column, which `bind` has already
+            asked and refused by the time this runs.
+        """
+        for s in range(len(self._source)):
+            self._algebra.append(False)
+            self._times.append(0)
+            self._plus.append(0)
+            self._wide.append(False)
+            self._floor.append(0)
+            self._ceiling.append(0)
+            var kind = self._produce[s]
+            if self._shift[s] < 0 or self._as_float[s]:
+                continue
+            if kind != AggKind.SUM and kind != AggKind.COUNT:
+                continue
+            ref it = self._shifts[self._shift[s]]
+            var op = it.op.value()
+            if op != BinaryOp.ADD and op != BinaryOp.SUB and op != BinaryOp.MUL:
+                continue
+            var column = self.input[self._source[s]].dtype
+            if not column.is_signed():
+                continue
+            var k = resolve_constant(column, it.constant, op)
+            if not k.present or not k.type.is_signed():
+                continue
+            var left = column if not it.value_on_left else k.type
+            var right = k.type if not it.value_on_left else column
+            var made = binary_type(op, left, right)
+            if not made.is_signed():
+                continue
+            var c = k.as_scalar[DType.int64]()
+            var times = Int64(1)
+            var plus = Int64(0)
+            if op == BinaryOp.ADD:
+                plus = c
+            elif op == BinaryOp.SUB and it.value_on_left:
+                times = -1
+                plus = c
+            elif op == BinaryOp.SUB:
+                plus = -c
+            else:
+                times = c
+            var bits = made.bit_width()
+            self._algebra[s] = True
+            self._times[s] = times
+            self._plus[s] = plus
+            self._wide[s] = bits >= 64
+            if bits < 64:
+                self._floor[s] = -(Int64(1) << Int64(bits - 1))
+                self._ceiling[s] = (Int64(1) << Int64(bits - 1)) - 1
+
+    def _by_algebra(
+        self, columns: List[AnyArray], s: Int, mut facts: List[_Facts]
+    ) raises -> Optional[AnyArray]:
+        """Answers a slot `_mark_algebra` marked, or declines to.
+
+        Args:
+            columns: The chunk's columns.
+            s: The slot.
+            facts: What has been read off each column this chunk so far, which
+                this adds to the first time it reads a column.
+
+        Returns:
+            The slot's one row, or None when the chunk has no values in the
+            column or when the operation would wrap in its own type somewhere
+            in the chunk, and the slot has to be built the ordinary way.
+
+        Raises:
+            If a reduction fails on the column.
+        """
+        var at = -1
+        for f in range(len(facts)):
+            if facts[f].source == self._source[s]:
+                at = f
+        if at < 0:
+            at = len(facts)
+            facts.append(_facts_of(columns[self._source[s]], self._source[s]))
+        ref known = facts[at]
+        if known.count == 0:
+            return None
+        var out = Array[DType.int64](1)
+        if self._produce[s] == AggKind.COUNT:
+            out[0] = known.count
+            return AnyArray(out^)
+        var times = self._times[s]
+        var plus = self._plus[s]
+        if not self._wide[s]:
+            # Narrower than 64 bits, so every number here is under 2^32 and
+            # none of this can overflow an Int64. The operation is linear in
+            # the value, so its smallest and largest answers are at the ends.
+            var one = times * known.low + plus
+            var two = times * known.high + plus
+            if min(one, two) < self._floor[s]:
+                return None
+            if max(one, two) > self._ceiling[s]:
+                return None
+        out[0] = times * known.sum + plus * known.count
+        return AnyArray(out^)
 
     def update_state(self) -> NodeStatus:
         """Reports whether the answer has been handed back.
@@ -6624,8 +6843,15 @@ struct Reduce(Movable):
             return None
         var columns = chunk^.into_columns()
         var made = List[AnyArray](capacity=len(self._source) + len(self._kept))
+        var facts = List[_Facts]()
         var s = 0
         while s < len(self._source):
+            if self._algebra[s]:
+                var got = self._by_algebra(columns, s, facts)
+                if got:
+                    made.append(got.take())
+                    s += 1
+                    continue
             if self._shift[s] < 0:
                 made.append(
                     reduce_any(
