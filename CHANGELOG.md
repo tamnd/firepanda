@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_numpy and values
+
+`DataFrame.to_numpy`, `Series.to_numpy` and `Index.to_numpy` hand back a numpy array in the type pandas gives, with `dtype` and `na_value` as pandas reads them. Whole numbers with a gap become floats, instants with no zone stay instants, and text, categories and instants with a zone are objects. A frame's columns share one type, the wider number or objects. `DataFrame.values` is `to_numpy()`, and `Series.values` is numpy for numbers, flags and instants with no zone, and a `FirepandaArray` for the rest, where pandas has an extension array. numpy is imported only when one of these is called.
+
 ### Added: index members a column already has
 
 `Index` gains `all`, `any`, `argmax`, `argmin`, `item`, `fillna`, `where`, `diff`, `round`, `value_counts`, `T`, `transpose`, `memory_usage`, `astype`, `droplevel`, `get_level_values`, `to_flat_index` and `infer_objects`, with pandas' signatures. Each goes through the labels as a column and back, so the answer keeps the index's class and name. `all` and `any` count a missing label as true, as numpy does. `item`, `argmax` and `argmin` with a bad axis, `droplevel` and `get_level_values` raise pandas' errors. `memory_usage` is the number the labels weigh as a column, which counts the bits that mark missing values where pandas does not.
