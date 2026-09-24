@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a gap in map's numbers is NaN, and a mapping with no hits keeps its type
+
+`Series.map` and everything built on it answer NaN rather than a null in a gap among numbers, because pandas' answer is a numpy column where NaN is the only gap. A mapping or a column used as a mapping that found no key answers a column of its own type, text staying text, as pandas does when it lines the mapping up against the values.
+
 ### Added: map, apply, combine, update and transpose on a column, and map on a frame
 
 `Series.map` takes a function, a mapping or another column read as a mapping from its labels, hands a missing value to the function as NaN unless `na_action="ignore"`, and reads the answer's type from what came back, with whole numbers beside a gap made floats as pandas makes them. `Series.apply` calls a function on each value with `args` and keywords, or runs a reduction by name, or several by name as a column. `Series.combine` calls a function on each pair of values over both columns' labels with `fill_value` for a label one side lacks. `Series.update` puts in the other object's values that are not missing and refuses a value the column cannot hold with pandas' TypeError. `Series.T` and `Series.transpose` answer the column. `DataFrame.map` maps each column. `firepanda.errors.InvalidIndexError` is new, for a column with repeated labels used as a mapping. A category column's `map` is refused for now, because pandas maps the categories.
