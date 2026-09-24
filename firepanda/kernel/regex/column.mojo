@@ -61,7 +61,7 @@ from firepanda.array.strview import (
 )
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
-from firepanda.exec import MORSEL_ROWS, parallel_morsels
+from firepanda.exec import parallel_morsels
 from firepanda.kernel.mask import repair_range
 from firepanda.kernel.regex.backtrack import Bounded, searched
 from firepanda.kernel.regex.count import counted, counted_python
@@ -70,6 +70,43 @@ from firepanda.kernel.regex.parse import decode_into
 from firepanda.kernel.regex.pike import Machine, byte_of, fill_byte_offsets
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite, replaced, replaced_python
+
+
+comptime REGEX_MORSEL = 1 << 12
+"""The fewest rows a worker takes at a time in these kernels.
+
+Far below `MORSEL_ROWS`, because a row costs far more here than in a kernel that
+reads a number. A streaming query hands each kernel one chunk of `MORSEL_ROWS`
+rows, and with the engine's morsel that chunk was one morsel, which runs on the
+thread that called. On ClickBench q28 that left the pattern on about two of ten
+cores. Four thousand rows of a pattern is still tens of microseconds of work
+against a hand out that costs well under one.
+"""
+
+
+comptime REGEX_MORSELS = 256
+"""The most morsels a column is cut into.
+
+The two kernels that answer text keep a payload per morsel and stack them at the
+end, so a whole column of a hundred million rows cut at `REGEX_MORSEL` would be
+tens of thousands of payloads. Past this many a morsel grows instead.
+"""
+
+
+def regex_morsel_rows(n: Int) -> Int:
+    """How many rows a worker takes at a time on a column of `n` rows.
+
+    Args:
+        n: The column's height.
+
+    Returns:
+        `REGEX_MORSEL`, or more if that would cut the column into more than
+        `REGEX_MORSELS` morsels, and always a multiple of 64 so that no two
+        morsels share a word of a bitmap.
+    """
+    var rows = (n + REGEX_MORSELS - 1) // REGEX_MORSELS
+    rows = (rows + 63) // 64 * 64
+    return max(REGEX_MORSEL, rows)
 
 
 def text_matches_regex(
@@ -143,7 +180,7 @@ def text_matches_regex(
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
         repair_range(out, validity, start, stop)
 
-    parallel_morsels(compute, n)
+    parallel_morsels(compute, n, regex_morsel_rows(n))
 
     out.data.validity = validity^
     return out^
@@ -196,7 +233,7 @@ def text_count_regex(
             dst.unsafe_offset(i).unsafe_write(Int64(seen))
         repair_range(out, validity, start, stop)
 
-    parallel_morsels(compute, n)
+    parallel_morsels(compute, n, regex_morsel_rows(n))
 
     out.data.validity = validity^
     return out^
@@ -274,7 +311,8 @@ def text_extract_regex(
 
     # A payload per morsel per group, laid out so that one group's morsels sit
     # next to each other, which is the order the join below wants them in.
-    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var rows = regex_morsel_rows(n)
+    var morsels = (n + rows - 1) // rows
     var parts = List[List[UInt8]](capacity=morsels * groups)
     for _ in range(morsels * groups):
         parts.append(List[UInt8]())
@@ -282,7 +320,7 @@ def text_extract_regex(
     def compute(
         start: Int, stop: Int
     ) raises {mut parts, mut valid, mut views, imm}:
-        var mine = start // MORSEL_ROWS
+        var mine = start // rows
         # The pointer to each group's views is taken once for the morsel rather
         # than once per row, which is what every other kernel that writes views
         # does as well.
@@ -349,13 +387,13 @@ def text_extract_regex(
                         Pointer(to=piece[0]), len(piece), 0, spot
                     )
 
-    parallel_morsels(compute, n, MORSEL_ROWS)
+    parallel_morsels(compute, n, rows)
 
     for _ in range(groups):
         var held = List[List[UInt8]](capacity=morsels)
         for _ in range(morsels):
             held.append(parts.pop(0))
-        var payload = stack_payloads(held^, views[0], n, MORSEL_ROWS)
+        var payload = stack_payloads(held^, views[0], n, rows)
         out.append(StringArray(views.pop(0), payload^, valid.pop(0), n))
     return out^
 
@@ -418,13 +456,14 @@ def text_replace_regex(
     if n == 0:
         return StringArray(views^, Buffer(1), validity^, 0)
 
-    var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var rows = regex_morsel_rows(n)
+    var morsels = (n + rows - 1) // rows
     var parts = List[List[UInt8]](capacity=morsels)
     for _ in range(morsels):
         parts.append(List[UInt8]())
 
     def compute(start: Int, stop: Int) raises {mut parts, mut views, imm}:
-        ref payload = parts[start // MORSEL_ROWS]
+        ref payload = parts[start // rows]
         var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
         # One of each engine and one of each buffer for the whole morsel
         # rather than one of each per row, which is what the serial version did
@@ -485,7 +524,7 @@ def text_replace_regex(
                     Pointer(to=out[0]), len(out), 0, at
                 )
 
-    parallel_morsels(compute, n, MORSEL_ROWS)
+    parallel_morsels(compute, n, rows)
 
-    var payload = stack_payloads(parts^, views, n, MORSEL_ROWS)
+    var payload = stack_payloads(parts^, views, n, rows)
     return StringArray(views^, payload^, validity^, n)

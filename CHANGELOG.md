@@ -38,6 +38,9 @@ A semi, anti or mark join only asks whether the other side has a key, never whic
 ### Changed: a small filter or gather of text writes its column directly
 
 A filter or gather of a text column below the size where it splits across cores went through `StringBuilder`, which grows two lists a row and then copies both into the finished column. It now runs the same count and copy the split route does, as one worker on the calling thread. Filtering 42,000 rows of TPC-H customers takes 175 us rather than 485 us for the two byte country code and 715 us rather than 1,180 us for the address, and q22 at SF1 goes from about 26 ms to 24 ms.
+### Changed: a regex over a column cuts it finer and walks a greedy repeat in a loop
+
+A regex kernel over a column (match, count, extract and replace) used to hand the cores one piece per 128K rows, which is one piece per streaming chunk, so a chunk was walked on one core. It now cuts a column into about 256 pieces of at least 4096 rows each. The backtracker walks a greedy repeat of one character, such as `[^/]+` or `.*`, in a loop that pushes only the arms leaving the repeat, where it used to push and pop the arm going round once per character, and it keeps its stack height in a counter rather than shortening its lists. A capture rewrite of 4000 URLs with `^https?://(?:www\.)?([^/]+)/.*$` goes from about 1000 ns a row to about 700.
 
 ## [0.8.32] - 2026-09-24
 

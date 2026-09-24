@@ -356,6 +356,13 @@ struct Bounded(Movable):
     var jobs_at: List[Int32]
     """The positions of the entries in `jobs_pc`, or the values to restore."""
 
+    var height: Int
+    """How many entries of the two lists are on the stack.
+
+    The lists are never shortened, so an entry above this is left over from an
+    earlier path and is written over by the next push. Popping is taking one off
+    the count, which is cheaper than asking the list to give an entry back."""
+
     var memo: Bool
     """Whether arriving twice at an instruction and a position may be dropped
     outright.
@@ -458,6 +465,7 @@ struct Bounded(Movable):
         self.slots = List[Int32](length=self.nslots, fill=-1)
         self.jobs_pc = []
         self.jobs_at = []
+        self.height = 0
         self.word = []
         self.lower = []
         self.memo = not (program.refs or program.asks)
@@ -554,8 +562,13 @@ struct Bounded(Movable):
             pc: The instruction, or `-slot - 1` for a slot to put back.
             at: The position, or the value to put back.
         """
-        self.jobs_pc.append(pc)
-        self.jobs_at.append(at)
+        if self.height < len(self.jobs_pc):
+            self.jobs_pc.unsafe_set(self.height, pc)
+            self.jobs_at.unsafe_set(self.height, at)
+        else:
+            self.jobs_pc.append(pc)
+            self.jobs_at.append(at)
+        self.height += 1
 
     def _write(mut self, slot: Int, value: Int32):
         """Puts a value in a slot and forgets the bitmap if that changed it.
@@ -623,18 +636,16 @@ struct Bounded(Movable):
         compacted in place rather than copied, since the saves keep their order
         and only move down. Document 99 section 4.
         """
-        var mark = len(self.jobs_pc) - 1
+        var mark = self.height - 1
         while mark >= 0 and self.jobs_pc[mark] != MARKED:
             mark -= 1
         var write = mark if mark >= 0 else 0
-        for i in range(mark + 1, len(self.jobs_pc)):
+        for i in range(mark + 1, self.height):
             if self.jobs_pc[i] < 0:
                 self.jobs_pc[write] = self.jobs_pc[i]
                 self.jobs_at[write] = self.jobs_at[i]
                 write += 1
-        while len(self.jobs_pc) > write:
-            _ = self.jobs_pc.pop()
-            _ = self.jobs_at.pop()
+        self.height = write
 
     def _attempt(
         mut self,
@@ -661,8 +672,7 @@ struct Bounded(Movable):
         Returns:
             Where the match ends, or `NO_MATCH`.
         """
-        self.jobs_pc.clear()
-        self.jobs_at.clear()
+        self.height = 0
         self._push(0, Int32(start))
         return self._walk(
             program, points, lead, length, start, 0, found, advance
@@ -708,7 +718,7 @@ struct Bounded(Movable):
         Returns:
             True when the body matches.
         """
-        var base = len(self.jobs_pc)
+        var base = self.height
         var marked = len(self.marks)
         self._push(entry, Int32(at))
         var end = self._walk(
@@ -716,9 +726,10 @@ struct Bounded(Movable):
         )
         if self.stamped:
             self._forget_from(marked)
-        while len(self.jobs_pc) > base:
-            var pc = self.jobs_pc.pop()
-            var value = self.jobs_at.pop()
+        while self.height > base:
+            self.height -= 1
+            var pc = self.jobs_pc.unsafe_get(self.height)
+            var value = self.jobs_at.unsafe_get(self.height)
             if pc < 0 and pc != MARKED:
                 self._write(Int(-pc - 1), value)
         return end != NO_MATCH
@@ -753,9 +764,10 @@ struct Bounded(Movable):
         Returns:
             Where the match ends, or `NO_MATCH`.
         """
-        while len(self.jobs_pc) > base:
-            var pc = self.jobs_pc.pop()
-            var at = self.jobs_at.pop()
+        while self.height > base:
+            self.height -= 1
+            var pc = self.jobs_pc.unsafe_get(self.height)
+            var at = self.jobs_at.unsafe_get(self.height)
             if pc < 0:
                 if pc == MARKED:
                     # An atomic group being left backwards, which is the group
@@ -819,13 +831,35 @@ struct Bounded(Movable):
                     # is the same test the body would have done and it is done
                     # once, so the one visit per instruction per position the
                     # bitmap gives is untouched.
-                    self._push(instruction.b, at)
-                    if Int(at) < length and accepts(
-                        program.code[Int(body)],
-                        program.ranges,
-                        point_at(points, lead, Int(at)),
-                    ):
-                        self._push(pc, at + 1)
+                    #
+                    # The going round is a loop here rather than a trip through
+                    # the stack. Coming back to this instruction one position
+                    # along would pop at once what was just pushed, test the
+                    # same bit and charge the same step, so the loop does those
+                    # things itself and pushes only the arms that leave.
+                    var read = program.code[Int(body)]
+                    var here = Int(at)
+                    while True:
+                        self._push(instruction.b, Int32(here))
+                        if here >= length or not accepts(
+                            read, program.ranges, point_at(points, lead, here)
+                        ):
+                            break
+                        here += 1
+                        if self.bitmap:
+                            var cell = Int(pc) * (length + 1) + here
+                            var word_at = cell >> 6
+                            var bit = UInt64(1) << UInt64(cell & 63)
+                            if (self.seen[word_at] & bit) != 0:
+                                break
+                            self.seen[word_at] |= bit
+                            if self.stamped:
+                                self.marks.append(Int32(cell))
+                        if self.counting:
+                            self.steps += 1
+                            if self.steps > MAX_STEPS:
+                                self.overrun = True
+                                return NO_MATCH
                 else:
                     # The same repeat written lazily, so the order is the other
                     # way round: the arm that leaves goes on last and comes off
