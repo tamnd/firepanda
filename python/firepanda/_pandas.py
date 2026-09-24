@@ -18168,8 +18168,34 @@ def merge(
     if named is not None:
         out = _indicated(out, named)
     if any(out.null_counts()):
-        out = out._widened_for_missing()
+        out = _merge_widened(out)
     return DataFrame._wrap(out)
+
+
+def _merge_widened(out: Any) -> Any:
+    """The joined frame with its gappy integers widened, instants and spans kept.
+
+    The core widens the key an outer or right join put together from both
+    sides into the counts under its instants or spans, so those are read back
+    as what they were.
+    """
+    from ._frame import DataFrame, Series
+
+    before = out.dtypes()
+    out = out._widened_for_missing()
+    for name, typed, now in zip(out.names(), before, out.dtypes(), strict=True):
+        if now == typed or not typed.startswith(("datetime64[", "timedelta64[")):
+            continue
+        unit, _, zone = typed[typed.find("[") + 1 : -1].partition(", ")
+        counts = Series._wrap(out.column(name))
+        if typed.startswith("timedelta64["):
+            fixed = to_timedelta(counts, unit=unit)
+        elif zone:
+            fixed = to_datetime(counts, unit=unit).dt.tz_localize("UTC").dt.tz_convert(zone)
+        else:
+            fixed = to_datetime(counts, unit=unit)
+        out = DataFrame._wrap(out).assign(**{name: fixed.dt.as_unit(unit)})._inner
+    return out
 
 
 MERGE_LEFT = "_left_indicator"
@@ -18281,13 +18307,6 @@ def _merged(
         for name in names:
             column = out.column(name)
             out = out.pick(name, column.is_in(filler).unary("invert"), column.missing_row())
-    # An outer or right join brings a key of instants back as its counts.
-    outs = dict(zip(out.names(), out.dtypes(), strict=True))
-    for name in dict.fromkeys([*lefts, *rights]):
-        typed = str(types.get(name, ""))
-        if typed.startswith("datetime64[") and "," not in typed and str(outs[name]) != typed:
-            retyped = Series._wrap(_retyped(out.column(name), typed))
-            out = DataFrame._wrap(out).assign(**{name: retyped})._inner
     if sort or how == "outer":
         # The sort carries the labels along, and pandas numbers the rows again.
         out = _merge_sorted(out, lefts, rights, how).reset_index(True)
