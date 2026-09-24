@@ -20,6 +20,8 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 - A power between two labelled operands answers what pandas answers in a row only one side has, which is 1 where numpy's `1 ** nan` or `nan ** 0` is 1 and NaN everywhere else. The kernel answers a gap with a null before it looks at either value, so the pandas facing layer lines the two sides up by label with NaN in each gap and takes the power again. That covers a series with a series and a frame with a frame, through `**`, its reflection and `pow` and `rpow` without a `fill_value`. A side with a repeated label cannot be lined up that way and keeps the NaN it had. (Issue #8)
 
+- A frame reduction takes `skipna=False` and `min_count`, which it refused by name. Each is a rule about the answer, the same as on a series, so the kernel reduces every column as before and a column the rule catches is answered NaN after: a column with a missing value under `skipna=False`, or one with fewer values than `min_count`. The answer widens to float64 only when a column is caught, which is what pandas does, and with `axis=None` the floor counts every cell in the frame rather than each column. A caught column whose answer is not a number is refused, because pandas answers `NaT` or an object NaN there. (Issue #8)
+
 ## [0.8.28] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).

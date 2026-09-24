@@ -5435,24 +5435,53 @@ class DataFrameMixin:
         """
         _refuses_a_fold(axis, kind)
         _reducing_axis(axis, "DataFrame")
-        _held_at(
-            "skipna",
-            skipna,
-            True,
-            "a missing value is skipped by every reduction in the library and"
-            " there is no second pass that lets one through",
-        )
-        _held_at(
-            "min_count",
-            min_count,
-            0,
-            "a floor on how many values a sum needs before it answers at all is"
-            " a rule about the result rather than about the sum",
-        )
+        skipna = _flag("skipna", skipna)
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
         if kind == "quantile":
             _no_boolean_quantile(read._inner.dtypes())
-        return read._per_column(kind, param)
+        return read._voided(read._per_column(kind, param), skipna, min_count)
+
+    def _voided(self, answer: Series, skipna: bool, min_count: int) -> Series:
+        """The per column answers with NaN for each column a rule says has none.
+
+        `skipna=False` and `min_count` are rules about the answer rather than
+        about the reduction, the same as on a series, so the kernel runs as it
+        always does and each column the rule catches is answered NaN after.
+        That is a column with a missing value under `skipna=False`, or one with
+        fewer than `min_count` values. pandas widens the whole answer to
+        float64 to hold the NaN, and a column nothing catches keeps its type.
+
+        Args:
+            answer: What the reduction answered, one row per column.
+            skipna: False to let a missing value through.
+            min_count: The fewest values a column needs to have an answer.
+
+        Returns:
+            The answer as it was when the rules catch no column, and otherwise
+            a float64 answer with NaN for each one they catch.
+
+        Raises:
+            UnsupportedError: When a column the rules catch has an answer that
+                is not a number, because pandas answers `NaT` or an object NaN
+                there and firepanda has neither to hand back.
+        """
+        if skipna and min_count <= 0:
+            return answer
+        names = self._inner.names()
+        caught = [
+            (not skipna and self[name].hasnans)
+            or (min_count > 0 and self[name].count() < min_count)
+            for name in names
+        ]
+        if not any(caught):
+            return answer
+        if not _counts_as_numeric(answer.dtype):
+            raise UnsupportedError(
+                "skipna=False and min_count are not supported yet on a reduction"
+                f" that answers {answer.dtype}, because pandas answers NaT or an"
+                " object NaN there and firepanda has neither to hand back"
+            )
+        return answer.astype("float64").mask(caught, float("nan"))
 
     def _numeric_part(self) -> DataFrameMixin:
         """The columns `numeric_only=True` keeps, which are the numbers and the booleans.
@@ -5498,12 +5527,15 @@ class DataFrameMixin:
         The answer is a series for every other spelling of the axis, which is
         why this returns whatever it returns rather than a series.
         """
-        columns = self._reduce(
-            kind, param, 0 if axis is None else axis, skipna, numeric_only, min_count
-        )
         if axis is not None:
-            return columns
-        return columns._reduce(kind, param, 0, True, False, 0)
+            return self._reduce(kind, param, axis, skipna, numeric_only, min_count)
+        columns = self._reduce(kind, param, 0, skipna, numeric_only, 0)
+        answer = columns._reduce(kind, param, 0, skipna, False, 0)
+        if min_count > 0:
+            read = self._numeric_part() if numeric_only else self
+            if sum(read[name].count() for name in read._inner.names()) < min_count:
+                return float("nan")
+        return answer
 
     def _truth(self, kind: str, axis: Any, bool_only: bool, skipna: bool) -> Any:
         """Runs `any` or `all` down every column, or over the whole frame.
