@@ -72,6 +72,8 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: m.Series([2.5, 2.5, 2.5, 2.5, 2.5]).kurt(),
     lambda m: m.Series([1e8 + 0.1, 1e8 + 0.1, 1e8 + 0.1, 1e8 + 0.1]).kurt(),
     lambda m: m.Series([], dtype="float64").kurt(),
+    lambda m: m.Series([1.0, float("inf"), 2.0, float("-inf"), 3.0]).kurt(),
+    lambda m: m.Series([1.0, float("inf"), 2.0, 5.0, 3.0]).kurt(),
     lambda m: m.Series([NAN, NAN], dtype="float64").kurt(),
     lambda m: m.DataFrame(FRAME).kurt(numeric_only=True),
     lambda m: m.DataFrame(FRAME).drop(columns="s").kurt(),

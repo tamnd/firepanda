@@ -1837,8 +1837,10 @@ def _kurtosis(values: Any) -> float:
     mean = values.sum() / count
     adjusted = values - mean
     squared = adjusted * adjusted
-    m2 = squared.sum()
-    m4 = (squared * squared).sum()
+    # An infinity makes the mean NaN and every moment NaN with it, and a sum
+    # that skipped the NaN would answer zero where pandas answers NaN.
+    m2 = squared.sum(skipna=False)
+    m4 = (squared * squared).sum(skipna=False)
     largest = values.abs().max()
     eps = sys.float_info.epsilon
     if abs(m2) < (eps * largest) ** 2 * count:
