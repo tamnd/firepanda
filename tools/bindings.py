@@ -298,6 +298,14 @@ COMPARISON: tuple[tuple[str, str], ...] = (
 )
 """The six comparisons, the same way."""
 
+LOGICAL: tuple[tuple[str, str, str], ...] = (
+    ("and", "&", "and"),
+    ("or", "|", "or"),
+    ("xor", "^", "exclusive or"),
+)
+"""The three logical operators, the same way and with how each reads. pandas has no named form for
+them, so they are dunders only."""
+
 UNARY: tuple[tuple[str, str, str], ...] = (
     ("__neg__", "neg", "`-a`, which on a boolean column is the logical not."),
     ("__pos__", "pos", "`+a`, which copies and refuses a boolean column, as pandas does."),
@@ -372,6 +380,24 @@ def _operators(py: str) -> tuple[Member, ...]:
                 returns="Any",
             )
         )
+
+    for name, symbol, reading in LOGICAL:
+        for prefix, flip in (("", "False"), ("r", "True")):
+            out.append(
+                Member(
+                    name=f"__{prefix}{name}__",
+                    kind="dunder",
+                    signature="other: Any",
+                    body=f'self._logical(other, "{name}", {flip})',
+                    doc=(
+                        f"`a {symbol} b`, the logical {reading} of two boolean operands."
+                        if not prefix
+                        else f"`b {symbol} a`, which is what Python calls when the left"
+                        " side declines."
+                    ),
+                    returns="Any",
+                )
+            )
 
     for name, _, doc in UNARY:
         out.append(

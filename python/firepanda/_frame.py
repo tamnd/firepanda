@@ -2811,6 +2811,48 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def __and__(self, other: Any) -> Any:
+        """`a & b`, the logical and of two boolean operands."""
+        try:
+            return self._logical(other, "and", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rand__(self, other: Any) -> Any:
+        """`b & a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "and", True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __or__(self, other: Any) -> Any:
+        """`a | b`, the logical or of two boolean operands."""
+        try:
+            return self._logical(other, "or", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ror__(self, other: Any) -> Any:
+        """`b | a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "or", True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __xor__(self, other: Any) -> Any:
+        """`a ^ b`, the logical exclusive or of two boolean operands."""
+        try:
+            return self._logical(other, "xor", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rxor__(self, other: Any) -> Any:
+        """`b ^ a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "xor", True)
+        except Exception as error:
+            raise translate(error) from None
+
     def __neg__(self) -> Any:
         """`-a`, which on a boolean column is the logical not."""
         try:
@@ -3732,6 +3774,48 @@ class Series(SeriesMixin):
         """`a >= b`, which refuses two seriess that are not labelled the same."""
         try:
             return self._operator(other, "ge", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __and__(self, other: Any) -> Any:
+        """`a & b`, the logical and of two boolean operands."""
+        try:
+            return self._logical(other, "and", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rand__(self, other: Any) -> Any:
+        """`b & a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "and", True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __or__(self, other: Any) -> Any:
+        """`a | b`, the logical or of two boolean operands."""
+        try:
+            return self._logical(other, "or", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ror__(self, other: Any) -> Any:
+        """`b | a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "or", True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __xor__(self, other: Any) -> Any:
+        """`a ^ b`, the logical exclusive or of two boolean operands."""
+        try:
+            return self._logical(other, "xor", False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rxor__(self, other: Any) -> Any:
+        """`b ^ a`, which is what Python calls when the left side declines."""
+        try:
+            return self._logical(other, "xor", True)
         except Exception as error:
             raise translate(error) from None
 
