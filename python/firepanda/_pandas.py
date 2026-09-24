@@ -46,6 +46,7 @@ from .errors import (
     InvalidArgumentError,
     MergeError,
     OutOfBoundsError,
+    SpecificationError,
     UnsupportedError,
     translate,
 )
@@ -11515,6 +11516,38 @@ _NARROW_WHOLE = frozenset({"int8", "int16", "int32", "uint8", "uint16", "uint32"
 """The integer types a broadcast `sum` or `prod` is cast back to."""
 
 
+class NamedAgg:
+    """One output column of `groupby(...).agg`, a column and what to run on it.
+
+    pandas 3 made this a small class of its own rather than a named tuple, with
+    the arguments for the function kept beside it, and `agg` reads it by its two
+    attributes, so a pandas one works here too.
+    """
+
+    __slots__ = ("aggfunc", "args", "column", "kwargs")
+
+    def __init__(self, column: Any, aggfunc: Any, *args: Any, **kwargs: Any) -> None:
+        """Holds the column, the function and the arguments for it.
+
+        Args:
+            column: The column label to reduce.
+            aggfunc: The name of the reduction.
+            *args: Arguments for it.
+            **kwargs: Arguments for it by keyword.
+        """
+        self.column = column
+        self.aggfunc = aggfunc
+        self.args = args
+        self.kwargs = kwargs
+
+    def __repr__(self) -> str:
+        """The way pandas prints it."""
+        return (
+            f"NamedAgg(column={self.column!r}, aggfunc={self.aggfunc!r},"
+            f" args={self.args!r}, kwargs={self.kwargs!r})"
+        )
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -12054,6 +12087,156 @@ class GroupByMixin[Answer]:
             )
         raise InvalidArgumentError(f"'{func}' is not a valid function name for transform(name)")
 
+    def aggregate(
+        self,
+        func: Any = None,
+        *args: Any,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """One or more reductions over the groups, each named by a string.
+
+        pandas reads `func` in four shapes and all four are read here when every
+        function in them is a name. One name answers what the method of that
+        name answers. A list of names over one column answers a column a name. A
+        mapping of column to name answers a column a column. Keywords of
+        `name=(column, function)` answer a column a keyword, and that is the one
+        shape that can reduce a column twice. Each column is the method of that
+        name run on its own, and the columns are put side by side on the groups,
+        so the numbers and the types are the method's.
+
+        A Python function is refused, because it runs once a group in the
+        interpreter, and so is a list over a frame, which pandas answers with
+        two levels of column labels and firepanda has one.
+
+        Args:
+            func: A name, a list of names or a mapping of column to name.
+            *args: Arguments for the functions, refused if there are any.
+            engine: Refused.
+            engine_kwargs: Refused.
+            **kwargs: The named form, one output column a keyword.
+
+        Returns:
+            The frame or the series pandas answers.
+
+        Raises:
+            TypeError: If there is neither a function nor a keyword.
+        """
+        _refuse(
+            "engine",
+            engine,
+            "there is one implementation and it is the compiled one, so there is"
+            " nothing here for this to choose between",
+        )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "there is nothing to configure while there is nothing to choose",
+        )
+        if args or (func is not None and kwargs):
+            raise UnsupportedError(
+                "agg takes no further arguments for its functions for now, because"
+                " the named reductions are answered with their defaults"
+            )
+        if func is None:
+            if not kwargs:
+                raise TypeError("Must provide 'func' or tuples of '(column, aggfunc).")
+            return self._gathered(self._named_plan(kwargs))
+        if isinstance(func, str):
+            return self._one(func, None)
+        if callable(func):
+            raise NotImplementedError(
+                "agg takes the name of a reduction for now, because a Python function"
+                " runs once a group in the interpreter"
+            )
+        return self._gathered(self._plan(func))
+
+    agg = aggregate
+
+    def _one(self, how: Any, column: str | None) -> Any:
+        """Runs one reduction by name, over one column or over them all.
+
+        Args:
+            how: The name of the method.
+            column: The column to run it over, or None for this group by as it is.
+
+        Returns:
+            What the method answers.
+
+        Raises:
+            AttributeError: If there is no method of that name, which is what
+                pandas raises.
+        """
+        if not isinstance(how, str):
+            raise NotImplementedError(
+                "agg takes the name of a reduction for now, because a Python function"
+                " runs once a group in the interpreter"
+            )
+        owner = self if column is None else self._column_group(column)
+        method = None if how.startswith("_") else getattr(type(owner), how, None)
+        if not callable(method):
+            kind = type(owner).__name__
+            if kind == "DataFrameGroupBy":
+                raise AttributeError(f"'{how}' is not a valid function for '{kind}' object")
+            raise AttributeError(f"'{kind}' object has no attribute '{how}'")
+        return getattr(owner, how)()
+
+    def _gathered(self, plan: list[tuple[str, str, Any]]) -> DataFrame:
+        """Runs every reduction in a plan and puts the answers side by side.
+
+        Args:
+            plan: The output name, the column and the function, one a column.
+
+        Returns:
+            One row a group, the keys first when they are not the labels.
+        """
+        if not plan:
+            from ._frame import DataFrame
+
+            return DataFrame()
+        names = [name for name, _, _ in plan]
+        if len(set(names)) != len(names):
+            raise UnsupportedError(
+                "agg answering two columns of the same name is not supported,"
+                " because a firepanda frame names each column once"
+            )
+        out: Any = None
+        for name, column, how in plan:
+            answer = self._one(how, column)
+            if not self._as_index:
+                last = answer.columns[-1]
+                if out is None:
+                    out = answer.rename(columns={last: name})
+                else:
+                    out = out._assigned(name, answer[last])
+            elif out is None:
+                out = answer.to_frame(name)
+            else:
+                out = out._assigned(name, answer)
+        return out
+
+    def _column_group(self, column: str) -> SeriesGroupBy:
+        """The group by narrowed to one column.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError(column)
+
+    def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
+        """Reads a list or a mapping into one reduction a column.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("agg")
+
+    def _named_plan(self, named: dict[str, Any]) -> list[tuple[str, str, Any]]:
+        """Reads the named form into one reduction a column.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("agg")
+
     def _shape_rows(self, kind: str, periods: int) -> Answer:
         """Runs a transform and puts the answer in the shape pandas gives.
 
@@ -12145,6 +12328,57 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             The frame, as tall as the one grouped.
         """
         return self._transform(kind, periods)
+
+    def _column_group(self, column: str) -> SeriesGroupBy:
+        """One column of this group by, as `self[column]` gives it."""
+        return cast("SeriesGroupBy", self[column])
+
+    def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
+        """A mapping of column to the name of a reduction.
+
+        Raises:
+            KeyError: If a column is not in the frame, as pandas words it.
+        """
+        if not isinstance(func, dict):
+            raise NotImplementedError(
+                "agg with a list over a frame is not supported yet, because pandas"
+                " answers it with two levels of column labels"
+            )
+        missing = [name for name in func if name not in self._frame.columns]
+        if missing:
+            raise KeyError(f"Label(s) {missing!r} do not exist")
+        for how in func.values():
+            if isinstance(how, (list, tuple)):
+                raise NotImplementedError(
+                    "agg with a list for a column is not supported yet, because"
+                    " pandas answers it with two levels of column labels"
+                )
+        return [(name, name, how) for name, how in func.items()]
+
+    def _named_plan(self, named: dict[str, Any]) -> list[tuple[str, str, Any]]:
+        """Keywords of `name=(column, function)`, `pd.NamedAgg` among them.
+
+        Raises:
+            TypeError: If a keyword is not a pair, which is what pandas raises.
+            KeyError: If a column is not in the frame, as pandas words it.
+        """
+        plan = []
+        for name, pair in named.items():
+            if hasattr(pair, "column") and hasattr(pair, "aggfunc"):
+                if getattr(pair, "args", ()) or getattr(pair, "kwargs", {}):
+                    raise UnsupportedError(
+                        "NamedAgg takes no further arguments for its function for now,"
+                        " because the named reductions are answered with their defaults"
+                    )
+                plan.append((name, pair.column, pair.aggfunc))
+                continue
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise TypeError("Must provide 'func' or tuples of '(column, aggfunc).")
+            plan.append((name, pair[0], pair[1]))
+        missing = [column for _, column, _ in plan if column not in self._frame.columns]
+        if missing:
+            raise KeyError(f"Label(s) {missing!r} do not exist")
+        return plan
 
     def _ranked(self, out: DataFrame) -> DataFrame:
         """The ranks as they are, one column a column that is not a key."""
@@ -12244,6 +12478,24 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     def _ranked(self, out: DataFrame) -> Series:
         """The ranks of the one column, as a series named after it."""
         return _relabelled(out, self._column, self._column)
+
+    def _column_group(self, column: str) -> SeriesGroupBy:
+        """This group by, which is over the one column already."""
+        return cast("SeriesGroupBy", self)
+
+    def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
+        """A list of names, each answering a column called after it.
+
+        Raises:
+            SpecificationError: For a mapping, which is what pandas raises.
+        """
+        if isinstance(func, dict):
+            raise SpecificationError("nested renamer is not supported")
+        return [(how if isinstance(how, str) else repr(how), self._column, how) for how in func]
+
+    def _named_plan(self, named: dict[str, Any]) -> list[tuple[str, str, Any]]:
+        """Keywords of `name=function`, each answering a column of that name."""
+        return [(name, self._column, how) for name, how in named.items()]
 
 
 class IndexMixin:

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `groupby(...).agg` and `aggregate` by name, and `NamedAgg`
+
+A group by now takes `agg` in the four shapes pandas reads when every function is a name: one name answers what the method of that name answers, a list of names over one column answers a column a name, a mapping of column to name answers a column a column, and keywords of `name=(column, function)` or `name=NamedAgg(column, function)` answer a column a keyword. Each column is that method run on its own, so the numbers and types are the method's, and the keys come back as labels or as columns the way `as_index` says. `firepanda.NamedAgg` has pandas 3's fields and printed form, and a pandas one is read too. A mapping handed to one column's `agg` raises `firepanda.errors.SpecificationError`, which is new and carries pandas' name. A Python function, and a list over a frame, which pandas answers with two levels of column labels, are refused by name. `python/tests/test_group_agg.py` checks 53 cases against pandas.
+
 ### Fixed: an operator against a moment or a span keeps the column's name
 
 `s - s.min()`, `s > datetime(2024, 1, 1)` and the other operators with a `Timestamp`, `datetime`, `Timedelta` or `timedelta` on one side answered a series with no name, because the scalar was lined up as an unnamed column first. It is now lined up under the column's own name, so the answer keeps it the way pandas does and the way an operator against a number already did.

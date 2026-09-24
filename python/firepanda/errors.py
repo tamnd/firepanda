@@ -48,6 +48,7 @@ __all__ = [
     "NumericOverflowError",
     "OutOfBoundsError",
     "ReaderError",
+    "SpecificationError",
     "UnsupportedError",
 ]
 
@@ -110,6 +111,16 @@ class MergeError(InvalidArgumentError):
     that were not given or not found, and for a `validate` the keys fail. A
     program that catches it by name gets nothing from a plain `ValueError`, so
     the name is carried, for the reason `IntCastingNaNError` gives.
+    """
+
+
+class SpecificationError(FirepandaError):
+    """An aggregation asked for in a shape pandas does not read.
+
+    pandas has a class with this name in `pandas.errors` and raises it for a
+    mapping handed to a column's `agg`, which would name a column inside a
+    column. It is a plain `Exception` there, so it is one here, and the name is
+    carried for the reason `IntCastingNaNError` gives.
     """
 
 
