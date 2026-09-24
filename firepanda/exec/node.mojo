@@ -4289,13 +4289,17 @@ struct Join(Movable):
     chunk that is still in cache. On a query that ends in a reduction the
     intermediate is never written at all.
 
-    ## What it will not do
+    ## Right and full joins
 
-    Right and outer joins are refused. This node emits a chunk per chunk and
-    nothing else, and an outer join has to emit the right rows that nothing
-    matched, which it cannot know until the last chunk has gone past, so it is a
-    breaker wearing this node's clothes. A right join is an outer join's left
-    half by the same argument.
+    A right or a full join has to hand out the right rows that nothing matched,
+    and which those are is not known until the last chunk has gone past. So the
+    node keeps a flag per build row, sets it for every row a pairing used, and
+    hands out the rows still unset from `finish`, with the probe side's columns
+    null. Writing those flags is why such a join is not row local: it is fed one
+    chunk at a time on the calling thread, like `Limit`, and the other kinds are
+    still handed to every core at once. Both are asked for by position only,
+    since that is how the plan asks, and by name there would be a shared key
+    column that only one side can fill on a padded row.
 
     A text key used to be refused too and is not any more. It only ever needed
     both sides concatenated because the table it had stored a hash and a hash is
@@ -4422,6 +4426,17 @@ struct Join(Movable):
     var _absent: List[Bool]
     """Which right rows have a null key, or empty when none do."""
 
+    var _hit: List[Bool]
+    """Per build row, whether a pairing used it. Sized by `bind` for a right or
+    a full join and empty for every other kind."""
+
+    var _drained: Bool
+    """Whether `finish` has handed out the build rows nothing matched."""
+
+    var _out: Schema
+    """The schema this emits, kept for `finish`, which makes the probe side's
+    columns out of nothing and needs to know what type each one is."""
+
     var _from_right: List[Bool]
     """Per wanted column, whether it comes from the right frame."""
 
@@ -4473,7 +4488,8 @@ struct Join(Movable):
             right: The build side. Consumed.
             left_on: The key column's name on the probe side. Consumed.
             right_on: The key column's name on the build side. Consumed.
-            kind: Which rows to keep. Inner, left, semi, anti and mark only.
+            kind: Which rows to keep. Anything but cross. A right or a full
+                join needs `wanted`.
             suffix: Appended to a right column whose name collides. Consumed.
             columns: Which output columns to build, in the order wanted, or
                 empty for all of them in their natural order. Consumed.
@@ -4510,6 +4526,9 @@ struct Join(Movable):
         self._side = BuildSide()
         self._table = ProbeTable()
         self._absent = List[Bool]()
+        self._hit = List[Bool]()
+        self._drained = False
+        self._out = Schema()
         self._from_right = List[Bool]()
         self._source = List[Int]()
         self._build = List[AnyArray]()
@@ -4528,12 +4547,13 @@ struct Join(Movable):
             missing, if the two keys have different dtypes, if one is text and
             the other is not, or if a projected name is not one the result has.
         """
-        if self.kind == JoinKind.RIGHT or self.kind == JoinKind.OUTER:
+        if self.holds_hits() and len(self.wanted) == 0:
             raise Error(
                 "join: a "
                 + String(self.kind)
-                + " join has to emit right rows that nothing matched, which is"
-                " not known until the last chunk; use the whole frame join"
+                + " join is asked for by position, because by name the key"
+                " both sides share would be one column that a padded row can"
+                " only fill from one of them"
             )
         if self.kind == JoinKind.CROSS:
             raise Error("join: a cross join has no key to build a table from")
@@ -4659,8 +4679,13 @@ struct Join(Movable):
                 self._side.groups(),
             )
 
+        if self.holds_hits():
+            self._hit = List[Bool](length=rows, fill=False)
+            self._drained = False
         if len(self.wanted) != 0:
-            return self._tagged(self._marked(self._picked(input)))
+            var out = self._tagged(self._marked(self._picked(input)))
+            self._out = out.copy()
+            return out^
 
         # The same plan `join_on` makes, without the coalescing branch: an
         # output row of these four kinds always has a probe side row behind it,
@@ -4840,8 +4865,89 @@ struct Join(Movable):
             self._source.append(j)
         return Schema(kept^)
 
+    def holds_hits(self) -> Bool:
+        """Reports whether this join hands out the build rows nothing matched.
+
+        Returns:
+            True for a right and a full join, which write a flag per build row
+            as chunks go past and so are not row local.
+        """
+        return self.kind == JoinKind.RIGHT or self.kind == JoinKind.OUTER
+
     def process(
         self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
+        """Probes one chunk against the built table and hands on what paired.
+
+        Args:
+            chunk: The chunk. Consumed.
+            spread: Whether this chunk may be worked on by more than one core.
+
+        Returns:
+            The paired rows, or None when nothing paired.
+
+        Raises:
+            If the join holds flags per build row, which `track` writes, or if
+            the probe or a gather raises.
+        """
+        if self.holds_hits():
+            raise Error(
+                "join: a right or a full join writes which build rows it used,"
+                " so it takes its chunks through `track`"
+            )
+        var none = List[Bool]()
+        return self._probe(chunk^, spread, none)
+
+    def track(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Probes one chunk and notes which build rows it paired with.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The paired rows, or None when nothing paired.
+
+        Raises:
+            If the probe or a gather raises.
+        """
+        var hits = List[Bool]()
+        swap(hits, self._hit)
+        var out = self._probe(chunk^, True, hits)
+        swap(hits, self._hit)
+        return out^
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Hands out the build rows no chunk paired with, once.
+
+        Returns:
+            Those rows, with the probe side's columns null, or None when there
+            are none or this is not a right or a full join.
+
+        Raises:
+            If a gather raises.
+        """
+        if not self.holds_hits() or self._drained:
+            return None
+        self._drained = True
+        var left = List[Int]()
+        for i in range(len(self._hit)):
+            if not self._hit[i]:
+                left.append(i)
+        if len(left) == 0:
+            return None
+        var padded = List[Int](length=len(left), fill=-1)
+        var out = List[AnyArray](capacity=len(self._source))
+        for w in range(len(self._source)):
+            if self._from_right[w]:
+                out.append(take_any(self._build[self._source[w]], left, True))
+            else:
+                out.append(
+                    take_any(empty_any(self._out[w].dtype), padded, True)
+                )
+        return Chunk(out^, len(left))
+
+    def _probe(
+        self, var chunk: Chunk, spread: Bool, mut hits: List[Bool]
     ) raises -> Optional[Chunk]:
         """Probes one chunk against the built table and hands on what paired.
 
@@ -4858,6 +4964,8 @@ struct Join(Movable):
                 nesting cost nothing, because a task that finds no free worker
                 runs on the one that made it. It is still wrong to ask for, and
                 it stops being free the moment the queue is not saturated.
+            hits: One flag per build row to set for every row a pairing
+                used, or empty to note nothing.
 
         Returns:
             The paired rows, or None when nothing paired, which is a chunk of no
@@ -4923,6 +5031,14 @@ struct Join(Movable):
             var kept = chunk.picks^
             chunk.picks = List[UInt32]()
             return Chunk(out^, kept^, dense^)
+        # A right join pairs the chunk as an inner join would and a full join
+        # as a left join would. The build rows neither one used are the other
+        # half, and those come out of `finish` once every chunk has been seen.
+        var pairing = self.kind
+        if pairing == JoinKind.RIGHT:
+            pairing = JoinKind.INNER
+        elif pairing == JoinKind.OUTER:
+            pairing = JoinKind.LEFT
         var matched = Bitmap(0, all_valid=False)
         var pairs = pair_probe(
             self._table,
@@ -4932,10 +5048,15 @@ struct Join(Movable):
             absent,
             0,
             len(absent) > 0,
-            self.kind,
+            pairing,
             matched,
             spread,
         )
+        if len(hits) != 0:
+            for j in range(len(pairs)):
+                var used = Int(pairs.right_at[j])
+                if used >= 0:
+                    hits[used] = True
         if len(pairs) == 0:
             return None
 
@@ -7763,7 +7884,8 @@ def node_is_row_local(node: Node) -> Bool:
         `Truncate`,
         `Presence`,
         `Fill`,
-        `Choose`, `Constant`, `Cast`, `Join` and `Settle`.
+        `Choose`, `Constant`, `Cast`, `Join` and `Settle`, except a right or a
+        full `Join`, which notes the build rows it used as chunks go past.
     """
     return (
         node.isa[Filter]()
@@ -7788,7 +7910,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Choose]()
         or node.isa[Constant]()
         or node.isa[Cast]()
-        or node.isa[Join]()
+        or (node.isa[Join]() and not node[Join].holds_hits())
         or node.isa[Settle]()
     )
 
@@ -8053,6 +8175,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
     if node.isa[Join]():
+        if node[Join].holds_hits():
+            return node[Join].track(chunk^)
         return node[Join].process(chunk^)
     if node.isa[Settle]():
         return node[Settle].process(chunk^)
@@ -8179,4 +8303,6 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
         return node[Reduce].finish()
     if node.isa[Unique]():
         return node[Unique].finish()
+    if node.isa[Join]():
+        return node[Join].finish()
     return None

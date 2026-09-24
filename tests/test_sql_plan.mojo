@@ -1704,6 +1704,21 @@ def test_a_right_only_part_of_an_outer_condition_goes_under_it() raises:
     )
 
 
+def test_a_left_only_part_of_a_right_condition_goes_under_it() raises:
+    # A right join is the mirror of a left one, so the side to filter first is
+    # the left, and the right rows that are left with no match get padded.
+    assert_equal(
+        _plan("SELECT a FROM t RIGHT JOIN u ON t.a = u.k AND t.b > 1"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN right [a = k]\n"
+            "    FILTER b > 1\n"
+            "      SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
 def test_a_semi_and_an_anti_join_take_the_same_part_the_same_way() raises:
     # All three of these ask the right side one question, which is whether a row
     # there matches, so all three answer the same with the rows that were never

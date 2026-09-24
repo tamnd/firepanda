@@ -3302,6 +3302,72 @@ def test_a_join_told_its_columns_by_position_renames_nothing() raises:
     assert_equal(len(out), 3, "the three keys that matched")
 
 
+def _outer(kind: JoinKind) raises -> DataFrame:
+    """Joins the six rows against the lookup by position and runs it.
+
+    The probe side's key and the build side's tag, so each side has one column
+    that says which of its rows a result row came from.
+    """
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Join(
+                lookup_frame(),
+                "n",
+                "n",
+                kind,
+                "_right",
+                List[String](),
+                [0, 3],
+            )
+        )
+    )
+    return pipeline^.run()
+
+
+def test_a_right_join_hands_out_the_build_row_nothing_matched() raises:
+    # Keys 2, 4 and 6 pair and key 8 pairs with nothing, so it comes out once
+    # the last chunk has gone past, with the probe side's column null.
+    var out = _outer(JoinKind.RIGHT)
+    assert_equal(len(out), 4, "three pairs and the build row left over")
+    assert_equal(out.column("n").null_count(), 1, "the left over row's key")
+    assert_equal(out.column("tag").null_count(), 0)
+    var tags = read_back(out, "tag")
+    var total = Int64(0)
+    for i in range(len(tags)):
+        total += tags[i]
+    assert_equal(total, Int64(200), "20, 40, 60 and 80 each once")
+
+
+def test_a_full_join_pads_both_sides() raises:
+    var out = _outer(JoinKind.OUTER)
+    assert_equal(len(out), 7, "three pairs, three probe rows, one build row")
+    assert_equal(out.column("n").null_count(), 1, "the build row left over")
+    assert_equal(out.column("tag").null_count(), 3, "the probe rows left over")
+
+
+def test_a_right_join_is_not_row_local() raises:
+    # It notes which build rows it used, so two cores cannot share it.
+    var node = Node(
+        Join(
+            lookup_frame(),
+            "n",
+            "n",
+            JoinKind.RIGHT,
+            "_right",
+            List[String](),
+            [0, 3],
+        )
+    )
+    assert_false(node_is_row_local(node))
+
+
+def test_a_right_join_by_name_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="asked for by position"):
+        pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.RIGHT)))
+
+
 def test_a_join_told_where_its_key_is_does_not_go_by_name() raises:
     """A name finds the first column that has it, and the caller here means the
     second. Both are called `n` and they hold different numbers, so a join that
@@ -3356,18 +3422,12 @@ def test_a_join_asked_for_a_column_neither_side_has_says_so() raises:
         )
 
 
-def test_an_outer_join_in_a_pipeline_is_refused() raises:
-    """It has to emit right rows nothing matched, which is not known until the
-    last chunk, so it is a breaker wearing this node's clothes."""
+def test_a_full_join_by_name_is_refused() raises:
+    """A full join pads both sides, and a join by name has no columns picked to
+    pad, so it needs its columns asked for by position like a right join."""
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="not known until the last chunk"):
+    with assert_raises(contains="asked for by position"):
         pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.OUTER)))
-
-
-def test_a_right_join_in_a_pipeline_is_refused() raises:
-    var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="not known until the last chunk"):
-        pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.RIGHT)))
 
 
 def test_a_join_on_a_text_key_gives_what_the_frame_join_gives() raises:
