@@ -1794,5 +1794,58 @@ def test_an_anti_join_whose_keys_never_meet_keeps_everything() raises:
     )
 
 
+def test_a_semi_or_anti_join_over_a_tall_repeated_right_side() raises:
+    """Scans three hundred thousand right rows for the keys they have.
+
+    A semi or anti join marks which keys the right side has rather than
+    bucketing its rows, and past `PARALLEL_LEFT_ROWS` the marking runs on every
+    core with workers writing the same seats. Every right key repeats hundreds
+    of times and a few are null, so a wrong seat or a null read as a key would
+    move a left row from one answer to the other.
+    """
+    comptime LEFT_ROWS = 1_000
+    comptime RIGHT_ROWS = 300_000
+    var left_keys = Array[DType.int64](LEFT_ROWS)
+    for i in range(LEFT_ROWS):
+        left_keys[i] = Int64((i * 37) % LEFT_ROWS)
+    var right_keys = Array[DType.int64](RIGHT_ROWS)
+    for j in range(RIGHT_ROWS):
+        right_keys[j] = Int64((j % 400) * 2)
+    for j in range(0, RIGHT_ROWS, 50_000):
+        right_keys.data.validity.set(j + 1, False)
+    var left = one_column(Series("k", left_keys^))
+    var right = one_column(Series("k", right_keys^))
+
+    var semi = join_indices(
+        left.column_refs(),
+        keys(0),
+        LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.SEMI,
+    )
+    var anti = join_indices(
+        left.column_refs(),
+        keys(0),
+        LEFT_ROWS,
+        right.column_refs(),
+        keys(0),
+        RIGHT_ROWS,
+        JoinKind.ANTI,
+    )
+    assert_equal(len(semi), 400)
+    assert_equal(len(anti), 600)
+    for r in range(len(semi)):
+        var key = (semi.left_at[r] * 37) % LEFT_ROWS
+        assert_true(key % 2 == 0 and key < 800, "the semi join kept a miss")
+        assert_equal(semi.right_at[r], -1)
+    for r in range(len(anti)):
+        var key = (anti.left_at[r] * 37) % LEFT_ROWS
+        assert_false(key % 2 == 0 and key < 800, "the anti join kept a hit")
+    for r in range(1, len(anti)):
+        assert_true(anti.left_at[r - 1] < anti.left_at[r], "out of row order")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
