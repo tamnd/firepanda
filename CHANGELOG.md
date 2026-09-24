@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `kurt` over a column with an infinity answers NaN
+
+An infinity makes the mean NaN and every moment NaN with it, and the sums skipped those NaNs, so `kurt` answered zero where pandas answers NaN. The moments are now summed without skipping, and `python/tests/test_describe.py` checks two columns with infinities against pandas.
+
 ### Added: `describe` and `kurt` on a series and a frame
 
 `Series.describe` and `DataFrame.describe` answer the count, mean, standard deviation, smallest value, percentiles and largest value of a column of numbers as float64, labelled the way pandas labels them, with `percentiles` checked, sorted and printed by pandas' rules, so `0.333333` next to `0.25` is `33.3%`. A frame describes its columns of numbers and leaves the rest out, as pandas does by default. Text, flags, moments and spans are refused by name, because pandas describes them with a column of mixed values that only an object column holds. `kurt` and `kurtosis` answer the unbiased excess kurtosis with pandas' own sum and its guard for a column that is constant up to rounding, and a column they cannot read raises pandas' error for its type. `python/tests/test_describe.py` checks 59 cases against pandas.
