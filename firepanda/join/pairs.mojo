@@ -166,6 +166,18 @@ The count pass and the emit pass have to agree on the boundaries, since the emit
 starts writing where the count said it would, so both walk the same morsels.
 """
 
+comptime MISS_SKIP_LANES = 16
+"""Probe rows the pairing checks at once for a run that cannot match.
+
+The probe route gives every row that matched nothing the same ordinal, the last
+one, and that ordinal holds no rows on the built side. A dimension against fact
+join is mostly those rows: q8 asks six million lines about thirteen hundred
+parts and keeps under one in a hundred of them. Both passes of the pairing used
+to load a table slot for each of those rows to learn that it was empty. Sixteen
+codes are one cache line of `uint32` and one compare, and at q8's hit rate
+nearly nine blocks in ten are all misses and are stepped over whole.
+"""
+
 comptime MERGE_PROBE_ROWS = 1 << 16
 """Below this many probe rows a join does not ask whether its keys are sorted.
 
@@ -1119,6 +1131,21 @@ def pair_probe(
         len(table.starts) - 1, 0
     )
     var hit = List[UInt8](length=groups if wants_right else 0, fill=0)
+    # The ordinal a block of rows can be skipped on, if there is one. The last
+    # ordinal is the probe route's miss and holds nothing on this side, and any
+    # ordinal that holds nothing is one a row can pair with nothing through, so
+    # the test is whether it is empty rather than which route made it. Only a
+    # kind that emits nothing for an unmatched row may skip one, which is the
+    # inner and the semi join.
+    var skips = False
+    var dead = UInt32(0)
+    if groups > 0 and not kind.keeps_unmatched_left() and kind != JoinKind.ANTI:
+        var last = groups - 1
+        if table.unique:
+            skips = table.only[last] < 0
+        else:
+            skips = table.starts[last + 1] == table.starts[last]
+        dead = UInt32(last)
     var chunk = LEFT_MORSEL_ROWS if parallel else max(probe_rows, 1)
     var pieces = (probe_rows + chunk - 1) // chunk
     if pieces == 0:
@@ -1154,33 +1181,65 @@ def pair_probe(
         var code_at = codes.unsafe_ptr()
         var seat = table.only.unsafe_ptr()
         var here = 0
-        for i in range(start, stop):
-            var hit = False
-            if not has_nulls or not absent[absent_at + i]:
-                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
-                hit = seat.unsafe_offset(g).unsafe_load() >= 0
-            if not hit:
-                here += Int(kind.keeps_unmatched_left())
-            elif kind != JoinKind.ANTI:
-                here += 1
+        var block = start
+        while block < stop:
+            var end = min(block + MISS_SKIP_LANES, stop)
+            if (
+                skips
+                and end - block == MISS_SKIP_LANES
+                and code_at.unsafe_offset(probe_at + block)
+                .unsafe_load[width=MISS_SKIP_LANES]()
+                .eq(dead)
+                .reduce_and()
+            ):
+                block = end
+                continue
+            for i in range(block, end):
+                var hit = False
+                if not has_nulls or not absent[absent_at + i]:
+                    var g = Int(
+                        code_at.unsafe_offset(probe_at + i).unsafe_load()
+                    )
+                    hit = seat.unsafe_offset(g).unsafe_load() >= 0
+                if not hit:
+                    here += Int(kind.keeps_unmatched_left())
+                elif kind != JoinKind.ANTI:
+                    here += 1
+            block = end
         counts[start // chunk + 1] = here
 
     def tally(start: Int, stop: Int) raises {mut counts, imm}:
         var code_at = codes.unsafe_ptr()
         var here = 0
-        for i in range(start, stop):
-            var width = 0
-            if not has_nulls or not absent[absent_at + i]:
-                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
-                width = table.starts[g + 1] - table.starts[g]
-            if width == 0:
-                here += Int(kind.keeps_unmatched_left())
-            elif kind == JoinKind.ANTI:
+        var block = start
+        while block < stop:
+            var end = min(block + MISS_SKIP_LANES, stop)
+            if (
+                skips
+                and end - block == MISS_SKIP_LANES
+                and code_at.unsafe_offset(probe_at + block)
+                .unsafe_load[width=MISS_SKIP_LANES]()
+                .eq(dead)
+                .reduce_and()
+            ):
+                block = end
                 continue
-            elif kind == JoinKind.SEMI:
-                here += 1
-            else:
-                here += width
+            for i in range(block, end):
+                var width = 0
+                if not has_nulls or not absent[absent_at + i]:
+                    var g = Int(
+                        code_at.unsafe_offset(probe_at + i).unsafe_load()
+                    )
+                    width = table.starts[g + 1] - table.starts[g]
+                if width == 0:
+                    here += Int(kind.keeps_unmatched_left())
+                elif kind == JoinKind.ANTI:
+                    continue
+                elif kind == JoinKind.SEMI:
+                    here += 1
+                else:
+                    here += width
+            block = end
         counts[start // chunk + 1] = here
 
     if not parallel:
@@ -1210,33 +1269,47 @@ def pair_probe(
         var right_out = out_right.unsafe_ptr()
         var mark = hit.unsafe_ptr()
         var put = counts[start // chunk]
-        for i in range(start, stop):
-            var r = -1
-            var g = -1
-            if not has_nulls or not absent[absent_at + i]:
-                g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
-                r = Int(seat.unsafe_offset(g).unsafe_load())
+        var block = start
+        while block < stop:
+            var end = min(block + MISS_SKIP_LANES, stop)
+            if (
+                skips
+                and end - block == MISS_SKIP_LANES
+                and code_at.unsafe_offset(probe_at + block)
+                .unsafe_load[width=MISS_SKIP_LANES]()
+                .eq(dead)
+                .reduce_and()
+            ):
+                block = end
+                continue
+            for i in range(block, end):
+                var r = -1
+                var g = -1
+                if not has_nulls or not absent[absent_at + i]:
+                    g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                    r = Int(seat.unsafe_offset(g).unsafe_load())
 
-            if r < 0:
-                if kind.keeps_unmatched_left():
+                if r < 0:
+                    if kind.keeps_unmatched_left():
+                        left_out.unsafe_offset(put).unsafe_write(i)
+                        right_out.unsafe_offset(put).unsafe_write(-1)
+                        put += 1
+                    continue
+
+                if kind == JoinKind.ANTI:
+                    continue
+                if kind == JoinKind.SEMI:
                     left_out.unsafe_offset(put).unsafe_write(i)
                     right_out.unsafe_offset(put).unsafe_write(-1)
                     put += 1
-                continue
+                    continue
 
-            if kind == JoinKind.ANTI:
-                continue
-            if kind == JoinKind.SEMI:
                 left_out.unsafe_offset(put).unsafe_write(i)
-                right_out.unsafe_offset(put).unsafe_write(-1)
+                right_out.unsafe_offset(put).unsafe_write(r)
                 put += 1
-                continue
-
-            left_out.unsafe_offset(put).unsafe_write(i)
-            right_out.unsafe_offset(put).unsafe_write(r)
-            put += 1
-            if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
-                mark.unsafe_offset(g).unsafe_write(1)
+                if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
+                    mark.unsafe_offset(g).unsafe_write(1)
+            block = end
 
     def spill(
         start: Int, stop: Int
@@ -1246,36 +1319,50 @@ def pair_probe(
         var right_out = out_right.unsafe_ptr()
         var mark = hit.unsafe_ptr()
         var put = counts[start // chunk]
-        for i in range(start, stop):
-            var first = -1
-            var last = -1
-            var g = -1
-            if not has_nulls or not absent[absent_at + i]:
-                g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
-                first = table.starts[g]
-                last = table.starts[g + 1]
+        var block = start
+        while block < stop:
+            var end = min(block + MISS_SKIP_LANES, stop)
+            if (
+                skips
+                and end - block == MISS_SKIP_LANES
+                and code_at.unsafe_offset(probe_at + block)
+                .unsafe_load[width=MISS_SKIP_LANES]()
+                .eq(dead)
+                .reduce_and()
+            ):
+                block = end
+                continue
+            for i in range(block, end):
+                var first = -1
+                var last = -1
+                var g = -1
+                if not has_nulls or not absent[absent_at + i]:
+                    g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                    first = table.starts[g]
+                    last = table.starts[g + 1]
 
-            if first == last:
-                if kind.keeps_unmatched_left():
+                if first == last:
+                    if kind.keeps_unmatched_left():
+                        left_out.unsafe_offset(put).unsafe_write(i)
+                        right_out.unsafe_offset(put).unsafe_write(-1)
+                        put += 1
+                    continue
+
+                if kind == JoinKind.ANTI:
+                    continue
+                if kind == JoinKind.SEMI:
                     left_out.unsafe_offset(put).unsafe_write(i)
                     right_out.unsafe_offset(put).unsafe_write(-1)
                     put += 1
-                continue
+                    continue
 
-            if kind == JoinKind.ANTI:
-                continue
-            if kind == JoinKind.SEMI:
-                left_out.unsafe_offset(put).unsafe_write(i)
-                right_out.unsafe_offset(put).unsafe_write(-1)
-                put += 1
-                continue
-
-            for p in range(first, last):
-                left_out.unsafe_offset(put).unsafe_write(i)
-                right_out.unsafe_offset(put).unsafe_write(table.bucket[p])
-                put += 1
-            if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
-                mark.unsafe_offset(g).unsafe_write(1)
+                for p in range(first, last):
+                    left_out.unsafe_offset(put).unsafe_write(i)
+                    right_out.unsafe_offset(put).unsafe_write(table.bucket[p])
+                    put += 1
+                if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
+                    mark.unsafe_offset(g).unsafe_write(1)
+            block = end
 
     if not parallel:
         if table.unique:

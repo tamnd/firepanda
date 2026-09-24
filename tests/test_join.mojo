@@ -1847,5 +1847,69 @@ def test_a_semi_or_anti_join_over_a_tall_repeated_right_side() raises:
         assert_true(anti.left_at[r - 1] < anti.left_at[r], "out of row order")
 
 
+def _pairs_over_mostly_misses(rows: Int, copies: Int, kind: JoinKind) raises:
+    """Joins `rows` probe rows against a few keys, each held `copies` times.
+
+    Hits come one in 997 rows and in one run of forty consecutive rows, so most
+    blocks of sixteen are all misses, some hold one hit, and a few are all hits.
+    Every tenth hit row has a null key, which must not pair however its block is
+    walked, and the height is not a multiple of sixteen.
+    """
+    var probe = Array[DType.int64](rows)
+    for i in range(rows):
+        probe[i] = Int64(i)
+    var wanted = List[Int]()
+    for k in range(rows):
+        if k % 997 == 5 or (k >= 1_000 and k < 1_040):
+            wanted.append(k)
+    var nulled = 0
+    for w in range(0, len(wanted), 10):
+        probe.data.validity.set(wanted[w], False)
+        nulled += 1
+    var built = Array[DType.int64](len(wanted) * copies)
+    for c in range(copies):
+        for w in range(len(wanted)):
+            # Descending, so the sorted walk that a semi join over two sorted
+            # sides would take instead is not on offer.
+            built[c * len(wanted) + w] = Int64(wanted[len(wanted) - 1 - w])
+    var left = one_column(Series("k", probe^))
+    var right = one_column(Series("k", built^))
+    var paired = join_indices(
+        left.column_refs(),
+        keys(0),
+        rows,
+        right.column_refs(),
+        keys(0),
+        len(wanted) * copies,
+        kind,
+    )
+    var each = copies if kind == JoinKind.INNER else 1
+    assert_equal(len(paired), (len(wanted) - nulled) * each)
+    for r in range(len(paired)):
+        var at = paired.left_at[r]
+        assert_true(
+            at % 997 == 5 or (at >= 1_000 and at < 1_040), "paired a miss"
+        )
+        if kind == JoinKind.INNER:
+            var there = paired.right_at[r] % len(wanted)
+            assert_equal(wanted[len(wanted) - 1 - there], at)
+        if r > 0:
+            assert_true(paired.left_at[r - 1] <= at, "out of row order")
+
+
+def test_an_inner_or_semi_join_that_mostly_misses_skips_only_misses() raises:
+    """Pairs a probe side where nearly every row matched nothing.
+
+    The pairing steps over a block of sixteen rows whose codes are all the miss
+    ordinal. A block with one hit in it, a block of hits, a null key inside a
+    block, a ragged last block and a built side with repeated keys all have to
+    come out the same as a row at a time, one thread and every core.
+    """
+    for rows in [1_000, 1_003, 200_003]:
+        for copies in [1, 3]:
+            _pairs_over_mostly_misses(rows, copies, JoinKind.INNER)
+        _pairs_over_mostly_misses(rows, 1, JoinKind.SEMI)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
