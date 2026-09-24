@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
+
 ### Changed
 
 - A streaming group by on two keys or more, when one of them is text, keeps its groups in a map that lasts across chunks rather than stacking the running table with every chunk's table and grouping the two again. Each row's tuple is written out as bytes, a presence byte per key and a length in front of text, on the cores, and looked up in the text map the single key route already used, so a null in a key no longer matters to the route either. ClickBench q18 at 1M went from 80.2 to 48.2 ms and q39 from 112.2 to 67.4 ms through the SQL planner, and the planner's total over the 43 queries against the hand written port went from 1.42 to 1.28, with all 43 still agreeing. A table that arrives in one chunk and a tuple of integers alone stay on the old route, because the map inserts its groups one at a time and loses to one parallel pass there. A float key does too.

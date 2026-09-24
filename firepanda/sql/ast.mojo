@@ -394,6 +394,14 @@ comptime EXPR_POSITIONAL: UInt8 = 30
 `a` is n, which is never 0.
 """
 
+comptime EXPR_GROUPING: UInt8 = 31
+"""`GROUPING(a, b)`, which of its columns the grouping set a row came from left
+out, one bit each with the first column the highest.
+
+`children` is the run of arguments, of which there is at least one.
+`GROUPING_ID` is the same thing under another name and lands here too.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -2041,6 +2049,20 @@ struct Ast(Movable):
             The node index.
         """
         return self.add(Expr(kind=EXPR_POSITIONAL, token=token, a=n))
+
+    def grouping(mut self, args: List[UInt32], token: UInt32 = 0) -> UInt32:
+        """Builds `GROUPING(...)`.
+
+        Args:
+            args: The columns it asks about.
+            token: The token the keyword is at.
+
+        Returns:
+            The node index.
+        """
+        return self.add(
+            Expr(kind=EXPR_GROUPING, token=token, children=self.run(args))
+        )
 
     def star(
         mut self,
