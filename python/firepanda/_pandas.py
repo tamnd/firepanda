@@ -15015,6 +15015,113 @@ class StringMixin:
 
         return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
 
+    def _pieces(self, pat: Any, n: Any, regex: Any, from_right: bool) -> list[Any]:
+        """Every row cut into its pieces, with None for a gap, by pandas' rules.
+
+        No pattern cuts at runs of whitespace. A pattern is read as a regular
+        expression when `regex` is True, when it is already compiled, or when
+        `regex` is left out and the pattern is not one character long, and as
+        plain text otherwise. `n` of None or 0 means every cut for plain text
+        and None or -1 means every cut for a regular expression, which is how
+        pandas hands the count to `str.split` and `re.split` respectively.
+        `rsplit` only ever reads plain text.
+        """
+        if regex is False and isinstance(pat, re.Pattern):
+            raise InvalidArgumentError(
+                "Cannot use a compiled regex as replacement pattern with regex=False"
+            )
+        rows = self._series.tolist()
+        if from_right:
+            if pat is not None and not isinstance(pat, str):
+                raise TypeError(f"must be str or None, not {type(pat).__name__}")
+            count = -1 if n is None or n == 0 else n
+            return [None if row is None else row.rsplit(pat, count) for row in rows]
+        pattern: Any = pat
+        if pat is not None and (
+            regex is True or isinstance(pat, re.Pattern) or (regex is None and len(pat) != 1)
+        ):
+            pattern = re.compile(pat)
+        if isinstance(pattern, re.Pattern):
+            count = 0 if n is None or n == -1 else n
+            return [None if row is None else pattern.split(row, maxsplit=count) for row in rows]
+        count = -1 if n is None or n == 0 else n
+        return [None if row is None else row.split(pattern, count) for row in rows]
+
+    def _split(self, pat: Any, n: Any, expand: Any, regex: Any, from_right: bool) -> DataFrame:
+        """Every row cut into pieces, one column per piece, padded with gaps.
+
+        The width is the most pieces any row was cut into, a row with fewer
+        is padded with gaps on the right, and a gap row is gaps throughout.
+        `expand=False` answers a column of lists in pandas and there is no
+        column type for a list here, so it is refused by name, the way
+        `partition` refuses its tuples. The columns are labelled with the text
+        of their position, for the reason `_cut` gives.
+        """
+        from ._frame import DataFrame, Series
+
+        name = "rsplit" if from_right else "split"
+        if expand not in (True, False):
+            raise InvalidArgumentError("expand must be True or False")
+        if not expand:
+            raise UnsupportedError(
+                f"firepanda:unsupported: str.{name} with expand=False answers a column of"
+                " lists and there is no column type for one yet, so only expand=True is"
+                " written"
+            )
+        try:
+            pieces = self._pieces(pat, n, regex, from_right)
+        except ValueError as error:
+            if isinstance(error, FirepandaError):
+                raise
+            raise InvalidArgumentError(str(error)) from None
+        index = self._series.index
+        if not pieces:
+            return DataFrame(index=index)
+        width = max((len(row) for row in pieces if row is not None), default=1)
+        padded = [
+            [None] * width if row is None else row + [None] * (width - len(row)) for row in pieces
+        ]
+        return DataFrame(
+            {
+                str(at): Series([row[at] for row in padded], index=index, dtype="string")
+                for at in range(width)
+            }
+        )
+
+    def _mapped_text(self, each: Callable[[str], str]) -> Series:
+        """A text column with `each` applied to every row that is not a gap.
+
+        A `ValueError` out of `each` is Python's own sentence, which is pandas'
+        too, and it is raised as the library's kind so the accessor's error
+        translation passes it through untouched.
+        """
+        from ._frame import Series
+
+        try:
+            rows = [None if row is None else each(row) for row in self._series.tolist()]
+        except ValueError as error:
+            if isinstance(error, FirepandaError):
+                raise
+            raise InvalidArgumentError(str(error)) from None
+        return Series(rows, index=self._series.index, name=self._series.name, dtype="string")
+
+    def _characters_joined(self, sep: Any) -> Series:
+        """Every row with the separator between each pair of its characters."""
+        return self._mapped_text(lambda row: sep.join(row))
+
+    def _wrapped_lines(self, arguments: dict[str, Any]) -> Series:
+        """Every row broken into lines by `textwrap`, which is what pandas hands it to.
+
+        `arguments` is the accessor method's own `locals()`, every one of which
+        but `self` is a `TextWrapper` argument of the same name, so the twelve
+        of them are written once in the signature and not again here.
+        """
+        import textwrap
+
+        options = {name: value for name, value in arguments.items() if name != "self"}
+        wrapper = textwrap.TextWrapper(**options)
+        return self._mapped_text(lambda row: "\n".join(wrapper.wrap(row)))
+
     def _normalized(self, form: Any) -> Series:
         """One of the four Unicode normalization forms, applied to every row.
 
