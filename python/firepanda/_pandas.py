@@ -10018,21 +10018,20 @@ class SeriesMixin:
         `proportion` when it is normalised, and its index takes the column's
         name.
 
-        A category column is refused, because pandas counts every category
-        including the ones that never occur, and so is `bins`.
+        A category column counts every category, the ones that never occur
+        included, in the order of the categories, which `_category_counts`
+        explains. `bins` is refused.
         """
         if bins is not None:
             raise UnsupportedError(
                 "value_counts with bins= is not supported yet, because it needs cut"
             )
         if self._inner.dtype() == "category":
-            raise UnsupportedError(
-                "value_counts on a category column is not supported yet, because pandas"
-                " counts every category including the ones that never occur"
-            )
-        key = "value"
-        frame = self.rename(key).to_frame()
-        counts = frame.groupby(key, sort=False, dropna=dropna).size()
+            counts = self._category_counts(dropna)
+        else:
+            key = "value"
+            frame = self.rename(key).to_frame()
+            counts = frame.groupby(key, sort=False, dropna=dropna).size()
         counts = counts.rename_axis(self.name)
         if normalize:
             counts = (counts / counts.sum()).rename("proportion")
@@ -10041,6 +10040,37 @@ class SeriesMixin:
         if sort:
             counts = counts.sort_values(ascending=ascending, kind="stable")
         return counts
+
+    def _category_counts(self, dropna: bool) -> Any:
+        """How often each category occurs, labelled by a categorical index.
+
+        pandas counts a category column by its categories rather than by the
+        values it holds, so a category nothing uses is a row with a count of
+        nought, and the rows come in the order of the categories. A missing
+        value is one more row at the end when `dropna` is False and there is
+        one to count. The index is categorical, with the column's categories
+        and its ordered flag, whichever of them appear as rows.
+
+        The counting is a group by on the codes, which are whole numbers, so it
+        costs what counting any integer column costs, and only the categories
+        are read into Python.
+        """
+        from ._frame import DataFrame, Series
+
+        categories = list(self.cat.categories)
+        codes = self.cat.codes.rename("code").to_frame()
+        found = codes.groupby("code", sort=False).size()
+        seen = dict(zip(found.index.tolist(), found.tolist(), strict=True))
+        labels: list[Any] = list(categories)
+        counts = [seen.get(code, 0) for code in range(len(categories))]
+        missing = int(self.isna().sum()) if not dropna else 0
+        if missing:
+            labels.append(None)
+            counts.append(missing)
+        index = Series(labels, dtype="string").astype("category")
+        index = index.cat.set_categories(categories, ordered=self.cat.ordered)
+        table = DataFrame({"label": index, "count": Series(counts, dtype="int64")})
+        return table.set_index("label")["count"]
 
     def _mode(self, dropna: bool) -> Any:
         """The values that occur most often, sorted, under a fresh index.
