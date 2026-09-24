@@ -8385,6 +8385,67 @@ class DataFrameMixin:
             return False
         return all(_same_values(self[name], other[name]) for name in self.columns)
 
+    def to_csv(
+        self,
+        path_or_buf: Any = None,
+        *,
+        sep: str = ",",
+        na_rep: str = "",
+        float_format: Any = None,
+        columns: Any = None,
+        header: Any = True,
+        index: bool = True,
+        index_label: Any = None,
+        mode: str = "w",
+        encoding: Any = None,
+        compression: Any = "infer",
+        quoting: Any = None,
+        quotechar: str = '"',
+        lineterminator: Any = None,
+        chunksize: Any = None,
+        date_format: Any = None,
+        doublequote: bool = True,
+        escapechar: Any = None,
+        decimal: str = ".",
+        errors: str = "strict",
+        storage_options: Any = None,
+    ) -> Any:
+        """The frame as comma separated text, written to a file or answered.
+
+        Floats are written the shortest way that reads back the same, missing
+        values as `na_rep`, and instants with one shape for the whole column.
+        A name ending in `.gz`, `.bz2`, `.xz` or `.zip` is compressed.
+
+        Returns:
+            The text when `path_or_buf` is None, and None otherwise.
+        """
+        options = {
+            "sep": sep,
+            "na_rep": na_rep,
+            "float_format": float_format,
+            "header": header,
+            "index": index,
+            "index_label": index_label,
+            "mode": mode,
+            "encoding": encoding,
+            "compression": compression,
+            "quoting": quoting,
+            "quotechar": quotechar,
+            "lineterminator": lineterminator,
+            "date_format": date_format,
+            "doublequote": doublequote,
+            "escapechar": escapechar,
+            "decimal": decimal,
+            "errors": errors,
+            "storage_options": storage_options,
+        }
+        chosen = (
+            self if columns is None else self[list(columns) if _list_like(columns) else [columns]]
+        )
+        names = list(chosen.columns)
+        found = [chosen.iloc[:, place] for place in range(len(names))]
+        return _write_csv(names, found, chosen.index, path_or_buf, **options)
+
     def to_dict(self, orient: str = "dict", *, into: Any = dict, index: bool = True) -> Any:
         """The frame as Python mappings and lists, in one of pandas' seven shapes.
 
@@ -11536,6 +11597,63 @@ class SeriesMixin:
         if not _same_values(self.index.to_series(), other.index.to_series()):
             return False
         return _same_values(self, other)
+
+    def to_csv(
+        self,
+        path_or_buf: Any = None,
+        *,
+        sep: str = ",",
+        na_rep: str = "",
+        float_format: Any = None,
+        columns: Any = None,
+        header: Any = True,
+        index: bool = True,
+        index_label: Any = None,
+        mode: str = "w",
+        encoding: Any = None,
+        compression: Any = "infer",
+        quoting: Any = None,
+        quotechar: str = '"',
+        lineterminator: Any = None,
+        chunksize: Any = None,
+        date_format: Any = None,
+        doublequote: bool = True,
+        escapechar: Any = None,
+        decimal: str = ".",
+        errors: str = "strict",
+        storage_options: Any = None,
+    ) -> Any:
+        """The column as comma separated text, written to a file or answered.
+
+        Floats are written the shortest way that reads back the same, missing
+        values as `na_rep`, and instants with one shape for the whole column.
+        A name ending in `.gz`, `.bz2`, `.xz` or `.zip` is compressed.
+
+        Returns:
+            The text when `path_or_buf` is None, and None otherwise.
+        """
+        options = {
+            "sep": sep,
+            "na_rep": na_rep,
+            "float_format": float_format,
+            "header": header,
+            "index": index,
+            "index_label": index_label,
+            "mode": mode,
+            "encoding": encoding,
+            "compression": compression,
+            "quoting": quoting,
+            "quotechar": quotechar,
+            "lineterminator": lineterminator,
+            "date_format": date_format,
+            "doublequote": doublequote,
+            "escapechar": escapechar,
+            "decimal": decimal,
+            "errors": errors,
+            "storage_options": storage_options,
+        }
+        name = "0" if self.name is None else self.name
+        return _write_csv([name], [self], self.index, path_or_buf, **options)
 
     def to_dict(self, *, into: Any = dict) -> Any:
         """The column as a mapping from row label to value.
@@ -19715,6 +19833,203 @@ def to_datetime(
         )
     except Exception as error:
         raise translate(error) from None
+
+
+_CSV_ZIPPED = {".gz": "gzip", ".bz2": "bz2", ".xz": "xz", ".zip": "zip"}
+
+
+def _instant_texts(values: list[Any], date_format: Any) -> list[Any]:
+    """Instants as pandas writes them, with one shape for the whole column.
+
+    pandas writes only the date when every instant with no zone is at
+    midnight, and otherwise as many fraction digits as the finest instant
+    needs, three, six or nine, and a zone's offset at the end.
+    """
+    present = [value for value in values if not _missing(value)]
+    if date_format is not None:
+        return [None if _missing(value) else value.strftime(date_format) for value in values]
+    zoned = any(value.tzinfo is not None for value in present)
+    parts = [value.microsecond * 1000 + value.nanosecond for value in present]
+    dates_only = not zoned and all(
+        value.hour == value.minute == value.second == 0 and part == 0
+        for value, part in zip(present, parts, strict=True)
+    )
+    digits = 0
+    if any(parts):
+        digits = 3 if all(part % 1_000_000 == 0 for part in parts) else 6
+        digits = 9 if any(part % 1000 for part in parts) else digits
+    texts: list[Any] = []
+    for value in values:
+        if _missing(value):
+            texts.append(None)
+            continue
+        text = f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+        if not dates_only:
+            text += f" {value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+            part = value.microsecond * 1000 + value.nanosecond
+            text += f".{part:09d}"[: digits + 1] if digits else ""
+        if value.tzinfo is not None:
+            text += re.search(r"[+-]\d\d:\d\d$", str(value)).group()  # type: ignore[union-attr]
+        texts.append(text)
+    return texts
+
+
+def _csv_cells(column: Any, float_format: Any, date_format: Any, **kw: Any) -> list[Any]:
+    """A column's cells as the text pandas writes, or as numbers the writer leaves bare.
+
+    Numbers stay numbers when the writer quotes everything that is not one,
+    so it leaves them bare the way pandas does.
+    """
+    numpy = _numpy()
+    printed = str(column.dtype)
+    values = column.tolist()
+    na_rep, decimal, bare = kw["na_rep"], kw["decimal"], kw["bare"]
+    if printed.startswith("datetime"):
+        texts = _instant_texts(values, date_format)
+    elif printed.startswith("timedelta"):
+        texts = [None if _missing(value) else str(value) for value in values]
+    elif printed.lower().startswith("float"):
+        plain = float_format is None and decimal == "."
+        texts = []
+        for value in values:
+            if _missing(value):
+                texts.append(None)
+            elif bare and plain and printed == "float64":
+                texts.append(value)
+            elif float_format is None:
+                shown = str(numpy.float32(value)) if printed == "float32" else repr(value)
+                texts.append(shown.replace(".", decimal))
+            else:
+                shown = float_format(value) if callable(float_format) else float_format % value
+                texts.append(shown.replace(".", decimal))
+    elif bare and printed.lower().startswith(("int", "uint", "bool")):
+        texts = values
+    else:
+        texts = [None if _missing(value) else str(value) for value in values]
+    return [na_rep if text is None else text for text in texts]
+
+
+def _csv_handle(path: Any, mode: str, encoding: Any, errors: str, compression: Any) -> Any:
+    """A text handle on the file, compressed the way the name or `compression` says.
+
+    Raises:
+        ValueError: For a compression pandas does not know.
+        NotImplementedError: For compressions firepanda does not write yet.
+    """
+    import io
+    import os
+
+    options = dict(compression) if isinstance(compression, dict) else {"method": compression}
+    method = options.pop("method", None)
+    path = os.path.expanduser(os.fspath(path))
+    if method == "infer":
+        method = next(
+            (name for end, name in _CSV_ZIPPED.items() if path.lower().endswith(end)), None
+        )
+    encoding = encoding or "utf-8"
+    raw = mode.replace("b", "").replace("t", "")
+    if method is None:
+        return open(path, raw, encoding=encoding, errors=errors, newline="")
+    if method in ("gzip", "bz2", "xz"):
+        import bz2
+        import gzip
+        import lzma
+
+        opener = {"gzip": gzip.open, "bz2": bz2.open, "xz": lzma.open}[method]
+        return opener(path, raw + "t", encoding=encoding, errors=errors, newline="")
+    if method == "zip":
+        import zipfile
+
+        name = options.get("archive_name") or os.path.basename(path).removesuffix(".zip")
+        archive = zipfile.ZipFile(path, raw, compression=zipfile.ZIP_DEFLATED)
+        inner = archive.open(name, "w")
+        handle = io.TextIOWrapper(inner, encoding=encoding, errors=errors, newline="")
+        closing = handle.close
+
+        def close() -> None:
+            closing()
+            archive.close()
+
+        handle.close = close  # type: ignore[method-assign]
+        return handle
+    if method in ("zstd", "tar"):
+        raise NotImplementedError(
+            f"to_csv: compression={method!r} is not supported yet, only gzip, bz2, xz and zip"
+        )
+    raise ValueError(f"Unrecognized compression type: {method}")
+
+
+def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any, **kw: Any) -> Any:
+    """Writes columns as pandas' `to_csv` does, and answers the text when there is no path.
+
+    Raises:
+        ValueError: For header aliases that do not match the columns, with
+            pandas' words.
+        NotImplementedError: For storage options, which are for remote files.
+    """
+    import csv
+    import io
+    import os
+
+    if kw["storage_options"] is not None:
+        raise NotImplementedError(
+            "to_csv: storage_options are for remote files, which firepanda does not write yet"
+        )
+    quoting = csv.QUOTE_MINIMAL if kw["quoting"] is None else kw["quoting"]
+    cells = {
+        "na_rep": kw["na_rep"],
+        "decimal": kw["decimal"],
+        "bare": quoting == csv.QUOTE_NONNUMERIC,
+    }
+    header, index, index_label = kw["header"], kw["index"], kw["index_label"]
+    lines: list[list[Any]] = []
+    if header is not False:
+        titles = list(names)
+        if _list_like(header):
+            if len(header) != len(names):
+                raise ValueError(f"Writing {len(names)} cols but got {len(header)} aliases")
+            titles = list(header)
+        titles = [str(title) for title in titles]
+        if index and index_label is not False:
+            if index_label is None:
+                label = "" if rows.name is None else str(rows.name)
+            elif _list_like(index_label):
+                label = str(next(iter(index_label)))
+            else:
+                label = str(index_label)
+            titles = [label, *titles]
+        lines.append(titles)
+    texts = [
+        _csv_cells(column, kw["float_format"], kw["date_format"], **cells) for column in columns
+    ]
+    if index:
+        texts = [_csv_cells(rows.to_series(), kw["float_format"], None, **cells), *texts]
+    lines.extend(zip(*texts, strict=True) if texts else [])
+    buffer = io.StringIO()
+    writer = csv.writer(
+        buffer,
+        delimiter=kw["sep"],
+        quoting=quoting,
+        quotechar=kw["quotechar"],
+        lineterminator=kw["lineterminator"] or os.linesep,
+        doublequote=kw["doublequote"],
+        escapechar=kw["escapechar"],
+    )
+    writer.writerows(lines)
+    text = buffer.getvalue()
+    if path_or_buf is None:
+        return text
+    if hasattr(path_or_buf, "write"):
+        try:
+            path_or_buf.write(text)
+        except TypeError:
+            path_or_buf.write(text.encode(kw["encoding"] or "utf-8", kw["errors"]))
+        return None
+    with _csv_handle(
+        path_or_buf, kw["mode"], kw["encoding"], kw["errors"], kw["compression"]
+    ) as handle:
+        handle.write(text)
+    return None
 
 
 _READ_CSV_ENGINES = ("c", "python", "pyarrow")
