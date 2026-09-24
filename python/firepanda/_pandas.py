@@ -20656,8 +20656,12 @@ def _json_epochs(values: list[Any], kind: str, options: dict[str, Any]) -> Any:
                 for value in numbers
             ]
             if all(value is None or -(2**63) < value < 2**63 for value in counts):
-                kind = "int64" if None not in counts else None
-                return to_datetime(Series(counts, dtype=kind), unit="ns")
+                whole = [
+                    None if value is None or value != value else int(value) for value in numbers
+                ]
+                if all(value is None or value == int(value) for value in numbers if value == value):
+                    return to_datetime(Series(whole), unit=unit)
+                return to_datetime(Series(counts), unit="ns")
         return None
     if kind != "str":
         return None
