@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `read_parquet` holds a string column that repeats as codes by default
+
+`Session.run(encode_strings=...)` now defaults to on, so `read_parquet` and everything built on it hand back a string column where each value repeats at least sixteen times on average as int32 codes into its distinct values (#979). The dtype still says string, and every frame and Series method reads the encoding or decodes first, so nothing a caller does changes except memory and speed. On TPC-H sf1 lineitem the frame is 813 MB rather than 1150 MB, and the read takes the same time. `encode_strings=False` gives every column flat, for a caller that reads the buffers directly.
+
 ### Added
 
 - A slice whose end is written as a minus, such as `a[1:-:2]` or `a[:-:-1]`, which is how DuckDB says the end of the list when a step follows. It now parses and prints back as written, and the plan refuses it the way it refuses any other step. `a[1:-]` with no second colon is a syntax error, as it is in DuckDB.
