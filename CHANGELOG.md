@@ -11,6 +11,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed: an inner or semi join steps over probe rows that matched nothing
 
 When the built side of an inner or semi join is small, most probe rows usually find nothing: TPC-H q8 probes six million lines against about 1,300 parts and under one in a hundred hits. The pairing walk still visited every row, twice, once to count and once to write. It now reads sixteen probe codes at a time and steps past the block in one go when all sixteen are the miss code, which has no rows behind it. Left, outer and anti joins walk every row as before, since a miss there still makes a row. On a busy 8 core VM this cut the instructions per run by about a fifth on q8 and a sixth on q5. The load on that box was too high for the wall clock to show it cleanly.
+### Added: merge_ordered
+
+- `firepanda.merge_ordered` joins two frames sorted by the key, the way `pandas.merge_ordered` does, as an outer join by default and any of the four joins with `how`. `fill_method="ffill"` carries each side's last row down over the rows where it had no match, keeping an integer column integer once no gap is left, and `left_by` or `right_by` merges group by group and stacks the pieces in the order their values first appear. The mistakes pandas refuses raise its errors in its words.
+- `merge` with an outer or right join on a key of instants, zoned instants or spans now keeps the key's type, where it used to come back as the integer counts underneath.
 
 ### Added: merge_asof
 

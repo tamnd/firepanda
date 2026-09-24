@@ -18168,8 +18168,34 @@ def merge(
     if named is not None:
         out = _indicated(out, named)
     if any(out.null_counts()):
-        out = out._widened_for_missing()
+        out = _merge_widened(out)
     return DataFrame._wrap(out)
+
+
+def _merge_widened(out: Any) -> Any:
+    """The joined frame with its gappy integers widened, instants and spans kept.
+
+    The core widens the key an outer or right join put together from both
+    sides into the counts under its instants or spans, so those are read back
+    as what they were.
+    """
+    from ._frame import DataFrame, Series
+
+    before = out.dtypes()
+    out = out._widened_for_missing()
+    for name, typed, now in zip(out.names(), before, out.dtypes(), strict=True):
+        if now == typed or not typed.startswith(("datetime64[", "timedelta64[")):
+            continue
+        unit, _, zone = typed[typed.find("[") + 1 : -1].partition(", ")
+        counts = Series._wrap(out.column(name))
+        if typed.startswith("timedelta64["):
+            fixed = to_timedelta(counts, unit=unit)
+        elif zone:
+            fixed = to_datetime(counts, unit=unit).dt.tz_localize("UTC").dt.tz_convert(zone)
+        else:
+            fixed = to_datetime(counts, unit=unit)
+        out = DataFrame._wrap(out).assign(**{name: fixed.dt.as_unit(unit)})._inner
+    return out
 
 
 MERGE_LEFT = "_left_indicator"
@@ -19181,6 +19207,161 @@ def merge_asof(
         suffixes=suffixes,
     ).drop(columns=marker)
     return joined.set_axis(left.index) if labels else joined
+
+
+def _ordered_filled(joined: DataFrame, frame: Any, names: list[Any], rows: list[Any]) -> DataFrame:
+    """Carries one side's last row down over the rows where that side had no match.
+
+    `names` are the answer's columns taken from `frame`, in the order of its
+    columns, and `rows` the matched row of `frame` for every answer row. Once
+    filled, the only gaps left are the rows before the first match, so each
+    column is those rows of the answer followed by the rows of `frame` taken,
+    which keeps the type `frame` had when there are no such rows, the way
+    pandas takes rows with a filled indexer.
+    """
+    filled = list(itertools.accumulate(rows, lambda last, row: last if row is None else row))
+    head = filled.count(None)
+    for name, source in zip(names, frame.columns, strict=True):
+        if name is None:
+            continue
+        taken = frame[source].iloc[filled[head:]]
+        if head:
+            taken = concat([joined[name].iloc[:head], taken])
+        joined = joined.assign(**{name: taken.set_axis(joined.index)})
+    return joined
+
+
+def _ordered_pair(
+    left: DataFrame,
+    right: DataFrame,
+    on: Any,
+    left_on: Any,
+    right_on: Any,
+    how: str,
+    suffixes: Any,
+    fill_method: Any,
+) -> DataFrame:
+    """One ordered merge of two frames: `merge` sorted by the key, then filled forward."""
+    if fill_method is None:
+        return merge(
+            left,
+            right,
+            how=how,
+            on=on,
+            left_on=left_on,
+            right_on=right_on,
+            sort=True,
+            suffixes=suffixes,
+        )
+    marker = "__ordered_row__"
+    while marker in left.columns or marker in right.columns:
+        marker += "_"
+    lmark, rmark = marker + "l", marker + "r"
+    joined = merge(
+        left.reset_index(drop=True).assign(**{lmark: list(range(len(left)))}),
+        right.reset_index(drop=True).assign(**{rmark: list(range(len(right)))}),
+        how=how,
+        on=on,
+        left_on=left_on,
+        right_on=right_on,
+        sort=True,
+        suffixes=suffixes,
+    )
+    if fill_method != "ffill":
+        raise ValueError("fill_method must be 'ffill' or None")
+    lrows = [None if _missing(v) else int(v) for v in joined[lmark].tolist()]
+    rrows = [None if _missing(v) else int(v) for v in joined[rmark].tolist()]
+    joined = joined.drop(columns=[lmark, rmark])
+    columns = list(joined.columns)
+    if on is not None:
+        shared = set(on) if _list_like(on) else {on}
+    elif left_on is not None and right_on is not None:
+        lkeys = list(left_on) if _list_like(left_on) else [left_on]
+        rkeys = list(right_on) if _list_like(right_on) else [right_on]
+        shared = {a for a, b in zip(lkeys, rkeys, strict=False) if a == b}
+    else:
+        shared = {c for c in left.columns if c in right.columns}
+    kept = [c for c in right.columns if c not in shared]
+    if len(columns) != len(left.columns) + len(kept):
+        raise NotImplementedError(
+            "merge_ordered with fill_method='ffill' could not line up the joined columns"
+        )
+    lnames = [None if c in shared else n for c, n in zip(left.columns, columns, strict=False)]
+    rnames = iter(columns[len(left.columns) :])
+    joined = _ordered_filled(joined, left, lnames, lrows)
+    names = [None if c in shared else next(rnames) for c in right.columns]
+    return _ordered_filled(joined, right, names, rrows)
+
+
+def merge_ordered(
+    left: Any,
+    right: Any,
+    on: Any = None,
+    left_on: Any = None,
+    right_on: Any = None,
+    left_by: Any = None,
+    right_by: Any = None,
+    fill_method: Any = None,
+    suffixes: Any = ("_x", "_y"),
+    how: str = "outer",
+) -> DataFrame:
+    """Joins two frames sorted by the key, the way `pandas.merge_ordered` does.
+
+    The answer is `merge` with `sort=True`: every key from the sides `how`
+    keeps, in key order, on the default index. With `fill_method="ffill"`, a
+    row where one side had no match takes that side's columns from the row
+    above, so only the rows before a side's first match keep gaps. With
+    `left_by`, the left frame is split by those columns, each piece is merged
+    with the right rows that share its values, or the whole right frame when
+    the right lacks those columns, and the pieces are stacked in the order
+    their values first appear; `right_by` is the same with the sides swapped.
+
+    Returns:
+        A new frame on the default index.
+
+    Raises:
+        ValueError: For both `left_by` and `right_by`, or a `fill_method`
+            other than "ffill" or None, in pandas' words.
+        KeyError: For a `by` column the frame lacks, in pandas' words.
+    """
+    left = _merge_side(left)
+    right = _merge_side(right)
+
+    def pair(lhs: DataFrame, rhs: DataFrame) -> DataFrame:
+        return _ordered_pair(lhs, rhs, on, left_on, right_on, how, suffixes, fill_method)
+
+    if left_by is not None and right_by is not None:
+        raise ValueError("Can only group either left or right frames")
+    if left_by is None and right_by is None:
+        return pair(left, right)
+    swapped = left_by is None
+    grouped, other = (right, left) if swapped else (left, right)
+    by = right_by if swapped else left_by
+    by = list(by) if isinstance(by, (list, tuple)) else [by]
+    missing = {c for c in by if c not in grouped.columns}
+    if missing:
+        raise KeyError(f"{missing} not found in {'right' if swapped else 'left'} columns")
+    groups: dict[tuple[Any, ...], list[int]] = {}
+    for row, key in enumerate(zip(*(grouped[c].tolist() for c in by), strict=True)):
+        if not any(_missing(v) for v in key):
+            groups.setdefault(key, []).append(row)
+    matches: dict[tuple[Any, ...], list[int]] | None = None
+    if all(c in other.columns for c in by):
+        matches = {}
+        for row, key in enumerate(zip(*(other[c].tolist() for c in by), strict=True)):
+            matches.setdefault(key, []).append(row)
+    pieces = []
+    for key, rows in groups.items():
+        piece = grouped.iloc[rows].reset_index(drop=True)
+        if matches is not None and key not in matches:
+            gaps = {c: [None] * len(piece) for c in other.columns if c not in piece.columns}
+            pieces.append(piece.assign(**gaps))
+            continue
+        against = other if matches is None else other.iloc[matches[key]]
+        merged = pair(against, piece) if swapped else pair(piece, against)
+        pieces.append(merged.assign(**{c: [v] * len(merged) for c, v in zip(by, key, strict=True)}))
+    result = concat(pieces, ignore_index=True)
+    return result[list(pieces[0].columns)]
 
 
 def concat(

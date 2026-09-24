@@ -184,3 +184,24 @@ def test_both_spellings_have_the_pandas_signature(firepanda: ModuleType) -> None
         for name in mine:
             if name != "copy":
                 assert mine[name].default == yours[name].default, name
+
+
+@pytest.mark.parametrize("how", ["outer", "right"])
+@pytest.mark.parametrize("zone", [None, "Asia/Tokyo", "span"])
+def test_a_key_of_instants_or_spans_stays_one(firepanda: ModuleType, how: str, zone: Any) -> None:
+    """An outer or right join puts the key together from both sides and keeps its type."""
+    import pandas as pd
+
+    def build(m: ModuleType) -> Any:
+        mine = m.to_datetime(m.Series(["2020-01-01", "2020-01-03"]))
+        theirs = m.to_datetime(m.Series(["2020-01-02", "2020-01-03"]))
+        if zone == "span":
+            mine, theirs = mine - mine.min(), theirs - mine.min()
+        elif zone is not None:
+            mine, theirs = mine.dt.tz_localize(zone), theirs.dt.tz_localize(zone)
+        left = m.DataFrame({"t": mine, "a": [1, 2]})
+        right = m.DataFrame({"t": theirs, "b": [1, 2]})
+        out = m.merge(left, right, on="t", how=how)
+        return [str(out[c].dtype) for c in out.columns], [str(v) for v in out["t"].tolist()]
+
+    assert build(firepanda) == build(pd)
