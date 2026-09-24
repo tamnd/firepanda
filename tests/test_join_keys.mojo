@@ -781,6 +781,38 @@ def test_a_wide_key_table_probed_in_two_pieces_answers_the_same_way() raises:
     assert_equal(bad, -1, String("row ", bad))
 
 
+def test_a_large_probe_side_pays_for_a_wide_table_indexed_by_value() raises:
+    # Three keys over a span of two hundred thousand. The build side alone
+    # cannot justify a table that wide, a million probe rows can, and a few
+    # probe rows cannot. The answers have to be the same on either route.
+    var keys = ints([1, 100_000, 200_000])
+    var probe = ints([200_000, 5, 1, 100_000, 199_999, 1])
+
+    var alone = Array[DType.uint32](overwritten=9)
+    var hashed = build_side[DType.int64](keys, 0, alone)
+    assert_true(not hashed.direct, "no probe height given")
+    probe_side[DType.int64](hashed, probe, 3, alone)
+
+    var few = Array[DType.uint32](overwritten=9)
+    assert_true(
+        not build_side[DType.int64](keys, 0, few, 6).direct, "six probe rows"
+    )
+
+    var many = Array[DType.uint32](overwritten=9)
+    var direct = build_side[DType.int64](keys, 0, many, 1_000_000)
+    assert_true(direct.direct, "a million probe rows")
+    probe_side[DType.int64](direct, probe, 3, many)
+
+    assert_equal(direct.groups(), hashed.groups(), "three keys and the miss")
+    var bad = -1
+    for i in range(9):
+        if alone[i] != many[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("row ", bad))
+    assert_equal(Int(many[4]), direct.groups() - 1, "the five found nothing")
+
+
 def test_a_probe_of_nothing_leaves_the_table_ready_for_the_next_one() raises:
     var codes = Array[DType.uint32](overwritten=6)
     var built = build_side[DType.int64](ints([2, 4]), 0, codes)

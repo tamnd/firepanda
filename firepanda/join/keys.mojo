@@ -248,6 +248,39 @@ which one to ask, which is a different piece of work rather than a variation on
 this one.
 """
 
+comptime DIRECT_PROBE_SPAN = 1 << 22
+"""The widest table indexed by key value that a large probe side can ask for.
+
+`build_side` otherwise sizes that table by the build side alone, which is the
+right test when the table is standing in for a hash table over the same keys and
+the wrong one when the build side is small and the probe side is not. q17 is the
+shape: two hundred parts out of two hundred thousand, probed by six million
+lines. The key span is two hundred thousand, the build side cannot justify a
+table that wide, and so every one of the six million lines was hashed to ask a
+table of two hundred keys, when one load from an eight hundred kilobyte table
+answers the same question. Every probe row that does not hash is the saving, so
+the probe side's height is what a wide table has to be paid off against.
+
+Measured on an M-series laptop, ten million probe rows drawn evenly over the
+span, best of seven, the build side either two hundred keys or twenty thousand:
+
+| span | hashed, 200 keys | direct, 200 keys | hashed, 20K keys | direct, 20K keys |
+| --- | --- | --- | --- | --- |
+| 128K | 28.5 ms | 4.2 ms | 29.8 ms | 5.5 ms |
+| 512K | 29.9 ms | 4.9 ms | 26.5 ms | 4.7 ms |
+| 2M | 31.3 ms | 6.7 ms | 27.6 ms | 8.4 ms |
+| 4M | 28.0 ms | 10.4 ms | 26.0 ms | 18.8 ms |
+| 8M | 28.0 ms | 19.4 ms | 28.1 ms | 22.5 ms |
+| 16M | 28.7 ms | 22.2 ms | 24.0 ms | 20.5 ms |
+
+The hashed probe does not care about the span and the direct one gets slower as
+its table leaves the cache, so the line goes where the direct table is still
+clearly ahead, at four million slots, which is sixteen megabytes. Past that the
+two are close enough that a machine with less cache could land on the wrong
+side. A span also has to stay under half the probe height, so a small probe side
+never pays for zeroing a table larger than itself.
+"""
+
 comptime PROBE_MORSEL_ROWS = 1 << 16
 """Probe rows a worker takes at a time.
 
@@ -1065,7 +1098,7 @@ def _build_and_probe[
     Raises:
         Error: If the parallel probe raises.
     """
-    var built = build_side[dt](build, build_at, codes)
+    var built = build_side[dt](build, build_at, codes, len(probe))
     probe_side[dt](built, probe, probe_at, codes)
     return built.groups()
 
@@ -1073,7 +1106,10 @@ def _build_and_probe[
 def build_side[
     dt: DType
 ](
-    build: Array[dt], build_at: Int, mut codes: Array[DType.uint32]
+    build: Array[dt],
+    build_at: Int,
+    mut codes: Array[DType.uint32],
+    probe_rows: Int = 0,
 ) raises -> BuildSide:
     """Picks the table the build side wants and fills it and its own codes.
 
@@ -1084,12 +1120,17 @@ def build_side[
     table over the same keys and costs four bytes a slot against sixteen, so a
     span near the row count is a table that is smaller than the one it replaces
     even when it is half empty. `factorize_dense` draws the line in the same
-    place and says why at length.
+    place and says why at length. A caller that knows how many rows are going
+    to probe the table can pass that, and a table up to half that height, and
+    up to `DIRECT_PROBE_SPAN`, is accepted too, because each of those rows is a
+    hash the direct table saves.
 
     Args:
         build: The smaller side's key column.
         build_at: Where its codes start.
         codes: The build side's stretch is filled with its ordinals.
+        probe_rows: How many rows will probe the table, or zero when that is not
+            known, as it is not for a join fed a chunk at a time.
 
     Parameters:
         dt: The key dtype.
@@ -1101,9 +1142,11 @@ def build_side[
         Error: If the build raises.
     """
     comptime if dt.is_integral():
-        var ceiling = len(build)
-        if ceiling < DIRECT_LIMIT:
-            ceiling = DIRECT_LIMIT
+        var ceiling = max(
+            len(build),
+            DIRECT_LIMIT,
+            min(probe_rows // 2, DIRECT_PROBE_SPAN),
+        )
         var plan = direct_plan[dt](build, ceiling)
         if plan.span >= 0:
             return _build_direct[dt](
