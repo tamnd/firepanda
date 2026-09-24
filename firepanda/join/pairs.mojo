@@ -1197,7 +1197,9 @@ def pair_probe(
             for i in range(block, end):
                 var hit = False
                 if not has_nulls or not absent[absent_at + i]:
-                    var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                    var g = Int(
+                        code_at.unsafe_offset(probe_at + i).unsafe_load()
+                    )
                     hit = seat.unsafe_offset(g).unsafe_load() >= 0
                 if not hit:
                     here += Int(kind.keeps_unmatched_left())
@@ -1225,7 +1227,9 @@ def pair_probe(
             for i in range(block, end):
                 var width = 0
                 if not has_nulls or not absent[absent_at + i]:
-                    var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                    var g = Int(
+                        code_at.unsafe_offset(probe_at + i).unsafe_load()
+                    )
                     width = table.starts[g + 1] - table.starts[g]
                 if width == 0:
                     here += Int(kind.keeps_unmatched_left())
