@@ -19319,6 +19319,229 @@ def lreshape(data: Any, groups: dict[Any, Any], dropna: bool = True) -> Any:
     return frame
 
 
+def _cut_values(x: Any, caller: str) -> tuple[Any, Any]:
+    """The values `cut` and `qcut` bin, as float64 numpy, and the column they came from.
+
+    Raises:
+        ValueError: For values that are not in one line, with pandas' words.
+        NotImplementedError: For instants and spans, whose bins are instants.
+    """
+    from ._frame import Index, Series
+
+    numpy = _numpy()
+    column = x if isinstance(x, Series) else None
+    if isinstance(x, Series | Index):
+        printed = str(x.dtype)
+        if printed.startswith(("datetime", "timedelta")):
+            raise NotImplementedError(
+                f"{caller}: bins of instants or spans are not supported yet, because the"
+                " edges would have to be instants too"
+            )
+        found = x.tolist()
+        values = numpy.array([math.nan if _missing(v) else v for v in found], dtype="float64")
+        return values, column
+    values = numpy.asarray(x)
+    if values.ndim != 1:
+        raise ValueError("Input array must be 1 dimensional")
+    if values.dtype.kind in "mM":
+        raise NotImplementedError(
+            f"{caller}: bins of instants or spans are not supported yet, because the edges"
+            " would have to be instants too"
+        )
+    return values.astype("float64"), column
+
+
+def _edges_from_count(values: Any, count: Any, right: bool) -> Any:
+    """`count` bins of equal width over the values, widened by a thousandth, as pandas does.
+
+    Raises:
+        ValueError: For fewer than one bin, no values, or an infinite value.
+    """
+    numpy = _numpy()
+    if count < 1:
+        raise ValueError("`bins` should be a positive integer.")
+    if values.size == 0:
+        raise ValueError("Cannot cut empty array")
+    low, high = numpy.nanmin(values), numpy.nanmax(values)
+    if numpy.isinf(low) or numpy.isinf(high):
+        raise ValueError("cannot specify integer `bins` when input data contains infinity")
+    if low == high:
+        low -= 0.001 * abs(low) if low != 0 else 0.001
+        high += 0.001 * abs(high) if high != 0 else 0.001
+        return numpy.linspace(low, high, count + 1, endpoint=True)
+    edges = numpy.linspace(low, high, count + 1, endpoint=True)
+    widen = (high - low) * 0.001
+    if right:
+        edges[0] -= widen
+    else:
+        edges[-1] += widen
+    return edges
+
+
+def _binned(
+    values: Any,
+    edges: Any,
+    column: Any,
+    labels: Any,
+    caller: str,
+    **kw: Any,
+) -> Any:
+    """Each value's bin, as a position or a label, the way pandas' `_bins_to_cuts` finds it.
+
+    Raises:
+        ValueError: For repeated edges, and labels that are not one fewer than
+            the edges or repeat when ordered, with pandas' words.
+        NotImplementedError: For pandas' own labels, which are intervals, labels
+            that are not text, and labels for values that are not a column.
+    """
+    from ._frame import Index, Series
+
+    numpy = _numpy()
+    right, ordered = kw.get("right", True), kw.get("ordered", True)
+    duplicates = kw.get("duplicates", "raise")
+    if not ordered and labels is None:
+        raise ValueError("'labels' must be provided if 'ordered = False'")
+    if duplicates not in ("raise", "drop"):
+        raise ValueError("invalid value for 'duplicates' parameter, valid options are: raise, drop")
+    kept = list(dict.fromkeys(edges.tolist()))
+    if len(kept) < len(edges) and len(edges) != 2:
+        if duplicates == "raise":
+            raise ValueError(
+                f"Bin edges must be unique: {Index(edges.tolist())!r}.\n"
+                "You can drop duplicate edges by setting the 'duplicates' kwarg"
+            )
+        edges = numpy.array(kept, dtype=edges.dtype)
+    places = numpy.searchsorted(edges, values, side="left" if right else "right")
+    if kw.get("include_lowest"):
+        places[values == edges[0]] = 1
+    gaps = numpy.isnan(values) | (places == len(edges)) | (places == 0)
+    if labels is False:
+        codes = (places - 1).astype("float64" if gaps.any() else "int64")
+        codes[gaps] = numpy.nan if gaps.any() else 0
+        answer: Any = codes
+        if column is not None:
+            found = [math.nan if gap else int(code) for code, gap in zip(codes, gaps, strict=True)]
+            answer = Series(found, dtype=str(codes.dtype), index=column.index, name=column.name)
+        return answer, edges
+    if labels is None:
+        raise NotImplementedError(
+            f"{caller}: pandas labels each bin with an Interval, which firepanda does not"
+            " have, so pass labels= a list of text or labels=False"
+        )
+    if not _list_like(labels):
+        raise ValueError(
+            "Bin labels must either be False, None or passed in as a list-like argument"
+        )
+    labels = list(labels)
+    if ordered and len(set(labels)) != len(labels):
+        raise ValueError(
+            "labels must be unique if ordered=True; pass ordered=False for duplicate labels"
+        )
+    if len(labels) != len(edges) - 1:
+        raise ValueError("Bin labels must be one fewer than the number of bin edges")
+    if not all(isinstance(label, str) for label in labels):
+        raise NotImplementedError(
+            f"{caller}: labels that are not text make categories of another type, and"
+            " firepanda holds categories as text"
+        )
+    if column is None:
+        raise NotImplementedError(
+            f"{caller}: pandas answers a Categorical for values that are not a column,"
+            " which firepanda does not have, so pass a Series"
+        )
+    names = labels if len(set(labels)) == len(labels) else sorted(set(labels))
+    found = [None if gap else labels[place - 1] for place, gap in zip(places, gaps, strict=True)]
+    text = Series(found, dtype="str", index=column.index, name=column.name)
+    return text.astype("category").cat.set_categories(names, ordered=ordered), edges
+
+
+def cut(
+    x: Any,
+    bins: Any,
+    right: bool = True,
+    labels: Any = None,
+    retbins: bool = False,
+    precision: int = 3,
+    include_lowest: bool = False,
+    duplicates: str = "raise",
+    ordered: bool = True,
+) -> Any:
+    """Which bin each value falls in, which is `pandas.cut`.
+
+    A count of bins spreads them evenly over the values, widened by a
+    thousandth of the range, and a list of edges is used as it is. With
+    `right` a bin holds its right edge and not its left, and `include_lowest`
+    lets the first bin hold its left edge too.
+
+    Raises:
+        ValueError: For edges that do not increase or repeat, and the other
+            mistakes pandas refuses, with pandas' words.
+        NotImplementedError: For pandas' interval labels, instants and spans,
+            labels that are not text, and labels for values that are not a column.
+    """
+    numpy = _numpy()
+    values, column = _cut_values(x, "cut")
+    if not _list_like(bins):
+        edges = _edges_from_count(values, bins, right)
+    else:
+        edges = numpy.asarray(list(bins))
+        if edges.size > 1 and not (numpy.diff(edges) >= 0).all():
+            raise ValueError("bins must increase monotonically.")
+    answer, edges = _binned(
+        values,
+        edges,
+        column,
+        labels,
+        "cut",
+        right=right,
+        include_lowest=include_lowest,
+        duplicates=duplicates,
+        ordered=ordered,
+    )
+    return (answer, edges) if retbins else answer
+
+
+def qcut(
+    x: Any,
+    q: Any,
+    labels: Any = None,
+    retbins: bool = False,
+    precision: int = 3,
+    duplicates: str = "raise",
+) -> Any:
+    """Which quantile each value falls in, which is `pandas.qcut`.
+
+    A count of quantiles splits the values into that many bins of about
+    equal size, and a list of fractions puts the edges at those quantiles.
+    The first bin holds its left edge.
+
+    Raises:
+        ValueError: For repeated edges, and the other mistakes pandas refuses,
+            with pandas' words.
+        NotImplementedError: For pandas' interval labels, instants and spans,
+            labels that are not text, and labels for values that are not a column.
+    """
+    numpy = _numpy()
+    values, column = _cut_values(x, "qcut")
+    if isinstance(q, int) and not isinstance(q, bool):
+        fractions = numpy.linspace(0, 1, q + 1)
+        numpy.putmask(
+            fractions, q * fractions != numpy.arange(q + 1), numpy.nextafter(fractions, 1)
+        )
+    else:
+        fractions = numpy.asarray(q, dtype="float64")
+    present = values[~numpy.isnan(values)]
+    edges = (
+        numpy.quantile(present, fractions)
+        if present.size
+        else numpy.full(len(fractions), numpy.nan)
+    )
+    answer, edges = _binned(
+        values, edges, column, labels, "qcut", include_lowest=True, duplicates=duplicates
+    )
+    return (answer, edges) if retbins else answer
+
+
 def to_numeric(
     arg: Any,
     errors: Any = "raise",
