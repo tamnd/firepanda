@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: crosstab, from_dummies and lreshape
+
+`crosstab` counts each pair of keys, or runs a named or Python function over the values of each pair. It supports pandas' `margins`, `margins_name`, `dropna`, `rownames` and `colnames`, and all four ways to `normalize`, including pandas' handling of the totals when normalising. Several keys on an axis, a missing or numeric column key, and totals beside numeric row labels are refused, since pandas holds those as a MultiIndex or as objects. `from_dummies` reads ones and zeros, or true and false, back into categories, with `sep` and `default_category`. `lreshape` stacks groups of columns into one column each. All three raise pandas' errors with pandas' messages.
+
 ### Added: pandas' options
 
 `get_option`, `set_option`, `reset_option`, `describe_option`, `option_context` and `options` work as they do in pandas 3.0. All 73 of pandas' options are registered with pandas' defaults and pandas' checks on a new value, a name is a pattern searched for in every option's name the way pandas searches, and the errors carry pandas' classes and messages. `mode.copy_on_write` and `future.no_silent_downcasting` give pandas' `Pandas4Warning`. `info` now reads `display.max_info_columns`, and the other options are kept but change nothing yet, since the printed form comes from the extension.

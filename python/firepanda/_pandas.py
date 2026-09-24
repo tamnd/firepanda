@@ -18939,6 +18939,386 @@ def pivot_table(
     )
 
 
+def _list_like(value: Any) -> bool:
+    """Whether pandas reads a value as several values rather than one."""
+    return hasattr(value, "__iter__") and not isinstance(value, str | bytes | dict)
+
+
+def _crosstab_keys(keys: Any, what: str) -> Any:
+    """The one set of keys `crosstab` was given for an axis.
+
+    Raises:
+        NotImplementedError: For several, which pandas answers with a MultiIndex.
+    """
+    nested = _list_like(keys) and len(keys) > 0 and all(_list_like(key) for key in keys)
+    if not nested:
+        return keys
+    if len(keys) != 1:
+        raise NotImplementedError(
+            f"crosstab: several {what} keys label the answer with a MultiIndex, which"
+            " firepanda does not have"
+        )
+    return keys[0]
+
+
+def _crosstab_name(keys: Any, names: Any, prefix: str) -> Any:
+    """The name of an axis, given, the column's own, or pandas' `row_0` and `col_0`."""
+    from ._frame import Series
+
+    if names is not None:
+        if len(names) != 1:
+            raise AssertionError("arrays and names must have the same length")
+        return next(iter(names))
+    if isinstance(keys, Series) and keys.name is not None:
+        return keys.name
+    return f"{prefix}_0"
+
+
+def _crosstab_lined_up(pieces: list[Any], labelled: list[Any]) -> list[list[Any]]:
+    """The keys and values as lists, the columns among them lined up by label first.
+
+    pandas keeps only the labels every column has, in the first column's order.
+
+    Raises:
+        NotImplementedError: For columns whose labels differ and repeat, which
+            pandas lines up by a join.
+    """
+    from ._frame import Series
+
+    if not labelled:
+        return [list(piece) for piece in pieces]
+    orders = [column.index.tolist() for column in labelled]
+    if all(order == orders[0] for order in orders):
+        common = orders[0]
+    elif all(len(set(order)) == len(order) for order in orders):
+        others = [set(order) for order in orders[1:]]
+        common = [label for label in orders[0] if all(label in other for other in others)]
+    else:
+        raise NotImplementedError(
+            "crosstab: columns with different labels that repeat are lined up by a join,"
+            " which firepanda does not do here"
+        )
+    answer = []
+    for piece in pieces:
+        if isinstance(piece, Series):
+            found = dict(zip(piece.index.tolist(), piece.tolist(), strict=True))
+            values = piece.tolist() if piece.index.tolist() == common else []
+            answer.append(values or [found[label] for label in common])
+        else:
+            values = list(piece)
+            if len(values) != len(common):
+                raise ValueError(
+                    f"Length of values ({len(values)}) does not match length of index"
+                    f" ({len(common)})"
+                )
+            answer.append(values)
+    return answer
+
+
+def _ratio(top: Any, bottom: Any) -> float:
+    """One number over another the way numpy divides, NaN for a gap."""
+    if _missing(top) or _missing(bottom):
+        return math.nan
+    if bottom == 0:
+        return math.nan if top == 0 else math.copysign(math.inf, top)
+    return top / bottom
+
+
+def _total(values: list[Any]) -> Any:
+    """The sum of the numbers that are not missing, as pandas sums a column."""
+    return sum(value for value in values if not _missing(value))
+
+
+def _crosstab_normalized(table: dict[str, list[Any]], normalize: Any) -> dict[str, list[Any]]:
+    """Each count over its total, the whole table's, a column's or a row's, a gap as 0."""
+    rows = len(next(iter(table.values()), []))
+    if normalize is True or normalize == "all":
+        whole = _total([_total(values) for values in table.values()]) if table else 0
+        wanted = {name: [_ratio(v, whole) for v in values] for name, values in table.items()}
+    elif normalize == "columns":
+        wanted = {
+            name: [_ratio(value, _total(values)) for value in values]
+            for name, values in table.items()
+        }
+    else:
+        sums = [_total([values[row] for values in table.values()]) for row in range(rows)]
+        wanted = {
+            name: [_ratio(value, sums[row]) for row, value in enumerate(values)]
+            for name, values in table.items()
+        }
+    return {
+        name: [0.0 if _missing(value) else value for value in values]
+        for name, values in wanted.items()
+    }
+
+
+def _crosstab_margins_normalized(
+    table: dict[str, list[Any]], normalize: Any, margins_name: Any
+) -> tuple[dict[str, list[Any]], bool]:
+    """pandas' normalising of a table with totals, and whether the row of totals stays.
+
+    The totals are taken off, the rest normalised, and the totals put back
+    normalised too: the column of them for `columns`, the row for `index`,
+    both for `all` with 1 where they meet.
+    """
+    across = table.pop(margins_name)[:-1]
+    down = {name: values.pop() for name, values in table.items()}
+    core = _crosstab_normalized(table, normalize)
+    if normalize == "columns":
+        total = _total(across)
+        core[margins_name] = [0.0 if _missing(r) else r for r in (_ratio(v, total) for v in across)]
+        return core, False
+    total = _total(list(down.values()))
+    for name, value in down.items():
+        ratio = _ratio(value, total)
+        core[name].append(0.0 if _missing(ratio) else ratio)
+    if normalize == "index":
+        return core, True
+    total = _total(across)
+    core[margins_name] = [0.0 if _missing(r) else r for r in (_ratio(v, total) for v in across)]
+    core[margins_name].append(1.0)
+    return core, True
+
+
+def _crosstab_cell(values: list[Any], printed: str | None, aggfunc: Any) -> Any:
+    """`aggfunc` over one cell's values, or how many there are with no values given."""
+    from ._frame import Series
+
+    if printed is None:
+        return len(values)
+    if not values and aggfunc not in ("count", "size", len):
+        return None
+    column = Series(values, dtype=printed)
+    answer = aggfunc(column) if callable(aggfunc) else column.agg(aggfunc)
+    return answer.item() if hasattr(answer, "item") else answer
+
+
+def crosstab(
+    index: Any,
+    columns: Any,
+    values: Any = None,
+    rownames: Any = None,
+    colnames: Any = None,
+    aggfunc: Any = None,
+    margins: bool = False,
+    margins_name: Any = "All",
+    dropna: bool = True,
+    normalize: Any = False,
+) -> Any:
+    """How often each pair of keys occurs, or `aggfunc` over the values of each pair.
+
+    The rows are the sorted keys of `index` and the columns the sorted keys of
+    `columns`, a pair with a missing key is left out unless `dropna` is false,
+    and `margins` adds a row and a column of totals over the pairs kept.
+
+    Raises:
+        ValueError: For values with no function or a function with no values,
+            and an unknown `normalize`, with pandas' words.
+        NotImplementedError: For several keys on an axis, column keys that are
+            not text, and totals on a row of labels that are not text.
+    """
+    from ._frame import DataFrame, Index, Series
+
+    if values is None and aggfunc is not None:
+        raise ValueError("aggfunc cannot be used without values.")
+    if values is not None and aggfunc is None:
+        raise ValueError("values cannot be used without an aggfunc.")
+    down = _crosstab_keys(index, "index")
+    across = _crosstab_keys(columns, "columns")
+    row_name = _crosstab_name(down, rownames, "row")
+    _crosstab_name(across, colnames, "col")
+    labelled = [piece for piece in (down, across) if isinstance(piece, Series)]
+    pieces = [down, across] if values is None else [down, across, values]
+    lined = _crosstab_lined_up(pieces, labelled)
+    printed = None
+    if values is not None:
+        printed = str(values.dtype) if hasattr(values, "dtype") else str(Series(lined[2]).dtype)
+    measured = lined[2] if values is not None else [0] * len(lined[0])
+    cells: dict[tuple[Any, Any], list[Any]] = {}
+    for key, head, value in zip(lined[0], lined[1], measured, strict=True):
+        if dropna and (_missing(key) or _missing(head)):
+            continue
+        pair = (None if _missing(key) else key, None if _missing(head) else head)
+        cells.setdefault(pair, []).append(value)
+    keys = {key for key, _ in cells}
+    rows: list[Any] = sorted(key for key in keys if key is not None)
+    if None in keys:
+        rows.append(None)
+    heads = {head for _, head in cells}
+    if any(_missing(head) for head in heads):
+        raise NotImplementedError(
+            "crosstab: a missing column key would name a column NaN, and firepanda names"
+            " columns with text"
+        )
+    names = _pivot_names(sorted(heads), "crosstab")
+    table = {
+        name: [
+            _crosstab_cell(cells[row, name], printed, aggfunc)
+            if (row, name) in cells
+            else (0 if printed is None else None)
+            for row in rows
+        ]
+        for name in names
+    }
+    if dropna:
+        table = {name: got for name, got in table.items() if not all(_missing(v) for v in got)}
+    if any(_missing(value) for got in table.values() for value in got):
+        # pandas unstacks the whole table at once, so one missing pair makes every column float
+        table = {name: _readable([*got, None])[:-1] for name, got in table.items()}
+    if margins:
+        if not all(isinstance(row, str) for row in rows) or not isinstance(margins_name, str):
+            raise NotImplementedError(
+                "crosstab: the row of totals is labelled with text beside labels that are"
+                " not, which pandas holds as objects and firepanda has no object type"
+            )
+        for name in table:
+            kept = [value for (_, head), got in cells.items() if head == name for value in got]
+            table[name].append(_crosstab_cell(kept, printed, aggfunc))
+        table[margins_name] = [
+            _crosstab_cell(
+                [value for (key, head), got in cells.items() if key == row for value in got],
+                printed,
+                aggfunc,
+            )
+            for row in rows
+        ]
+        table[margins_name].append(
+            _crosstab_cell([value for got in cells.values() for value in got], printed, aggfunc)
+        )
+        rows = [*rows, margins_name]
+    if normalize is not False:
+        if not isinstance(normalize, bool | str):
+            if normalize not in (0, 1):
+                raise ValueError("Not a valid normalize argument")
+            normalize = {0: "index", 1: "columns"}[normalize]
+        if normalize not in (True, "all", "index", "columns"):
+            raise ValueError("Not a valid normalize argument")
+        if margins:
+            table, keep = _crosstab_margins_normalized(table, normalize, margins_name)
+            rows = rows if keep else rows[:-1]
+        else:
+            table = _crosstab_normalized(table, normalize)
+    labels = Index(rows, name=row_name)
+    return DataFrame({name: _readable(got) for name, got in table.items()}, index=labels)
+
+
+def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> Any:
+    """The categories `get_dummies` spread over columns of ones and zeros, read back.
+
+    Each row takes the name of the one column that is set in it, or the part of
+    the name after `sep` with the part before it naming the answer's column,
+    and `default_category` for a row with none set.
+
+    Raises:
+        TypeError: For something that is not a frame, values other than ones
+            and zeros, and a `sep` or `default_category` of the wrong type.
+        ValueError: For a gap, a row with two set or none set, and a column
+            name without `sep`, with pandas' words.
+    """
+    from collections.abc import Hashable
+
+    from ._frame import DataFrame, Series
+
+    if not isinstance(data, DataFrame):
+        raise TypeError(
+            f"Expected 'data' to be a 'DataFrame'; Received 'data' of type: {type(data).__name__}"
+        )
+    for name in data.columns:
+        if data[name].isna().any():
+            raise ValueError(f"Dummy DataFrame contains NA value in column: '{name}'")
+    flags: dict[str, list[bool]] = {}
+    for name in data.columns:
+        printed = str(data[name].dtype)
+        found = data[name].tolist()
+        if printed != "bool" and (
+            _numeric_kind(printed) is None or any(value not in (0, 1) for value in found)
+        ):
+            raise TypeError("Passed DataFrame contains non-dummy data")
+        flags[name] = [bool(value) for value in found]
+    groups: dict[str, list[str]] = {}
+    if sep is None:
+        groups[""] = list(data.columns)
+    elif isinstance(sep, str):
+        for name in data.columns:
+            prefix = name.split(sep)[0]
+            if len(prefix) == len(name):
+                raise ValueError(f"Separator not specified for column: {name}")
+            groups.setdefault(prefix, []).append(name)
+    else:
+        raise TypeError(
+            "Expected 'sep' to be of type 'str' or 'None'; Received 'sep' of type:"
+            f" {type(sep).__name__}"
+        )
+    if isinstance(default_category, dict):
+        if len(default_category) != len(groups):
+            raise ValueError(
+                f"Length of 'default_category' ({len(default_category)}) did not match the"
+                f" length of the columns being encoded ({len(groups)})"
+            )
+    elif default_category is not None and isinstance(default_category, Hashable):
+        default_category = dict.fromkeys(groups, default_category)
+    elif default_category is not None:
+        raise TypeError(
+            "Expected 'default_category' to be of type 'None', 'Hashable', or 'dict';"
+            f" Received 'default_category' of type: {type(default_category).__name__}"
+        )
+    labels = data.index.tolist()
+    answer = {}
+    for prefix, names in groups.items():
+        cats: list[Any] = list(names) if sep is None else [n[len(prefix + sep) :] for n in names]
+        counts = [sum(flags[name][row] for name in names) for row in range(len(labels))]
+        if any(count > 1 for count in counts):
+            raise ValueError(
+                "Dummy DataFrame contains multi-assignment(s); First instance in row:"
+                f" {labels[counts.index(max(counts))]}"
+            )
+        if any(count == 0 for count in counts):
+            if not isinstance(default_category, dict):
+                raise ValueError(
+                    "Dummy DataFrame contains unassigned value(s); First instance in row:"
+                    f" {labels[counts.index(min(counts))]}"
+                )
+            fallback = default_category[prefix]
+            cats.append(None if _missing(fallback) else str(fallback))
+        picked = [
+            next((place for place, name in enumerate(names) if flags[name][row]), len(names))
+            for row in range(len(labels))
+        ]
+        answer[prefix] = Series([cats[place] for place in picked], dtype="str", index=data.index)
+    return DataFrame(answer)
+
+
+def lreshape(data: Any, groups: dict[Any, Any], dropna: bool = True) -> Any:
+    """A wide frame made long, each group of columns stacked into one column.
+
+    The columns in no group are repeated once for each column in a group, in
+    sorted order ahead of the stacked ones, and with `dropna` a row with a gap
+    in any stacked column is left out.
+
+    Raises:
+        ValueError: For groups of different lengths, with pandas' words.
+    """
+    from ._frame import DataFrame, Series
+
+    width = len(next(iter(groups.values())))
+    stacked = {}
+    taken: set[Any] = set()
+    for target, names in groups.items():
+        if len(names) != width:
+            raise ValueError("All column lists must be same length")
+        stacked[target] = concat([data[name] for name in names], ignore_index=True)
+        taken.update(names)
+    kept = sorted(name for name in data.columns if name not in taken)
+    repeated = {name: concat([data[name]] * width, ignore_index=True) for name in kept}
+    frame = DataFrame({**repeated, **stacked})
+    if dropna:
+        gaps = [stacked[target].isna().tolist() for target in groups]
+        present = [not any(row) for row in zip(*gaps, strict=True)]
+        if not all(present):
+            frame = frame[Series(present)].reset_index(drop=True)
+    return frame
+
+
 def to_numeric(
     arg: Any,
     errors: Any = "raise",
