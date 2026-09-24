@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: a semi or anti join asks the rest of its condition, and TPC-H q21 runs
 
 A semi or an anti join, and the correlated `EXISTS` and `NOT EXISTS` that become one, now take a condition with more than equalities in it, such as `EXISTS (SELECT 1 FROM lineitem l2 WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey)`. The equalities pair the rows up and the rest is asked of each pairing, and a left row is kept when some pairing passes (semi) or none does (anti). The plan shows it as `JOIN semi [a = k] where k > b` and the JSON form writes it under `"where"`. This is the last piece TPC-H q21 needed, so all 22 TPC-H queries now answer the same as DuckDB (#816).
+### Added: `DataFrame.query` and `DataFrame.eval`
+
+`query` keeps the rows where an expression over the columns is True, and `eval` answers the value of one, or the frame with a column assigned for `c = a + b`. The expression is read with Python's own parser and pandas' three changes: `&` and `|` bind looser than a comparison, a name in backticks may hold spaces, and `@name` reads a variable of the caller, or of `local_dict` and `global_dict`. Chains such as `1 < a < 4`, membership with `in`, `not in` and `==` against a list, the row labels as `index` or by their name, `abs`, and methods such as `b.isna()` and `s.str.startswith('x')` all work, each node worked out over whole columns. A name that is nothing the query can read raises the new `firepanda.errors.UndefinedVariableError`, a subclass of NameError, and the nodes pandas does not read, such as `is` and `if else`, raise NotImplementedError as pandas does. `inplace` works for both.
 
 ### Added: `DataFrame.resample`, `Series.resample` and the resampler
 
