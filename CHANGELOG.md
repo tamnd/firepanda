@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `to_csv` on frames and columns
+
+`DataFrame.to_csv` and `Series.to_csv` write the text pandas writes. Floats come out the shortest way that reads back the same, or through `float_format` and `decimal`, missing values as `na_rep`, and instants with one shape for the whole column: the date alone when every instant is at midnight, and otherwise as many fraction digits as the finest one needs. `sep`, `quoting`, `quotechar`, `escapechar`, `doublequote`, `lineterminator`, `header` aliases, `index_label`, `columns` and `date_format` all follow pandas. With no path the text is answered. A path is written, appended to with `mode="a"`, and compressed with gzip, bz2, xz or zip when its name or `compression` asks for it, and a text or byte handle gets the text.
+
 ### Added: `cut` and `qcut`
 
 `cut` puts each value in a bin, from a count of bins spread evenly over the values or from a list of edges, and `qcut` puts the edges at quantiles. Both follow pandas' rules for `right`, `include_lowest`, `duplicates` and `retbins` and answer pandas' errors. With `labels=False` they answer each bin's position, and with a list of text labels they answer an ordered category column. pandas labels bins with intervals by default, which firepanda does not have yet, so leaving `labels` out is refused with a message that says so.
