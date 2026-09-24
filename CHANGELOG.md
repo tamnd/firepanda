@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a column labelled with empty text exports to Arrow
+
+A frame with a column labelled `""` could not be read by pyarrow, which raised a SystemError from `pa.table`, because the column's schema went out with a null name, the form Arrow keeps for an array with no name at all, and pyarrow refuses a struct child without one. `get_dummies` makes that label whenever a column holds an empty string. A frame's column now always carries its name, empty or not, and a lone column or index with no name still goes out with a null one.
+
 ### Added: `unique` and `factorize`
 
 `Series.unique` and `firepanda.unique` give each value once in the order first seen, with a missing value kept once, and a categorical column keeps every one of its categories, used or not, as in pandas. The answer is a `FirepandaArray`, which is pandas' array answer here: values with a type and no row labels or name, with a length, positions, slices and the Arrow PyCapsule export, and `Series.array` gives one too. `Series.factorize`, `Index.factorize` and `firepanda.factorize` give an int64 array of codes and the uniques, as an index for a column or an index and as an array for an array, with `sort` and `use_na_sentinel` doing what they do in pandas, a float NaN included. The codes are the group numbers of a group by, so no Python loop runs over the rows. A list is refused with pandas' own TypeError, and `factorize` on a categorical column is refused, because its uniques are a categorical index, which firepanda does not hold yet.
