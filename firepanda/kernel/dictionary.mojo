@@ -57,7 +57,12 @@ and that arithmetic is in the Python layer where the pandas surface lives.
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.chunked import ChunkedArray
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.dtype.logical import LogicalType
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.sort import argsort_any
@@ -661,3 +666,172 @@ def encode_repetitive(var col: AnyArray) raises -> AnyArray:
     var encoded = AnyArray.dictionary_encoded(codes^, categories^)
     encoded.type = type
     return encoded^
+
+
+struct RepeatEncoder(Movable):
+    """Encodes a string column piece by piece as a read hands it over.
+
+    `encode_repetitive` needs the whole column flat before it can decide, so a
+    read that uses it holds every string column at sixteen bytes a row until
+    the last piece arrives. This makes the same decision on the first piece and
+    keeps checking it as the rest come in, and a piece that passes is turned
+    into codes as soon as it arrives, so the flat copy only ever exists one
+    piece at a time.
+
+    The codes of every piece point into one list of distinct values that grows
+    as new ones turn up. A value keeps the code it was first given, so a piece
+    encoded early is still right against the longer list at the end, and the
+    column is its code pieces stacked plus that list.
+
+    The rule is `encode_repetitive`'s, sixteen rows a value on average, held
+    over the rows seen so far. A column that breaks it part way is decoded back
+    to flat pieces there and goes on flat, so the answer is the same column
+    whichever way it went and the only cost of a wrong first guess is the work.
+    """
+
+    var state: Int
+    """Zero before the first piece, one while encoding, two once flat."""
+
+    var type: LogicalType
+    """The column's logical type, string or binary, which the result keeps."""
+
+    var rows: Int
+    """How many rows have been handed over."""
+
+    var lookup: Dict[String, Int32]
+    """Each distinct value seen so far and its code."""
+
+    var values: List[String]
+    """The distinct values in code order."""
+
+    var pieces: List[AnyArray]
+    """The int32 code pieces, in the order they came."""
+
+    def __init__(out self):
+        """Starts a column with nothing handed over yet."""
+        self.state = 0
+        self.type = LogicalType.STRING
+        self.rows = 0
+        self.lookup = Dict[String, Int32]()
+        self.values = List[String]()
+        self.pieces = List[AnyArray]()
+
+    def encoding(self) -> Bool:
+        """Reports whether the column is being held as codes.
+
+        Returns:
+            True from the first piece that passed until one fails.
+        """
+        return self.state == 1
+
+    def feed(mut self, var piece: AnyArray, mut flat: List[AnyArray]) raises:
+        """Takes the next piece of the column.
+
+        Args:
+            piece: The rows, in the order they come in the column.
+            flat: Where a piece goes when the column is not being encoded,
+                which is also where the encoded pieces so far go, decoded, if
+                this piece is the one that breaks the rule.
+
+        Raises:
+            If hashing or decoding a piece fails.
+        """
+        if self.state == 2:
+            flat.append(piece^)
+            return
+        if self.state == 0:
+            self.state = 2
+            self.type = piece.type
+            if not piece.is_flat() or not piece.is_string() or len(piece) < 64:
+                flat.append(piece^)
+                return
+            ref text = piece.strings()
+            if len(piece) > REPEAT_SAMPLE_ROWS:
+                var sample = factorize_strings(
+                    text.window(0, REPEAT_SAMPLE_ROWS)
+                )
+                if sample.count() * MIN_REPEATS > REPEAT_SAMPLE_ROWS:
+                    flat.append(piece^)
+                    return
+            self.state = 1
+        var rows = len(piece)
+        var found = factorize_strings(piece.strings())
+        var remap = List[Int32](capacity=len(found.firsts))
+        ref text = piece.strings()
+        for g in range(len(found.firsts)):
+            var value = text[found.firsts[g]]
+            var code = self.lookup.get(value)
+            if code:
+                remap.append(code.value())
+                continue
+            var next = Int32(len(self.values))
+            self.lookup[value] = next
+            self.values.append(value^)
+            remap.append(next)
+        self.rows += rows
+        if len(self.values) == 0 or len(self.values) * MIN_REPEATS > self.rows:
+            self._give_up(flat)
+            flat.append(piece^)
+            return
+        var shift = UInt32(1) if found.null_group >= 0 else UInt32(0)
+        var codes = Array[DType.int32](rows)
+        var ordinals = found.codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
+        var nulls = text.null_count() > 0
+        for i in range(rows):
+            if nulls and not text.is_valid(i):
+                codes.set_null(i)
+                continue
+            var local = Int(ordinals.unsafe_offset(i).unsafe_load() - shift)
+            out.unsafe_offset(i).unsafe_write(remap[local])
+        self.pieces.append(AnyArray(codes^))
+
+    def _give_up(mut self, mut flat: List[AnyArray]) raises:
+        """Turns the pieces encoded so far back into text and goes flat.
+
+        Args:
+            flat: Where the decoded pieces go, in order.
+
+        Raises:
+            If a piece cannot be decoded.
+        """
+        self.state = 2
+        if len(self.pieces) == 0:
+            return
+        var categories = strings_from_list(self.values)
+        for i in range(len(self.pieces)):
+            var codes = self.pieces[i].as_typed[DType.int32]().copy()
+            var held = AnyArray.dictionary_encoded(
+                codes^, StringArray(copy=categories)
+            )
+            held.type = self.type
+            flat.append(held.decoded())
+        self.pieces.clear()
+        self.lookup = Dict[String, Int32]()
+        self.values.clear()
+
+    def finish(mut self) raises -> AnyArray:
+        """Hands back the whole column held as codes.
+
+        Only called while `encoding` is true. The pieces are stacked into one
+        run of codes and the distinct values become the categories.
+
+        Returns:
+            The column, dictionary encoded, with the type it came in with.
+
+        Raises:
+            If the column is not being encoded, or the pieces cannot be
+            stacked.
+        """
+        if self.state != 1:
+            raise Error("RepeatEncoder: the column is not being encoded")
+        var stacked = ChunkedArray(LogicalType.INT32)
+        for i in range(len(self.pieces)):
+            stacked.append(self.pieces[i].copy())
+        self.pieces.clear()
+        var codes = stacked^.combine().into_typed[DType.int32]()
+        var out = AnyArray.dictionary_encoded(
+            codes^, strings_from_list(self.values)
+        )
+        out.type = self.type
+        return out^

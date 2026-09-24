@@ -391,6 +391,40 @@ def test_a_read_asked_to_encode_holds_repeats_as_codes_and_nothing_else() raises
     assert_equal(back.null_count(), flat[0].null_count())
 
 
+def test_an_encoded_read_in_groups_matches_the_flat_one() raises:
+    # Groups of two thousand rows, so each column goes through its encoder
+    # ten times. `s` repeats all the way down and stays encoded. `t` repeats
+    # for the first six thousand rows and then is a different value every
+    # row, so it is encoded for three groups and has to be decoded back when
+    # the rule breaks. Both have to read back as the flat read does.
+    var session = Session()
+    var sql = String(
+        "SELECT CASE WHEN i % 11 = 0 THEN NULL",
+        " ELSE ('shipped by ' || (i % 7)::VARCHAR) END AS s,",
+        " CASE WHEN i < 6000 THEN ('early ' || (i % 5)::VARCHAR)",
+        " ELSE ('late ' || i::VARCHAR) END AS t",
+        " FROM range(20000) t(i)",
+    )
+    var flat = session.run(sql)
+    var held = session.run(sql, group_rows=2048, encode_strings=True)
+    assert_true(held[0].encoding == Encoding.DICTIONARY, "s stays encoded")
+    assert_true(held[1].is_flat(), "t gave up part way")
+    assert_equal(len(held[0].distinct()), 7, "one code per value")
+    for c in range(2):
+        var back = held[c].decoded()
+        var ours = back.strings().copy()
+        var theirs = flat[c].strings().copy()
+        var wrong = -1
+        for i in range(len(flat)):
+            if back.is_valid(i) != flat[c].is_valid(i):
+                wrong = i
+                break
+            if back.is_valid(i) and ours[i] != theirs[i]:
+                wrong = i
+                break
+        assert_equal(wrong, -1, String("column ", c, " differs at row ", wrong))
+
+
 def test_a_group_asked_for_in_morsels_is_a_whole_number_of_them() raises:
     # A group boundary is a chunk boundary, so a group that is not a whole
     # number of morsels would put a short chunk at the end of every group and
