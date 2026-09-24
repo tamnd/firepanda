@@ -12290,8 +12290,10 @@ def merge(
 
     With `left_index` or `right_index` a side's key is its row labels, and the
     answer's labels are those of the other side, or the key when both sides are
-    on their labels. `indicator` and the joins other than the four are refused
-    by name. `copy` is accepted and does nothing, as it does in pandas 3.
+    on their labels. `indicator` adds pandas' category column that says which
+    side a row came from, with all three categories whichever of them occur.
+    The joins other than the four are refused by name. `copy` is accepted and
+    does nothing, as it does in pandas 3.
 
     Returns:
         A new frame, with the default index when both keys are columns.
@@ -12315,8 +12317,12 @@ def merge(
             f"'{how}' is not a valid Merge type: left, right, inner, outer, left_anti,"
             " right_anti, cross, asof"
         )
-    if indicator is not False:
-        raise UnsupportedError("merge(indicator=) is not written yet")
+    named = _indicator_name(left, right, indicator)
+    if named is not None:
+        left, right = (
+            _marked(left, MERGE_LEFT, "left_only"),
+            _marked(right, MERGE_RIGHT, "right_only"),
+        )
     if _flag("left_index", left_index) or _flag("right_index", right_index):
         out = _merge_on_index(
             left,
@@ -12334,9 +12340,76 @@ def merge(
     else:
         lefts, rights = _merge_keys(left, right, on, left_on, right_on)
         out, _, _ = _merged(left, right, how, lefts, rights, sort, suffixes, validate)
+    if named is not None:
+        out = _indicated(out, named)
     if any(out.null_counts()):
         out = out._widened_for_missing()
     return DataFrame._wrap(out)
+
+
+MERGE_LEFT = "_left_indicator"
+"""The column that marks a left row through a merge with `indicator`, as pandas names it."""
+
+MERGE_RIGHT = "_right_indicator"
+"""The column that marks a right row through a merge with `indicator`."""
+
+MERGE_SIDES = ["left_only", "right_only", "both"]
+"""The categories of the indicator column, all three whichever of them occur."""
+
+
+def _indicator_name(left: DataFrame, right: DataFrame, indicator: Any) -> str | None:
+    """The name of the indicator column, or None when there is not one.
+
+    Anything false is no column, True is `_merge` and a string is that name.
+    pandas uses its two marker columns by their own names, so a frame that has
+    one of them already is refused, and so is a name either frame has.
+
+    Raises:
+        InvalidArgumentError: For an indicator that is neither a flag nor a
+            string, or a name that is taken.
+    """
+    if not indicator:
+        return None
+    if isinstance(indicator, str):
+        named = indicator
+    elif isinstance(indicator, bool):
+        named = "_merge"
+    else:
+        raise InvalidArgumentError("indicator option can only accept boolean or string arguments")
+    columns = set(left.columns) | set(right.columns)
+    for marker in (MERGE_LEFT, MERGE_RIGHT):
+        if marker in columns:
+            raise InvalidArgumentError(
+                f"Cannot use `indicator=True` option when data contains a column named {marker}"
+            )
+    if named in columns:
+        raise InvalidArgumentError("Cannot use name of an existing column for indicator column")
+    return named
+
+
+def _marked(frame: DataFrame, marker: str, side: str) -> DataFrame:
+    """The frame with a last column that says `side` on every row."""
+    from ._frame import DataFrame
+
+    return DataFrame._wrap(frame._inner.reindex_columns([*frame.columns, marker], side))
+
+
+def _indicated(out: Any, named: str) -> Any:
+    """The joined frame with the two markers made into one category column, last.
+
+    A row a side did not have has no marker from that side, so a row with both
+    markers is `both` and a row with one says which one it has.
+    """
+    from ._frame import Series, _series_to_frame
+
+    mine, theirs = Series._wrap(out.column(MERGE_LEFT)), Series._wrap(out.column(MERGE_RIGHT))
+    both = Series(["both"], dtype="string")._inner
+    out = out.pick(MERGE_LEFT, (mine.isna() | theirs.isna())._inner, both)
+    out = out.fill_null(MERGE_LEFT, out.column(MERGE_RIGHT))
+    sides = Series._wrap(out.column(MERGE_LEFT)).astype("category")
+    sides = sides.cat.set_categories(MERGE_SIDES)
+    out = out.drop([MERGE_LEFT, MERGE_RIGHT])
+    return out.stack_columns([_series_to_frame(sides._inner, named)._inner])
 
 
 def _merged(

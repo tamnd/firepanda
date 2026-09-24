@@ -48,6 +48,8 @@ def agrees(got: Any, want: Any) -> None:
         printed = str(want[name].dtype)
         assert got[name].dtype == ("string" if printed == "str" else printed), name
         assert same(got[name].tolist(), want[name].tolist()), name
+        if printed == "category":
+            assert list(got[name].cat.categories) == list(want[name].cat.categories), name
 
 
 @pytest.mark.parametrize("how", ["inner", "left", "right", "outer"])
@@ -81,6 +83,21 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: m.DataFrame(NUMBERS).merge(m.DataFrame(OTHERS), on="k", how="left"),
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(NUMBERS)["x"], on="x"),
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", validate="many_to_one"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", indicator=True),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", how="outer", indicator="side"
+    ),
+    lambda m: m.merge(m.DataFrame(LEFT), m.DataFrame(RIGHT), on="k", how="left", indicator=True),
+    lambda m: m.merge(m.DataFrame(LEFT), m.DataFrame(RIGHT), on="k", how="right", indicator=True),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", indicator=0),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS).set_index("k"),
+        m.DataFrame(OTHERS).set_index("k"),
+        left_index=True,
+        right_index=True,
+        how="outer",
+        indicator=True,
+    ),
 ]
 
 
@@ -107,6 +124,17 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", validate="bad"),
     lambda m: m.merge(m.DataFrame(NUMBERS), m.Series([1])),
     lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame({"k": ["a", "b"], "y": [1, 2]}), on="k"),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", indicator=1),
+    lambda m: m.merge(m.DataFrame(NUMBERS), m.DataFrame(OTHERS), on="k", indicator="y"),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS).rename(columns={"x": "_merge"}), m.DataFrame(OTHERS), indicator=True
+    ),
+    lambda m: m.merge(
+        m.DataFrame(NUMBERS),
+        m.DataFrame(OTHERS).rename(columns={"y": "_left_indicator"}),
+        on="k",
+        indicator=True,
+    ),
 ]
 
 
@@ -137,7 +165,7 @@ def test_a_missing_key_is_a_key_error(firepanda: ModuleType) -> None:
 def test_the_unwritten_options_are_refused(firepanda: ModuleType) -> None:
     """Refused by name rather than ignored."""
     left, right = firepanda.DataFrame(NUMBERS), firepanda.DataFrame(OTHERS)
-    for options in ({"how": "cross"}, {"indicator": True}):
+    for options in ({"how": "cross"}, {"how": "asof"}):
         with pytest.raises(NotImplementedError):
             firepanda.merge(left, right, **options)
 
