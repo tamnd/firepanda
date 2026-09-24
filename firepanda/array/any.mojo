@@ -695,7 +695,9 @@ struct AnyArray(Copyable, Movable, Sized):
             fixed width or not one per category.
         """
         if self.encoding != Encoding.DICTIONARY:
-            raise Error("through_codes: column is held " + String(self.encoding))
+            raise Error(
+                "through_codes: column is held " + String(self.encoding)
+            )
         if per_category.is_string() or per_category.is_nested():
             raise Error(
                 "through_codes: an answer of "
@@ -723,6 +725,20 @@ struct AnyArray(Copyable, Movable, Sized):
         var dst = values.unsafe_mut_ptr()
         var holes = per_category.null_count() > 0
         var all_valid = self.data.validity.all_valid()
+        # The usual case is a comparison or a lookup: one byte an answer and no
+        # null among them. Then there is nothing to decide per row, so the loop
+        # is a load, a clamp and a store. The clamp is what lets a null row's
+        # code be anything at all, since its answer is masked out regardless.
+        if width == 1 and not holes and count > 0:
+            var top = UInt32(count - 1)
+            for i in range(rows):
+                var code = min(
+                    UInt32(codes.unsafe_offset(i).unsafe_load()), top
+                )
+                dst.unsafe_offset(i).unsafe_write(
+                    src.unsafe_offset(Int(code)).unsafe_load()
+                )
+            return Self(ColumnData(values^, validity^, rows), per_category.type)
         for i in range(rows):
             if not all_valid and not self.data.validity.get(i):
                 continue

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: take, filter, compare, is_in and group by read an encoded string column without decoding it
+
+`take_any`, `gather_any` and `filter_any` move the codes of a dictionary encoded string column and hand back a column that is still encoded, so moving its rows costs four bytes a row instead of sixteen and the string bytes are never touched. A comparison with a constant and `is_in` work out the answer once per distinct value and spread it over the rows by code, `factorize_any` groups on the codes, and `DataFrame.group_by` does both and decodes only the keys it returns, one row a group. On six million rows over seven distinct values on a six core Linux machine the column is 24 MB against 96 MB flat, a filter took 1.0 to 1.3 ms against 12, `is_in` 7 ms against 25 and a group by with a sum 24 ms against 65, while an equality with a constant was within noise of flat at 7 ms. This is the third box of #979.
+
 ### Changed: a query decodes an encoded column one morsel at a time
 
 The pipeline's scan now decodes a column held in any encoding but flat as it hands each morsel out, instead of every operator refusing it. The flat copy only ever exists a morsel at a time, so a query over a frame of dictionary encoded strings pays for a few megabytes of views per morsel and not for the whole column. An operator taught to read the codes will skip this, one operator at a time (#979).
@@ -17,6 +21,7 @@ The pipeline's scan now decodes a column held in any encoding but flat as it han
 - A MAP literal such as `MAP {'a': 1}` now reads and prints back instead of being refused while the query is read. Its keys and values are expressions like any other. The plan still refuses it by name, because no firepanda column holds a map yet.
 
 - `GROUPING SETS`, `CUBE` and `ROLLUP` in SQL, alone or beside plain keys, and the `GROUPING()` function (also spelled `grouping_id`) that says which keys a row left out. Each grouping set is its own aggregate over a copy of the input, the keys a set leaves out come back as null, and the sets are stacked with a union that keeps every row, so a set written twice gives its rows twice the way DuckDB does. `GROUPING(a, b)` is a whole number per set with the first argument as the highest bit, and on a plain GROUP BY it is 0. A GROUPING with no groups, or over a column that is not a key, fails with DuckDB's binder message.
+
 ### Added: a string column can be held as codes into its distinct values
 
 `AnyArray.dictionary_encoded(codes, categories)` builds a string column whose rows are int32 codes into a list of distinct strings, with `Encoding.DICTIONARY` on it and `dtype` still string. That last part is what separates it from the category type: nothing the user can see changes. `decoded()` turns it back into a flat column by copying one sixteen byte view per row and sharing the categories' payload, so no string bytes are copied. `slice` and `window` keep it encoded and `nbytes` counts the codes plus the categories. Ten million rows over seventeen strings of about thirty bytes weigh 41 MB this way against 485 MB flat, and decoding them took 41 ms on a six core Linux machine. Nothing builds one yet outside the tests; the Arrow and Parquet readers are the next step (#979).
