@@ -156,3 +156,25 @@ def test_the_signature_is_pandas_signature(firepanda: ModuleType, owner: str) ->
     assert [(p.name, p.kind, p.default) for p in ours.values()] == [
         (p.name, p.kind, p.default) for p in yours.values()
     ]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda s: s.interpolate(),
+        lambda s: s.interpolate(limit=1),
+        lambda s: s.interpolate(limit_area="inside"),
+        lambda s: s.iloc[[1, 3]].interpolate(),
+    ],
+)
+def test_a_gap_left_is_nan_and_not_null(firepanda: ModuleType, build: Callable[[Any], Any]) -> None:
+    """pandas' only missing value in a float column is NaN, whether it came in as
+    a NaN or as a null, so a gap left behind crosses to Arrow as NaN."""
+    import pyarrow as pa
+
+    column = firepanda.from_arrow(
+        pa.table({"v": pa.array([NAN, None, 2.0, None, None, None, 6.0, None])})
+    )["v"]
+    answer = build(column)
+    assert bool(answer.isna().any())
+    assert pa.array(answer).null_count == 0

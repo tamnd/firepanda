@@ -4973,10 +4973,11 @@ def _interpolated_line(
     the left end, retried from the right end where that is NaN, which is where
     an infinity meets a finite value, so the answers agree to the last bit. A
     gap before the first value takes the first and one after the last takes the
-    last, as `interp` clamps, and then the gaps pandas leaves are put back:
-    those more than `limit` rows from a value in the direction asked for, the
-    ones at the front for a forward fill and at the back for a backward one,
-    and the ones inside or outside the values under `limit_area`.
+    last, as `interp` clamps, and then the gaps pandas leaves are put back as
+    NaN, the one missing value a float column has in pandas: those more than
+    `limit` rows from a value in the direction asked for, the ones at the front
+    for a forward fill and at the back for a backward one, and the ones inside
+    or outside the values under `limit_area`.
 
     Every step is a whole column operation. The values have at least one gap
     and at least one value, and the labels are unique, since the steps line
@@ -5014,7 +5015,7 @@ def _interpolated_line(
         keep = middle if keep is None else keep | middle
     if keep is None:
         return filled
-    return filled.where(~(keep & gap))
+    return filled.where(~(keep & gap), math.nan)
 
 
 def _interpolated(
@@ -5059,8 +5060,11 @@ def _interpolated(
             " values as numbers along the line and firepanda does not hand them out that way"
         )
     direction, area = _interpolation_limits(method, index, limit, direction, area, kwargs)
-    if gaps == 0 or gaps == len(column):
-        return column if kind in _FLOATING else values
+    if gaps == 0:
+        return column
+    if gaps == len(column):
+        answer = values.where(values.notna(), math.nan)
+        return answer.astype(kind) if kind in _FLOATING and kind != "float64" else answer
     points = _interpolation_points(values, method, index)
     answer = _interpolated_line(values, points, limit, direction, area)
     return answer.astype(kind) if kind in _FLOATING and kind != "float64" else answer

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a gap interpolate leaves is NaN
+
+The gaps `interpolate` leaves behind, at the front of a forward fill, past a `limit` or outside a `limit_area`, and every row of a column with no value at all, are NaN now rather than null, since NaN is the only missing value a float column has in pandas. Before this they crossed to Arrow as nulls and a consumer counting nulls saw a different column from the one pandas answers.
+
 ### Added: interpolate on a frame and a column
 
 `Series.interpolate` and `DataFrame.interpolate` fill each gap on the straight line between the values either side of it, with numpy's arithmetic so the answers agree to the last bit, along row positions for `linear` and along the labels for `index` and `values`. `limit`, `limit_direction` and `limit_area` leave the gaps pandas leaves, whole numbers or flags with no gap come back untouched, whole numbers with a gap come back as float64, and `inplace=True` hands back the object as pandas does. Text, flags with a gap and a category are refused with pandas' errors, every bad argument with pandas' message in pandas' order, and the methods pandas hands to scipy as not supported.
