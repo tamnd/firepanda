@@ -995,6 +995,39 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             out.columns[i] = widened^
         return out^
 
+    def is_flat(self) -> Bool:
+        """Reports whether every column is held one value a row.
+
+        Returns:
+            False if any chunk of any column is held in an encoding.
+        """
+        for i in range(len(self.columns)):
+            for c in range(len(self.columns[i].chunks)):
+                if not self.columns[i].chunks[c].is_flat():
+                    return False
+        return True
+
+    def decoded(self) raises -> Self:
+        """Returns the frame with every column held one value a row.
+
+        For a writer that hands buffers out as they lie. The columns already
+        flat are shared rather than copied.
+
+        Returns:
+            The same values, every chunk flat.
+
+        Raises:
+            If a column cannot be decoded.
+        """
+        var out = Self(copy=self)
+        for i in range(len(out.columns)):
+            for c in range(len(out.columns[i].chunks)):
+                if not out.columns[i].chunks[c].is_flat():
+                    out.columns[i].chunks[c] = (
+                        out.columns[i].chunks[c].decoded()
+                    )
+        return out^
+
     def filter(self, mask: Array[DType.bool]) raises -> Self:
         """Returns the rows where the mask is true.
 

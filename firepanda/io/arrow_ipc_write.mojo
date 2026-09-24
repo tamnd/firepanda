@@ -994,6 +994,11 @@ def _write(
     Raises:
         Error: If a column cannot be written or the destination cannot be.
     """
+    # The planner hands each column's buffers out as they lie, so a column
+    # held as codes is written as the strings it stands for.
+    if not frame.is_flat():
+        _write(sink, frame.decoded(), options, as_file)
+        return
     if as_file:
         sink.put(MAGIC.as_bytes())
         # Two bytes, which is what the padding rule works out to after a six

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a sort and an Arrow export read a string column held as codes
+
+A sort on a column held as codes (#979) sorts its few distinct strings once and then radix sorts the rows on each one's rank, an int32, rather than comparing strings row by row. `argsort_any`, `argsort_multi`, `is_sorted_any`, `DataFrame.argsort`, `sort_values` and the bounded `argsort_limit` all go through it, and the order is the one the decoded column gives, ties and nulls included. `export_array`, `export_array_borrowed` and the IPC writers hand such a column out as the strings it stands for, since a consumer handed an Arrow dictionary would call it a category. `DataFrame.is_flat()` and `DataFrame.decoded()` are new, for a writer that reads buffers as they lie.
+
 ## [0.8.30] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).
