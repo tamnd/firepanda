@@ -80,6 +80,7 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: text(m).map(str.upper, na_action="ignore"),
     lambda m: text(m).map(lambda v: type(v).__name__),
     lambda m: text(m).map({"a": 1}),
+    lambda m: column(m).map({9: "nine"}),
     lambda m: m.Series([], dtype="int64").map(str),
     lambda m: column(m).apply(lambda v: v + 1),
     lambda m: column(m).apply(lambda v, k: v * k, args=(3,)),
@@ -106,6 +107,12 @@ def test_the_answer_is_pandas_answer(firepanda: ModuleType, build: Callable[[Any
     import pandas as pd
 
     agrees(build(firepanda), build(pd))
+
+
+def test_a_numeric_gap_is_nan(firepanda: ModuleType) -> None:
+    """pandas' answer is a numpy column, so a gap in numbers is NaN, not a null."""
+    answer = firepanda.Series([1.0, None]).map(lambda v: v * 2)
+    assert answer.tolist()[1] != answer.tolist()[1]
 
 
 def test_text_updated_stays_text(firepanda: ModuleType) -> None:

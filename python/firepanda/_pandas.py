@@ -5715,14 +5715,38 @@ def _mapper(func: Any) -> Callable[[Any], Any]:
 
             raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
         table = dict(zip(labels, func.tolist(), strict=True))
-        return table.get
+        return _hinted(table.get, str(func.dtype))
     if isinstance(func, dict) and hasattr(type(func), "__missing__"):
         return func.__getitem__
     if hasattr(func, "get") and hasattr(func, "keys"):
-        return func.get
+        return _hinted(func.get, _held_type(list(func.values())))
     if not callable(func):
         raise TypeError(f"'{type(func).__name__}' object is not callable")
     return cast(Callable[[Any], Any], func)
+
+
+def _hinted(lookup: Callable[[Any], Any], kind: str | None) -> Callable[[Any], Any]:
+    """A lookup that carries the type of what it holds, for an answer with no hits.
+
+    pandas reads a mapping as a column and lines it up against the values, so
+    an answer where no key was found still has the mapping's type.
+    """
+
+    def found(value: Any) -> Any:
+        return lookup(value)
+
+    found.kind = kind  # type: ignore[attr-defined]
+    return found
+
+
+def _held_type(values: list[Any]) -> str | None:
+    """The type a column of these values would have, or None when it cannot be one."""
+    from ._frame import Series
+
+    try:
+        return str(Series(values).dtype) if values else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
@@ -5758,22 +5782,28 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
                 continue
             value = gap
         answers.append(apply(value))
+    kind = getattr(apply, "kind", None)
+    numeric = kind is None or re.fullmatch(r"u?int\d+|float\d+|bool", kind)
+    if not numeric and all(_missing(answer) for answer in answers):
+        return type(column)([None] * len(answers), index=column.index, name=column.name, dtype=kind)
     return type(column)(_readable(answers), index=column.index, name=column.name)
 
 
 def _readable(answers: list[Any]) -> list[Any]:
     """Answers the way pandas reads them into a column, a gap as None.
 
-    Whole numbers beside a gap are floats in pandas, because numpy has no gap
-    in a column of whole numbers, and the constructor here would keep them
-    whole, so they are made floats first.
+    Numbers beside a gap are floats in pandas with NaN in the gap, because the
+    answer is a numpy column and numpy has no other gap, and the constructor
+    here would keep whole numbers whole and read None as a null, so they are
+    made floats and NaN first. An answer with nothing in it is NaN too, which
+    is what pandas gives when no call answered anything.
     """
     held = [None if _missing(answer) else answer for answer in answers]
-    if len(held) != len(answers) or None not in held:
+    if None not in held:
         return held
     found = [answer for answer in held if answer is not None]
-    if found and all(isinstance(answer, int) and not isinstance(answer, bool) for answer in found):
-        return [None if answer is None else float(answer) for answer in held]
+    if all(isinstance(answer, (int, float)) and not isinstance(answer, bool) for answer in found):
+        return [math.nan if answer is None else float(answer) for answer in held]
     return held
 
 
