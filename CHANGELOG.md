@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: `kurt` over a column with an infinity answers NaN
 
 An infinity makes the mean NaN and every moment NaN with it, and the sums skipped those NaNs, so `kurt` answered zero where pandas answers NaN. The moments are now summed without skipping, and `python/tests/test_describe.py` checks two columns with infinities against pandas.
+### Added: group ffill, bfill, pct_change and filter
+
+`groupby(...).ffill()` and `bfill()` fill each missing value from the last or next value in its group, and `limit` stops after that many missing rows in a row. A row whose key is missing answers missing, and an integer column that gets a missing value widens to float64, as it does in pandas. `pct_change` divides each value by the group's own shift and subtracts one, with no fill first, as pandas 3 does, and refuses `freq`. `filter` calls the function once per group on the group's rows and keeps the rows of the groups it answers True for. On a frame, an answer that is not one flag raises pandas' TypeError, and on a column any truthy value keeps the group. `dropna=False` is refused. All four carry repeated row labels through unchanged, and `python/tests/test_group_fills.py` checks them against pandas.
 
 ### Added: `describe` and `kurt` on a series and a frame
 

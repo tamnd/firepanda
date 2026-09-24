@@ -12575,6 +12575,155 @@ class GroupByMixin[Answer]:
         """
         return self._frame.loc[mask]
 
+    def _value_columns(self) -> list[str]:
+        """The columns a transform answers, which are the ones that are not keys.
+
+        Overridden by `SeriesGroupBy`, which has the one column.
+        """
+        return [name for name in self._frame.columns if name not in self._by]
+
+    def _as_answer(self, out: DataFrame) -> Any:
+        """A frame of the columns a transform answered, as this group by hands it out.
+
+        Overridden by `SeriesGroupBy`, which answers its one column.
+        """
+        return out
+
+    def ffill(self, limit: int | None = None) -> Any:
+        """Each missing value filled from the last value before it in its group.
+
+        A row whose key is missing is in no group and answers missing, and
+        `limit` fills at most that many missing rows of a group in a row.
+        """
+        return self._filled(limit, backward=False)
+
+    def bfill(self, limit: int | None = None) -> Any:
+        """Each missing value filled from the next value after it in its group."""
+        return self._filled(limit, backward=True)
+
+    def _filled(self, limit: Any, backward: bool) -> Any:
+        """`ffill` or `bfill`, a running largest position and a gather.
+
+        Every row gets its own position when its value is there and -1 when it
+        is missing, and the running largest of that within the group is the
+        position of the last value at or before the row, or -1 when there is
+        none. The value at that position is the fill. `bfill` is the same walk
+        over the rows turned around. The row labels go into a column for the
+        walk and come back out at the end, so labels that repeat are carried
+        the way they are rather than lined up.
+        """
+        from ._frame import DataFrameGroupBy, Series
+
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+                raise TypeError("an integer is required")
+            limit = int(limit)
+            if limit < 0:
+                limit = None
+        label = "__firepanda_label__"
+        plain = _with_labels(self._frame, label)
+        if backward:
+            plain = plain.iloc[::-1].reset_index(drop=True)
+        columns = self._value_columns()
+        place = Series(range(len(plain)))
+        marks = {
+            f"__firepanda_mark_{i}__": place.where(plain[name].notna(), -1)
+            for i, name in enumerate(columns)
+        }
+        scan = plain[list(self._by)].assign(**marks)
+        grouped = DataFrameGroupBy(scan, self._by, True, self._sort, self._dropna)
+        last = grouped.cummax()
+        within = grouped.cumcount() if limit is not None else None
+        out = plain[[label]]
+        for i, name in enumerate(columns):
+            at = last[f"__firepanda_mark_{i}__"].fillna(-1).astype("int64")
+            gone = at < 0
+            source = at.where(~gone, 0).tolist()
+            if within is not None:
+                gap = within - within.iloc[source].reset_index(drop=True)
+                gone = gone | (gap > limit)
+            taken = plain[name].iloc[source].reset_index(drop=True)
+            if str(taken.dtype) in _SIGNED | _UNSIGNED and bool(gone.any()):
+                # pandas holds a missing integer as NaN, so the column widens.
+                taken = taken.astype("float64")
+            out = out.assign(**{name: taken.mask(gone)})
+        if backward:
+            out = out.iloc[::-1]
+        out = out.set_index(label).rename_axis(self._frame.index.name)
+        return self._as_answer(out)
+
+    def pct_change(self, periods: int = 1, fill_method: None = None, freq: Any = None) -> Any:
+        """Each value's change from the value `periods` rows before it in its group.
+
+        pandas 3 fills nothing first, so this is each value over the shifted
+        value, less one, and a row whose key is missing answers missing.
+        """
+        if fill_method is not None:
+            raise InvalidArgumentError(
+                f"fill_method must be None; got fill_method={fill_method!r}."
+            )
+        _refuse(
+            "freq",
+            freq,
+            "shifting by a frequency moves the labels rather than the values and"
+            " needs the offset vocabulary, which is the resampling milestone",
+        )
+        if isinstance(periods, bool) or not isinstance(periods, int):
+            raise TypeError(f"Periods must be integer, but {periods} is {type(periods)}.")
+        shifted = self._shape_rows("shift", periods)
+        values = self._as_answer(self._frame[self._value_columns()])
+        return values / shifted - 1
+
+    def filter(self, func: Any, dropna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The rows of every group `func` answers True for, in the frame's order.
+
+        `func` runs once a group in Python, on the group's rows with their own
+        labels, which is what pandas hands it, so this is as fast as the
+        function is. A row whose key is missing is in no group and is left
+        out. `dropna=False`, which keeps every row and blanks the ones left
+        out, is refused.
+        """
+        from ._frame import DataFrameGroupBy
+
+        if not callable(func):
+            raise TypeError(f"'{type(func).__name__}' object is not callable")
+        _held_at(
+            "dropna",
+            dropna,
+            True,
+            "keeping the rows a group loses as missing values widens every column"
+            " and blanks the keys, which is a different answer to build",
+        )
+        numbers = DataFrameGroupBy(self._frame, self._by, True, self._sort, self._dropna).ngroup()
+        rows: dict[int, list[int]] = {}
+        for place, number in enumerate(numbers.tolist()):
+            if number is not None and number == number:
+                rows.setdefault(int(number), []).append(place)
+        kept = [
+            number
+            for number, places in rows.items()
+            if self._keeps(func(self._as_answer(self._frame.iloc[places]), *args, **kwargs))
+        ]
+        return self._kept(numbers.isin(kept))
+
+    def _keeps(self, answer: Any) -> bool:
+        """Whether a group's answer from `filter` keeps it, read as pandas reads a frame's.
+
+        Overridden by `SeriesGroupBy`, where pandas reads it differently.
+
+        Raises:
+            TypeError: For an answer that is not one flag, with pandas' message.
+        """
+        with contextlib.suppress(AttributeError):
+            answer = answer.squeeze()
+        flag = isinstance(answer, bool) or type(answer).__name__ == "bool_"
+        missing = answer is None or (isinstance(answer, float) and answer != answer)
+        if not (flag or missing):
+            raise TypeError(
+                f"filter function returned a {type(answer).__name__}, but expected a scalar bool"
+            )
+        return bool(flag and answer)
+
     def head(self, n: int = 5) -> Any:
         """The first `n` rows of each group, in the frame's order.
 
@@ -12978,6 +13127,28 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     def _kept(self, mask: Series) -> Series:
         """The one column's rows a mask keeps."""
         return self._frame.loc[mask][self._column]
+
+    def _value_columns(self) -> list[str]:
+        """The one column."""
+        return [self._column]
+
+    def _as_answer(self, out: DataFrame) -> Series:
+        """The one column of a frame of answers."""
+        return out[self._column]
+
+    def _keeps(self, answer: Any) -> bool:
+        """Whether a group's answer from `filter` keeps it: any truthy value that is there.
+
+        Raises:
+            TypeError: For a series or a frame, with pandas' message.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(answer, (Series, DataFrame)):
+            raise TypeError("the filter must return a boolean result")
+        if answer is None or (isinstance(answer, float) and answer != answer):
+            return False
+        return bool(answer)
 
     def idxmax(self, skipna: bool = True) -> Series:
         """The label of each group's largest value.
