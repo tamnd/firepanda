@@ -60,6 +60,7 @@ from firepanda.exec import (
     Window,
     mark_chained_filters,
     node_apply,
+    node_bind,
     node_computes_per_row,
     node_ends_early,
     node_is_breaker,
@@ -3057,6 +3058,118 @@ def test_an_anti_join_keeps_the_rows_that_matched_nothing() raises:
     assert_equal(len(values), 3, "the three keys that missed")
     assert_equal(values[0], Int64(1), "the first of them")
     assert_equal(values[2], Int64(5), "the last of them")
+
+
+def repeated_lookup_frame() raises -> DataFrame:
+    """A lookup where key 4 is there twice, so a probe row can pair twice."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([2, 4, 4, 6]))
+    columns.append(numbers([20, 40, 41, 60]))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def selected_probe() raises -> Chunk:
+    """Six rows under a selection that keeps the keys 2, 3, 4 and 6.
+
+    Both columns are left where they were, so the probe has to read its key
+    through the positions and a column it hands on still points into this.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([10, 20, 30, 40, 50, 60]))
+    var picks: List[UInt32] = [1, 2, 3, 5]
+    var dense: List[Bool] = [False, False]
+    return Chunk(columns^, picks^, dense^)
+
+
+def probe_schema() -> Schema:
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    return Schema(fields^)
+
+
+def column_values(chunk: Chunk, at: Int) raises -> List[Int64]:
+    """Reads one column of a chunk at its rows, through its selection."""
+    var col = chunk.column(at).as_typed[DType.int64]()
+    var out = List[Int64](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col[i])
+    return out^
+
+
+def test_a_join_hands_the_probe_side_on_as_positions() raises:
+    """The probe columns are not copied. The output points into the chunk that
+    arrived, composed with the selection it arrived under, and a key that
+    paired twice is one position written twice."""
+    var node = Node(Join(repeated_lookup_frame(), "n", "n", JoinKind.INNER))
+    _ = node_bind(node, probe_schema())
+    var got = node_process(node, selected_probe())
+    var out = got.take()
+    assert_true(out.selected(), "the output is still a selection")
+    assert_equal(len(out), 4, "2 once, 4 twice, 6 once")
+    var n = column_values(out, 0)
+    var v = column_values(out, 1)
+    var tag = column_values(out, 2)
+    assert_equal(n[0], Int64(2), "the first key")
+    assert_equal(n[1], Int64(4), "4 paired with its first match")
+    assert_equal(n[2], Int64(4), "and again with its second")
+    assert_equal(n[3], Int64(6), "the last key")
+    assert_equal(v[2], Int64(40), "the probe payload follows its row")
+    assert_equal(v[3], Int64(60), "including the last one")
+    assert_equal(tag[1], Int64(40), "the build side is gathered")
+    assert_equal(tag[2], Int64(41), "for each match")
+
+
+def test_a_join_on_a_chunk_with_no_selection_writes_one() raises:
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([10, 20, 30, 40, 50, 60]))
+    var node = Node(Join(lookup_frame(), "n", "n", JoinKind.LEFT))
+    _ = node_bind(node, probe_schema())
+    var got = node_process(node, Chunk(columns^))
+    var out = got.take()
+    assert_true(out.selected(), "the probe side became positions")
+    assert_equal(len(out), 6, "every row of a left join")
+    var v = column_values(out, 1)
+    assert_equal(v[0], Int64(10), "the first row")
+    assert_equal(v[5], Int64(60), "the last row")
+
+
+def test_a_semi_join_under_a_selection_is_a_selection() raises:
+    var node = Node(Join(lookup_frame(), "n", "n", JoinKind.SEMI))
+    _ = node_bind(node, probe_schema())
+    var got = node_process(node, selected_probe())
+    var out = got.take()
+    assert_equal(len(out), 3, "2, 4 and 6 are in the lookup and 3 is not")
+    var v = column_values(out, 1)
+    assert_equal(v[0], Int64(20), "the row keyed 2")
+    assert_equal(v[1], Int64(40), "the row keyed 4")
+    assert_equal(v[2], Int64(60), "the row keyed 6")
+
+
+def test_filters_on_both_sides_of_a_join_compose_with_its_positions() raises:
+    """The filter under the join keeps 1, 3, 4 and 6 as a selection, the join
+    pairs 4 twice and 6 once through it, and the filter over the join picks
+    from the join's positions, which repeat a row, rather than from the chunk
+    underneath. Nothing is gathered until the sink."""
+    var pipeline = Pipeline(sample_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Join(repeated_lookup_frame(), "n", "n", JoinKind.INNER)))
+    pipeline.add(Node(Filter(1)))
+    var out = pipeline^.run()
+    var n = read_back(out, "n")
+    var tag = read_back(out, "tag")
+    assert_equal(len(n), 3, "4 twice and 6 once")
+    assert_equal(n[0], Int64(4), "the first pair")
+    assert_equal(n[1], Int64(4), "the same probe row again")
+    assert_equal(n[2], Int64(6), "the last")
+    assert_equal(tag[0], Int64(40), "its first match")
+    assert_equal(tag[1], Int64(41), "its second match")
+    assert_equal(tag[2], Int64(60), "the tag for 6")
 
 
 def test_a_join_builds_only_the_columns_it_was_asked_for() raises:
