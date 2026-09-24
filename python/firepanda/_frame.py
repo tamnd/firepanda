@@ -2774,6 +2774,25 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def interpolate(
+        self,
+        method: Any = "linear",
+        *,
+        axis: Any = 0,
+        limit: Any = None,
+        inplace: bool = False,
+        limit_direction: Any = None,
+        limit_area: Any = None,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The frame with each gap filled on the line between the values either side."""
+        try:
+            return self._interpolate(
+                method, axis, limit, inplace, limit_direction, limit_area, kwargs
+            )
+        except Exception as error:
+            raise translate(error) from None
+
     def shift(
         self,
         periods: Any = 1,
@@ -3769,6 +3788,25 @@ class Series(SeriesMixin):
         """Each missing value taken from the nearest present one after it."""
         try:
             return self._fill("bfill", axis, inplace, limit, limit_area)
+        except Exception as error:
+            raise translate(error) from None
+
+    def interpolate(
+        self,
+        method: Any = "linear",
+        *,
+        axis: Any = 0,
+        limit: Any = None,
+        inplace: bool = False,
+        limit_direction: Any = None,
+        limit_area: Any = None,
+        **kwargs: Any,
+    ) -> Series:
+        """The column with each gap filled on the line between the values either side."""
+        try:
+            return self._interpolate(
+                method, axis, limit, inplace, limit_direction, limit_area, kwargs
+            )
         except Exception as error:
             raise translate(error) from None
 

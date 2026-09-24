@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: interpolate on a frame and a column
+
+`Series.interpolate` and `DataFrame.interpolate` fill each gap on the straight line between the values either side of it, with numpy's arithmetic so the answers agree to the last bit, along row positions for `linear` and along the labels for `index` and `values`. `limit`, `limit_direction` and `limit_area` leave the gaps pandas leaves, whole numbers or flags with no gap come back untouched, whole numbers with a gap come back as float64, and `inplace=True` hands back the object as pandas does. Text, flags with a gap and a category are refused with pandas' errors, every bad argument with pandas' message in pandas' order, and the methods pandas hands to scipy as not supported.
+
 ### Added: corr, cov and autocorr on a frame and a column
 
 `DataFrame.corr` and `DataFrame.cov` answer the square frame pandas does, labelled by the numeric columns both ways, pairing each two columns over the rows where both hold a value. `Series.corr`, `Series.cov` and `Series.autocorr` answer one number, lining the two columns up by label first. Pearson and Spearman are both there, `min_periods` and `ddof` behave as in pandas, including the difference in `DataFrame.cov` between a frame with a gap and one without, and text is refused with numpy's words unless `numeric_only` is set. Kendall is refused as not supported yet.
