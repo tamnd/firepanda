@@ -2996,6 +2996,21 @@ FRAME = Exposed(
             doc="A decay over every row of every column, computing nothing until reduced.",
             returns="ExponentialMovingWindow",
         ),
+        Member(
+            name="resample",
+            kind="method",
+            signature=(
+                "rule: Any, closed: str | None = None, label: str | None = None,"
+                ' convention: str = "start", on: Any = None, level: Any = None,'
+                ' origin: Any = "start_day", offset: Any = None, group_keys: bool = False'
+            ),
+            body=(
+                "_resample(self, rule, closed, label, convention, on, level, origin,"
+                " offset, group_keys)"
+            ),
+            doc="Bins of a fixed step of time over every column, computing nothing until reduced.",
+            returns="Resampler",
+        ),
         *_reductions("DataFrame"),
         *_transformations("DataFrame"),
         *_operators("DataFrame"),
@@ -3769,6 +3784,21 @@ SERIES = Exposed(
             ),
             doc="A decay over every row of the column, computing nothing until reduced.",
             returns="ExponentialMovingWindow",
+        ),
+        Member(
+            name="resample",
+            kind="method",
+            signature=(
+                "rule: Any, closed: str | None = None, label: str | None = None,"
+                ' convention: str = "start", on: Any = None, level: Any = None,'
+                ' origin: Any = "start_day", offset: Any = None, group_keys: bool = False'
+            ),
+            body=(
+                "_resample(self, rule, closed, label, convention, on, level, origin,"
+                " offset, group_keys)"
+            ),
+            doc="Bins of a fixed step of time over the column, computing nothing until reduced.",
+            returns="Resampler",
         ),
         Member(
             name="dt",
@@ -4915,7 +4945,7 @@ def wrapper() -> str:
         mixins.add("_grouped")
     # `s.rolling(...)` and `s.expanding(...)` are the same case as `groupby`
     # above, for the same reason, so they are hand written functions too.
-    for builder in ("_rolling", "_expanding", "_ewm"):
+    for builder in ("_rolling", "_expanding", "_ewm", "_resample"):
         if any(f"{builder}(" in m.body for m in every):
             mixins.add(builder)
     # `tolist` and its neighbours read values out, and a temporal column's
@@ -4931,6 +4961,10 @@ def wrapper() -> str:
             mixins.add(accessor)
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
+    # The resampler is a class of its own module rather than of this one, so the
+    # members that answer one name it through an import.
+    if any("_resample(" in m.body for m in every):
+        out.append("from ._resample import Resampler")
     out.append("from .errors import translate")
 
     out.append("")
