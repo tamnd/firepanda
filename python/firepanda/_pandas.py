@@ -7704,6 +7704,61 @@ class SeriesMixin:
             self._named(other, "mod", axis, level, fill_value, flip),
         )
 
+    def _value_counts(
+        self, normalize: bool, sort: bool, ascending: bool, bins: Any, dropna: bool
+    ) -> Any:
+        """How often each distinct value occurs, as pandas counts it.
+
+        A group by on the column itself in the order each value first appears,
+        which is the order pandas' hash table hands its keys back in, and then
+        a stable sort on the count, so two values that occur equally often
+        stay in the order they first appeared. The answer is named `count`, or
+        `proportion` when it is normalised, and its index takes the column's
+        name.
+
+        A category column is refused, because pandas counts every category
+        including the ones that never occur, and so is `bins`.
+        """
+        if bins is not None:
+            raise UnsupportedError(
+                "value_counts with bins= is not supported yet, because it needs cut"
+            )
+        if self._inner.dtype() == "category":
+            raise UnsupportedError(
+                "value_counts on a category column is not supported yet, because pandas"
+                " counts every category including the ones that never occur"
+            )
+        key = "value"
+        frame = self.rename(key).to_frame()
+        counts = frame.groupby(key, sort=False, dropna=dropna).size()
+        counts = counts.rename_axis(self.name)
+        if normalize:
+            counts = (counts / counts.sum()).rename("proportion")
+        else:
+            counts = counts.rename("count")
+        if sort:
+            counts = counts.sort_values(ascending=ascending, kind="stable")
+        return counts
+
+    def _mode(self, dropna: bool) -> Any:
+        """The values that occur most often, sorted, under a fresh index.
+
+        The counts come from `_value_counts` and there are only as many modes as
+        there are ties at the top, so the few that win are sorted here, with a
+        missing value last where `dropna=False` lets one win.
+        """
+        from ._frame import Series
+
+        counts = self._value_counts(False, False, False, None, dropna)
+        if len(counts) == 0:
+            return Series._wrap(self._inner.head(0).relabel(self._inner.label()))
+        top = counts.max()
+        winners = counts[counts == top].index.to_list()
+        present = sorted(value for value in winners if value is not None and value == value)
+        missing = [value for value in winners if value is None or value != value]
+        answer = Series(present + missing, name=self.name)
+        return answer if answer.dtype == self.dtype else answer.astype(self.dtype)
+
     def _between(self, left: Any, right: Any, inclusive: str) -> Any:
         """`left <= s <= right`, with either end open as `inclusive` says.
 
