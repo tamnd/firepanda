@@ -21,6 +21,7 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
+from firepanda.kernel.rank import rank_method, rank_missing
 from firepanda.kernel.reduce import reduce_any
 from firepanda.py.args import flag, maybe_whole, number, whole, words
 from firepanda.py.build import array_from, column_from, empty_column
@@ -2115,6 +2116,52 @@ struct PySeries(Movable, Writable):
             return PythonObject(
                 alloc=Self(
                     ArcPointer(Self._held(py_self)[].series[].unary(which))
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def rank(
+        py_self: PythonObject,
+        method: PythonObject,
+        ascending: PythonObject,
+        na_option: PythonObject,
+        pct: PythonObject,
+    ) raises -> PythonObject:
+        """Ranks every row against the whole column.
+
+        Args:
+            py_self: The series.
+            method: How a tie is settled, as pandas spells it.
+            ascending: Rank the smallest value first.
+            na_option: Where a missing value ranks, as pandas spells it.
+            pct: Answer the rank as a fraction of the column.
+
+        Returns:
+            A new float64 series, on the same labels.
+
+        Raises:
+            Error: Tagged `value` for a method or placement pandas does not
+                have, and `dtype` if the column's type cannot be sorted.
+        """
+        var how: Int
+        var placed: Int
+        try:
+            how = rank_method(words(method, "method"))
+            placed = rank_missing(words(na_option, "na_option"))
+        except cause:
+            raise retagged(VALUE, cause)
+        var up = flag(ascending, "ascending")
+        var share = flag(pct, "pct")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .rank(how, up, placed, share)
+                    )
                 )
             )
         except cause:

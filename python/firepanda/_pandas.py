@@ -554,6 +554,28 @@ def _axis_number(axis: Any, owner: str, default: int, allowed: tuple[int, ...]) 
     return number
 
 
+def _rank_options(method: Any, na_option: Any) -> None:
+    """Refuses a rank method or a placement for the missing values pandas lacks.
+
+    Checked here rather than in the core because pandas' two mistakes are two
+    different classes: a method it does not know is a `KeyError` naming it,
+    since pandas looks the method up in a table, and a placement it does not
+    know is a `ValueError` listing the three it does.
+
+    Args:
+        method: What was passed as `method`.
+        na_option: What was passed as `na_option`.
+
+    Raises:
+        KeyError: If the method is not one of pandas' five.
+        InvalidArgumentError: If the placement is not one of pandas' three.
+    """
+    if method not in ("average", "min", "max", "first", "dense"):
+        raise KeyError(method)
+    if na_option not in ("keep", "top", "bottom"):
+        raise InvalidArgumentError("na_option must be one of 'keep', 'top', or 'bottom'")
+
+
 def _no_fill_against_a_series(fill_value: Any) -> None:
     """Refuses a fill value between a frame and a series.
 
@@ -5365,6 +5387,45 @@ class DataFrameMixin:
         """What Python's own `round` calls, which is `round` with no extras."""
         return self.round(decimals)
 
+    def rank(
+        self,
+        axis: Any = 0,
+        method: str = "average",
+        numeric_only: bool = False,
+        na_option: str = "keep",
+        ascending: bool = True,
+        pct: bool = False,
+    ) -> DataFrame:
+        """Every column ranked down its rows, one float64 column a column.
+
+        The core sorts each column once and walks the ties, the same walk a
+        group by rank takes with a single group, and the rules it follows are
+        written out beside it. A flag is read for its truth, as pandas reads it.
+
+        Args:
+            axis: The rows. Ranking across a row is refused for now.
+            method: How a tie is settled: `average`, `min`, `max`, `first` or
+                `dense`.
+            numeric_only: Rank only the numbers and the booleans.
+            na_option: Where a missing value ranks: `keep`, `top` or `bottom`.
+            ascending: Rank the smallest value first.
+            pct: Answer the rank as a fraction of the column.
+
+        Returns:
+            A frame of float64 columns with this frame's labels.
+        """
+        from ._frame import DataFrame
+
+        _transforming_axis(axis, "DataFrame")
+        _rank_options(method, na_option)
+        read = self._numeric_part() if numeric_only else self
+        try:
+            return DataFrame._wrap(
+                read._inner.group_rank([], method, bool(ascending), na_option, bool(pct), True)
+            )
+        except Exception as error:
+            raise translate(error) from None
+
     def replace(
         self,
         to_replace: Any = None,
@@ -7709,6 +7770,41 @@ class SeriesMixin:
     def __round__(self, decimals: int = 0) -> Series:
         """What Python's own `round` calls, which is `round` with no extras."""
         return self.round(decimals)
+
+    def rank(
+        self,
+        axis: Any = 0,
+        method: str = "average",
+        numeric_only: bool = False,
+        na_option: str = "keep",
+        ascending: bool = True,
+        pct: bool = False,
+    ) -> Series:
+        """Every row ranked against the column, as a float64 column.
+
+        Args:
+            axis: The rows, the one axis a series has.
+            method: How a tie is settled: `average`, `min`, `max`, `first` or
+                `dense`.
+            numeric_only: Accepted and read the way pandas reads it, which for
+                a series of numbers is not at all.
+            na_option: Where a missing value ranks: `keep`, `top` or `bottom`.
+            ascending: Rank the smallest value first.
+            pct: Answer the rank as a fraction of the column.
+
+        Returns:
+            A float64 series with this one's labels and name.
+        """
+        from ._frame import Series
+
+        _axis_number(axis, "Series", 0, (0,))
+        _rank_options(method, na_option)
+        if numeric_only and not _counts_as_numeric(self.dtype):
+            raise TypeError("Series.rank does not allow numeric_only=True with non-numeric dtype.")
+        try:
+            return Series._wrap(self._inner.rank(method, bool(ascending), na_option, bool(pct)))
+        except Exception as error:
+            raise translate(error) from None
 
     def replace(
         self,
@@ -10827,7 +10923,6 @@ BROADCAST_LATER = frozenset(
         "idxmin",
         "corrwith",
         "ohlc",
-        "rank",
         "bfill",
         "ffill",
         "fillna",
@@ -11213,6 +11308,54 @@ class GroupByMixin[Answer]:
         except Exception as error:
             raise translate(error) from None
 
+    def rank(
+        self,
+        method: str = "average",
+        ascending: bool = True,
+        na_option: str = "keep",
+        pct: bool = False,
+    ) -> Answer:
+        """Every row ranked within its group, as float64.
+
+        A row whose key is missing answers NaN under `dropna`, and its key is a
+        group of its own without it, which is what pandas does.
+
+        Args:
+            method: How a tie is settled: `average`, `min`, `max`, `first` or
+                `dense`.
+            ascending: Rank the smallest value first.
+            na_option: Where a missing value ranks: `keep`, `top` or `bottom`.
+            pct: Answer the rank as a fraction of the group.
+
+        Returns:
+            The frame or the series pandas answers, as tall as the one grouped.
+        """
+        _rank_options(method, na_option)
+        from ._frame import DataFrame
+
+        try:
+            out = DataFrame._wrap(
+                self._frame._inner.group_rank(
+                    self._by, method, bool(ascending), na_option, bool(pct), self._dropna
+                )
+            )
+        except Exception as error:
+            raise translate(error) from None
+        return self._ranked(out)
+
+    def _ranked(self, out: DataFrame) -> Answer:
+        """Puts a rank in the shape pandas gives.
+
+        Overridden in both subclasses and never called on this one.
+
+        Args:
+            out: The ranks, one column a column that is not a key.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        raise NotImplementedError("rank")
+
     def _cumulative(
         self, kind: str, numeric_only: bool, args: Any = (), kwargs: Any = None
     ) -> Answer:
@@ -11352,6 +11495,8 @@ class GroupByMixin[Answer]:
             return self._shape_rows(func, 1)
         if func in ("shift", "diff"):
             return self._shape_rows(func, 1)
+        if func == "rank":
+            return self.rank()
         if func in BROADCAST_LATER:
             raise NotImplementedError(
                 f"transform({func!r}) is not written yet, because it answers"
@@ -11451,6 +11596,10 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         """
         return self._transform(kind, periods)
 
+    def _ranked(self, out: DataFrame) -> DataFrame:
+        """The ranks as they are, one column a column that is not a key."""
+        return out
+
     def _size(self) -> DataFrame | Series:
         """Counts the rows in each group, which is the one reduction with two shapes.
 
@@ -11540,6 +11689,10 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
             A series named after the column, as tall as the frame grouped.
         """
         out = self._transform(kind, periods)
+        return _relabelled(out, self._column, self._column)
+
+    def _ranked(self, out: DataFrame) -> Series:
+        """The ranks of the one column, as a series named after it."""
         return _relabelled(out, self._column, self._column)
 
 
