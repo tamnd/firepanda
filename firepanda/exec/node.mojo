@@ -168,6 +168,7 @@ from firepanda.kernel.regex.column import (
 from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite
 from firepanda.kernel.reduce import reduce_any
+from firepanda.kernel.fold import reduce_value_any
 from firepanda.kernel.running import (
     accumulate_any,
     settle_any,
@@ -6376,6 +6377,13 @@ struct Reduce(Movable):
     rows in one chunk that is four and a half gigabytes of difference, and the
     fused route is also the faster of the two by a wide margin once the
     materializing one starts paging.
+
+    A sum or a count over an integer column goes one step further and builds
+    no column at all: `reduce_value_any` runs the operation inside the sum's
+    own loop, so each row is read, given the operation and added in one go.
+    Every one of the ninety sums still does its own additions over every row.
+    A float column, a division and the other reductions build the one column
+    as described above.
     """
 
     var aggs: List[GroupAgg]
@@ -6685,6 +6693,35 @@ struct Reduce(Movable):
             # reduction above them had read all of them, so ninety of them meant
             # ninety columns of the chunk resident at once. Here it is one.
             ref it = self._shifts[self._shift[s]]
+            var stop = s
+            while (
+                stop < len(self._source)
+                and self._source[stop] == self._source[s]
+                and self._shift[stop] == self._shift[s]
+            ):
+                stop += 1
+            # A sum over an integer column runs the operation inside the sum
+            # and writes no column at all, which is the rest of what folding
+            # the operation in here is for. See `kernel/fold.mojo`, and why
+            # that is not the algebra the lowering's docstring rules out.
+            var fused = List[AnyArray](capacity=stop - s)
+            for t in range(s, stop):
+                var one = reduce_value_any(
+                    columns[self._source[t]],
+                    it.constant,
+                    it.op.value(),
+                    it.value_on_left,
+                    self._produce[t],
+                    self._as_float[t],
+                )
+                if not one:
+                    break
+                fused.append(one.take())
+            if len(fused) == stop - s:
+                for f in range(len(fused)):
+                    made.append(fused[f].copy())
+                s = stop
+                continue
             var made_here = binary_value_any(
                 columns[self._source[s]],
                 it.constant,

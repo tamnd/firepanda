@@ -44,6 +44,10 @@ The streaming `Join` node now takes a chunk under a selection and gives one back
 
 A join whose build side is small but whose integer keys spread over a wide range used to hash every probe row, because the table indexed by the key value is sized by the build side alone. `build_side` now also takes the probe height, and a whole frame join accepts a value indexed table up to half that height and at most four million slots. TPC-H q17 is the shape: two hundred parts out of two hundred thousand, probed by six million lines. At SF1, over three interleaved rounds, q17 went from 25.3 to 27.0 ms to 9.9 to 12.2 ms, q8 from 31.3 to 33.6 ms to 16.4 to 18.3 ms, q9 from 93.1 to 102.7 ms to 76.7 to 77.6 ms and q22 from 32.0 to 34.7 ms to 28.3 to 29.1 ms, and the other queries did not move outside their spread. A streaming join does not know its probe height and keeps the old rule.
 
+### Changed: a sum of an integer column and a constant builds no column
+
+A whole input `SUM(x + c)`, `SUM(x - c)`, `SUM(c - x)` or `SUM(x * c)` over an integer column used to build `x + c` for the chunk and then add it up, which on ClickBench q29 is ninety columns built and read back per chunk, each one a cast of the source to int64 first. `reduce_value_any` in `kernel/fold.mojo` runs the operation inside the sum instead: each row is read, widened, given the operation and added, and nothing is written in between. This is not the algebra 0.8.29 had and 0.8.30 took out, and each of the ninety sums still does its own additions over every row. Integer sums wrap and so do not depend on the order of the additions, which is why the answer is the same bit for bit, and why float columns, divisions and the other reductions stay on the old route. On a loaded 10 core Mac, q29 over 1M rows goes from 146 ms at best to 37 ms, and user CPU time drops by three quarters. All 43 ClickBench answers are unchanged.
+
 ## [0.8.31] - 2026-09-24
 
 Built against Mojo 1.0.0 (ed45d567).

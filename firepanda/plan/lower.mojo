@@ -2347,7 +2347,8 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     for as long as the chunk is alive, so the chunk costs ninety times what the
     column it reads costs. Folded, `Reduce` builds one of them at a time and
     drops it before it builds the next, and the chunk costs one column and
-    change. Only a reduction folds this. A group by cannot, because its rows
+    change. An integer sum builds none, because the operation runs inside the
+    sum's loop. Only a reduction folds this. A group by cannot, because its rows
     scatter and the operation would have to move with them, which is what the
     `Compute` in front of it already does.
 
