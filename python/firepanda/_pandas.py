@@ -20482,6 +20482,454 @@ def _write_json(obj: Any, path_or_buf: Any, orient: Any, **kw: Any) -> Any:
     return None
 
 
+_JSON_TENTHS = [float(f"1e-{count}") if count else 1.0 for count in range(16)]
+_JSON_DATE_NAMES = ("modified", "date", "datetime")
+_JSON_MIN_STAMPS = {"s": 31536000, "ms": 31536000000, "us": 31536000000000}
+_JSON_MIN_STAMPS["ns"] = 31536000000000000
+
+
+def _json_fused(a: float, b: float, c: float) -> float:
+    """`a * b + c` rounded once, which is what an arm64 compiler makes of pandas' line."""
+    fma = getattr(math, "fma", None)
+    if fma is not None:
+        return float(fma(a, b, c))
+    from fractions import Fraction
+
+    return float(Fraction(a) * Fraction(b) + Fraction(c))
+
+
+def _json_read_float(text: str) -> float:
+    """A JSON number with a point or an exponent, read the way pandas' decoder reads it.
+
+    pandas does not round a number to the nearest float unless it is asked to
+    with `precise_float`. Its decoder adds up the whole part, the first fifteen
+    fraction digits and a power of ten in floating point, so the last digit can
+    differ from Python's. This is that routine. On arm64 the compiler fuses the
+    multiply and the add, so the fused form is used there.
+    """
+    import platform
+
+    negative = text.startswith("-")
+    body = text[1:] if negative else text
+    mantissa, _, exponent = body.lower().partition("e")
+    whole_text, _, fraction_text = mantissa.partition(".")
+    whole = 0
+    for digit in whole_text:
+        before, whole = whole, (whole * 10 + int(digit)) % 2**64
+        if negative and whole > 2**63:
+            raise ValueError("Value is too small")
+        if not negative and before > whole:
+            raise ValueError("Value is too big!")
+    fraction = 0.0
+    digits = fraction_text[:15]
+    for digit in digits:
+        fraction = fraction * 10.0 + int(digit)
+    tenth = _JSON_TENTHS[len(digits)]
+    if platform.machine().lower() in ("arm64", "aarch64"):
+        value = _json_fused(fraction, tenth, float(whole))
+    else:
+        value = float(whole) + fraction * tenth
+    value = -value if negative else value
+    if exponent:
+        try:
+            value *= math.pow(10.0, float(int(exponent)))
+        except OverflowError:
+            value *= math.inf
+    return value
+
+
+def _json_read_int(text: str) -> int:
+    """A JSON whole number, refused past what pandas' decoder holds.
+
+    Raises:
+        ValueError: For a number past 64 bits, with the decoder's words.
+    """
+    value = int(text)
+    if value >= 2**64:
+        raise ValueError("Value is too big!")
+    if value < -(2**63):
+        raise ValueError("Value is too small")
+    return value
+
+
+def _json_source(path_or_buf: Any, encoding: Any, errors: str, compression: Any) -> str:
+    """The text of a handle, or of a file decompressed the way its name or `compression` says.
+
+    Raises:
+        FileNotFoundError: For a path with no file, which is also what text
+            that is not a path meets, as in pandas.
+        NotImplementedError: For compressions firepanda does not read yet.
+    """
+    import os
+
+    encoding = encoding or "utf-8"
+    if hasattr(path_or_buf, "read"):
+        text = path_or_buf.read()
+        return text.decode(encoding, errors) if isinstance(text, bytes) else text
+    path = os.path.expanduser(os.fspath(path_or_buf))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File {path_or_buf} does not exist")
+    options = dict(compression) if isinstance(compression, dict) else {"method": compression}
+    method = options.get("method")
+    if method == "infer":
+        method = next(
+            (name for end, name in _CSV_ZIPPED.items() if path.lower().endswith(end)), None
+        )
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    if method in ("gzip", "bz2", "xz"):
+        import bz2
+        import gzip
+        import lzma
+
+        raw = {"gzip": gzip, "bz2": bz2, "xz": lzma}[method].decompress(raw)
+    elif method == "zip":
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            names = archive.namelist()
+            if len(names) != 1:
+                raise ValueError(
+                    f"Multiple files found in ZIP file. Only one file per ZIP: {names}"
+                )
+            raw = archive.read(names[0])
+    elif method is not None:
+        raise NotImplementedError(
+            f"read_json: compression={method!r} is not supported yet, only gzip, bz2, xz and zip"
+        )
+    return raw.decode(encoding, errors)
+
+
+def _json_kind(values: list[Any]) -> str:
+    """The dtype pandas gives a column built from these decoded values.
+
+    Whole numbers with a gap become floats, flags with a gap and anything
+    mixed are objects, and a column with nothing in it is an object too.
+    """
+    present = [value for value in values if value is not None]
+    gaps = len(present) < len(values)
+    if not present:
+        return "object"
+    if all(isinstance(value, bool) for value in present):
+        return "object" if gaps else "bool"
+    if all(isinstance(value, int) and not isinstance(value, bool) for value in present):
+        if any(not -(2**63) <= value < 2**63 for value in present):
+            return "object"
+        return "float64" if gaps else "int64"
+    if all(isinstance(value, int | float) and not isinstance(value, bool) for value in present):
+        return "float64"
+    if all(isinstance(value, str) for value in present):
+        return "str"
+    return "object"
+
+
+def _json_epochs(values: list[Any], kind: str, options: dict[str, Any]) -> Any:
+    """The values as instants when pandas would read them as instants, and None otherwise.
+
+    Text that is all whole numbers and numbers are counts since the epoch when
+    every one is past a year after it, in the first unit whose instants all
+    fit. Other text is read as dates when all of it reads.
+    """
+    from ._frame import Series
+
+    if not values:
+        return None
+    numbers: list[Any] | None = None
+    if kind in ("str", "object"):
+        try:
+            numbers = [int(value) for value in values]
+        except (TypeError, ValueError):
+            numbers = None
+        if numbers is not None and any(not -(2**63) <= value < 2**63 for value in numbers):
+            return None
+    elif kind in ("int64", "float64"):
+        numbers = values
+    if numbers is not None:
+        floor = _JSON_MIN_STAMPS[options["date_unit"] or "s"]
+        if not all(value is None or value != value or value > floor for value in numbers):
+            return None
+        for unit in [options["date_unit"]] if options["date_unit"] else list(_JSON_UNITS):
+            scale = _JSON_UNITS[unit]
+            counts = [
+                None if value is None or value != value else round(value * scale)
+                for value in numbers
+            ]
+            if all(value is None or -(2**63) < value < 2**63 for value in counts):
+                kind = "int64" if None not in counts else None
+                return to_datetime(Series(counts, dtype=kind), unit="ns")
+        return None
+    if kind != "str":
+        return None
+    try:
+        return to_datetime(Series(values, dtype="str"))
+    except Exception:  # pandas tries every reading and keeps the text when none works
+        return None
+
+
+def _json_inferred(
+    values: list[Any], name: Any, options: dict[str, Any], *, dates: bool, axis: bool = False
+) -> tuple[Any, str, bool]:
+    """pandas' `_try_convert_data`: the values, the kind they end as, and whether they moved.
+
+    Instants come back as a series of kind `datetime`, and a dtype asked for
+    by name comes back as the kind `astype:<dtype>`.
+    """
+    kind = _json_kind(values)
+    wanted = options["dtype"]
+    if not axis:
+        if not wanted:
+            return values, kind, False
+        if wanted is not True and not dates:
+            chosen = wanted.get(name) if isinstance(wanted, dict) else wanted
+            if chosen is not None:
+                return values, f"astype:{chosen}", True
+    if dates:
+        instants = _json_epochs(values, kind, options)
+        if instants is not None:
+            return instants, "datetime", True
+    data, moved = values, False
+    if kind in ("str", "object"):
+        try:
+            data = [math.nan if value is None else float(value) for value in values]
+            kind, moved = "float64", True
+        except (TypeError, ValueError):
+            pass
+    if values and kind in ("float64", "object"):
+        try:
+            whole = [int(value) for value in values]
+            if all(-(2**63) <= value < 2**63 for value in whole) and all(
+                left == right for left, right in zip(whole, data, strict=True)
+            ):
+                data, kind, moved = whole, "int64", True
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if axis and name == "index" and values and options["orient"] == "split":
+        return values, _json_kind(values), False
+    return data, kind, moved
+
+
+def _json_series_of(values: Any, kind: str, name: Any) -> Any:
+    """A firepanda column of the values in the kind `_json_inferred` settled on.
+
+    Raises:
+        NotImplementedError: For values pandas holds as objects, which no
+            firepanda column holds.
+    """
+    from ._frame import Series
+
+    if kind == "datetime":
+        return values.rename(name)
+    if kind.startswith("astype:"):
+        built = _json_series_of(values, _json_kind(values), name)
+        try:
+            return built.astype(kind.removeprefix("astype:"))
+        except (TypeError, ValueError):
+            return built
+    if kind == "object":
+        if all(value is None for value in values):
+            return Series([math.nan] * len(values), dtype="float64", name=name)
+        raise NotImplementedError(
+            f"read_json: {name!r} mixes kinds of values or holds lists or mappings, which pandas"
+            " keeps as objects and firepanda has no column for"
+        )
+    if kind == "float64":
+        values = [math.nan if value is None else float(value) for value in values]
+    return Series(values, dtype=kind, name=name)
+
+
+def _json_frame_parts(decoded: Any, orient: str) -> tuple[list[str], list[list[Any]], Any]:
+    """The names, the columns and the row labels an orient lays the decoded JSON out as.
+
+    Labels are None for the default positions.
+
+    Raises:
+        ValueError: For keys pandas does not expect under `split`, and for a
+            mapping of plain values, with pandas' words.
+    """
+    if orient == "split":
+        unexpected = set(map(str, decoded)) - {"columns", "index", "data"}
+        if unexpected:
+            raise ValueError(f"JSON data had unexpected key(s): {', '.join(unexpected)}")
+        rows = decoded.get("data", [])
+        width = max((len(row) for row in rows), default=0)
+        names = [str(name) for name in decoded.get("columns", range(width))]
+        columns = [
+            [row[place] if place < len(row) else None for row in rows]
+            for place in range(len(names))
+        ]
+        return names, columns, decoded.get("index")
+    if orient == "values" or (
+        isinstance(decoded, list) and decoded and isinstance(decoded[0], list)
+    ):
+        width = max((len(row) for row in decoded), default=0)
+        columns = [
+            [row[place] if place < len(row) else None for row in decoded] for place in range(width)
+        ]
+        return [str(place) for place in range(width)], columns, None
+    if isinstance(decoded, list):
+        names = list(dict.fromkeys(key for record in decoded for key in record))
+        return names, [[record.get(name) for record in decoded] for name in names], None
+    if orient == "index":
+        labels = list(decoded)
+        names = list(dict.fromkeys(key for row in decoded.values() for key in row))
+        return names, [[decoded[label].get(name) for label in labels] for name in names], labels
+    if decoded and all(not isinstance(value, dict | list) for value in decoded.values()):
+        raise ValueError("If using all scalar values, you must pass an index")
+    if all(isinstance(value, list) for value in decoded.values()):
+        height = max((len(value) for value in decoded.values()), default=0)
+        return (
+            list(decoded),
+            [value + [None] * (height - len(value)) for value in decoded.values()],
+            None,
+        )
+    labels = list(dict.fromkeys(key for inner in decoded.values() for key in inner))
+    return (
+        list(decoded),
+        [[inner.get(label) for label in labels] for inner in decoded.values()],
+        labels,
+    )
+
+
+def _json_labelled(obj: Any, labels: Any, options: dict[str, Any]) -> Any:
+    """The frame or column with the decoded row labels, read as pandas reads its axes."""
+    from ._frame import Index
+
+    if labels is None:
+        return obj
+    if options["convert_axes"]:
+        data, kind, moved = _json_inferred(labels, "index", options, dates=True, axis=True)
+        if moved:
+            return obj.set_axis(data if kind == "datetime" else Index(data))
+    return obj.set_axis(Index(labels))
+
+
+def read_json(
+    path_or_buf: Any,
+    *,
+    orient: Any = None,
+    typ: str = "frame",
+    dtype: Any = None,
+    convert_axes: Any = None,
+    convert_dates: Any = True,
+    keep_default_dates: bool = True,
+    precise_float: bool = False,
+    date_unit: Any = None,
+    encoding: Any = None,
+    encoding_errors: str = "strict",
+    lines: bool = False,
+    chunksize: Any = None,
+    compression: Any = "infer",
+    nrows: Any = None,
+    storage_options: Any = None,
+    dtype_backend: Any = NO_DEFAULT,
+    engine: str = "ujson",
+) -> Any:
+    """Reads JSON into a frame or a column, which is `pandas.read_json`.
+
+    The text is laid out by `orient` the way `to_json` writes it, then every
+    column goes through pandas' inference: text that is all numbers becomes
+    numbers, floats that are all whole become integers, and columns named like
+    dates (`date`, `modified`, ending `_at` or `_time`, starting `timestamp`)
+    become instants when they read as epochs or ISO text. Row labels go
+    through the same inference unless `convert_axes=False`. Floats are read
+    with pandas' own decoder, which is not always the nearest float, unless
+    `precise_float` asks for that.
+
+    Column names stay text, where pandas turns names like `"0"` into integers,
+    because firepanda's column names are text.
+
+    Returns:
+        A frame, or a column when `typ="series"`.
+
+    Raises:
+        ValueError: For the combinations pandas refuses, with its words.
+        NotImplementedError: For `orient="table"`, `chunksize`, the pyarrow
+            engine, `dtype_backend` and remote files, and for columns pandas
+            would hold as objects.
+    """
+    import json
+
+    from ._frame import DataFrame
+
+    if orient == "table":
+        raise NotImplementedError(
+            "read_json: orient='table' is not supported yet, because its schema names pandas"
+            " types firepanda spells differently"
+        )
+    if engine not in ("ujson", "pyarrow"):
+        raise ValueError(f"The engine type {engine} is currently not supported.")
+    if chunksize is not None and not lines:
+        raise ValueError("chunksize can only be passed if lines=True")
+    if nrows is not None and not lines:
+        raise ValueError("nrows can only be passed if lines=True")
+    if engine == "pyarrow" and not lines:
+        raise ValueError("currently pyarrow engine only supports the line-delimited JSON format")
+    for given, name in (
+        (chunksize, "chunksize"),
+        (storage_options, "storage_options"),
+        (None if dtype_backend is NO_DEFAULT else dtype_backend, "dtype_backend"),
+        (None if engine == "ujson" else engine, "engine"),
+    ):
+        if given is not None:
+            raise NotImplementedError(f"read_json: {name} is not supported yet")
+    if date_unit is not None:
+        date_unit = date_unit.lower()
+        if date_unit not in _JSON_UNITS:
+            raise ValueError("date_unit must be one of ('s', 'ms', 'us', 'ns')")
+    options = {
+        "dtype": True if dtype is None else dtype,
+        "convert_axes": True if convert_axes is None else convert_axes,
+        "date_unit": date_unit,
+        "orient": orient,
+    }
+    text = _json_source(path_or_buf, encoding, encoding_errors, compression)
+    if lines:
+        rows = [row.strip() for row in text.split("\n")]
+        rows = [row for row in rows if row]
+        text = "[" + ",".join(rows if nrows is None else rows[:nrows]) + "]"
+    decoded = json.loads(
+        text,
+        parse_float=float if precise_float else _json_read_float,
+        parse_int=_json_read_int,
+        parse_constant=lambda word: None if word == "NaN" else float(word),
+    )
+    if typ == "series":
+        name, labels = None, None
+        if orient == "split":
+            unexpected = set(map(str, decoded)) - {"name", "index", "data"}
+            if unexpected:
+                raise ValueError(f"JSON data had unexpected key(s): {', '.join(unexpected)}")
+            name, labels, values = decoded.get("name"), decoded.get("index"), decoded["data"]
+        elif isinstance(decoded, dict):
+            labels, values = list(decoded), list(decoded.values())
+        else:
+            values = decoded
+        data, kind, _ = _json_inferred(values, "data", options, dates=bool(convert_dates))
+        return _json_labelled(_json_series_of(data, kind, name), labels, options)
+    if typ != "frame":
+        raise ValueError(f"typ={typ!r} must be 'frame' or 'series'.")
+    if not decoded:
+        return DataFrame()
+    names, columns, labels = _json_frame_parts(decoded, orient or "columns")
+    built = {}
+    for name, values in zip(names, columns, strict=True):
+        dated = convert_dates is not False and (
+            (not isinstance(convert_dates, bool) and name in set(convert_dates))
+            or (
+                keep_default_dates
+                and (
+                    name.lower().endswith(("_at", "_time"))
+                    or name.lower() in _JSON_DATE_NAMES
+                    or name.lower().startswith("timestamp")
+                )
+            )
+        )
+        data, kind, _ = _json_inferred(values, name, options, dates=dated)
+        built[name] = _json_series_of(data, kind, name)
+    return _json_labelled(DataFrame(built), labels, options)
+
+
 _READ_CSV_ENGINES = ("c", "python", "pyarrow")
 """The three parsers pandas can be told to use, all of which give one answer here."""
 
