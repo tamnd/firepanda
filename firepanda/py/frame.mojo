@@ -1538,6 +1538,53 @@ struct PyDataFrame(Movable, Writable):
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
+    def group_broadcast(
+        py_self: PythonObject,
+        by: PythonObject,
+        kind: PythonObject,
+        param: PythonObject,
+        dropna: PythonObject,
+    ) raises -> PythonObject:
+        """Answers each row with its group's reduction.
+
+        This is `df.groupby(keys).transform("sum")` and the other reductions
+        spelled as a transform. The word and the number cross the way they do
+        for `group_agg`, and the answer is as tall as the frame.
+
+        Args:
+            py_self: The frame.
+            by: The key columns, at least one and no repeats.
+            kind: The reduction, as pandas spells the method on a group.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the reductions that take neither.
+            dropna: Leave the rows whose key is missing out of every group.
+
+        Returns:
+            A new frame with this one's rows and labels.
+
+        Raises:
+            Error: Tagged `column` if a key is missing or named twice, `value`
+                if the name is not a reduction, and `dtype` if a column has a
+                type the reduction cannot read.
+        """
+        var keys = List[String](capacity=Int(len(by)))
+        for name in by:
+            keys.append(String(name))
+        var wanted = grouped_reduction(
+            words(kind, "kind"), number(param, "param")
+        )
+        var drop = flag(dropna, "dropna")
+        ref frame = Self._frame(py_self)[].frame[]
+        try:
+            var out = frame.group_broadcast(keys, wanted, drop)
+            return PythonObject(alloc=Self(ArcPointer(out^)))
+        except cause:
+            var text = String(cause)
+            if "no column named" in text or "given twice" in text:
+                raise retagged(COLUMN, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def group_scan(
         py_self: PythonObject,
         by: PythonObject,
@@ -1584,6 +1631,8 @@ struct PyDataFrame(Movable, Writable):
             var text = String(cause)
             if "unknown transformation" in text:
                 raise retagged(VALUE, cause)
+            if "no object column" in text:
+                raise retagged(UNSUPPORTED, cause)
             if "no column named" in text or "given twice" in text:
                 raise retagged(COLUMN, cause)
             raise retagged(DTYPE, cause)

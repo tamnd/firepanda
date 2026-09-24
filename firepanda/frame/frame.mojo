@@ -58,7 +58,7 @@ from firepanda.array.chunked import ChunkedArray, Sortedness, wrap_columns
 from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.display import DisplayOptions, render_table
@@ -2966,7 +2966,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """Answers one value a row, worked out within the row's group.
 
         This is `df.groupby(keys).cumsum()` and the other transforms that keep
-        the row count: the four running folds, `shift`, `cumcount` and
+        the row count: the four running folds, `shift`, `diff`, `cumcount` and
         `ngroup`. The answer has the input's rows in the input's order and its
         labels, which is the property that separates a transform from an
         aggregation. The folds and `shift` answer every column that is not a
@@ -2987,7 +2987,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Args:
             by: The key columns. At least one, no repeats.
             kind: The transform, as pandas spells the method.
-            periods: How far `shift` moves, and ignored by the others.
+            periods: How far `shift` and `diff` look, and ignored by the others.
             dropna: Leave the rows with a null in their key out of every group.
             sort: Number the groups in key order for `ngroup`.
 
@@ -3018,6 +3018,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         elif (
             kind != "cumsum"
             and kind != "shift"
+            and kind != "diff"
             and kind != "cumcount"
             and kind != "ngroup"
         ):
@@ -3069,7 +3070,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             columns.append(AnyArray(out^))
         else:
             var sources = List[Int]()
-            if kind == "shift":
+            if kind == "shift" or kind == "diff":
                 sources = _shift_sources(grouping, kept, periods, self.rows)
             for c in range(len(self.columns)):
                 var is_key = False
@@ -3081,6 +3082,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 var produced: AnyArray
                 if kind == "shift":
                     produced = take_any(self.columns[c].only(), sources)
+                elif kind == "diff":
+                    produced = _grouped_difference(
+                        self.columns[c].only(), sources
+                    )
                 else:
                     produced = grouped_cumulative_any(
                         self.columns[c].only(),
@@ -3092,6 +3097,70 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 fields.append(Field(self.schema[c].name, produced.type))
                 columns.append(produced^)
 
+        var out = Self(Schema(fields^), columns^)
+        out.index = Index(copy=self.index)
+        return out^
+
+    def group_broadcast(
+        self,
+        by: List[String],
+        kind: AggKind,
+        dropna: Bool = True,
+    ) raises -> Self:
+        """Answers each row with its group's reduction, one value a row.
+
+        This is `df.groupby(keys).transform("sum")` and its siblings. The groups
+        are reduced once, in the order they first appear, which is the order
+        of the grouping's ordinals, and every row then reads its group's value
+        by ordinal. A row whose key has a null in it, when `dropna` is on,
+        belongs to no group and answers missing.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            kind: The reduction to apply to every column that is not a key.
+            dropna: Leave the rows with a null in their key out of every group.
+
+        Returns:
+            A frame as tall as this one, with this one's labels and every column
+            that is not a key.
+
+        Raises:
+            As `group_agg` does.
+        """
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            at.append(self.schema.index_of(by[i]))
+        # Every group is reduced, the null ones too, so the reduced frame's row
+        # `g` is ordinal `g`. Leaving the null groups out is done by the rows
+        # below rather than by the reduction, which would renumber the rest.
+        var reduced = self.group_agg(by, kind, False, False, False)
+        var grouping = self._grouping(at)
+        var ordinals = grouping.codes.unsafe_ptr()
+        var sources = List[Int](capacity=self.rows)
+        for i in range(self.rows):
+            sources.append(Int(ordinals.unsafe_offset(i).unsafe_load()))
+        if dropna:
+            for k in range(len(at)):
+                ref key = self.columns[at[k]]
+                if key.null_count() == 0:
+                    continue
+                for i in range(self.rows):
+                    if not key.only().is_valid(i):
+                        sources[i] = -1
+
+        var fields = List[Field]()
+        var columns = List[AnyArray]()
+        for c in range(len(reduced.columns)):
+            var name = reduced.schema[c].name
+            var is_key = False
+            for k in range(len(by)):
+                if by[k] == name:
+                    is_key = True
+            if is_key:
+                continue
+            var produced = take_any(reduced.columns[c].only(), sources)
+            fields.append(Field(name, produced.type))
+            columns.append(produced^)
         var out = Self(Schema(fields^), columns^)
         out.index = Index(copy=self.index)
         return out^
@@ -5978,6 +6047,39 @@ def dt_isocalendar(s: Series) raises -> DataFrame:
     var out = DataFrame.from_series(columns^)
     out.index = Index(copy=s.index)
     return out^
+
+
+def _grouped_difference(col: AnyArray, sources: List[Int]) raises -> AnyArray:
+    """Each row less the row its group's shift reads, for a grouped `diff`.
+
+    A column of whole numbers is taken to floats first, as pandas takes it, so
+    the difference cannot wrap: float32 for the two narrow signed widths and
+    float64 for the rest. A difference of two instants is a length of time,
+    which the subtraction says without being told.
+
+    Args:
+        col: The column.
+        sources: Where each row's earlier row is, or -1 for none.
+
+    Returns:
+        The differences, missing where there is no earlier row.
+
+    Raises:
+        Error: For a bool column, which pandas answers with an object column,
+            and for a type that cannot be subtracted from itself.
+    """
+    if col.type.kind == TypeKind.BOOL:
+        raise Error(
+            "group scan: a grouped diff of a bool column is an object column in"
+            " pandas, and firepanda has no object column to answer with"
+        )
+    if col.type.kind == TypeKind.INT:
+        var narrow = (
+            col.type.physical == DType.int8 or col.type.physical == DType.int16
+        )
+        var values = cast_any(col, DType.float32 if narrow else DType.float64)
+        return binary_any(values, take_any(values, sources), BinaryOp.SUB)
+    return binary_any(col, take_any(col, sources), BinaryOp.SUB)
 
 
 def _shift_sources(

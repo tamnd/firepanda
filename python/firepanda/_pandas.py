@@ -10644,6 +10644,79 @@ class StringMixin:
             raise translate(error) from None
 
 
+BROADCAST = frozenset(
+    {
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "count",
+        "first",
+        "last",
+        "median",
+        "nunique",
+        "std",
+        "var",
+        "sem",
+        "skew",
+        "prod",
+        "any",
+        "all",
+    }
+)
+"""The reductions `transform` puts on every row of the group, by name."""
+
+BROADCAST_LATER = frozenset(
+    {
+        "size",
+        "quantile",
+        "idxmax",
+        "idxmin",
+        "corrwith",
+        "ohlc",
+        "rank",
+        "bfill",
+        "ffill",
+        "fillna",
+        "pct_change",
+        "cumcount",
+        "ngroup",
+        "kurt",
+    }
+)
+"""The names pandas takes in `transform` that are not answered yet."""
+
+
+def _cast_back(source: Any, out: Any, kind: str) -> Any:
+    """Puts a broadcast reduction back in the type pandas gives it.
+
+    pandas casts a transform's answer back to the column's own type where it
+    can: a float32 column answers float32 whatever the reduction, and a column
+    of whole numbers keeps its width for `sum` and `prod`, which the reduction
+    widened to int64.
+
+    Args:
+        source: The inner frame of the columns that were reduced.
+        out: The inner frame the broadcast produced, the same columns.
+        kind: The reduction.
+
+    Returns:
+        The inner frame, with the columns cast back where pandas casts them.
+    """
+    names, types = [], []
+    for name, mine, theirs in zip(out.names(), out.dtypes(), source.dtypes(), strict=True):
+        single = theirs == "float32" and mine == "float64"
+        narrow = kind in ("sum", "prod") and theirs in _NARROW_WHOLE and mine == "int64"
+        if single or narrow:
+            names.append(name)
+            types.append(theirs)
+    return out.cast(names, types, False) if names else out
+
+
+_NARROW_WHOLE = frozenset({"int8", "int16", "int32", "uint8", "uint16", "uint32", "uint64"})
+"""The integer types a broadcast `sum` or `prod` is cast back to."""
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -10968,7 +11041,21 @@ class GroupByMixin[Answer]:
                 # missing keeps its value and a column of whole numbers stays
                 # whole.
                 return DataFrame._wrap(self._frame._inner.drop(self._by))
-            out = self._frame._inner.group_scan(self._by, kind, periods, self._dropna, self._sort)
+            if kind == "diff" and periods == 0:
+                # The same for a difference by nothing, which is each value
+                # less itself over the whole frame.
+                return DataFrame._wrap(self._frame._inner.drop(self._by).transform("diff", 0))
+            if kind in BROADCAST:
+                # A reduction spelled as a transform. `periods` carries the
+                # delta degrees of freedom for the three spreads, as it does
+                # when they are reductions.
+                param = 1.0 if kind in ("std", "var", "sem") else 0.0
+                out = self._frame._inner.group_broadcast(self._by, kind, param, self._dropna)
+                out = _cast_back(self._frame._inner.drop(self._by), out, kind)
+            else:
+                out = self._frame._inner.group_scan(
+                    self._by, kind, periods, self._dropna, self._sort
+                )
             return DataFrame._wrap(out._widened_for_missing())
         except Exception as error:
             raise translate(error) from None
@@ -11055,6 +11142,69 @@ class GroupByMixin[Answer]:
                 " answers a frame with one column per period"
             )
         return self._shape_rows("shift", periods)
+
+    def _differenced(self, periods: Any) -> Answer:
+        """Each row less the row `periods` before it in its group.
+
+        Args:
+            periods: How far back to look, a whole number.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        if not isinstance(periods, int) or isinstance(periods, bool):
+            raise InvalidArgumentError("periods must be an integer")
+        return self._shape_rows("diff", periods)
+
+    def _broadcast(
+        self, func: Any, args: Any, engine: Any, engine_kwargs: Any, kwargs: Any
+    ) -> Answer:
+        """A reduction or a transform named by a string, answered one value a row.
+
+        A reduction's value is put on every row of its group. A transform's
+        name runs that transform, since pandas lets either be named here.
+
+        Args:
+            func: The name of the reduction or transform.
+            args: Arguments for it, refused if there are any.
+            engine: Refused.
+            engine_kwargs: Refused.
+            kwargs: Arguments for it by keyword, refused if there are any.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        _refuse(
+            "engine",
+            engine,
+            "there is one implementation and it is the compiled one, so there is"
+            " nothing here for this to choose between",
+        )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "there is nothing to configure while there is nothing to choose",
+        )
+        if not isinstance(func, str):
+            raise NotImplementedError(
+                "transform takes the name of a reduction or a transform for now,"
+                " because a Python function runs once a group in the interpreter"
+            )
+        if args or kwargs:
+            raise UnsupportedError(
+                f"transform({func!r}) takes no further arguments for now, because"
+                " the named reductions are answered with their defaults"
+            )
+        if func in BROADCAST or func in ("cumsum", "cumprod", "cummax", "cummin"):
+            return self._shape_rows(func, 1)
+        if func in ("shift", "diff"):
+            return self._shape_rows(func, 1)
+        if func in BROADCAST_LATER:
+            raise NotImplementedError(
+                f"transform({func!r}) is not written yet, because it answers"
+                " differently from the reductions and scans that are"
+            )
+        raise InvalidArgumentError(f"'{func}' is not a valid function name for transform(name)")
 
     def _shape_rows(self, kind: str, periods: int) -> Answer:
         """Runs a transform and puts the answer in the shape pandas gives.
