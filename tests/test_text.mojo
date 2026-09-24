@@ -396,6 +396,20 @@ def test_a_text_filter_past_the_split_carries_nulls_across() raises:
     assert_equal(first_wrong(kept, source, mask), -1, "a kept row is wrong")
 
 
+def test_a_text_filter_below_the_split_keeps_the_rows_and_the_nulls() raises:
+    # Below `PARALLEL_FILTER_ROWS` the same count and copy runs as one worker on
+    # the calling thread, so the short, long and null rows all go through the
+    # arm the tests above only reach past the split. The height is one past a
+    # multiple of sixty four so the last validity word is a partial one.
+    var rows = 1_025
+    var source = wide_text(rows, 7)
+    var mask = every_third(rows)
+    var kept = source.filter(mask)
+    assert_equal(len(kept), 683)
+    assert_true(kept.null_count() > 0, "the nulls were dropped")
+    assert_equal(first_wrong(kept, source, mask), -1, "a kept row is wrong")
+
+
 def test_a_substring_is_a_series_and_a_pattern_is_a_mask() raises:
     # `str_slice` gives a series back rather than a mask, because the answer is
     # text and text is what the next operation wants. That is the opposite of

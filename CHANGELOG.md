@@ -11,6 +11,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: `DataFrame(...)` and `Series(...)` read every shape of data pandas does
 
 `DataFrame` now takes a list of records, a list of rows with `columns=`, a two dimensional numpy array with `columns=` and another frame, and `index=` and `columns=` beside any of them. A single value in a mapping is repeated down the rows, series in a mapping are lined up on the union of their labels as pandas lines them up, and a category or an instant series keeps its type. `Series` takes `index=`, one value repeated along it, and a series with an index, which pandas reads as a reindex. A numpy array keeps its own type, int32, uint8 and `datetime64[s]` included, and numpy scalars in a list are read as the values they hold. A shape that would need a column named 0, a column of objects or a numpy array of spans is refused by name, and the wrong lengths raise pandas' own messages. `python/tests/test_construct_shapes.py` checks 56 cases against pandas.
+### Changed: a small filter or gather of text writes its column directly
+
+A filter or gather of a text column below the size where it splits across cores went through `StringBuilder`, which grows two lists a row and then copies both into the finished column. It now runs the same count and copy the split route does, as one worker on the calling thread. Filtering 42,000 rows of TPC-H customers takes 175 us rather than 485 us for the two byte country code and 715 us rather than 1,180 us for the address, and q22 at SF1 goes from about 26 ms to 24 ms.
+
+## [0.8.32] - 2026-09-24
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, `concat` stacks frames and series down the rows and side by side, `DataFrame.join` and `merge` join on the row labels, `merge(indicator=)` says which side each row came from, and `DataFrame.assign`, attribute access to a column, `rank`, `round`, the grouped transforms and grouped `diff` and `transform` by name are new. `Series` built from a mapping now holds its values under its keys. On the engine side, a join probed by many more rows than it builds indexes by value, a hashed join table that most probes miss keeps a bit per key value in front of it, a join in a pipeline hands its probe side on as positions, a sum of an integer column and a constant builds no column, which takes ClickBench q29 from 146 ms to 37 ms, and a streaming group on one integer key writes its map on every core.
 
 ### Added: `DataFrame.assign` and a column read as an attribute
 
@@ -55,6 +64,10 @@ The streaming `Join` node now takes a chunk under a selection and gives one back
 ### Changed: a join probed by many more rows than it builds indexes by value
 
 A join whose build side is small but whose integer keys spread over a wide range used to hash every probe row, because the table indexed by the key value is sized by the build side alone. `build_side` now also takes the probe height, and a whole frame join accepts a value indexed table up to half that height and at most four million slots. TPC-H q17 is the shape: two hundred parts out of two hundred thousand, probed by six million lines. At SF1, over three interleaved rounds, q17 went from 25.3 to 27.0 ms to 9.9 to 12.2 ms, q8 from 31.3 to 33.6 ms to 16.4 to 18.3 ms, q9 from 93.1 to 102.7 ms to 76.7 to 77.6 ms and q22 from 32.0 to 34.7 ms to 28.3 to 29.1 ms, and the other queries did not move outside their spread. A streaming join does not know its probe height and keeps the old rule.
+
+### Changed: a streaming group on one integer key writes its map on the cores
+
+A `GROUP BY` over one integer key whose values spread wider than the direct table used to insert every chunk into one hash table on one thread, the join's build called a thousand rows at a time. On ClickBench q15, which groups on UserID, that thread was most of the query. The map now uses the parts table the text keys got in 0.8.31: the rows are hashed and bucketed by part on the cores, each part is walked on a core, and the new keys are numbered in row order by a prefix sum, so the ordinals come out as before. An integer key needs no comparison, because its hash is a bijection on its bits, so the walk is only the probe. On a loaded 10 core Mac, a million int64 keys in eight chunks go from 35 ms to 21 ms with 400 thousand groups and from 16 ms to 13 ms with 100 thousand, ten thousand groups is unchanged, and q15's best time over 1M rows goes from about 22 ms to 16 ms. All 43 ClickBench answers are unchanged.
 
 ### Changed: a sum of an integer column and a constant builds no column
 
