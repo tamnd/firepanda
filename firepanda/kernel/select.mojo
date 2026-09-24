@@ -670,7 +670,9 @@ def gather_rows[
 
     Args:
         col: The column to gather from.
-        picks: The selection. Ascending, and every position inside the column.
+        picks: The selection. Never decreasing, and every position inside
+            the column. A join repeats a position once for each row it paired
+            with, and a filter never does.
             Not checked, for the same reason `take_rows` does not check: the
             caller is the operator that just built it.
 
@@ -700,7 +702,9 @@ def gather_any(
 
     Args:
         col: The column to gather from.
-        picks: The selection. Ascending, and every position inside the column.
+        picks: The selection. Never decreasing, and every position inside
+            the column. A join repeats a position once for each row it paired
+            with, and a filter never does.
         spread: Whether this gather may use more than one core. False when the
             caller is already running on a worker.
 

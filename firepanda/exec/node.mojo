@@ -4779,7 +4779,7 @@ struct Join(Movable):
     def process(
         self, var chunk: Chunk, spread: Bool = True
     ) raises -> Optional[Chunk]:
-        """Probes one chunk against the built table and gathers what paired.
+        """Probes one chunk against the built table and hands on what paired.
 
         Args:
             chunk: The chunk. Consumed.
@@ -4807,6 +4807,14 @@ struct Join(Movable):
         var rows = len(chunk)
         if rows == 0:
             return None
+
+        # The probe reads the key a row at a time, so a key column under a
+        # selection is gathered into place first. That is the only gather: the
+        # other columns stay where they are and the output points into them.
+        if chunk.selected():
+            chunk.materialize(self._left_at, spread)
+            for k in range(len(self.left_keys)):
+                chunk.materialize(self.left_keys[k], spread)
 
         # A borrow when the key is a column of the chunk, which is the ordinary
         # case and copies nothing, and the packed tuple when it is not. The
@@ -4839,11 +4847,18 @@ struct Join(Movable):
                 spread,
             )
             var out = List[AnyArray](capacity=len(self._source) + 1)
+            var dense = List[Bool](capacity=len(self._source) + 1)
             for w in range(len(self._source)):
-                out.append(chunk.columns[self._source[w]].copy())
+                out.append(AnyArray(copy=chunk.columns[self._source[w]]))
+                if chunk.selected():
+                    dense.append(chunk.dense[self._source[w]])
             out.append(AnyArray(marks^))
-            _ = chunk^
-            return Chunk(out^, rows)
+            if not chunk.selected():
+                return Chunk(out^, rows)
+            dense.append(True)
+            var kept = chunk.picks^
+            chunk.picks = List[UInt32]()
+            return Chunk(out^, kept^, dense^)
         var matched = Bitmap(0, all_valid=False)
         var pairs = pair_probe(
             self._table,
@@ -4860,7 +4875,26 @@ struct Join(Movable):
         if len(pairs) == 0:
             return None
 
+        # The build side is gathered, since its rows live in the table and not
+        # in the chunk. The probe side is not: every pair's left row is a row of
+        # this chunk, in the order the chunk had them, so the output can point
+        # at them and a column no later node reads is never copied at all. An
+        # inner, left, semi or anti join never writes a negative left position,
+        # which is what makes that a selection rather than a take.
+        var height = len(pairs)
+        var picks = List[UInt32](unsafe_uninit_length=height)
+        var target = picks.unsafe_ptr()
+        if chunk.selected():
+            for j in range(height):
+                target.unsafe_offset(j).unsafe_write(
+                    chunk.picks[pairs.left_at[j]]
+                )
+        else:
+            for j in range(height):
+                target.unsafe_offset(j).unsafe_write(UInt32(pairs.left_at[j]))
         var out = List[AnyArray](capacity=len(self._source))
+        var dense = List[Bool](capacity=len(self._source))
+        var pointing = False
         for w in range(len(self._source)):
             if self._from_right[w]:
                 out.append(
@@ -4870,15 +4904,24 @@ struct Join(Movable):
                         spread,
                     )
                 )
-            else:
+                dense.append(True)
+            elif chunk.selected() and chunk.dense[self._source[w]]:
+                # Already at the chunk's rows, a key gathered above or a column
+                # a `Compute` added, so it is not what the positions index.
                 out.append(
                     take_any(
                         chunk.columns[self._source[w]], pairs.left_at, spread
                     )
                 )
-        var height = len(pairs)
+                dense.append(True)
+            else:
+                out.append(AnyArray(copy=chunk.columns[self._source[w]]))
+                dense.append(False)
+                pointing = True
         _ = chunk^
-        return Chunk(out^, height)
+        if not pointing:
+            return Chunk(out^, height)
+        return Chunk(out^, picks^, dense^)
 
 
 def _names_include(fields: List[Field], name: String) -> Bool:
@@ -7663,7 +7706,10 @@ def node_reads_selection(node: Node) -> Bool:
     expression names one or two columns and flattening gathers all of them.
     `Limit` reads one because cutting a chunk down to ten rows is cutting the
     positions, and flattening first would gather every row it is about to drop.
-    Everything else is still flattened.
+    `Join` reads one because it gathers only its key and hands the probe side on
+    as positions, so a filter under a probe no longer costs a copy of every
+    column followed by a second copy of the ones that paired. Everything else is
+    still flattened.
 
     Args:
         node: The node.
@@ -7677,6 +7723,7 @@ def node_reads_selection(node: Node) -> Bool:
         or node.isa[Compute]()
         or node.isa[Cast]()
         or node.isa[Limit]()
+        or node.isa[Join]()
     )
 
 
