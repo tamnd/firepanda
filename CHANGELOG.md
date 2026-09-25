@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The members only an index of instants has
+
+`DatetimeIndex` now has `shift`, `snap`, `indexer_at_time`, `indexer_between_time`, `isocalendar`, `mean`, `std`, `to_julian_date`, `to_pydatetime`, `time`, `timetz`, `tzinfo` and `resolution`. `shift` and `snap` count along calendar frequencies such as `MS`, `W-MON` and `B` with the steps `date_range` already uses, and a label between two landing dates rolls the way pandas rolls it. The time of day indexers read times the way pandas does, including the evening time pandas reads a missing label as, so a range that wraps past midnight takes it in as it does in pandas. Slicing or picking labels out of an index of instants or spans now keeps its type. `shift` without `freq` raises `NullFrequencyError`, since firepanda keeps no frequency on an index.
+
 ### Added: Index join, asof and the members around them
 
 `Index` and every index built on it now have `join`, `asof`, `asof_locs`, `get_indexer_for`, `get_indexer_non_unique`, `sortlevel`, `groupby`, `view`, `array`, `shift` and a `str` accessor that answers indexes. `join` follows pandas down each of its three paths, the sorted join, the merge join for repeated labels and the lookup join, so the rows and the positions come back in pandas' order, `None` included where pandas answers it. A join of text with numbers is refused, since the answer would be an index of mixed values. `get_indexer` on an index of instants or spans now reads labels written as text, where it used to fail.
