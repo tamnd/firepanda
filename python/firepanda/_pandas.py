@@ -44,6 +44,7 @@ from . import _config, _firepanda
 from ._scalars import _inward, _outward, _outward_one, _temporal
 from .errors import (
     ColumnNotFoundError,
+    DataError,
     DTypeError,
     FirepandaError,
     IndexingError,
@@ -13905,6 +13906,371 @@ class WindowMixin:
             return Series._wrap(self._data._inner.window_agg(*plan))
         except Exception as error:
             raise translate(error) from None
+
+    # What follows is the part of a window that is not a kernel reduction. Each
+    # of these reads every window in Python, which is slower than the kernel by
+    # the width of the window, and each is here because a caller's own function
+    # or a pairing of two columns cannot be carried through a window the way a
+    # total can. The rows and ends are the kernel's rows and ends, worked out
+    # the way pandas works them out, so the answers line up with the ones above.
+
+    def _over(self, data: Series | DataFrame) -> Any:
+        """The same window over other data, for a column of a frame or a swapped pair."""
+        window = object.__new__(type(self))
+        window._hold(data, self._window, self._min_periods, self._center, self._closed, self._step)
+        return window
+
+    def _least(self) -> int:
+        """How many values a window needs, with the default applied."""
+        if self._min_periods is not None:
+            return self._min_periods
+        return 1 if self._window is None else self._window
+
+    def _bounds(self, rows: int) -> list[tuple[int, int]]:
+        """Where each answered row's window starts and stops, as pandas places it.
+
+        A centred window is moved forward by half its width rounded down, and
+        `closed` takes one row off or puts one on at either end. A step answers
+        every so many rows and not the ones between.
+        """
+        if self._window is None:
+            return [(0, row + 1) for row in range(rows)]
+        width = self._window
+        ahead = (width - 1) // 2 if self._center or width == 0 else 0
+        closed = self._closed or "right"
+        bounds = []
+        for row in range(0, rows, self._step or 1):
+            stop = row + 1 + ahead
+            start = stop - width
+            if closed in ("left", "both"):
+                start -= 1
+            if closed in ("left", "neither"):
+                stop -= 1
+            bounds.append((min(max(start, 0), rows), min(max(stop, 0), rows)))
+        return bounds
+
+    def _numbers(self, column: Series) -> list[float | None]:
+        """A column's values as floats with None for a gap, or pandas' refusal."""
+        from ._frame import DataFrame
+
+        dtype = str(column.dtype)
+        if not dtype.startswith(("int", "uint", "float", "bool")):
+            if isinstance(self._data, DataFrame):
+                shown = "str" if dtype in ("str", "string") else dtype
+                raise DataError(f"Cannot aggregate non-numeric type: {shown}")
+            raise DataError("No numeric types to aggregate")
+        return [None if _missing(value) else float(value) for value in column.tolist()]
+
+    def _answered(self, column: Series, answers: list[float | None], name: Any) -> Series:
+        """A float64 column on the answered rows' labels."""
+        from ._frame import Series
+
+        index = column.index if self._step in (None, 1) else column.iloc[:: self._step].index
+        return Series(answers, index=index, name=name, dtype="float64")
+
+    def _per_window(self, read: Callable[[Series, list[float | None], int, int], Any]) -> Any:
+        """One answer per window of every column, where the window holds enough values.
+
+        `read` is given the column, its values as floats and the window's two
+        ends, and is only asked about a window with at least `min_periods`
+        values in it, which is the rule every pandas window follows.
+        """
+        from ._frame import DataFrame
+
+        least = self._least()
+
+        def one(column: Series) -> Series:
+            values = self._numbers(column)
+            answers = []
+            for start, stop in self._bounds(len(values)):
+                count = sum(value is not None for value in values[start:stop])
+                answers.append(read(column, values, start, stop) if count >= least else None)
+            return self._answered(column, answers, column.name)
+
+        if isinstance(self._data, DataFrame):
+            frame = self._data
+            for label in frame.columns:
+                self._numbers(frame[label])
+            return _float_frame({label: one(frame[label]) for label in frame.columns}, frame)
+        return one(self._data)
+
+    def _only_numbers(self, numeric_only: bool) -> None:
+        """Holds `numeric_only` at False over a frame, for the reason `_reduce` gives."""
+        if self._over_frame():
+            _held_at(
+                "numeric_only",
+                numeric_only,
+                False,
+                "dropping the columns a window cannot read is a decision about"
+                " which columns come back, and firepanda windows the ones it was"
+                " given or says which one it could not",
+            )
+
+    def first(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The first value in every window, skipping gaps."""
+        self._only_numbers(numeric_only)
+        return self._per_window(
+            lambda column, values, start, stop: next(
+                (value for value in values[start:stop] if value is not None), None
+            )
+        )
+
+    def last(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The last value in every window, skipping gaps."""
+        self._only_numbers(numeric_only)
+        return self._per_window(
+            lambda column, values, start, stop: next(
+                (value for value in reversed(values[start:stop]) if value is not None), None
+            )
+        )
+
+    def nunique(self, numeric_only: bool = False) -> Series | DataFrame:
+        """How many distinct values every window holds, not counting gaps."""
+        self._only_numbers(numeric_only)
+        return self._per_window(
+            lambda column, values, start, stop: float(
+                len({value for value in values[start:stop] if value is not None})
+            )
+        )
+
+    def apply(
+        self,
+        func: Callable[..., Any],
+        raw: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> Series | DataFrame:
+        """A caller's function of every window, which has to answer a number.
+
+        The window is handed over as a float64 column keeping its labels, or
+        with `raw` as a numpy array, gaps and all, once it holds `min_periods`
+        values. A True answer is one, as it is in pandas.
+
+        Raises:
+            InvalidArgumentError: For a `raw` that is not a boolean, or the numba
+                engine without `raw`, in pandas' words.
+            NotImplementedError: For the numba engine, which is not here.
+            TypeError: If the function answers something that is not a number.
+        """
+        from ._frame import Series
+
+        if raw is not True and raw is not False:
+            raise InvalidArgumentError("raw parameter must be `True` or `False`")
+        if engine not in (None, "cython", "numba"):
+            raise InvalidArgumentError("engine must be either 'numba' or 'cython'")
+        if engine == "numba":
+            if not raw:
+                raise InvalidArgumentError("raw must be `True` when using the numba engine")
+            raise NotImplementedError(
+                "engine='numba' is not supported yet, because there is one implementation"
+                " here and it is the one cython names"
+            )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "it configures the numba engine, and there is no numba engine here for it to configure",
+        )
+        extra = tuple(args or ())
+        named = dict(kwargs or {})
+
+        def read(column: Series, values: list[float | None], start: int, stop: int) -> float:
+            part = [math.nan if value is None else value for value in values[start:stop]]
+            if raw:
+                import numpy
+
+                window: Any = numpy.array(part, dtype="float64")
+            else:
+                window = Series(
+                    part, index=column.iloc[start:stop].index, name=column.name, dtype="float64"
+                )
+            answer = func(window, *extra, **named)
+            if isinstance(answer, str) or not hasattr(answer, "__float__"):
+                raise TypeError(f"must be real number, not {type(answer).__name__}")
+            return float(answer)
+
+        return self._per_window(read)
+
+    def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Series | DataFrame:
+        """One reduction by name or function, or several in a list or a dict.
+
+        A name is the method of that name. A function is `apply` with the
+        window as a column, which is what pandas 3 does with every function,
+        the built in `sum` included. A list gives a frame with one column a
+        reduction, and a dict gives a frame keyed by its keys, each over the
+        column of that name when the window is over a frame.
+
+        Raises:
+            AttributeError: For a name that is not a reduction, in pandas' words.
+            KeyError: For a dict key that is not a column.
+            NotImplementedError: For a list of reductions over a frame, whose
+                answer has two levels of column labels.
+        """
+        from ._frame import DataFrame
+
+        data = self._data
+        if isinstance(func, str):
+            found = getattr(self, func, None) if not func.startswith("_") else None
+            if not callable(found) or func in ("aggregate", "agg", "pipe"):
+                raise AttributeError(
+                    f"'{func}' is not a valid function for '{type(self).__name__}' object"
+                )
+            return found(*args, **kwargs)
+        if isinstance(func, dict):
+            if isinstance(data, DataFrame):
+                lost = [key for key in func if key not in data.columns]
+                if lost:
+                    raise KeyError(f"Label(s) {lost} do not exist")
+                if any(isinstance(how, (list, tuple, dict)) for how in func.values()):
+                    raise NotImplementedError(
+                        "a list of reductions for one column is not supported yet, because the"
+                        " answer has two levels of column labels"
+                    )
+                parts = {
+                    key: self._over(data[key]).aggregate(how, *args, **kwargs)
+                    for key, how in func.items()
+                }
+            else:
+                parts = {key: self.aggregate(how, *args, **kwargs) for key, how in func.items()}
+            return _float_frame(parts, data)
+        if isinstance(func, (list, tuple)):
+            if isinstance(data, DataFrame):
+                raise NotImplementedError(
+                    "a list of reductions over a frame is not supported yet, because the answer"
+                    " has two levels of column labels"
+                )
+            parts = {
+                how if isinstance(how, str) else getattr(how, "__name__", str(how)): self.aggregate(
+                    how, *args, **kwargs
+                )
+                for how in func
+            }
+            return _float_frame(parts, data)
+        if callable(func):
+            return self.apply(func, raw=False, args=args, kwargs=kwargs)
+        raise TypeError(f"'{type(func).__name__}' object is not callable")
+
+    agg = aggregate
+
+    def pipe(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """The function called with this window, first or as the keyword a tuple names."""
+        return _piped(self, func, args, kwargs)
+
+    def cov(
+        self,
+        other: Series | DataFrame | None = None,
+        pairwise: bool | None = None,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """The covariance of every window with the same window of another column.
+
+        Only the rows where both sides have a value count, and they have to
+        number `min_periods`. Two frames are paired column by column, with a
+        column only one side has answered as gaps. `other` left out means the
+        data with itself.
+
+        Raises:
+            InvalidArgumentError: If `other` is not a column or a frame.
+            NotImplementedError: For every pair of columns of a frame against
+                every other, whose answer has two levels of row labels.
+        """
+        self._spread_settings(ddof)
+        return self._paired(other, pairwise, numeric_only, ddof, False)
+
+    def corr(
+        self,
+        other: Series | DataFrame | None = None,
+        pairwise: bool | None = None,
+        ddof: int = 1,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """The correlation of every window with the same window of another column.
+
+        Paired the way `cov` pairs, and a window where either side does not
+        vary has no correlation.
+        """
+        self._spread_settings(ddof)
+        return self._paired(other, pairwise, numeric_only, ddof, True)
+
+    def _paired(
+        self, other: Any, pairwise: bool | None, numeric_only: bool, ddof: int, scaled: bool
+    ) -> Series | DataFrame:
+        """What `cov` and `corr` share: the pairing of the two sides."""
+        from ._frame import DataFrame, Series
+
+        self._only_numbers(numeric_only)
+        data = self._data
+        if other is None:
+            other = data
+            if pairwise is None:
+                pairwise = True
+        if not isinstance(other, (Series, DataFrame)):
+            raise InvalidArgumentError("other must be a DataFrame or Series")
+        if isinstance(data, DataFrame) and pairwise:
+            raise NotImplementedError(
+                "pairwise=True over a frame is not supported yet, because the answer has two"
+                " levels of row labels; pass pairwise=False to pair the columns by name"
+            )
+        if isinstance(data, Series) and isinstance(other, DataFrame):
+            return self._over(other)._paired(data, False, numeric_only, ddof, scaled)
+        if isinstance(data, Series):
+            return self._moment(data, other, ddof, scaled)
+        if isinstance(other, Series):
+            parts = {
+                label: self._moment(data[label], other, ddof, scaled).reindex(data.index)
+                for label in data.columns
+            }
+            return _float_frame(parts, data)
+        left, right = data.align(other, join="outer")
+        parts = {
+            label: self._moment(left[label], right[label], ddof, scaled) for label in left.columns
+        }
+        return _float_frame(parts, left)
+
+    def _moment(self, x: Series, y: Series, ddof: int, scaled: bool) -> Series:
+        """The covariance or correlation of two columns, window by window."""
+        if list(x.index.tolist()) != list(y.index.tolist()):
+            x, y = x.align(y, join="outer")
+        xs, ys = self._numbers(x), self._numbers(y)
+        least = self._least()
+        answers: list[float | None] = []
+        for start, stop in self._bounds(len(xs)):
+            pairs = [
+                (a, b)
+                for a, b in zip(xs[start:stop], ys[start:stop], strict=True)
+                if a is not None and b is not None
+            ]
+            answers.append(_window_moment(pairs, ddof, scaled) if len(pairs) >= least else None)
+        return self._answered(x, answers, x.name if x.name == y.name else None)
+
+
+def _float_frame(parts: dict[Any, Series], like: Any) -> DataFrame:
+    """A frame of float64 columns on the labels the first column carries."""
+    from ._frame import DataFrame
+
+    columns = list(parts.values())
+    index = columns[0].index if columns else like.index[:0]
+    return DataFrame(
+        {label: column.tolist() for label, column in parts.items()},
+        index=index,
+        dtype="float64",
+    )
+
+
+def _window_moment(pairs: list[tuple[float, float]], ddof: int, scaled: bool) -> float | None:
+    """The covariance of some pairs, or their correlation, or None when there is none."""
+    count = len(pairs)
+    if count == 0:
+        return None
+    mean_x = sum(a for a, _ in pairs) / count
+    mean_y = sum(b for _, b in pairs) / count
+    both = sum((a - mean_x) * (b - mean_y) for a, b in pairs)
+    if not scaled:
+        return None if count - ddof <= 0 else both / (count - ddof)
+    spread = sum((a - mean_x) ** 2 for a, _ in pairs) * sum((b - mean_y) ** 2 for _, b in pairs)
+    return None if spread <= 0 else both / math.sqrt(spread)
 
 
 class RollingMixin(WindowMixin):
