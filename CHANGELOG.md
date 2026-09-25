@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the window members that read every window
+
+`Rolling` and `Expanding` gain `first`, `last`, `nunique`, `apply`, `aggregate` (and `agg`), `pipe`, `cov` and `corr`, placed the way pandas places each window, including `center`, `closed`, `step` and `min_periods`. `apply` hands the window over as a float64 column with its labels, or as a numpy array with `raw=True`. `cov` and `corr` pair a column with a column, a frame with a column, or two frames column by column. Answers that pandas gives with two levels of labels, a list of reductions over a frame and every pair of a frame's columns, are refused for now.
+
 ### Fixed: convert_dtypes turns NaN into a gap
 
 `convert_dtypes` now turns a NaN in a float column into a missing value, as pandas' nullable float does, before it looks for whole numbers.
