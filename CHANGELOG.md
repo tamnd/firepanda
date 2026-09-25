@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a window member with no answer is a NaN
+
+`first`, `last`, `nunique`, `apply`, `cov` and `corr` on a window answered a gap where a window held too few values, and pandas and the kernel reductions answer NaN there. They answer NaN now.
+
 ### Added: the window members that read every window
 
 `Rolling` and `Expanding` gain `first`, `last`, `nunique`, `apply`, `aggregate` (and `agg`), `pipe`, `cov` and `corr`, placed the way pandas places each window, including `center`, `closed`, `step` and `min_periods`. `apply` hands the window over as a float64 column with its labels, or as a numpy array with `raw=True`. `cov` and `corr` pair a column with a column, a frame with a column, or two frames column by column. Answers that pandas gives with two levels of labels, a list of reductions over a frame and every pair of a frame's columns, are refused for now.

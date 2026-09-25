@@ -13973,7 +13973,8 @@ class WindowMixin:
 
         `read` is given the column, its values as floats and the window's two
         ends, and is only asked about a window with at least `min_periods`
-        values in it, which is the rule every pandas window follows.
+        values in it, which is the rule every pandas window follows. Every
+        other window answers NaN and not a gap, as the kernel reductions do.
         """
         from ._frame import DataFrame
 
@@ -13984,7 +13985,7 @@ class WindowMixin:
             answers = []
             for start, stop in self._bounds(len(values)):
                 count = sum(value is not None for value in values[start:stop])
-                answers.append(read(column, values, start, stop) if count >= least else None)
+                answers.append(read(column, values, start, stop) if count >= least else math.nan)
             return self._answered(column, answers, column.name)
 
         if isinstance(self._data, DataFrame):
@@ -14011,7 +14012,7 @@ class WindowMixin:
         self._only_numbers(numeric_only)
         return self._per_window(
             lambda column, values, start, stop: next(
-                (value for value in values[start:stop] if value is not None), None
+                (value for value in values[start:stop] if value is not None), math.nan
             )
         )
 
@@ -14020,7 +14021,7 @@ class WindowMixin:
         self._only_numbers(numeric_only)
         return self._per_window(
             lambda column, values, start, stop: next(
-                (value for value in reversed(values[start:stop]) if value is not None), None
+                (value for value in reversed(values[start:stop]) if value is not None), math.nan
             )
         )
 
@@ -14242,7 +14243,7 @@ class WindowMixin:
                 for a, b in zip(xs[start:stop], ys[start:stop], strict=True)
                 if a is not None and b is not None
             ]
-            answers.append(_window_moment(pairs, ddof, scaled) if len(pairs) >= least else None)
+            answers.append(_window_moment(pairs, ddof, scaled) if len(pairs) >= least else math.nan)
         return self._answered(x, answers, x.name if x.name == y.name else None)
 
 
@@ -14259,18 +14260,18 @@ def _float_frame(parts: dict[Any, Series], like: Any) -> DataFrame:
     )
 
 
-def _window_moment(pairs: list[tuple[float, float]], ddof: int, scaled: bool) -> float | None:
-    """The covariance of some pairs, or their correlation, or None when there is none."""
+def _window_moment(pairs: list[tuple[float, float]], ddof: int, scaled: bool) -> float:
+    """The covariance of some pairs, or their correlation, or NaN when there is none."""
     count = len(pairs)
     if count == 0:
-        return None
+        return math.nan
     mean_x = sum(a for a, _ in pairs) / count
     mean_y = sum(b for _, b in pairs) / count
     both = sum((a - mean_x) * (b - mean_y) for a, b in pairs)
     if not scaled:
-        return None if count - ddof <= 0 else both / (count - ddof)
+        return math.nan if count - ddof <= 0 else both / (count - ddof)
     spread = sum((a - mean_x) ** 2 for a, _ in pairs) * sum((b - mean_y) ** 2 for _, b in pairs)
-    return None if spread <= 0 else both / math.sqrt(spread)
+    return math.nan if spread <= 0 else both / math.sqrt(spread)
 
 
 class RollingMixin(WindowMixin):
