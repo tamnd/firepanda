@@ -5483,6 +5483,112 @@ def _combined(this: Series, that: Series, kind: str) -> Series:
     return answer
 
 
+def _all_missing(rows: int, beside: Series) -> Series:
+    """The gaps a column one side of a `combine` lacks reads as.
+
+    NaN, except beside a text column, where a column of NaN would be a column
+    of floats that nothing written for text can take, and pandas' own is a
+    column of objects that its text methods read.
+    """
+    from ._frame import Series
+
+    if str(beside.dtype) in ("string", "str"):
+        return Series([None] * rows, dtype=beside.dtype)
+    return Series([math.nan] * rows, dtype="float64")
+
+
+def _cast_to(column: Series, kind: str) -> Series:
+    """The column in `kind`, left alone when it is already that type."""
+    return column if str(column.dtype) == kind else column.astype(kind)
+
+
+def _combine_cast(answer: Any, kind: str) -> Any:
+    """A `combine` answer back in the whole number type its columns shared, as pandas does.
+
+    Floats that are all there and all whole go back to that type, and whole
+    numbers with a gap become floats with NaN, which is how pandas holds them.
+
+    Raises:
+        AttributeError: When `func` answered something that is not a column,
+            with the words pandas raises for it.
+    """
+    found = str(answer.dtype)
+    if found.startswith(("int", "uint")) and bool(answer.isna().any()):
+        return answer.astype("float64")
+    if (
+        kind.startswith(("int", "uint"))
+        and found.startswith("float")
+        and not bool(answer.isna().any())
+        and all(float(value).is_integer() for value in answer.tolist())
+    ):
+        return answer.astype(kind)
+    return answer
+
+
+def _pair_correlation(x: Series, y: Series, method: Any) -> float:
+    """One pair's correlation in `corrwith` against a frame, over the rows both hold.
+
+    A callable is handed the two sides' values, as numpy arrays when numpy is
+    there, the way pandas hands them.
+    """
+    if not callable(method):
+        _correlation_method(method)
+        return _pearson(x, y, method, None)
+    x, y = _paired(x, y)
+    if len(x) == 0:
+        return math.nan
+    try:
+        import numpy
+    except ImportError:
+        return method(x.tolist(), y.tolist())
+    return method(
+        numpy.array(x.tolist(), dtype="float64"), numpy.array(y.tolist(), dtype="float64")
+    )
+
+
+def _column_correlation(other: Series, part: Series, method: Any, least: Any) -> float:
+    """One column's or row's correlation in `corrwith` against a column, as `Series.corr`.
+
+    A callable is handed the values of the labels both have, where both hold one.
+    """
+    if not callable(method):
+        return cast("Any", other).corr(part, method=method, min_periods=least)
+    mine, theirs = cast("Any", other)._aligned_with(part)
+    mine, theirs = _as_floats([mine, theirs])
+    mine, theirs = _paired(mine, theirs)
+    if len(mine) < (1 if least is None else least):
+        return math.nan
+    return _pair_correlation(mine, theirs, method)
+
+
+def _backend(dtype_backend: Any) -> None:
+    """Checks a `dtype_backend` the way pandas does.
+
+    Raises:
+        ValueError: For a backend pandas does not know, in pandas' words.
+    """
+    if dtype_backend not in ("numpy_nullable", "pyarrow"):
+        raise InvalidArgumentError(
+            f"dtype_backend {dtype_backend} is invalid, only 'numpy_nullable' and 'pyarrow' are"
+            " allowed."
+        )
+
+
+def _converted(column: Series, whole: bool) -> Series:
+    """One column as `convert_dtypes` leaves it: floats that are all whole become int64."""
+    if not (whole and str(column.dtype).startswith("float")):
+        return column
+    values = column.tolist()
+    # A gap stays a float column: pandas' answer is its nullable `Int64`, and a
+    # whole number column here takes no gap through `astype`.
+    if all(
+        not _missing(value) and math.isfinite(value) and float(value).is_integer()
+        for value in values
+    ):
+        return column.astype("int64")
+    return column
+
+
 def _combining_labels(mine: Index, theirs: Index) -> Index | None:
     """The row labels of a `combine_first`, or None when they are the caller's own.
 
@@ -9167,6 +9273,167 @@ class DataFrameMixin:
         answer = DataFrame(columns) if columns else this.reset_index(drop=True)
         return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
 
+    def combine(
+        self, other: Any, func: Any, fill_value: Any = None, overwrite: bool = True
+    ) -> DataFrame:
+        """`func` on each pair of columns, over both frames' labels and columns.
+
+        The answer has the rows of both frames, sorted when they differ, and the
+        columns of this frame followed by the ones only the other one has. A
+        column one side lacks reads as NaN there. Both columns are cast to the
+        type they share before `func` sees them, and an answer of floats that
+        are all whole goes back to that type if it was whole numbers, which is
+        pandas' order of work. With `overwrite=False` a column the other frame
+        has nothing in keeps this frame's values.
+        """
+        from ._frame import DataFrame
+
+        frame = cast("DataFrame", self)
+        other.index  # noqa: B018 - pandas reads the labels first, which names the error
+        theirs_names = list(other.columns)
+        if len(frame.index) == 0 or len(frame.columns) == 0:
+            return other.copy()
+        labels = _combining_labels(frame.index, other.index)
+        this = frame if labels is None else frame.reindex(labels)
+        that = other if labels is None else other.reindex(labels)
+        index = frame.index if labels is None else labels
+        mine = list(frame.columns)
+        names = mine + [name for name in theirs_names if name not in mine]
+        columns: dict[Any, Series] = {}
+        for name in names:
+            left = this[name] if name in mine else _all_missing(len(index), that[name])
+            right = that[name] if name in theirs_names else _all_missing(len(index), left)
+            left, right = left.reset_index(drop=True), right.reset_index(drop=True)
+            if not overwrite and bool(right.isna().all()):
+                columns[name] = left
+                continue
+            if fill_value is not None:
+                left, right = left.fillna(fill_value), right.fillna(fill_value)
+            if name not in mine:
+                kind = str(right.dtype)
+                if not bool(left.isna().any()):
+                    with contextlib.suppress(Exception):
+                        left = left.astype(kind)
+            else:
+                try:
+                    kind = _combined_type(str(left.dtype), str(right.dtype))
+                except NotImplementedError:
+                    kind = ""
+                if kind:
+                    left, right = _cast_to(left, kind), _cast_to(right, kind)
+            columns[name] = _combine_cast(func(left, right), kind)
+        answer = DataFrame(columns) if columns else this.reset_index(drop=True)
+        return _with_row_labels(answer, index.tolist()).rename_axis(index.name)
+
+    def corrwith(
+        self,
+        other: Any,
+        axis: Any = 0,
+        drop: bool = False,
+        method: Any = "pearson",
+        numeric_only: bool = False,
+        min_periods: Any = None,
+    ) -> Series:
+        """The correlation of each column, or each row, with a column or with another frame.
+
+        Against a column, each of this frame's columns, or rows with `axis=1`,
+        is correlated with it by `Series.corr`. Against a frame, the columns, or
+        rows, the two share are paired over the labels both have, and unless
+        `drop` the ones only one side has are added after them as NaN, sorted.
+
+        Raises:
+            TypeError: For anything that is not a column or a frame, in pandas' words.
+            ValueError: For an unknown method or axis, or a text column with a
+                value in it, in pandas' words.
+        """
+        from ._frame import DataFrame, Series
+
+        axis = _axis_number(axis, "DataFrame", 0, (0, 1))
+        frame = cast("DataFrame", self._numeric_part() if numeric_only else self)
+        if isinstance(other, Series):
+            if axis == 0:
+                parts = [(name, frame[name]) for name in frame.columns]
+            else:
+                names = list(frame.columns)
+                rows = list(zip(*(frame[name].tolist() for name in names), strict=True))
+                labels = frame.index.tolist()
+                parts = [
+                    (label, Series(list(row), index=names))
+                    for label, row in zip(labels, rows, strict=True)
+                ]
+            values = [_column_correlation(other, part, method, min_periods) for _, part in parts]
+            return Series(values, index=[label for label, _ in parts], dtype="float64")
+        if not isinstance(other, DataFrame):
+            raise TypeError(f"unsupported type: {type(other)}")
+        rows_theirs = set(other.index.tolist())
+        rows = [label for label in frame.index.tolist() if label in rows_theirs]
+        names = [name for name in frame.columns if name in set(other.columns)]
+        left = _as_floats([frame[name].loc[rows] for name in names]) if rows else []
+        right = _as_floats([other[name].loc[rows] for name in names]) if rows else []
+        if method not in _CORRELATIONS[:2] and method != "kendall" and not callable(method):
+            raise InvalidArgumentError(
+                f"Invalid method {method} was passed, valid methods are: 'pearson', 'kendall',"
+                " 'spearman', or callable"
+            )
+        if not rows:
+            left = right = [Series([], dtype="float64") for _ in names]
+        if axis == 0:
+            labels = names
+            pairs = list(zip(left, right, strict=True))
+        else:
+            labels = rows
+            mine = list(zip(*(column.tolist() for column in left), strict=True))
+            theirs = list(zip(*(column.tolist() for column in right), strict=True))
+            pairs = [
+                (Series(list(a), dtype="float64"), Series(list(b), dtype="float64"))
+                for a, b in zip(mine, theirs, strict=True)
+            ] or [(Series([], dtype="float64"),) * 2 for _ in rows]
+        values = [_pair_correlation(x, y, method) for x, y in pairs]
+        if not drop:
+            ours = list(frame.columns) if axis == 0 else frame.index.tolist()
+            everything = list(other.columns) if axis == 0 else other.index.tolist()
+            found = set(labels)
+            rest = {label for label in [*ours, *everything] if label not in found}
+            try:
+                extra = sorted(rest)
+            except TypeError:
+                extra = sorted(rest, key=str)
+            labels = [*labels, *extra]
+            values = [*values, *[math.nan] * len(extra)]
+        return Series(values, index=labels, dtype="float64")
+
+    def convert_dtypes(
+        self,
+        infer_objects: bool = True,
+        convert_string: bool = True,
+        convert_integer: bool = True,
+        convert_boolean: bool = True,
+        convert_floating: bool = True,
+        dtype_backend: Any = "numpy_nullable",
+    ) -> DataFrame:
+        """Every column in the narrowest type that holds it with its gaps.
+
+        pandas moves each column to one of its nullable types, `Int64`,
+        `Float64`, `string` and `boolean`. Every type here already holds a gap
+        without changing, so those four are `int64`, `float64`, `str` and
+        `bool`, and the one change left is pandas' other one: a float column
+        whose values are all whole becomes `int64`, when `convert_integer`.
+
+        Raises:
+            ValueError: For a backend pandas does not know, in pandas' words.
+        """
+        from ._frame import DataFrame
+
+        _backend(dtype_backend)
+        frame = cast("DataFrame", self)
+        columns = {name: _converted(frame[name], convert_integer) for name in frame.columns}
+        if not columns:
+            return frame.copy()
+        return _with_row_labels(
+            DataFrame({name: column.reset_index(drop=True) for name, column in columns.items()}),
+            frame.index.tolist(),
+        ).rename_axis(frame.index.name)
+
     def _cov_matrix(self, min_periods: Any, ddof: Any, numeric_only: bool) -> DataFrame:
         """Every numeric column's covariance with every other, pairwise.
 
@@ -10612,6 +10879,23 @@ class SeriesMixin:
             for label in labels.tolist()
         ]
         return type(self)(_readable(answers), index=labels, name=_shared_name(self, other))
+
+    def convert_dtypes(
+        self,
+        infer_objects: bool = True,
+        convert_string: bool = True,
+        convert_integer: bool = True,
+        convert_boolean: bool = True,
+        convert_floating: bool = True,
+        dtype_backend: Any = "numpy_nullable",
+    ) -> Series:
+        """The column in the narrowest type that holds it, as `DataFrame.convert_dtypes` reads one.
+
+        Raises:
+            ValueError: For a backend pandas does not know, in pandas' words.
+        """
+        _backend(dtype_backend)
+        return _converted(cast("Series", self), convert_integer)
 
     def update(self, other: Any) -> None:
         """Puts in the values of `other` that are not missing, label by label.
