@@ -1655,6 +1655,13 @@ def test_a_cross_join_is_the_same_node_the_comma_built() raises:
     )
 
 
+def test_a_positional_join_pairs_by_place_with_no_key() raises:
+    assert_equal(
+        _plan("SELECT a FROM t POSITIONAL JOIN u"),
+        "PROJECT [a]\n  JOIN positional []\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
 def test_each_outer_join_keeps_the_side_its_word_names() raises:
     assert_true("JOIN left [a = k]" in _plan(_outer("LEFT")))
     assert_true("JOIN right [a = k]" in _plan(_outer("RIGHT")))
@@ -3195,8 +3202,6 @@ def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
 
 
 def test_the_joins_with_no_node_yet_each_say_which_one() raises:
-    with assert_raises(contains="POSITIONAL join"):
-        _ = _plan("SELECT a FROM t POSITIONAL JOIN u")
     with assert_raises(contains="ASOF join"):
         _ = _plan("SELECT a FROM t ASOF JOIN u ON t.a = u.k")
     with assert_raises(contains="alias on a table function"):

@@ -34,6 +34,7 @@ from firepanda.exec import (
     Compute,
     Constant,
     Cross,
+    Positional,
     Cut,
     Expand,
     Fill,
@@ -3376,6 +3377,39 @@ def test_a_cross_join_onto_nothing_is_nothing() raises:
 
 def test_a_cross_join_is_row_local() raises:
     assert_true(node_is_row_local(Node(Cross(_two_tags([7, 9])))))
+
+
+def test_a_positional_join_pads_the_right_side_when_it_runs_out() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Positional(_two_tags([7, 9]))))
+    var out = pipeline^.run()
+    assert_equal(len(out), 6, "as long as the longer side")
+    assert_equal(len(out.schema), 3, "both sides end to end")
+    var n = read_back(out, "n")
+    var there = present(out, "tag")
+    var tags = read_back(out, "tag")
+    for i in range(6):
+        assert_equal(n[i], Int64(i + 1), String("n at ", i))
+        assert_equal(there[i], i < 2, String("tag there at ", i))
+    assert_equal(tags[0], Int64(7))
+    assert_equal(tags[1], Int64(9))
+
+
+def test_a_positional_join_hands_out_the_right_rows_past_the_left() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Positional(_two_tags([1, 2, 3, 4, 5, 6, 7, 8]))))
+    var out = pipeline^.run()
+    assert_equal(len(out), 8, "the two rows the left ran out before")
+    var tags = read_back(out, "tag")
+    var there = present(out, "n")
+    for i in range(8):
+        assert_equal(tags[i], Int64(i + 1), String("tag at ", i))
+        assert_equal(there[i], i < 6, String("n there at ", i))
+
+
+def test_a_positional_join_is_not_row_local() raises:
+    # Which right row a left row meets depends on how many came before it.
+    assert_false(node_is_row_local(Node(Positional(_two_tags([7, 9])))))
 
 
 def test_a_right_join_hands_out_the_build_row_nothing_matched() raises:

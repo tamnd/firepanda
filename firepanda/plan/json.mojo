@@ -496,7 +496,7 @@ def _join_of(word: String) raises -> JoinKind:
     Raises:
         Error: If nothing is called that.
     """
-    for code in range(Int(JoinKind.MARK.code) + 1):
+    for code in range(Int(JoinKind.POSITIONAL.code) + 1):
         var kind = JoinKind(UInt8(code))
         if String(kind) == word:
             return kind

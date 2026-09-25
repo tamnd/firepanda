@@ -1383,11 +1383,14 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
         var origin = left.origin.copy()
         origin.append(UNBOUND)
         return Bound(Schema(fields^), origin^)
+    # A positional join pads whichever side runs out first, and which one that
+    # is depends on the rows, so both sides can be null.
+    var positional = kind == JoinKind.POSITIONAL
     return _widen(
         left,
         right,
-        kind == JoinKind.RIGHT or kind == JoinKind.OUTER,
-        kind == JoinKind.LEFT or kind == JoinKind.OUTER,
+        kind == JoinKind.RIGHT or kind == JoinKind.OUTER or positional,
+        kind == JoinKind.LEFT or kind == JoinKind.OUTER or positional,
     )
 
 
