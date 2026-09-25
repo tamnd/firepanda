@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.combine, DataFrame.corrwith and convert_dtypes
+
+`DataFrame.combine` runs a function over each pair of columns across both frames' labels and columns, with pandas' casting, `fill_value` and `overwrite`, and whole number answers cast back the way pandas does. `DataFrame.corrwith` correlates each column, or each row with `axis=1`, with a column or with the shared columns or rows of another frame, with `drop`, `numeric_only`, `min_periods`, Pearson, Spearman and a callable method. `DataFrame.convert_dtypes` and `Series.convert_dtypes` answer the types here that hold a gap, which are pandas' nullable types under their plain names, and turn a float column of whole numbers into `int64`. A float column of whole numbers with a gap stays `float64`, where pandas answers `Int64`.
+
 ### Added: the grouping made visible
 
 `DataFrameGroupBy` and `SeriesGroupBy` now have `ngroups`, `ndim`, `len`, iteration, `groups`, `indices`, `get_group` and `pipe`, matching pandas 3. Each of them numbers the rows again when it is asked for and keeps nothing afterwards. A key written as one name is a value and a key written as a list is a tuple, as in pandas, a group with a missing key under `dropna=False` is keyed by nan and can be fetched with `get_group(float("nan"))`, `[[...]]` narrows what a group hands out, and `indices` is numpy arrays when numpy is installed. `groups` is a plain dict rather than pandas' `PrettyDict`.
