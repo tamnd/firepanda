@@ -17,7 +17,8 @@ were measured against pandas 3.0.
   point only when it is the end.
 
 Steps of weeks, months, quarters, years and business days are calendar offsets
-whose steps are not all one length, and they are refused by name.
+whose steps are not all one length. They land on dates, counted on the wall
+clock, and `_calendar_steps` finds them.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import datetime
 import re
 from typing import Any
 
+from ._calendar_steps import CalendarStep, calendar_step
 from ._datetime import DatetimeIndex
 from ._frame import Series
 from ._pandas import to_datetime
@@ -33,7 +35,7 @@ from ._resample import _CALENDAR, _NANOS
 from ._scalars import Timestamp
 from .errors import InvalidArgumentError
 
-__all__ = ["date_range"]
+__all__ = ["bdate_range", "date_range"]
 
 _UNITS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
 """The units a range can be counted in, finest last, in nanoseconds."""
@@ -232,9 +234,9 @@ def date_range(
         start: The first instant, as text, a `Timestamp`, a `datetime` or a `date`.
         end: The last instant, in the same forms.
         periods: How many instants.
-        freq: The step, as text like `"6h"` or `"2D"`, or a timedelta. Left out
-            it is a day, unless start, end and periods are all given, when the
-            points are spaced evenly between the two ends.
+        freq: The step, as text like `"6h"`, `"2D"`, `"B"`, `"W-WED"` or `"QE"`, or
+            a timedelta. Left out it is a day, unless start, end and periods are
+            all given, when the points are spaced evenly between the two ends.
         tz: The zone the instants are read against, by name.
         normalize: Moves both ends to midnight before counting.
         name: The level name.
@@ -246,8 +248,25 @@ def date_range(
         TypeError: When periods is not a whole number, or for an unknown keyword.
         ValueError: When not exactly three of start, end, periods and freq are
             given, or for an unknown inclusive or unit.
-        NotImplementedError: For a calendar offset.
+        NotImplementedError: For a semi month, business hour or week of month step.
     """
+    return _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, None)
+
+
+def _ranged(
+    start: Any,
+    end: Any,
+    periods: Any,
+    freq: Any,
+    tz: Any,
+    normalize: bool,
+    name: Any,
+    inclusive: Any,
+    unit: Any,
+    kwargs: dict[str, Any],
+    calendar: CalendarStep | None,
+) -> DatetimeIndex:
+    """`date_range`, with the business day step `bdate_range` built standing in for freq."""
     if kwargs:
         raise TypeError(
             "DatetimeArray._generate_range() got an unexpected keyword argument"
@@ -271,7 +290,10 @@ def date_range(
         )
     if unit is not None and unit not in _UNITS:
         raise InvalidArgumentError("'unit' must be one of 's', 'ms', 'us', 'ns'")
-    step, in_days, offset = _frequency(freq) if freq is not None else (None, False, "")
+    steps = calendar_step(freq) if calendar is None else calendar
+    step, in_days, offset = (
+        _frequency(freq) if freq is not None and steps is None else (None, steps is not None, "")
+    )
     ends = [_end(start), _end(end)]
     zone = _zone_name(tz)
     for found in ends:
@@ -302,7 +324,11 @@ def date_range(
         None if found is None else (found.wall if on_the_wall else found.utc) // scale
         for found in ends
     )
-    counts = _points(first, last, periods, None if step is None else step // scale)
+    if steps is not None:
+        walls = [None if found is None else found.wall for found in ends]
+        counts = [point // scale for point in steps.points(walls[0], walls[1], periods)]
+    else:
+        counts = _points(first, last, periods, None if step is None else step // scale)
     if counts and inclusive in ("neither", "right") and counts[0] == first:
         counts = counts[1:]
     if counts and inclusive in ("neither", "left") and counts[-1] == last:
@@ -314,6 +340,45 @@ def date_range(
         else:
             stamps = stamps.dt.tz_localize("UTC").dt.tz_convert(zone)
     return DatetimeIndex(stamps, name=name)
+
+
+def bdate_range(
+    start: Any = None,
+    end: Any = None,
+    periods: Any = None,
+    freq: Any = "B",
+    tz: Any = None,
+    normalize: bool = True,
+    name: Any = None,
+    weekmask: Any = None,
+    holidays: Any = None,
+    inclusive: Any = "both",
+    *,
+    unit: Any = None,
+    **kwargs: Any,
+) -> DatetimeIndex:
+    """A `DatetimeIndex` of business days, which is `pandas.bdate_range`.
+
+    It is `date_range` with a business day step and both ends moved to midnight.
+    A week mask or holidays need the custom business day `C`.
+
+    Raises:
+        TypeError: When freq is None.
+        ValueError: For a week mask or holidays without a `C` step, and for
+            everything `date_range` refuses.
+    """
+    if freq is None:
+        raise TypeError("freq must be specified for bdate_range; use date_range instead")
+    custom = isinstance(freq, str) and freq.startswith("C")
+    if not custom and (weekmask is not None or holidays is not None):
+        raise InvalidArgumentError(
+            "a custom frequency string is required when holidays or weekmask are passed,"
+            f" got frequency {freq}"
+        )
+    step = calendar_step(freq) if custom else None
+    if step is not None:
+        step.with_calendar(weekmask, holidays)
+    return _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, step)
 
 
 def _place(ends: list[_End | None], zone: str) -> None:
