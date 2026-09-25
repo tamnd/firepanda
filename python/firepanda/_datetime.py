@@ -16,16 +16,20 @@ the same kernel `s.dt.year` calls, and wraps the answer back up. There is no
 second table of field names anywhere and there is no second set of rules about
 what a frequency string means.
 
-What is deliberately absent is listed in document 33 section 6. `freq` and the
-three names around it need frequency inference, `time` and `timetz` need a time
-of day column type, `to_period` needs a period type, and `to_pydatetime` needs a
-column of Python objects. None of them is spelled here, because document 07's
-rule is that a name must not resolve and then refuse.
+What is deliberately absent is `freq` and the three names around it, which need
+frequency inference, and `to_period`, which needs a period type. Neither is
+spelled here, because document 07's rule is that a name must not resolve and
+then refuse. `time`, `timetz` and `to_pydatetime` answer Python lists, the
+convention document 41 set for what an index answers label by label, and
+`shift` and `snap` count along calendar frequencies with the same steps
+`date_range` uses.
 """
 
 from __future__ import annotations
 
 import datetime
+import math
+import zoneinfo
 from typing import Any, cast
 
 from ._frame import Index, Series
@@ -40,7 +44,7 @@ from ._pandas import (
     _spelled,
     to_datetime,
 )
-from .errors import translate
+from .errors import InvalidArgumentError, translate
 
 __all__ = ["DatetimeIndex"]
 
@@ -468,3 +472,334 @@ class DatetimeIndex(Index):
         if not (_is_default(ambiguous) and _is_default(nonexistent)):
             return self._placed("tz_localize", tz, ambiguous, nonexistent)
         return self._moved("tz_localize", tz)
+
+    def _labels(self) -> list[Any]:
+        """The labels as timestamps, with None for a missing one."""
+        try:
+            return list(self.tolist())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _rebuilt(self, labels: list[Any]) -> DatetimeIndex:
+        """Wall clock readings put back into an index in this one's unit, clock and name."""
+        tz = self.tz
+        built = DatetimeIndex(labels, name=self.name).as_unit(self.unit)
+        return built.tz_localize(tz) if tz is not None else built
+
+    def _stepped(self, freq: Any, count: int) -> DatetimeIndex:
+        """Every label moved `count` steps along a calendar frequency, as pandas adds an offset.
+
+        A label on a landing date moves `count` landings. A label between two
+        of them first rolls to the next one the way it is going, which is one
+        of the steps, and rolls forward for a count of nought. The time of day
+        rides along.
+        """
+        from ._calendar_steps import calendar_step
+
+        steps = calendar_step(freq)
+        assert steps is not None
+        moved: list[Any] = []
+        for label in self._labels():
+            if label is None:
+                moved.append(None)
+                continue
+            day = label.date()
+            if not steps.on(day):
+                day = steps.roll(day, count >= 0)
+                day = steps.move(day, count - 1 if count > 0 else min(count + 1, 0))
+            else:
+                day = steps.move(day, count)
+            moved.append(_wall(label, day))
+        return self._rebuilt(moved)
+
+    def shift(self, periods: int = 1, freq: Any = None) -> DatetimeIndex:
+        """Every label moved `periods` steps of `freq`.
+
+        Raises:
+            NullFrequencyError: Without a frequency. pandas uses the index's
+                own frequency there, and firepanda does not keep one on an
+                index, so an index made by `date_range` needs `freq` spelled.
+        """
+        from ._calendar_steps import calendar_step
+        from ._date_range import _UNITS, _frequency
+        from ._scalars import Timedelta
+        from .errors import NullFrequencyError
+
+        if freq is None:
+            raise NullFrequencyError("Cannot shift with no freq")
+        if calendar_step(freq) is not None:
+            return self._stepped(freq, periods)
+        step, _, _ = _frequency(freq)
+        nanos, scale = periods * step, _UNITS[self.unit]
+        by = Timedelta(nanos // scale, unit=self.unit) if nanos % scale == 0 else Timedelta(nanos)
+        return DatetimeIndex(self.to_series() + by, name=self.name)
+
+    def snap(self, freq: Any = "S") -> DatetimeIndex:
+        """Every label moved to the nearer landing date of `freq`, the later one on a tie.
+
+        A frequency of a fixed length lands everywhere, so the labels come back as they are.
+        """
+        from ._calendar_steps import calendar_step
+        from ._date_range import _frequency
+
+        steps = calendar_step(freq)
+        if steps is None:
+            _frequency(freq)
+            return self.copy()
+        snapped: list[Any] = []
+        for label in self._labels():
+            if label is None:
+                raise TypeError("bad operand type for abs(): 'NaTType'")
+            day = label.date()
+            if not steps.on(day):
+                back, forward = steps.roll(day, False), steps.roll(day, True)
+                day = back if day - back < forward - day else forward
+            snapped.append(_wall(label, day))
+        return self._rebuilt(snapped)
+
+    def _micros(self, zone: Any = None) -> list[int]:
+        """Every label's time of day in microseconds, read off its own clock or `zone`.
+
+        A missing label is pandas' missing instant read the same way, which
+        lands at some time in the evening that depends on the unit, and so
+        a range of times that wraps past midnight can take it in. That is
+        pandas' answer and it is kept.
+        """
+        per_second = _PER_SECOND[self.unit]
+        missing = (-(2**63)) % (86400 * per_second) * 10**6 // per_second
+        found = []
+        for label in self._labels():
+            if label is None:
+                found.append(missing)
+                continue
+            if zone is not None:
+                label = label.astimezone(zone)
+            found.append(
+                ((label.hour * 60 + label.minute) * 60 + label.second) * 10**6 + label.microsecond
+            )
+        return found
+
+    def indexer_at_time(self, time: Any, asof: bool = False) -> list[int]:
+        """The positions of the labels whose time of day is `time`."""
+        if asof:
+            raise NotImplementedError("'asof' argument is not supported")
+        if isinstance(time, str):
+            time = _parsed_time(time)
+        if not hasattr(time, "tzinfo"):
+            raise AttributeError(f"'{type(time).__name__}' object has no attribute 'tzinfo'")
+        if time.tzinfo is not None and self.tz is None:
+            raise InvalidArgumentError("Index must be timezone aware.")
+        wanted = _time_micros(time)
+        found = self._micros(time.tzinfo)
+        return [at for at, micros in enumerate(found) if micros == wanted]
+
+    def indexer_between_time(
+        self,
+        start_time: Any,
+        end_time: Any,
+        include_start: bool = True,
+        include_end: bool = True,
+    ) -> list[int]:
+        """The positions of the labels whose time of day is between two times.
+
+        When the start is after the end the range wraps past midnight.
+        """
+        start, end = _time_micros(start_time), _time_micros(end_time)
+
+        def after(micros: int) -> bool:
+            return micros >= start if include_start else micros > start
+
+        def before(micros: int) -> bool:
+            return micros <= end if include_end else micros < end
+
+        wraps = start > end
+        return [
+            at
+            for at, micros in enumerate(self._micros())
+            if ((after(micros) or before(micros)) if wraps else (after(micros) and before(micros)))
+        ]
+
+    def isocalendar(self) -> Any:
+        """The ISO year, week and day of every label, as a frame on this index."""
+        return self.to_series().dt.isocalendar().set_axis(self)
+
+    def mean(self, *, skipna: bool = True, axis: Any = 0) -> Any:
+        """The average instant, or None when there is none."""
+        if axis not in (0, -1, None):
+            raise IndexError("tuple index out of range")
+        stamps = self.asi8
+        present = [value for value in stamps if value is not None]
+        if not present or (not skipna and len(present) < len(stamps)):
+            return None
+        return self._instant(int(sum(float(value) for value in present) / len(present)))
+
+    def std(
+        self,
+        axis: Any = None,
+        dtype: Any = None,
+        out: Any = None,
+        ddof: int = 1,
+        keepdims: bool = False,
+        skipna: bool = True,
+    ) -> Any:
+        """The spread of the instants as a span, or None when there are too few."""
+        from ._scalars import Timedelta
+
+        stamps = self.asi8
+        present = [float(value) for value in stamps if value is not None]
+        count = len(present)
+        if count - ddof <= 0 or (not skipna and count < len(stamps)):
+            return None
+        average = sum(present) / count
+        spread = math.sqrt(sum((average - value) ** 2 for value in present) / (count - ddof))
+        return Timedelta(int(spread), unit=self.unit)
+
+    def _instant(self, stamp: int) -> Any:
+        """A whole number of the index's unit since the epoch, as a timestamp on its clock."""
+        from ._scalars import Timestamp
+
+        instant = Timestamp(stamp, unit=self.unit)
+        tz = self.tz
+        return instant if tz is None else instant.tz_localize("UTC").tz_convert(tz)
+
+    def to_julian_date(self) -> Index:
+        """Every label as a Julian date, read off its own clock, NaN for a missing one."""
+        return Index(
+            [math.nan if label is None else label.to_julian_date() for label in self._labels()],
+            name=self.name,
+        )
+
+    def to_pydatetime(self) -> list[Any]:
+        """Every label as a Python datetime, None for a missing one.
+
+        A list where pandas answers a numpy array of objects, which is the
+        convention document 41 set for everything an index answers position by position.
+        """
+        return [None if label is None else label.to_pydatetime() for label in self._labels()]
+
+    @property
+    def time(self) -> list[Any]:
+        """The time of day of every label, without the clock."""
+        return [None if label is None else label.time() for label in self._labels()]
+
+    @property
+    def timetz(self) -> list[Any]:
+        """The time of day of every label, with the clock."""
+        return [None if label is None else label.timetz() for label in self._labels()]
+
+    @property
+    def tzinfo(self) -> Any:
+        """The clock the labels are read against, as a tzinfo, or None."""
+        tz = self.tz
+        if tz is None:
+            return None
+        for label in self._labels():
+            if label is not None:
+                return label.tzinfo
+        return datetime.UTC if tz == "UTC" else zoneinfo.ZoneInfo(tz)
+
+    @property
+    def resolution(self) -> str:
+        """The finest part any label uses, from `day` down to `nanosecond`."""
+        finest = 0
+        for label in self._labels():
+            if label is None:
+                continue
+            finest = max(finest, _finest(label))
+        return _RESOLUTIONS[finest]
+
+
+_PER_SECOND = {"s": 1, "ms": 10**3, "us": 10**6, "ns": 10**9}
+"""How many of each unit make a second."""
+
+_RESOLUTIONS = ("day", "hour", "minute", "second", "millisecond", "microsecond", "nanosecond")
+
+_TIME_FORMATS = (
+    "%H:%M",
+    "%H%M",
+    "%I:%M%p",
+    "%I%M%p",
+    "%H:%M:%S",
+    "%H%M%S",
+    "%I:%M:%S%p",
+    "%I%M%S%p",
+)
+"""The spellings of a time of day pandas reads after ISO, in the order it tries them."""
+
+
+def _finest(label: Any) -> int:
+    """The position in `_RESOLUTIONS` of the finest part one label uses."""
+    nanosecond = getattr(label, "nanosecond", 0)
+    parts = (
+        nanosecond,
+        label.microsecond % 1000,
+        label.microsecond,
+        label.second,
+        label.minute,
+        label.hour,
+    )
+    for at, part in enumerate(parts):
+        if part:
+            return len(_RESOLUTIONS) - 1 - at
+    return 0
+
+
+def _wall(label: Any, day: datetime.date) -> Any:
+    """A label's time of day on another date, as a wall clock timestamp with no clock."""
+    from ._scalars import Timestamp
+
+    into = ((label.hour * 60 + label.minute) * 60 + label.second) * 10**9
+    into += label.microsecond * 1000 + getattr(label, "nanosecond", 0)
+    days = (day - datetime.date(1970, 1, 1)).days
+    return Timestamp(days * 86400 * 10**9 + into, unit="ns")
+
+
+def _parsed_time(text: str) -> datetime.time:
+    """A time of day read from text the way `indexer_at_time` reads it.
+
+    pandas hands the text to dateutil, which reads a bare run of digits as a
+    date, so that is midnight, and takes `9am` and `9:30 pm` as well as the
+    spellings `indexer_between_time` reads.
+
+    Raises:
+        InvalidArgumentError: For text that is no time, in dateutil's words.
+    """
+    plain = text.strip()
+    if plain.isdigit():
+        return datetime.time()
+    try:
+        return datetime.time.fromisoformat(plain)
+    except ValueError:
+        pass
+    squeezed = plain.replace(" ", "").upper()
+    for spelling in (*_TIME_FORMATS, "%I%p"):
+        try:
+            return datetime.datetime.strptime(squeezed, spelling).time()
+        except ValueError:
+            continue
+    raise InvalidArgumentError(f"Unknown string format: {text}")
+
+
+def _time_micros(value: Any) -> int:
+    """A time of day, from a time or text, as microseconds into the day.
+
+    Raises:
+        InvalidArgumentError: For anything that is no time pandas reads, in its words.
+    """
+    if isinstance(value, datetime.datetime):
+        value = value.time()
+    if isinstance(value, str):
+        try:
+            value = datetime.time.fromisoformat(value)
+        except ValueError:
+            for spelling in _TIME_FORMATS:
+                try:
+                    value = datetime.datetime.strptime(value, spelling).time()
+                    break
+                except ValueError:
+                    continue
+            else:
+                raise InvalidArgumentError(f"Cannot convert arg {[value]} to a time") from None
+    if not isinstance(value, datetime.time):
+        raise InvalidArgumentError(f"Cannot convert arg {[value]} to a time")
+    return ((value.hour * 60 + value.minute) * 60 + value.second) * 10**6 + value.microsecond

@@ -18207,7 +18207,8 @@ class IndexMixin:
         Three keys wearing one name, which is why this is here rather than in
         the table. An integer takes a label out and gives back a Python value, a
         slice and a list both give back an index, and a list is read as
-        positions or as a mask depending on what is in it.
+        positions or as a mask depending on what is in it. Several labels out
+        of an index of instants or spans are still one, as they are in pandas.
 
         A slice is resolved against the length here rather than in Mojo, because
         `slice.indices` is the definition of what a Python slice means and
@@ -18215,6 +18216,7 @@ class IndexMixin:
         """
         from ._frame import Index
 
+        made: Any = type(self) if self._temporal else Index
         try:
             if isinstance(key, bool):
                 raise TypeError("cannot index an index with a bool; pass a list of them")
@@ -18229,15 +18231,15 @@ class IndexMixin:
             if isinstance(key, slice):
                 start, stop, step = key.indices(self._inner.length())
                 if step == 1:
-                    return Index._wrap(self._inner.slice_rows(start, max(start, stop)))
-                return Index._wrap(self._inner.take(list(range(start, stop, step))))
+                    return made._wrap(self._inner.slice_rows(start, max(start, stop)))
+                return made._wrap(self._inner.take(list(range(start, stop, step))))
             if isinstance(key, (list, tuple)):
                 picks = list(key)
                 if picks and all(isinstance(k, bool) for k in picks):
-                    return Index._wrap(
+                    return made._wrap(
                         self._inner.take([i for i, keep in enumerate(picks) if keep])
                     )
-                return Index._wrap(self._inner.take([int(k) for k in picks]))
+                return made._wrap(self._inner.take([int(k) for k in picks]))
         except Exception as error:
             raise translate(error) from None
         raise TypeError(
