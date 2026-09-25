@@ -294,6 +294,40 @@ class DatetimeProperties(DatetimeMixin):
         except Exception as error:
             raise translate(error) from None
 
+    @property
+    def seconds(self) -> Series:
+        """The seconds of each span below the next larger field, for a duration column."""
+        try:
+            return self._span_field("seconds")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def microseconds(self) -> Series:
+        """The microseconds of each span below the next larger field, for a duration
+        column.
+        """
+        try:
+            return self._span_field("microseconds")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def nanoseconds(self) -> Series:
+        """The nanoseconds of each span below the next larger field, for a duration column."""
+        try:
+            return self._span_field("nanoseconds")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def components(self) -> DataFrame:
+        """Every span cut into days down to nanoseconds, one column each."""
+        try:
+            return self._span_components()
+        except Exception as error:
+            raise translate(error) from None
+
     def normalize(self) -> Series:
         """Every clock moved back to midnight, keeping the timestamp type."""
         try:

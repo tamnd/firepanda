@@ -862,6 +862,26 @@ def _datetime_members() -> tuple[Member, ...]:
         )
     )
 
+    for name in ("seconds", "microseconds", "nanoseconds"):
+        out.append(
+            Member(
+                name=name,
+                kind="property",
+                body=f'self._span_field("{name}")',
+                doc=f"The {name} of each span below the next larger field, for a duration column.",
+                returns="Series",
+            )
+        )
+    out.append(
+        Member(
+            name="components",
+            kind="property",
+            body="self._span_components()",
+            doc="Every span cut into days down to nanoseconds, one column each.",
+            returns="DataFrame",
+        )
+    )
+
     # Two names that take nothing and are still methods rather than properties,
     # which is why they are not in the table above. pandas spells both with an
     # empty parameter list, checked against a running one.

@@ -8,6 +8,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: TimedeltaIndex and timedelta_range
+
+- `TimedeltaIndex` builds an index of spans from text, whole nanoseconds, `Timedelta` and `timedelta` objects, or an index of spans, and reads `days`, `seconds`, `microseconds`, `nanoseconds`, `components`, `total_seconds()`, `unit`, `asi8` and `as_unit` the way pandas does.
+- `timedelta_range` takes any three of start, end, periods and freq, with `closed`, `name` and `unit`, picks the unit pandas picks from the ends and the step, and reads a compound step like `2D3h`.
+- The `dt` accessor on a column of spans gains `seconds`, `microseconds`, `nanoseconds` and `components`, with float64 where there are gaps as in pandas, and asking a span column for a calendar field it does not have raises AttributeError in pandas' words.
+- A held `freq`, and `dtype` and `copy` on `TimedeltaIndex`, are refused with NotImplementedError.
+
 ### Added: str.split, str.rsplit, str.join and str.wrap
 
 - `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
