@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: cov, corr and aggregate on a decay
+
+`ExponentialMovingWindow` gains `cov`, `corr`, `aggregate` and `agg`. `cov` and `corr` follow pandas' own recurrence, with `adjust`, `ignore_na`, `min_periods` and `bias`, and only the rows where both sides hold a value count. They pair a column with a column, a frame with a column, or two frames column by column, the same way the window `cov` and `corr` do, and the pairing and `aggregate` are now one piece of code shared by windows and decays.
+
 ### Fixed: a window member with no answer is a NaN
 
 `first`, `last`, `nunique`, `apply`, `cov` and `corr` on a window answered a gap where a window held too few values, and pandas and the kernel reductions answer NaN there. They answer NaN now.

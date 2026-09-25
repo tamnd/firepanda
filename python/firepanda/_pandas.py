@@ -13609,7 +13609,146 @@ _TIED = ("average", "min", "max")
 pandas' own difference and is kept."""
 
 
-class WindowMixin:
+class _ReadingMixin:
+    """What a window and a decay share once they are read in Python.
+
+    `aggregate`, the pairing `cov` and `corr` make of two sides, and the check
+    that a column holds numbers. Each owner writes `_over`, which is the same
+    object over other data, and `_moment`, which is its own covariance.
+    """
+
+    __slots__ = ()
+    """All the state is the owner's."""
+
+    _data: Series | DataFrame
+
+    def _numbers(self, column: Series) -> list[float | None]:
+        """A column's values as floats with None for a gap, or pandas' refusal."""
+        from ._frame import DataFrame
+
+        dtype = str(column.dtype)
+        if not dtype.startswith(("int", "uint", "float", "bool")):
+            if isinstance(self._data, DataFrame):
+                shown = "str" if dtype in ("str", "string") else dtype
+                raise DataError(f"Cannot aggregate non-numeric type: {shown}")
+            raise DataError("No numeric types to aggregate")
+        return [None if _missing(value) else float(value) for value in column.tolist()]
+
+    def _only_numbers(self, numeric_only: bool) -> None:
+        """Holds `numeric_only` at False over a frame, as `WindowMixin._reduce` does."""
+        if self._over_frame():
+            _held_at(
+                "numeric_only",
+                numeric_only,
+                False,
+                "dropping the columns it cannot read is a decision about which"
+                " columns come back, and firepanda reads the ones it was given or"
+                " says which one it could not",
+            )
+
+    def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Series | DataFrame:
+        """One reduction by name or function, or several in a list or a dict.
+
+        A name is the method of that name. A function is `apply` with the
+        window as a column, which is what pandas 3 does with every function,
+        the built in `sum` included, and a decay has no `apply` to hand it to,
+        as in pandas. A list gives a frame with one column a
+        reduction, and a dict gives a frame keyed by its keys, each over the
+        column of that name when the window is over a frame.
+
+        Raises:
+            AttributeError: For a name that is not a reduction, in pandas' words.
+            KeyError: For a dict key that is not a column.
+            NotImplementedError: For a list of reductions over a frame, whose
+                answer has two levels of column labels.
+        """
+        from ._frame import DataFrame
+
+        data = self._data
+        if isinstance(func, str):
+            found = getattr(self, func, None) if not func.startswith("_") else None
+            if not callable(found) or func in ("aggregate", "agg", "pipe"):
+                raise AttributeError(
+                    f"'{func}' is not a valid function for '{type(self).__name__}' object"
+                )
+            return found(*args, **kwargs)
+        if isinstance(func, dict):
+            if isinstance(data, DataFrame):
+                lost = [key for key in func if key not in data.columns]
+                if lost:
+                    raise KeyError(f"Label(s) {lost} do not exist")
+                if any(isinstance(how, (list, tuple, dict)) for how in func.values()):
+                    raise NotImplementedError(
+                        "a list of reductions for one column is not supported yet, because the"
+                        " answer has two levels of column labels"
+                    )
+                parts = {
+                    key: self._over(data[key]).aggregate(how, *args, **kwargs)
+                    for key, how in func.items()
+                }
+            else:
+                parts = {key: self.aggregate(how, *args, **kwargs) for key, how in func.items()}
+            return _float_frame(parts, data)
+        if isinstance(func, (list, tuple)):
+            if isinstance(data, DataFrame):
+                raise NotImplementedError(
+                    "a list of reductions over a frame is not supported yet, because the answer"
+                    " has two levels of column labels"
+                )
+            parts = {
+                how if isinstance(how, str) else getattr(how, "__name__", str(how)): self.aggregate(
+                    how, *args, **kwargs
+                )
+                for how in func
+            }
+            return _float_frame(parts, data)
+        if callable(func):
+            return self.apply(func, raw=False, args=args, kwargs=kwargs)
+        raise TypeError(f"'{type(func).__name__}' object is not callable")
+
+    agg = aggregate
+
+    def _paired(
+        self, other: Any, pairwise: bool | None, numeric_only: bool, *settings: Any
+    ) -> Series | DataFrame:
+        """What `cov` and `corr` share: the pairing of the two sides.
+
+        `settings` goes on to `_moment`, which is the one piece each owner
+        writes for itself.
+        """
+        from ._frame import DataFrame, Series
+
+        self._only_numbers(numeric_only)
+        data = self._data
+        if other is None:
+            other = data
+            if pairwise is None:
+                pairwise = True
+        if not isinstance(other, (Series, DataFrame)):
+            raise InvalidArgumentError("other must be a DataFrame or Series")
+        if isinstance(data, DataFrame) and pairwise:
+            raise NotImplementedError(
+                "pairwise=True over a frame is not supported yet, because the answer has two"
+                " levels of row labels; pass pairwise=False to pair the columns by name"
+            )
+        if isinstance(data, Series) and isinstance(other, DataFrame):
+            return self._over(other)._paired(data, False, numeric_only, *settings)
+        if isinstance(data, Series):
+            return self._moment(data, other, *settings)
+        if isinstance(other, Series):
+            parts = {
+                label: self._moment(data[label], other, *settings).reindex(data.index)
+                for label in data.columns
+            }
+            return _float_frame(parts, data)
+        left, right = data.align(other, join="outer")
+        parts = {
+            label: self._moment(left[label], right[label], *settings) for label in left.columns
+        }
+        return _float_frame(parts, left)
+
+
+class WindowMixin(_ReadingMixin):
     """What `Rolling` and `Expanding` share, which is everything after the width.
 
     A window object holds some data and five numbers saying where each window
@@ -13949,18 +14088,6 @@ class WindowMixin:
             bounds.append((min(max(start, 0), rows), min(max(stop, 0), rows)))
         return bounds
 
-    def _numbers(self, column: Series) -> list[float | None]:
-        """A column's values as floats with None for a gap, or pandas' refusal."""
-        from ._frame import DataFrame
-
-        dtype = str(column.dtype)
-        if not dtype.startswith(("int", "uint", "float", "bool")):
-            if isinstance(self._data, DataFrame):
-                shown = "str" if dtype in ("str", "string") else dtype
-                raise DataError(f"Cannot aggregate non-numeric type: {shown}")
-            raise DataError("No numeric types to aggregate")
-        return [None if _missing(value) else float(value) for value in column.tolist()]
-
     def _answered(self, column: Series, answers: list[float | None], name: Any) -> Series:
         """A float64 column on the answered rows' labels."""
         from ._frame import Series
@@ -13994,18 +14121,6 @@ class WindowMixin:
                 self._numbers(frame[label])
             return _float_frame({label: one(frame[label]) for label in frame.columns}, frame)
         return one(self._data)
-
-    def _only_numbers(self, numeric_only: bool) -> None:
-        """Holds `numeric_only` at False over a frame, for the reason `_reduce` gives."""
-        if self._over_frame():
-            _held_at(
-                "numeric_only",
-                numeric_only,
-                False,
-                "dropping the columns a window cannot read is a decision about"
-                " which columns come back, and firepanda windows the ones it was"
-                " given or says which one it could not",
-            )
 
     def first(self, numeric_only: bool = False) -> Series | DataFrame:
         """The first value in every window, skipping gaps."""
@@ -14093,67 +14208,6 @@ class WindowMixin:
 
         return self._per_window(read)
 
-    def aggregate(self, func: Any = None, *args: Any, **kwargs: Any) -> Series | DataFrame:
-        """One reduction by name or function, or several in a list or a dict.
-
-        A name is the method of that name. A function is `apply` with the
-        window as a column, which is what pandas 3 does with every function,
-        the built in `sum` included. A list gives a frame with one column a
-        reduction, and a dict gives a frame keyed by its keys, each over the
-        column of that name when the window is over a frame.
-
-        Raises:
-            AttributeError: For a name that is not a reduction, in pandas' words.
-            KeyError: For a dict key that is not a column.
-            NotImplementedError: For a list of reductions over a frame, whose
-                answer has two levels of column labels.
-        """
-        from ._frame import DataFrame
-
-        data = self._data
-        if isinstance(func, str):
-            found = getattr(self, func, None) if not func.startswith("_") else None
-            if not callable(found) or func in ("aggregate", "agg", "pipe"):
-                raise AttributeError(
-                    f"'{func}' is not a valid function for '{type(self).__name__}' object"
-                )
-            return found(*args, **kwargs)
-        if isinstance(func, dict):
-            if isinstance(data, DataFrame):
-                lost = [key for key in func if key not in data.columns]
-                if lost:
-                    raise KeyError(f"Label(s) {lost} do not exist")
-                if any(isinstance(how, (list, tuple, dict)) for how in func.values()):
-                    raise NotImplementedError(
-                        "a list of reductions for one column is not supported yet, because the"
-                        " answer has two levels of column labels"
-                    )
-                parts = {
-                    key: self._over(data[key]).aggregate(how, *args, **kwargs)
-                    for key, how in func.items()
-                }
-            else:
-                parts = {key: self.aggregate(how, *args, **kwargs) for key, how in func.items()}
-            return _float_frame(parts, data)
-        if isinstance(func, (list, tuple)):
-            if isinstance(data, DataFrame):
-                raise NotImplementedError(
-                    "a list of reductions over a frame is not supported yet, because the answer"
-                    " has two levels of column labels"
-                )
-            parts = {
-                how if isinstance(how, str) else getattr(how, "__name__", str(how)): self.aggregate(
-                    how, *args, **kwargs
-                )
-                for how in func
-            }
-            return _float_frame(parts, data)
-        if callable(func):
-            return self.apply(func, raw=False, args=args, kwargs=kwargs)
-        raise TypeError(f"'{type(func).__name__}' object is not callable")
-
-    agg = aggregate
-
     def pipe(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         """The function called with this window, first or as the keyword a tuple names."""
         return _piped(self, func, args, kwargs)
@@ -14194,41 +14248,6 @@ class WindowMixin:
         """
         self._spread_settings(ddof)
         return self._paired(other, pairwise, numeric_only, ddof, True)
-
-    def _paired(
-        self, other: Any, pairwise: bool | None, numeric_only: bool, ddof: int, scaled: bool
-    ) -> Series | DataFrame:
-        """What `cov` and `corr` share: the pairing of the two sides."""
-        from ._frame import DataFrame, Series
-
-        self._only_numbers(numeric_only)
-        data = self._data
-        if other is None:
-            other = data
-            if pairwise is None:
-                pairwise = True
-        if not isinstance(other, (Series, DataFrame)):
-            raise InvalidArgumentError("other must be a DataFrame or Series")
-        if isinstance(data, DataFrame) and pairwise:
-            raise NotImplementedError(
-                "pairwise=True over a frame is not supported yet, because the answer has two"
-                " levels of row labels; pass pairwise=False to pair the columns by name"
-            )
-        if isinstance(data, Series) and isinstance(other, DataFrame):
-            return self._over(other)._paired(data, False, numeric_only, ddof, scaled)
-        if isinstance(data, Series):
-            return self._moment(data, other, ddof, scaled)
-        if isinstance(other, Series):
-            parts = {
-                label: self._moment(data[label], other, ddof, scaled).reindex(data.index)
-                for label in data.columns
-            }
-            return _float_frame(parts, data)
-        left, right = data.align(other, join="outer")
-        parts = {
-            label: self._moment(left[label], right[label], ddof, scaled) for label in left.columns
-        }
-        return _float_frame(parts, left)
 
     def _moment(self, x: Series, y: Series, ddof: int, scaled: bool) -> Series:
         """The covariance or correlation of two columns, window by window."""
@@ -14419,7 +14438,7 @@ def _expanding(data: Series | DataFrame, min_periods: int, method: str) -> Expan
     return Expanding(data, min_periods)
 
 
-class EwmMixin:
+class EwmMixin(_ReadingMixin):
     """The hand written half of `ExponentialMovingWindow`.
 
     A window object that holds what it was told and computes nothing until a
@@ -14539,6 +14558,78 @@ class EwmMixin:
 
         return isinstance(self._data, DataFrame)
 
+    def _over(self, data: Series | DataFrame) -> Any:
+        """The same decay over other data, for a column of a frame or a swapped pair."""
+        decay = object.__new__(type(self))
+        for name in EwmMixin.__slots__:
+            setattr(decay, name, getattr(self, name))
+        decay._data = data
+        return decay
+
+    def cov(
+        self,
+        other: Series | DataFrame | None = None,
+        pairwise: bool | None = None,
+        bias: bool = False,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """The decayed covariance of every row so far with another column.
+
+        Only the rows where both sides have a value are observations, and
+        pandas' own recurrence carries the two means and the covariance, so the
+        answers match its to the last few digits. Paired the way the window
+        `cov` pairs.
+
+        Raises:
+            InvalidArgumentError: If `other` is not a column or a frame, or
+                `bias` is not a boolean.
+            NotImplementedError: For every pair of columns of a frame against
+                every other, whose answer has two levels of row labels.
+        """
+        self._bias_settings(bias)
+        return self._paired(other, pairwise, numeric_only, bias, False)
+
+    def corr(
+        self,
+        other: Series | DataFrame | None = None,
+        pairwise: bool | None = None,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """The decayed correlation of every row so far with another column.
+
+        The biased covariance over the square root of the two biased variances,
+        which is how pandas puts it together, and a row where either side has
+        not varied has no correlation.
+        """
+        return self._paired(other, pairwise, numeric_only, True, True)
+
+    def _moment(self, x: Series, y: Series, bias: bool, scaled: bool) -> Series:
+        """The decayed covariance or correlation of two columns, row by row."""
+        from ._frame import Series
+
+        if list(x.index.tolist()) != list(y.index.tolist()):
+            x, y = x.align(y, join="outer")
+        xs, ys = self._numbers(x), self._numbers(y)
+        both = [a is not None and b is not None for a, b in zip(xs, ys, strict=True)]
+        xs = [a if seen else None for a, seen in zip(xs, both, strict=True)]
+        ys = [b if seen else None for b, seen in zip(ys, both, strict=True)]
+        plan = (self._factor, self._adjust, self._ignore_na, self._min_periods)
+        if not scaled:
+            answers = _ewm_cov(xs, ys, *plan, bias)
+        else:
+            answers = []
+            for joint, left, right in zip(
+                _ewm_cov(xs, ys, *plan, True),
+                _ewm_cov(xs, xs, *plan, True),
+                _ewm_cov(ys, ys, *plan, True),
+                strict=True,
+            ):
+                spread = left * right
+                answers.append(joint / math.sqrt(spread) if spread > 0 else math.nan)
+        return Series(
+            answers, index=x.index, name=x.name if x.name == y.name else None, dtype="float64"
+        )
+
     def _bias_settings(self, bias: bool) -> tuple[Any, ...]:
         """Checks the one parameter the two spreads read and packs it.
 
@@ -14639,6 +14730,66 @@ class EwmMixin:
             return Series._wrap(self._data._inner.ewm_agg(*plan))
         except Exception as error:
             raise translate(error) from None
+
+
+def _ewm_cov(
+    xs: list[float | None],
+    ys: list[float | None],
+    alpha: float,
+    adjust: bool,
+    ignore_na: bool,
+    least: int,
+    bias: bool,
+) -> list[float]:
+    """pandas' decayed covariance of two columns, row by row, NaN where there is none.
+
+    The recurrence is pandas' `ewmcov` step for step, including the two places
+    it leaves a mean alone when the new value equals it, because a column that
+    never moves would otherwise pick up rounding and answer a covariance that
+    is not quite nought.
+    """
+    decay = 1.0 - alpha
+    fresh = 1.0 if adjust else alpha
+    mean_x = mean_y = math.nan
+    moment = 0.0
+    total = squares = old = 1.0
+    seen = 0
+    answers = []
+    for row, (x, y) in enumerate(zip(xs, ys, strict=True)):
+        here = x is not None and y is not None
+        seen += here
+        if row == 0 or mean_x != mean_x:
+            if here:
+                mean_x, mean_y = x, y
+        elif here or not ignore_na:
+            total *= decay
+            squares *= decay * decay
+            old *= decay
+            if here:
+                last_x, last_y = mean_x, mean_y
+                if mean_x != x:
+                    mean_x = (old * last_x + fresh * x) / (old + fresh)
+                if mean_y != y:
+                    mean_y = (old * last_y + fresh * y) / (old + fresh)
+                moment = (
+                    old * (moment + (last_x - mean_x) * (last_y - mean_y))
+                    + fresh * (x - mean_x) * (y - mean_y)
+                ) / (old + fresh)
+                total += fresh
+                squares += fresh * fresh
+                old += fresh
+                if not adjust:
+                    total /= old
+                    squares /= old * old
+                    old = 1.0
+        if seen < least:
+            answers.append(math.nan)
+        elif bias:
+            answers.append(moment)
+        else:
+            whole = total * total
+            answers.append(whole / (whole - squares) * moment if whole - squares > 0 else math.nan)
+    return answers
 
 
 def _smoothing(
