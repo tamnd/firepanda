@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Index join, asof and the members around them
+
+`Index` and every index built on it now have `join`, `asof`, `asof_locs`, `get_indexer_for`, `get_indexer_non_unique`, `sortlevel`, `groupby`, `view`, `array`, `shift` and a `str` accessor that answers indexes. `join` follows pandas down each of its three paths, the sorted join, the merge join for repeated labels and the lookup join, so the rows and the positions come back in pandas' order, `None` included where pandas answers it. A join of text with numbers is refused, since the answer would be an index of mixed values. `get_indexer` on an index of instants or spans now reads labels written as text, where it used to fail.
+
 ### Added: MultiIndex
 
 `MultiIndex` is here, with every member pandas declares on it spelled the way pandas spells it. It is built with `from_arrays`, `from_tuples`, `from_product`, `from_frame` or out of levels and codes, and keeps what pandas keeps: sorted levels, codes with -1 for a gap, and level names. Lookups (`get_loc`, `get_locs`, `get_loc_level`, `get_indexer`, `isin`, `slice_locs`), reshaping of levels (`droplevel`, `swaplevel`, `reorder_levels`, `set_levels`, `set_codes`, `remove_unused_levels`), sorting, set operations, `append`, `insert`, `drop` and the duplicate members answer as pandas does, arrays as numpy arrays when numpy is installed. What needs a frame or column labelled by a MultiIndex, or a column of tuples, is refused by name for now: `to_frame(index=True)`, `to_series`, `to_flat_index` and `value_counts`.

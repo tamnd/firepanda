@@ -18070,6 +18070,73 @@ def _temporal_bounds(values: Any, key: Any, sliced: bool) -> tuple[Any, Any, boo
     return moment, moment + Timedelta(1, unit="ns"), False
 
 
+def _join_type(mine: str, theirs: str) -> str:
+    """The type two indexes of different types are joined as.
+
+    Two kinds of number meet as floats, or as whole numbers when neither holds
+    a fraction. Anything else would need an index of mixed values, which
+    pandas answers with `object` and firepanda has no type for yet.
+    """
+    numbers = ("int", "uint", "float")
+    if mine.lower().startswith(numbers) and theirs.lower().startswith(numbers):
+        return "float64" if "float" in (mine + theirs).lower() else "int64"
+    raise NotImplementedError(
+        f"join of an index of {mine} and an index of {theirs} is not supported yet, because the"
+        " answer holds mixed values and there is no index type for those"
+    )
+
+
+class IndexStrings:
+    """The string accessor on an index, which answers indexes rather than columns.
+
+    Every method is the column accessor's, run over the labels, with the answer
+    turned back into an index that keeps the name. A method that answers
+    booleans answers a plain array instead, as pandas does, because an index of
+    booleans is rarely what a caller filtering labels wants. A method that
+    answers a frame, `extract` with several groups or `split` with `expand`,
+    answers a `MultiIndex` of its columns.
+    """
+
+    __slots__ = ("_index", "_strings")
+
+    def __init__(self, data: Any) -> None:
+        """Holds the index, and refuses one that is not text, in pandas' words."""
+        from ._frame import StringAccessor
+
+        self._index = data
+        self._strings = StringAccessor(data.to_series())
+
+    def __getattr__(self, name: str) -> Any:
+        """The column accessor's member, with its answer made an index."""
+        member = getattr(self._strings, name)
+        if not callable(member):
+            return member
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return self._indexed(name, member(*args, **kwargs))
+
+        call.__name__ = name
+        call.__doc__ = member.__doc__
+        return call
+
+    def __dir__(self) -> list[str]:
+        """The members of the column accessor, which are the members here too."""
+        return dir(self._strings)
+
+    def _indexed(self, name: str, answer: Any) -> Any:
+        """A column accessor's answer as pandas answers it on an index."""
+        from ._frame import DataFrame, Index, Series
+        from ._multi import MultiIndex
+
+        if isinstance(answer, DataFrame):
+            return answer if name.startswith("extract") else MultiIndex.from_frame(answer)
+        if not isinstance(answer, Series):
+            return answer
+        if str(answer.dtype) in ("bool", "boolean"):
+            return answer.to_numpy()
+        return Index(answer.rename(self._index.name))
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -18360,10 +18427,372 @@ class IndexMixin:
         _refuse("method", method, "filling a missing label from a neighbour is not written")
         _refuse("limit", limit, "there is no filling for it to limit")
         _refuse("tolerance", tolerance, "there is no filling for it to bound")
+        if str(self.dtype).startswith(("datetime64", "timedelta64")):
+            if not self.is_unique:
+                from .errors import InvalidIndexError
+
+                raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
+            return self.get_indexer_non_unique(target)[0]
         try:
             return list(self._inner.get_indexer(target))
         except Exception as error:
             raise translate(error) from None
+
+    def get_indexer_for(self, target: Any) -> list[int]:
+        """Where each of a set of labels sits, on any index.
+
+        `get_indexer` on a unique index, and the first half of
+        `get_indexer_non_unique` otherwise, so a label that repeats answers
+        every position it holds.
+        """
+        if self.is_unique:
+            return self.get_indexer(target)
+        return self.get_indexer_non_unique(target)[0]
+
+    def get_indexer_non_unique(self, target: Any) -> tuple[list[int], list[int]]:
+        """Every position of each label asked for, and which labels were not there.
+
+        A label that repeats in this index answers each of its positions in
+        order, a label that is not there answers -1, and the second list holds
+        the positions in the target of the labels that answered -1. A gap finds
+        the gaps.
+        """
+        from ._frame import Index
+        from ._index_join import keyed
+
+        if isinstance(target, IndexMixin):
+            wanted = target.tolist()
+        elif str(self.dtype).startswith(("datetime64", "timedelta64")):
+            wanted = [self._as_label(value) for value in target]
+        else:
+            wanted = list(Index(target))
+        where: dict[Any, list[int]] = {}
+        for at, value in enumerate(self.tolist()):
+            where.setdefault(keyed(value), []).append(at)
+        found: list[int] = []
+        absent: list[int] = []
+        for at, value in enumerate(wanted):
+            places = where.get(keyed(value))
+            if places:
+                found.extend(places)
+            else:
+                found.append(-1)
+                absent.append(at)
+        return found, absent
+
+    def join(
+        self,
+        other: Any,
+        *,
+        how: str = "left",
+        level: Any = None,
+        return_indexers: bool = False,
+        sort: bool = False,
+    ) -> Any:
+        """The labels two indexes line up on, and where each side's rows went.
+
+        `_index_join` holds the argument for why pandas' three paths are all
+        kept. An outer join always sorts, as in pandas. Two indexes of different
+        types are joined as their common type, and in that one case pandas
+        drops `sort`, which is kept too. `level` means nothing between two flat
+        indexes and pandas ignores it there.
+
+        Args:
+            other: The other index, or anything an index is built from.
+            how: One of left, right, inner and outer.
+            level: Ignored between two flat indexes.
+            return_indexers: Whether to answer the positions as well.
+            sort: Whether the labels come back sorted.
+
+        Returns:
+            The joined index, or with `return_indexers` a triple of it and the
+            positions on each side, where None means a side came back whole
+            and in its own order.
+
+        Raises:
+            ValueError: For an unknown `how`.
+            NotImplementedError: When either side is a `MultiIndex`.
+        """
+        from ._frame import Index
+        from ._multi import MultiIndex
+
+        if isinstance(self, MultiIndex) or isinstance(other, MultiIndex):
+            raise NotImplementedError("join with a MultiIndex is not supported yet")
+        if not isinstance(other, IndexMixin):
+            other = Index(other)
+        if how not in ("left", "right", "inner", "outer"):
+            raise InvalidArgumentError(f"do not recognize join method {how}")
+        joined = self._joined(other, how, sort or how == "outer")
+        return joined if return_indexers else joined[0]
+
+    def _joined(self, other: Any, how: str, sort: bool) -> tuple[Any, Any, Any]:
+        """The joined index and both sides' positions, down pandas' own path."""
+        from ._index_join import increasing, unique
+
+        if not len(self) or not len(other):
+            return self._joined_empty(other, how, sort)
+        if str(self.dtype) != str(other.dtype):
+            common = _join_type(str(self.dtype), str(other.dtype))
+            return self.astype(common)._joined(other.astype(common), how, how == "outer")
+        mine, theirs = self.tolist(), other.tolist()
+        if increasing(mine) and increasing(theirs) and (unique(mine) or unique(theirs)):
+            return self._joined_sorted(other, how)
+        if not unique(mine) or not unique(theirs):
+            return self._joined_merge(other, how, sort)
+        return self._joined_looked_up(other, how, sort)
+
+    def _joined_empty(self, other: Any, how: str, sort: bool) -> tuple[Any, Any, Any]:
+        """A join where one side has no labels, which pandas answers without pairing."""
+        from ._index_join import increasing, ordered
+
+        if len(other):
+            flipped = {"left": "right", "right": "left"}.get(how, how)
+            joined, theirs, mine = other._joined_empty(self, flipped, sort)
+            return joined, mine, theirs
+        if how in ("left", "outer"):
+            if sort and not increasing(self.tolist()):
+                order = ordered(self.tolist())
+                return self._kept(self.take(order)), order, [-1] * len(self)
+            return self, None, [-1] * len(self)
+        return other, [], None
+
+    def _joined_sorted(self, other: Any, how: str) -> tuple[Any, Any, Any]:
+        """A join of two sorted indexes, which answers None for a side kept whole."""
+        from ._index_join import merged, unique
+
+        if self.equals(other):
+            return (other if how == "right" else self), None, None
+        mine, theirs = self.tolist(), other.tolist()
+        if how == "left" and unique(theirs):
+            return self, None, other.get_indexer_for(self)
+        if how == "right" and unique(mine):
+            return other, self.get_indexer_for(other), None
+        lidx: Any
+        ridx: Any
+        lidx, ridx = merged(mine, theirs, how, True, False)
+        if lidx == list(range(len(self))):
+            lidx = None
+        if ridx == list(range(len(other))):
+            ridx = None
+        if lidx is None:
+            joined = self
+        elif ridx is None:
+            joined = other
+        else:
+            joined = self._picked(other, lidx, ridx)
+        name = other.name if how == "right" else self.name
+        return (joined if joined.name == name else joined.rename(name)), lidx, ridx
+
+    def _joined_merge(self, other: Any, how: str, sort: bool) -> tuple[Any, Any, Any]:
+        """A join where a label repeats, which pairs every row of each label."""
+        from ._index_join import merged
+
+        numeric = str(self.dtype).lower().startswith(("int", "uint", "float", "bool"))
+        lidx, ridx = merged(self.tolist(), other.tolist(), how, sort, numeric)
+        name = other.name if how == "right" else self.name
+        return self._picked(other, lidx, ridx).rename(name), lidx, ridx
+
+    def _joined_looked_up(self, other: Any, how: str, sort: bool) -> tuple[Any, Any, Any]:
+        """A join of two unique indexes, done by looking each label up on both sides."""
+        from ._index_join import keyed, ordered
+
+        if how in ("left", "right"):
+            base, rest = (self, other) if how == "left" else (other, self)
+            if sort:
+                kept, order = base.sort_values(return_indexer=True)
+                found = rest.get_indexer_for(kept)
+                return (kept, order, found) if how == "left" else (kept, found, order)
+            joined = base
+        else:
+            mine, theirs = self.tolist(), other.tolist()
+            there = {keyed(value) for value in theirs}
+            if how == "inner":
+                picks = [at for at, value in enumerate(mine) if keyed(value) in there]
+                if sort:
+                    picks = [picks[at] for at in ordered([mine[at] for at in picks])]
+                joined = self._kept(self.take(picks))
+            else:
+                here = {keyed(value) for value in mine}
+                extra = [at for at, value in enumerate(theirs) if keyed(value) not in here]
+                values = mine + [theirs[at] for at in extra]
+                joined = self._kept(self.append(other.take(extra)).take(ordered(values)))
+        name = other.name if how == "right" else self.name
+        if joined.name != name:
+            joined = joined.rename(name)
+        lidx = None if joined is self else self.get_indexer_for(joined)
+        ridx = None if joined is other else other.get_indexer_for(joined)
+        return joined, lidx, ridx
+
+    def _kept(self, index: Any) -> Any:
+        """An index of instants or spans kept as its own type after a take.
+
+        `take` and `append` answer a plain `Index`, which holds the same labels
+        but not the members an index of instants has.
+        """
+        if type(index) is type(self) or not str(self.dtype).startswith(
+            ("datetime64", "timedelta64")
+        ):
+            return index
+        return self._like(index.to_series())
+
+    def _picked(self, other: Any, lidx: list[int], ridx: list[int]) -> Any:
+        """The labels a list of row pairs lands on, from the left side where there is one."""
+        both = self.append(other)
+        width = len(self)
+        return self._kept(
+            both.take(
+                [
+                    mine if mine != -1 else width + theirs
+                    for mine, theirs in zip(lidx, ridx, strict=True)
+                ]
+            )
+        )
+
+    def sortlevel(
+        self,
+        level: Any = None,
+        ascending: Any = True,
+        sort_remaining: Any = None,
+        na_position: str = "first",
+    ) -> tuple[Any, list[int]]:
+        """The labels sorted, and the order that sorted them.
+
+        `sort_values` with the indexer, for the one level a flat index has.
+        `level` and `sort_remaining` mean nothing here and pandas ignores them.
+        `ascending` may be a list of one, as for a `MultiIndex`, and the two
+        errors for anything else are pandas' own, a missing space included.
+        """
+        if not isinstance(ascending, (list, bool)):
+            raise TypeError(
+                "ascending must be a single bool value ora list of bool values of length 1"
+            )
+        if isinstance(ascending, list):
+            if len(ascending) != 1:
+                raise TypeError("ascending must be a list of bool values of length 1")
+            ascending = ascending[0]
+            if not isinstance(ascending, bool):
+                raise TypeError("ascending must be a bool value")
+        return self.sort_values(return_indexer=True, ascending=ascending, na_position=na_position)
+
+    def shift(self, periods: int = 1, freq: Any = None) -> Any:
+        """Refused on an index of plain labels, in pandas' own words.
+
+        Moving a label by a step only means something for instants, spans and
+        periods, and their index types answer it themselves.
+        """
+        raise NotImplementedError(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and"
+            f" TimedeltaIndex; Got type {type(self).__name__}"
+        )
+
+    def asof(self, label: Any) -> Any:
+        """The label itself if present, or the last label before it.
+
+        The index has to be sorted one way or the other. On an index sorted
+        downwards the label before is the one earlier in the index, which is
+        the larger one, as in pandas. A label before every other answers a
+        missing value, NaN, or None on an index of instants or spans.
+
+        Raises:
+            ValueError: When the index is not sorted either way.
+            InvalidIndexError: When the label is not present and labels repeat,
+                or for a list of labels, which pandas refuses the same way.
+        """
+        from ._index_join import increasing
+
+        values = self.tolist()
+        label = self._as_label(label)
+        up = increasing(values)
+        if not up and not increasing(values[::-1]):
+            raise InvalidArgumentError("index must be monotonic increasing or decreasing")
+        if isinstance(label, (list, IndexMixin)) or type(label).__name__ == "Series":
+            from .errors import InvalidIndexError
+
+            raise InvalidIndexError(str(label))
+        at = (
+            bisect.bisect_left(values, label)
+            if up
+            else len(values) - bisect.bisect_right(values[::-1], label)
+        )
+        if at < len(values) and values[at] == label:
+            while up and at + 1 < len(values) and values[at + 1] == label:
+                at += 1
+            return values[at]
+        if not self.is_unique:
+            from .errors import InvalidIndexError
+
+            raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
+        if at == 0:
+            return None if str(self.dtype).startswith(("datetime64", "timedelta64")) else math.nan
+        return values[at - 1]
+
+    def _as_label(self, value: Any) -> Any:
+        """A label written as text read as the instant or span this index holds."""
+        if isinstance(value, str):
+            from ._scalars import Timedelta, Timestamp
+
+            if str(self.dtype).startswith("datetime64"):
+                return Timestamp(value)
+            if str(self.dtype).startswith("timedelta64"):
+                return Timedelta(value)
+        return value
+
+    def asof_locs(self, where: Any, mask: Any) -> list[int]:
+        """For each label of `where`, the position of the last label at or before it.
+
+        Only the positions `mask` keeps are candidates, and a label before the
+        first of them answers -1. The kept labels have to be sorted, as pandas
+        assumes without checking.
+        """
+        values = self.tolist()
+        keep = [bool(flag) for flag in mask]
+        places = [at for at, flag in enumerate(keep) if flag]
+        kept = [values[at] for at in places]
+        first = values[keep.index(True)] if True in keep else values[0]
+        found = []
+        for value in where.tolist() if isinstance(where, IndexMixin) else list(where):
+            at = bisect.bisect_right(kept, value)
+            at = at - 1 if at > 0 else 0
+            found.append(-1 if at == 0 and value < first else places[at])
+        return found
+
+    def groupby(self, values: Any) -> dict[Any, Any]:
+        """The labels split by a list of keys, one index per key.
+
+        The keys come in sorted order, a missing key is dropped, and a list of
+        keys shorter than the index groups only the labels it reaches, as in
+        pandas.
+        """
+        from ._index_join import missing
+
+        keys = values.tolist() if hasattr(values, "tolist") else list(values)
+        where: dict[Any, list[int]] = {}
+        for at, key in enumerate(keys):
+            if not missing(key):
+                where.setdefault(key, []).append(at)
+        try:
+            order = sorted(where)
+        except TypeError:
+            order = list(where)
+        return {key: self._kept(self.take(where[key])) for key in order}
+
+    def view(self, cls: Any = None) -> Any:
+        """The same index under a new wrapper, sharing its labels.
+
+        `cls` reinterprets the bytes underneath as another type, which needs a
+        buffer of fixed width values that an index of text does not have, so it
+        is refused.
+        """
+        _refuse("cls", cls, "reading the labels' bytes as another type is not written")
+        made: Any = type(self)
+        return made._wrap(self._inner)
+
+    @property
+    def array(self) -> Any:
+        """The labels as an array with no name, which is pandas' `array`."""
+        from ._array import FirepandaArray
+
+        return FirepandaArray(self.to_series())
 
     def reindex(
         self,
@@ -19157,6 +19586,9 @@ class IndexMixin:
             return Index._wrap(getattr(self._inner, which)(_unwrap(other, "other"), sort))
         except Exception as error:
             raise translate(error) from None
+
+    str = Namespace(IndexStrings)
+    """The string accessor, which answers indexes where the column one answers columns."""
 
 
 def _label_of(data: Any) -> str | None:
