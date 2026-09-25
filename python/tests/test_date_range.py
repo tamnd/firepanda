@@ -112,9 +112,9 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value) == str(theirs.value)
 
 
-@pytest.mark.parametrize("freq", ["ME", "W", "2QS", "B"])
+@pytest.mark.parametrize("freq", ["SME", "SMS", "BH", "CBME"])
 def test_a_calendar_offset_is_refused(firepanda: ModuleType, freq: str) -> None:
-    """Months, weeks, quarters and business days are not all one length."""
+    """Semi months, business hours and custom business months are not counted yet."""
     with pytest.raises(NotImplementedError, match="calendar offset"):
         firepanda.date_range("2024-01-01", periods=3, freq=freq)
 

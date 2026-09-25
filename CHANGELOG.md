@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: calendar steps in date_range, and bdate_range
+
+- `date_range` steps by business days (`B`, `C`), weeks on a weekday (`W`, `W-WED`), and the first or last day, plain or business, of every month, quarter and year (`ME`, `MS`, `BME`, `BMS`, `QE`, `QS`, `BQE`, `BQS`, `YE`, `YS`, `BYE`, `BYS`, with a month anchor like `QE-JAN`), with multiples and backwards steps. The start rolls forward to the first landing date and keeps its time of day, as in pandas, and a zone counts on the wall clock.
+- `bdate_range` is `date_range` on business days with both ends moved to midnight, and `C` takes a week mask and holidays.
+- The old names `M`, `Q`, `Y`, `BY`, `BM`, `BQ`, `SM` and `CBM` raise pandas' error pointing at the new name. Semi month, business hour and week of month steps are still refused with NotImplementedError.
+
 ### Added: TimedeltaIndex and timedelta_range
 
 - `TimedeltaIndex` builds an index of spans from text, whole nanoseconds, `Timedelta` and `timedelta` objects, or an index of spans, and reads `days`, `seconds`, `microseconds`, `nanoseconds`, `components`, `total_seconds()`, `unit`, `asi8` and `as_unit` the way pandas does.

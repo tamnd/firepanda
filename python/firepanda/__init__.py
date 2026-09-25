@@ -43,7 +43,7 @@ from ._config import (
     reset_option,
     set_option,
 )
-from ._date_range import date_range
+from ._date_range import bdate_range, date_range
 from ._datetime import DatetimeIndex
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._pandas import (
@@ -87,6 +87,7 @@ __all__ = [
     "Timestamp",
     "__version__",
     "api",
+    "bdate_range",
     "concat",
     "crosstab",
     "cut",
