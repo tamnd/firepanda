@@ -47,6 +47,7 @@ from ._date_range import bdate_range, date_range
 from ._datetime import DatetimeIndex
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._interval import Interval
+from ._multi import MultiIndex
 from ._pandas import (
     NamedAgg,
     concat,
@@ -83,6 +84,7 @@ __all__ = [
     "DatetimeIndex",
     "Index",
     "Interval",
+    "MultiIndex",
     "NamedAgg",
     "RangeIndex",
     "Series",

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: MultiIndex
+
+`MultiIndex` is here, with every member pandas declares on it spelled the way pandas spells it. It is built with `from_arrays`, `from_tuples`, `from_product`, `from_frame` or out of levels and codes, and keeps what pandas keeps: sorted levels, codes with -1 for a gap, and level names. Lookups (`get_loc`, `get_locs`, `get_loc_level`, `get_indexer`, `isin`, `slice_locs`), reshaping of levels (`droplevel`, `swaplevel`, `reorder_levels`, `set_levels`, `set_codes`, `remove_unused_levels`), sorting, set operations, `append`, `insert`, `drop` and the duplicate members answer as pandas does, arrays as numpy arrays when numpy is installed. What needs a frame or column labelled by a MultiIndex, or a column of tuples, is refused by name for now: `to_frame(index=True)`, `to_series`, `to_flat_index` and `value_counts`.
+
 ### Added: cov, corr and aggregate on a decay
 
 `ExponentialMovingWindow` gains `cov`, `corr`, `aggregate` and `agg`. `cov` and `corr` follow pandas' own recurrence, with `adjust`, `ignore_na`, `min_periods` and `bias`, and only the rows where both sides hold a value count. They pair a column with a column, a frame with a column, or two frames column by column, the same way the window `cov` and `corr` do, and the pairing and `aggregate` are now one piece of code shared by windows and decays.
