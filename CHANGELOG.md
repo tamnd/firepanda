@@ -8,6 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: RangeIndex
+
+- `RangeIndex` builds the labels of a range from a stop, a start and a stop, a step, a `range` or another `RangeIndex`, and `RangeIndex.from_range` takes a `range`. `start`, `stop`, `step` and the repr read as pandas' do, and whole numbers, the step and the dtype are checked in pandas' words. Every other method answers a plain `Index`, and a frame's default labels are not a `RangeIndex` yet.
+- `bdate_range` takes `unit` among its keywords, which is how pandas' signature has it.
+
 ### Added: calendar steps in date_range, and bdate_range
 
 - `date_range` steps by business days (`B`, `C`), weeks on a weekday (`W`, `W-WED`), and the first or last day, plain or business, of every month, quarter and year (`ME`, `MS`, `BME`, `BMS`, `QE`, `QS`, `BQE`, `BQS`, `YE`, `YS`, `BYE`, `BYS`, with a month anchor like `QE-JAN`), with multiples and backwards steps. The start rolls forward to the first landing date and keeps its time of day, as in pandas, and a zone counts on the wall clock.

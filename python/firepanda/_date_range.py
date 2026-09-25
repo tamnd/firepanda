@@ -353,14 +353,13 @@ def bdate_range(
     weekmask: Any = None,
     holidays: Any = None,
     inclusive: Any = "both",
-    *,
-    unit: Any = None,
     **kwargs: Any,
 ) -> DatetimeIndex:
     """A `DatetimeIndex` of business days, which is `pandas.bdate_range`.
 
     It is `date_range` with a business day step and both ends moved to midnight.
-    A week mask or holidays need the custom business day `C`.
+    A week mask or holidays need the custom business day `C`. `unit` arrives
+    among the keywords, as it does in pandas' signature.
 
     Raises:
         TypeError: When freq is None.
@@ -378,6 +377,7 @@ def bdate_range(
     step = calendar_step(freq) if custom else None
     if step is not None:
         step.with_calendar(weekmask, holidays)
+    unit = kwargs.pop("unit", None)
     return _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, step)
 
 
