@@ -184,3 +184,18 @@ def test_answers_with_two_levels_of_labels_are_refused(
     """pandas answers these with two levels of labels, which is not here yet."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
+
+
+def test_a_window_without_an_answer_is_a_nan_and_not_a_gap(firepanda: ModuleType) -> None:
+    """pandas answers NaN there, and so do the kernel reductions, so a null would stand out."""
+    s = column(firepanda)
+    answers = [
+        s.rolling(2).first(),
+        s.rolling(2).nunique(),
+        s.rolling(2).apply(len),
+        s.rolling(3).cov(other(firepanda)),
+        firepanda.Series([1.0, 1.0, 1.0]).rolling(2).corr(firepanda.Series([1.0, 2.0, 3.0])),
+    ]
+    for answer in answers:
+        first = answer.tolist()[0]
+        assert first is not None and first != first
