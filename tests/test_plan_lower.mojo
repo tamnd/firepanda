@@ -2494,14 +2494,27 @@ def test_a_full_join_keeps_the_rows_of_both_sides() raises:
     )
 
 
-def test_a_cross_join_onto_more_than_one_row_is_refused() raises:
+def test_a_cross_join_onto_more_than_one_row_pairs_every_row() raises:
+    # Each sale comes out once per band, the bands in their order under it.
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
     var root = plan.join(left, right, List[Int](), List[Int](), JoinKind.CROSS)
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="right side of 4 rows"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 40)
+    assert_equal(len(out.schema), 4, "both sides end to end")
+    var qty = read_back(out, "qty")
+    var band = read_back(out, "band")
+    same(
+        [qty[0], qty[1], qty[2], qty[3], qty[4]],
+        [5, 5, 5, 5, 20],
+        "the first sale four times",
+    )
+    same(
+        [band[0], band[1], band[2], band[3], band[4]],
+        [3, 20, 40, 99, 3],
+        "every band under it",
+    )
 
 
 def test_a_cross_join_onto_one_row_is_a_column_per_right_column() raises:
@@ -2529,9 +2542,9 @@ def test_a_cross_join_onto_one_row_is_a_column_per_right_column() raises:
     )
 
 
-def test_a_cross_join_onto_no_rows_is_refused_rather_than_empty() raises:
-    # An empty right side makes the whole answer empty, which is a row count
-    # this operator cannot produce, since it adds a column and keeps the rows.
+def test_a_cross_join_onto_no_rows_is_empty() raises:
+    # An empty right side makes the whole answer empty, with both sides'
+    # columns still there.
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
@@ -2544,9 +2557,9 @@ def test_a_cross_join_onto_no_rows_is_refused_rather_than_empty() raises:
         ),
     )
     var root = plan.join(left, none, List[Int](), List[Int](), JoinKind.CROSS)
-    _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="right side of 0 rows"):
-        _ = lower(plan, root, two_frames())
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 0)
+    assert_equal(len(out.schema), 4, "both sides end to end")
 
 
 def test_a_join_whose_right_side_is_a_filter_builds_it_first() raises:

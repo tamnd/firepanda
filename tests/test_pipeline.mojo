@@ -33,6 +33,7 @@ from firepanda.exec import (
     Collect,
     Compute,
     Constant,
+    Cross,
     Cut,
     Expand,
     Fill,
@@ -3323,6 +3324,58 @@ def _outer(kind: JoinKind) raises -> DataFrame:
         )
     )
     return pipeline^.run()
+
+
+def _two_tags(tags: List[Int64]) raises -> DataFrame:
+    """A frame of one column, `tag`, for the cross join to pair with."""
+    var columns = List[AnyArray]()
+    columns.append(numbers(tags))
+    var fields = List[Field]()
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_cross_join_pairs_every_row_with_every_right_row() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Cross(_two_tags([7, 9]))))
+    var out = pipeline^.run()
+    assert_equal(len(out), 12, "six rows times two")
+    assert_equal(len(out.schema), 3, "both sides end to end")
+    var n = read_back(out, "n")
+    var tags = read_back(out, "tag")
+    var ns = Int64(0)
+    var sevens = 0
+    for i in range(len(n)):
+        ns += n[i]
+        if tags[i] == 7:
+            sevens += 1
+    assert_equal(ns, Int64(42), "every row of the left twice")
+    assert_equal(sevens, 6, "every left row once with each right row")
+
+
+def test_a_cross_join_hands_each_left_row_on_with_the_right_rows_in_order() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Cross(_two_tags([7, 9]))))
+    var out = pipeline^.run()
+    var n = read_back(out, "n")
+    var tags = read_back(out, "tag")
+    for i in range(len(n)):
+        assert_equal(n[i], Int64(i // 2 + 1), String("n at ", i))
+        assert_equal(
+            tags[i], Int64(7 if i % 2 == 0 else 9), String("tag at ", i)
+        )
+
+
+def test_a_cross_join_onto_nothing_is_nothing() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Cross(_two_tags(List[Int64]()))))
+    var out = pipeline^.run()
+    assert_equal(len(out), 0)
+    assert_equal(len(out.schema), 3, "still both sides end to end")
+
+
+def test_a_cross_join_is_row_local() raises:
+    assert_true(node_is_row_local(Node(Cross(_two_tags([7, 9])))))
 
 
 def test_a_right_join_hands_out_the_build_row_nothing_matched() raises:

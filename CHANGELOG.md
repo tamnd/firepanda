@@ -39,6 +39,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 - `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
 - `str.join` puts a separator between the characters of every row, and `str.wrap` breaks every row into lines with `textwrap` and every argument pandas takes.
+### Added: a cross join onto more than one row runs
+
+A cross join used to run only when its right side was a single row, and any other right side was refused when the plan was lowered. It now runs whatever the right side holds. A new `Cross` operator holds the right side whole and hands each left chunk on once per right row, and an empty right side gives an empty answer. Because a cross join is an inner join with nothing asked of the pair, predicate pushdown now sends a filter on its right side under it too, where before it only did that for the left side.
 
 ### Added: right and full joins run
 

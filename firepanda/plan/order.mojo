@@ -15,10 +15,10 @@ puts each equality on the join that can carry it. Neither equality can go on the
 lower join, because `a` and `b` have nothing between them, so that one stays a
 product of every row of `a` against every row of `b`.
 
-A product of two real tables is not slow, it is refused: the operator pairs a
-whole frame against a right side of a single row and says so when the right side
-has more rows than that. So the query does not run. Written as `FROM a, c, b` it
-runs, and the two spellings are the same query. That is the gap this closes.
+A product of two real tables runs, but it is every row of one against every
+row of the other, which on real tables is more rows than the query will ever
+keep. Written as `FROM a, c, b` it is two hash joins, and the two spellings are
+the same query. That is the gap this closes.
 
 TPC-H q9 is the case. Its `FROM` is `part, supplier, lineitem, partsupp, orders,
 nation` and every one of its six equalities is against `lineitem`, which is
@@ -41,8 +41,8 @@ Keep the first relation where the query put it and then repeatedly take the
 first one left that has an equality with something already taken. Stop and
 change nothing at all if that ever fails, because a relation with no equality to
 anything already taken is a product the query really did ask for, and leaving it
-exactly as written is what keeps this pass from turning one refusal into a
-different one.
+exactly as written is what keeps this pass from moving that product somewhere
+the query did not put it.
 
 An equality counts when both sides are a plain column and each of them is handed
 out by exactly one relation in the chain. That is deliberately the same test

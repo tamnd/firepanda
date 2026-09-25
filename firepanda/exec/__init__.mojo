@@ -47,6 +47,7 @@ from .node import (
     Compute,
     Connective,
     Constant,
+    Cross,
     Expand,
     Filter,
     Group,
