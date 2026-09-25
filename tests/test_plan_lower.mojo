@@ -2562,6 +2562,44 @@ def test_a_cross_join_onto_no_rows_is_empty() raises:
     assert_equal(len(out.schema), 4, "both sides end to end")
 
 
+def test_a_positional_join_puts_row_by_row_side_by_side() raises:
+    # Four bands beside ten sales, so the last six sales have no band.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.POSITIONAL
+    )
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 10)
+    assert_equal(len(out.schema), 4, "both sides end to end")
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+    valid(
+        present(out, "band"),
+        [True, True, True, True, False, False, False, False, False, False],
+        "a band for the first four sales",
+    )
+    var band = read_back(out, "band")
+    same([band[0], band[1], band[2], band[3]], [3, 20, 40, 99], "band")
+
+
+def test_a_positional_join_hands_out_the_longer_right_side() raises:
+    var plan = Plan()
+    var left = plan.scan("tiers", List[String](), 1)
+    var right = plan.scan("sales", List[String](), 0)
+    var root = plan.join(
+        left, right, List[Int](), List[Int](), JoinKind.POSITIONAL
+    )
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 10)
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+    valid(
+        present(out, "band"),
+        [True, True, True, True, False, False, False, False, False, False],
+        "the bands run out after four",
+    )
+
+
 def test_a_join_whose_right_side_is_a_filter_builds_it_first() raises:
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)

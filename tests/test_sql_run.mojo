@@ -4761,6 +4761,56 @@ def test_a_cross_join_pairs_each_band_with_each_shop() raises:
     )
 
 
+def test_a_positional_join_is_as_long_as_its_longer_side() raises:
+    same(
+        answer("SELECT count(*) AS n FROM sales POSITIONAL JOIN tiers", "n"),
+        [10],
+        "n",
+    )
+
+
+def test_a_positional_join_puts_each_row_beside_the_one_at_its_place() raises:
+    var out = run(
+        "SELECT qty, band FROM tiers POSITIONAL JOIN sales", session()
+    )
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+    same(
+        gapped(out, "band"),
+        [3, 20, 40, 99, -1, -1, -1, -1, -1, -1],
+        "band",
+    )
+
+
+def test_a_positional_join_keeps_its_rows_with_no_column_read() raises:
+    # Nothing is read off shops, but its three rows still line up with the
+    # first three sales and the sales run on past them.
+    same(
+        answer("SELECT count(*) AS n FROM shops POSITIONAL JOIN sales", "n"),
+        [10],
+        "n",
+    )
+    same(
+        answer("SELECT qty FROM sales POSITIONAL JOIN shops", "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "qty",
+    )
+
+
+def test_a_filter_over_a_positional_join_stays_above_it() raises:
+    # Moving the filter under the join would change which rows pair up.
+    same(
+        gapped(
+            run(
+                "SELECT band FROM sales POSITIONAL JOIN tiers WHERE qty < 10",
+                session(),
+            ),
+            "band",
+        ),
+        [3, 40, -1, -1],
+        "band",
+    )
+
+
 def test_a_right_join_keeps_the_shop_that_sold_nothing() raises:
     # Shop 3 has no sale, so its one row comes out with the sale side null.
     same(

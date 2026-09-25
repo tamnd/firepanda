@@ -55,6 +55,7 @@ from .node import (
 )
 from .node import Join, Limit, Match, Materialize, Node, NodeStatus, Project
 from .node import Case, Cut, Fill, Length, Locate, Member, Part, Presence
+from .node import Positional
 from .node import Reduce
 from .node import Search, Substitute
 from .node import Trim, Truncate

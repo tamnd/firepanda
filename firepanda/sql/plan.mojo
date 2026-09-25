@@ -447,9 +447,9 @@ Checked against DuckDB both ways.
 
 Named tables, the table functions above, the derived tables and the CTEs above,
 and the joins over them. So is a `LATERAL` derived table.
-`POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
-row number and so reads no column at all, and `ASOF` matches on the nearest
-value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
+`ASOF` is refused by name, since it matches on the nearest value rather than
+an equal one. A `POSITIONAL` join is lowered, and it pairs the two sides by row
+number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
 refused as well, since the merged name is on both sides and a column a subquery
 computed carries no table to tell the two apart. Each is a refusal by
 name rather than a silence, so `pixi run sql-support` lists them and the
@@ -4461,10 +4461,7 @@ def _join_kind(text: StringSlice) raises -> JoinKind:
             " different operator and not a different condition"
         )
     if said.find("POSITIONAL") != -1:
-        raise Error(
-            "firepanda does not lower a POSITIONAL join yet, which pairs the"
-            " two sides by row number and so reads no column at all"
-        )
+        return JoinKind.POSITIONAL
     # Neither takes a LEFT or a RIGHT in front of it, in DuckDB or here, so
     # both are read before the words that do and there is nothing to order
     # these two against each other.
@@ -5271,6 +5268,11 @@ def _joined(
     )
     if not kind.keeps_right_columns() and not conditional:
         scope.hide(reach, pairs)
+
+    if kind == JoinKind.POSITIONAL:
+        # Paired by where the rows are, so there is nothing to split and no
+        # key to find. The grammar gives it no condition to write.
+        return _pair(plan, left, right, List[Int](), List[Int](), kind)
 
     if node.kind == REF_JOIN_USING:
         var named = List[String]()

@@ -743,6 +743,11 @@ struct Plan(Movable, Sized):
                     ),
                 )
             )
+        if kind == JoinKind.POSITIONAL and len(left_keys) != 0:
+            raise Error(
+                "a positional join pairs rows by where they are and takes no"
+                " key"
+            )
         if len(left_keys) != len(right_keys):
             raise Error(
                 String(

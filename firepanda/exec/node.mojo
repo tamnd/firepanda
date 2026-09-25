@@ -5357,6 +5357,130 @@ struct Cross(Movable):
         return Chunk(out^, total)
 
 
+struct Positional(Movable):
+    """Puts row i of a frame it holds beside row i of the stream.
+
+    A positional join pairs the two sides by where each row is. The left side
+    streams past and a count of the rows seen so far says which right row goes
+    beside each one, a null where the right side has run out. When the stream
+    is done, `finish` hands out whatever right rows are left, with the left
+    side's columns null.
+
+    The count is written as chunks go past, so this is not row local and is fed
+    one chunk at a time in order, like a right join.
+    """
+
+    var side: Schema
+    """The right side's columns, appended after the chunk's."""
+
+    var right: List[AnyArray]
+    """The right side, one array per column."""
+
+    var height: Int
+    """How many rows the right side has."""
+
+    var _seen: Int
+    """How many left rows have gone past so far."""
+
+    var _out: Schema
+    """What `bind` answered, for the types of the padded left columns."""
+
+    def __init__(out self, var right: DataFrame) raises:
+        """Takes the right side in.
+
+        Args:
+            right: The frame the stream is put beside. Consumed.
+
+        Raises:
+            If a column's chunks cannot be stacked.
+        """
+        self.side = Schema(copy=right.schema)
+        self.height = right.rows
+        var columns = right^.into_columns()
+        var backwards = List[AnyArray](capacity=len(columns))
+        while len(columns) > 0:
+            backwards.append(columns.pop().combine())
+        self.right = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            self.right.append(backwards.pop())
+        self._seen = 0
+        self._out = Schema()
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the right side's columns after it.
+
+        Either side can run out first, so every column can be null.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            Both schemas end to end.
+        """
+        var out = input^
+        for c in range(len(out)):
+            out.fields[c].nullable = True
+        for c in range(len(self.side)):
+            var field = self.side[c].copy()
+            field.nullable = True
+            out.append(field^)
+        self._seen = 0
+        self._out = Schema(copy=out)
+        return out^
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Puts the next right rows beside the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with the right side's columns after it.
+
+        Raises:
+            If a column cannot be gathered.
+        """
+        var rows = len(chunk)
+        if rows == 0:
+            return None
+        var right_at = List[Int](capacity=rows)
+        for i in range(rows):
+            var at = self._seen + i
+            right_at.append(at if at < self.height else -1)
+        self._seen += rows
+        var out = chunk^.into_columns()
+        for c in range(len(self.right)):
+            out.append(take_any(self.right[c], right_at, True))
+        return Chunk(out^, rows)
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Hands out the right rows the stream never reached.
+
+        Returns:
+            Those rows with the left side's columns null, or nothing when the
+            stream was at least as long as the right side.
+
+        Raises:
+            If a column cannot be gathered.
+        """
+        if self._seen >= self.height:
+            return None
+        var rows = self.height - self._seen
+        var left_at = List[Int](capacity=rows)
+        var right_at = List[Int](capacity=rows)
+        for i in range(rows):
+            left_at.append(-1)
+            right_at.append(self._seen + i)
+        self._seen = self.height
+        var width = len(self._out) - len(self.right)
+        var out = List[AnyArray](capacity=len(self._out))
+        for c in range(width):
+            out.append(take_any(empty_any(self._out[c].dtype), left_at, True))
+        for c in range(len(self.right)):
+            out.append(take_any(self.right[c], right_at, True))
+        return Chunk(out^, rows)
+
+
 def _names_include(fields: List[Field], name: String) -> Bool:
     """Reports whether a field of that name has already been planned.
 
@@ -7762,6 +7886,7 @@ comptime Node = Variant[
     Join,
     Settle,
     Cross,
+    Positional,
     Limit,
     Sort,
     Window,
@@ -7846,6 +7971,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Settle].bind(input^)
     if node.isa[Cross]():
         return node[Cross].bind(input^)
+    if node.isa[Positional]():
+        return node[Positional].bind(input^)
     if node.isa[Sort]():
         return node[Sort].bind(input^)
     if node.isa[Window]():
@@ -8277,6 +8404,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Settle].process(chunk^)
     if node.isa[Cross]():
         return node[Cross].process(chunk^)
+    if node.isa[Positional]():
+        return node[Positional].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
     if node.isa[Sort]():
@@ -8404,4 +8533,6 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
         return node[Unique].finish()
     if node.isa[Join]():
         return node[Join].finish()
+    if node.isa[Positional]():
+        return node[Positional].finish()
     return None

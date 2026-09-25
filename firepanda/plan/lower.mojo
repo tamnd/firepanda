@@ -276,6 +276,7 @@ from firepanda.exec.node import (
     Member,
     Node,
     Part,
+    Positional,
     Presence,
     Project,
     Reduce,
@@ -3346,6 +3347,37 @@ def _lower_cross(
         )
 
 
+def _lower_positional(
+    plan: Plan,
+    right: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+    mut pipe: Pipeline,
+) raises:
+    """Lowers a positional join into a `Positional` node.
+
+    The right side is built into a frame first, the way a cross join's is, and
+    the left side streams past it with row i of each put side by side.
+
+    Args:
+        plan: The plan.
+        right: The join's right input.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: Whatever the right side itself refuses.
+    """
+    var side: DataFrame
+    if plan.nodes[right].kind == NodeKind.SCAN:
+        side = _take(frames, taken, plan, right)
+    else:
+        var built = _lower_from(plan, right, frames, taken)
+        side = built^.run()
+    pipe.add(Node(Positional(side^)))
+
+
 def _lower_join(
     plan: Plan,
     at: Int,
@@ -3400,6 +3432,9 @@ def _lower_join(
     var right = plan.nodes[at].inputs[1]
     if kind == JoinKind.CROSS:
         _lower_cross(plan, right, frames, taken, pipe)
+        return
+    if kind == JoinKind.POSITIONAL:
+        _lower_positional(plan, right, frames, taken, pipe)
         return
 
     var parts = plan.nodes[at].parts

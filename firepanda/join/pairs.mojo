@@ -247,6 +247,14 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     one column.
     """
 
+    comptime POSITIONAL = Self(8)
+    """Row i of the left beside row i of the right, the shorter side padded.
+
+    No key and no condition. The two sides are paired by where each row is, so
+    the answer is as long as the longer side and the side that ran out is null
+    on the rows past its end.
+    """
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -311,6 +319,8 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("anti")
         elif self == Self.MARK:
             writer.write("mark")
+        elif self == Self.POSITIONAL:
+            writer.write("positional")
         else:
             writer.write("cross")
 
