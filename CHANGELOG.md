@@ -8,6 +8,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Interval
+
+- `Interval(left, right, closed)` with ends that are numbers, instants or spans, and `left`, `right`, `closed`, `closed_left`, `closed_right`, `open_left`, `open_right`, `length`, `mid`, `is_empty` and `overlaps`. Containment works for a point and for another interval, equality, ordering and hashing go by left, right and closed, and a number or a span moves both ends while a number scales them, all as in pandas. Bad ends, an unknown closed and a left end past the right one are refused in pandas' words.
+- `IntervalIndex` and `interval_range` still wait for a column type that holds pairs.
+
 ### Added: RangeIndex
 
 - `RangeIndex` builds the labels of a range from a stop, a start and a stop, a step, a `range` or another `RangeIndex`, and `RangeIndex.from_range` takes a `range`. `start`, `stop`, `step` and the repr read as pandas' do, and whole numbers, the step and the dtype are checked in pandas' words. Every other method answers a plain `Index`, and a frame's default labels are not a `RangeIndex` yet.
