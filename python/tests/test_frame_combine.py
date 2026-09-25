@@ -4,7 +4,9 @@ A frame is compared by its columns, labels, column types and values, with
 every missing value as None, because a float column here holds a gap where
 pandas holds NaN. pandas' nullable types are read as the type here that holds
 the same values: `Int64` is `int64`, `Float64` is `float64`, `string` is
-`str` and `boolean` is `bool`, and the same for the Arrow backed ones. A correlation is compared to twelve places.
+`str` and `boolean` is `bool`, and the same for the Arrow backed ones. A
+correlation is compared to twelve places, and the gaps are counted apart from
+NaN, which `convert_dtypes` turns into gaps.
 """
 
 from __future__ import annotations
@@ -49,8 +51,20 @@ def kind(dtype: Any) -> str:
     return NULLABLE.get(text, "str" if text == "string" else text)
 
 
+def converted(answer: Any) -> Any:
+    """What is compared for `convert_dtypes`, with the gaps counted apart from NaN."""
+    if hasattr(answer, "columns"):
+        return facts(answer), [gaps(answer[c]) for c in answer.columns]
+    return facts(answer), gaps(answer), answer.name
+
+
+def gaps(column: Any) -> int:
+    """How many values are missing rather than NaN."""
+    return sum(v is None or type(v).__name__ == "NAType" for v in column.tolist())
+
+
 def facts(answer: Any) -> Any:
-    """What is compared, for a frame or a column."""
+    """What is compared: labels, types and values."""
     if hasattr(answer, "columns"):
         return (
             list(answer.columns),
@@ -146,13 +160,6 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: numbers(m)[0][["p", "q"]].corrwith(numbers(m)[1], axis="columns", drop=True),
     lambda m: whole(m, p=[1, 2, 3]).corrwith(m.Series([1, 2, 4])),
     lambda m: whole(m, p=[True, False, True]).corrwith(m.Series([1, 2, 4])),
-    lambda m: whole(m, i=[1, 2, 3], g=[1.5, 2.0, None], s=["a", None, "c"]).convert_dtypes(),
-    lambda m: whole(m, f=[1.0, 2.0, 3.0], b=[True, False, True]).convert_dtypes(),
-    lambda m: whole(m, f=[1.0, 2.0, 3.0]).convert_dtypes(convert_integer=False),
-    lambda m: whole(m, f=[1.0, math.inf]).convert_dtypes(),
-    lambda m: whole(m, f=[1.0, 2.0]).convert_dtypes(dtype_backend="pyarrow"),
-    lambda m: m.Series([1.0, 2.0], name="v").convert_dtypes(),
-    lambda m: m.Series(["a", "b"]).convert_dtypes(),
 ]
 
 
@@ -162,6 +169,30 @@ def test_the_answer_is_pandas_answer(firepanda: ModuleType, build: Callable[[Any
     import pandas as pd
 
     assert facts(build(firepanda)) == facts(build(pd))
+
+
+CONVERTS: list[Callable[[Any], Any]] = [
+    lambda m: whole(m, i=[1, 2, 3], g=[1.5, 2.0, None], s=["a", None, "c"]).convert_dtypes(),
+    lambda m: whole(m, f=[1.0, 2.0, 3.0], b=[True, False, True]).convert_dtypes(),
+    lambda m: whole(m, f=[1.0, 2.0, 3.0]).convert_dtypes(convert_integer=False),
+    lambda m: whole(m, f=[1.0, math.inf]).convert_dtypes(),
+    lambda m: whole(m, f=[1.5, math.nan]).convert_dtypes(),
+    lambda m: whole(m, f=[1.5, math.nan]).convert_dtypes(convert_integer=False),
+    lambda m: m.Series([1.5, math.nan], index=[4, 2], name="v").convert_dtypes(),
+    lambda m: whole(m, f=[1.0, 2.0]).convert_dtypes(dtype_backend="pyarrow"),
+    lambda m: m.Series([1.0, 2.0], name="v").convert_dtypes(),
+    lambda m: m.Series(["a", "b"]).convert_dtypes(),
+]
+
+
+@pytest.mark.parametrize("build", CONVERTS)
+def test_the_conversion_is_pandas_conversion(
+    firepanda: ModuleType, build: Callable[[Any], Any]
+) -> None:
+    """Types, values, and a NaN in a float column turned into a gap."""
+    import pandas as pd
+
+    assert converted(build(firepanda)) == converted(build(pd))
 
 
 MISTAKES: list[Callable[[Any], Any]] = [

@@ -5575,10 +5575,21 @@ def _backend(dtype_backend: Any) -> None:
 
 
 def _converted(column: Series, whole: bool) -> Series:
-    """One column as `convert_dtypes` leaves it: floats that are all whole become int64."""
-    if not (whole and str(column.dtype).startswith("float")):
+    """One column as `convert_dtypes` leaves it.
+
+    A NaN in a float column becomes a gap, because pandas' nullable float reads
+    NaN as missing, and floats that are then all whole become int64.
+    """
+    from ._frame import Series
+
+    if not str(column.dtype).startswith("float"):
         return column
     values = column.tolist()
+    if any(value is not None and value != value for value in values):
+        values = [None if _missing(value) else value for value in values]
+        column = Series(values, index=column.index, name=column.name, dtype=str(column.dtype))
+    if not whole:
+        return column
     # A gap stays a float column: pandas' answer is its nullable `Int64`, and a
     # whole number column here takes no gap through `astype`.
     if all(
