@@ -817,9 +817,7 @@ def join_indices[
     return paired^
 
 
-def _by_left_row(
-    var paired: JoinIndices, left_rows: Int
-) raises -> JoinIndices:
+def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:
     """Puts a pairing that came back in right row order into left row order.
 
     A counting sort rather than a comparison sort, because the key is a left row
