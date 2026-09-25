@@ -1,10 +1,10 @@
 """The window members that read every window in Python, checked against pandas.
 
 `first`, `last`, `nunique`, `apply`, `aggregate`, `pipe`, `cov` and `corr` on
-rolling and expanding windows. The answers are compared as labels, names and
-values, with gaps as None and numbers to twelve places, because a covariance
-worked out from a window's own mean and one worked out from running sums land
-on different last digits.
+rolling and expanding windows, and `aggregate`, `cov` and `corr` on a decay.
+The answers are compared as labels, names and values, with gaps as None and
+numbers to twelve places, because a covariance worked out from a window's own
+mean and one worked out from running sums land on different last digits.
 """
 
 from __future__ import annotations
@@ -56,6 +56,11 @@ def column(m: ModuleType) -> Any:
 def other(m: ModuleType) -> Any:
     """A second column on the same labels."""
     return m.Series([2.0, 1.0, 3.0, 5.0, 4.0, 6.0])
+
+
+def gappy(m: ModuleType) -> Any:
+    """A second column with its gap in another row."""
+    return m.Series([2.0, 1.0, 3.0, 5.0, None, 6.0])
 
 
 def frame(m: ModuleType) -> Any:
@@ -121,6 +126,24 @@ BUILDS: list[Callable[[Any], Any]] = [
     lambda m: frame(m).rolling(3).cov(frame(m), pairwise=False),
     lambda m: frame(m).rolling(3).corr(pairwise=False),
     lambda m: column(m).rolling(3).corr(frame(m)),
+    lambda m: column(m).ewm(span=3).cov(gappy(m)),
+    lambda m: column(m).ewm(span=3).cov(gappy(m), bias=True),
+    lambda m: column(m).ewm(span=3).corr(gappy(m)),
+    lambda m: column(m).ewm(com=0.5, adjust=False).cov(gappy(m)),
+    lambda m: column(m).ewm(com=0.5, adjust=False).corr(gappy(m)),
+    lambda m: column(m).ewm(alpha=0.3, ignore_na=True).cov(gappy(m), bias=True),
+    lambda m: column(m).ewm(alpha=0.3, ignore_na=True).corr(gappy(m)),
+    lambda m: column(m).ewm(halflife=2, min_periods=3).cov(gappy(m)),
+    lambda m: column(m).ewm(span=3, adjust=False, ignore_na=True).corr(gappy(m)),
+    lambda m: column(m).ewm(span=3).corr(),
+    lambda m: column(m).ewm(span=3).cov(),
+    lambda m: column(m).ewm(span=3).cov(m.Series([1.0, 3.0, 2.0], index=[3, 4, 5])),
+    lambda m: m.Series([1.0, 1, 1, 1]).ewm(span=3).corr(m.Series([1.0, 2, 3, 4])),
+    lambda m: frame(m).ewm(span=3).cov(frame(m)["a"]),
+    lambda m: frame(m).ewm(span=3).corr(pairwise=False),
+    lambda m: column(m).ewm(span=3).agg("mean"),
+    lambda m: column(m).ewm(span=3).agg(["mean", "std"]),
+    lambda m: frame(m).ewm(span=3).agg({"a": "mean"}),
 ]
 
 
@@ -147,6 +170,10 @@ MISTAKES: list[Callable[[Any], Any]] = [
     lambda m: m.Series(["a", "b"]).rolling(1).apply(len),
     lambda m: m.DataFrame({"a": [1, 2], "t": ["x", "y"]}).rolling(1).nunique(),
     lambda m: column(m).rolling(2).pipe((lambda r: r, "r"), r=1),
+    lambda m: column(m).ewm(span=3).agg(lambda w: 1),
+    lambda m: column(m).ewm(span=3).agg("nope"),
+    lambda m: column(m).ewm(span=3).agg("apply"),
+    lambda m: column(m).ewm(span=3).corr([1]),
 ]
 
 
@@ -174,6 +201,7 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: frame(m).rolling(2).corr(),
     lambda m: frame(m).rolling(2).cov(frame(m), pairwise=True),
     lambda m: frame(m).rolling(2).first(numeric_only=True),
+    lambda m: frame(m).ewm(span=3).corr(),
 ]
 
 
