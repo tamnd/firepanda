@@ -1911,5 +1911,48 @@ def test_an_inner_or_semi_join_that_mostly_misses_skips_only_misses() raises:
         _pairs_over_mostly_misses(rows, 1, JoinKind.SEMI)
 
 
+def test_an_exchanged_join_with_a_tall_pairing_sorts_back_on_every_core() raises:
+    """A short left side matching a tall right one many times over.
+
+    Three thousand left rows against three hundred thousand right rows is past
+    the exchange margin, and every left key below two thousand is on 120 right
+    rows, so the pairing is 360,000 entries, tall enough for the sort back into
+    left row order to be split across cores. Left rows 0 and 2,000 share a key,
+    so a key's entries have to go to two left rows in the right order, and
+    right keys from two thousand up match nothing.
+    """
+    var left_rows = 3_000
+    var right_rows = 300_000
+    var probe = Array[DType.int64](left_rows)
+    for i in range(left_rows):
+        probe[i] = Int64(i % 2_000)
+    var built = Array[DType.int64](right_rows)
+    for i in range(right_rows):
+        built[i] = Int64((i * 7) % 2_500)
+    var left = one_column(Series("k", probe^))
+    var right = one_column(Series("k", built^))
+    var paired = join_indices(
+        left.column_refs(),
+        keys(0),
+        left_rows,
+        right.column_refs(),
+        keys(0),
+        right_rows,
+        JoinKind.INNER,
+    )
+    assert_equal(len(paired), left_rows * 120)
+    for r in range(len(paired)):
+        var at = paired.left_at[r]
+        var there = paired.right_at[r]
+        assert_equal((there * 7) % 2_500, at % 2_000, "paired unequal keys")
+        if r > 0:
+            var before = paired.left_at[r - 1]
+            assert_true(before <= at, "out of left row order")
+            if before == at:
+                assert_true(
+                    paired.right_at[r - 1] < there, "out of right row order"
+                )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
