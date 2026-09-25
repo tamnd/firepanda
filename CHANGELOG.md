@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the grouping made visible
+
+`DataFrameGroupBy` and `SeriesGroupBy` now have `ngroups`, `ndim`, `len`, iteration, `groups`, `indices`, `get_group` and `pipe`, matching pandas 3. Each of them numbers the rows again when it is asked for and keeps nothing afterwards. A key written as one name is a value and a key written as a list is a tuple, as in pandas, a group with a missing key under `dropna=False` is keyed by nan and can be fetched with `get_group(float("nan"))`, `[[...]]` narrows what a group hands out, and `indices` is numpy arrays when numpy is installed. `groups` is a plain dict rather than pandas' `PrettyDict`.
+
 ### Added: Interval
 
 - `Interval(left, right, closed)` with ends that are numbers, instants or spans, and `left`, `right`, `closed`, `closed_left`, `closed_right`, `open_left`, `open_right`, `length`, `mid`, `is_empty` and `overlaps`. Containment works for a point and for another interval, equality, ordering and hashing go by left, right and closed, and a number or a span moves both ends while a number scales them, all as in pandas. Bad ends, an unknown closed and a left end past the right one are refused in pandas' words.

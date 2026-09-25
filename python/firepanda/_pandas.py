@@ -13262,7 +13262,9 @@ def _grouped(
         " for, and a group with no rows in it is a row this has nothing to put in",
     )
     keys = GroupByMixin._keys(frame, by, level)
-    return DataFrameGroupBy(frame, keys, as_index, sort, dropna)
+    grouped = DataFrameGroupBy(frame, keys, as_index, sort, dropna)
+    grouped._single = isinstance(by, str)
+    return grouped
 
 
 def _relabelled(frame: DataFrame, name: str, label: str | None) -> Series:
@@ -15586,6 +15588,18 @@ class _NthSelector:
         return self._owner._nth(n)
 
 
+_GROUP_NAN = float("nan")
+"""The one nan a missing group key is, so a key with a gap in it can be looked up."""
+
+
+def _group_key(value: Any) -> Any:
+    """A key a caller passed to `get_group`, with any missing value as `_GROUP_NAN`."""
+    try:
+        return _GROUP_NAN if _missing(value) else value
+    except (TypeError, ValueError):
+        return value
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -15608,20 +15622,22 @@ class GroupByMixin[Answer]:
     and a program that catches the wrong line is a program whose error handling
     does not run. Checking early costs one pass over the column names.
 
-    What is deliberately absent is any notion of the groups themselves. pandas
-    can hand back `g.groups`, `g.indices` and `g.get_group(k)`, which are the
-    grouping made visible, and firepanda computes the grouping inside the
-    reduction and throws it away. Keeping it would mean the object holds an
-    index per group whether or not anybody asks, which is the cost pandas pays
-    and is the wrong default for a library whose claim is the other one. Those
-    three names are absent rather than wrong.
+    The groups themselves are never kept. pandas can hand back `g.groups`,
+    `g.indices` and `g.get_group(k)`, which are the grouping made visible, and
+    here each of them numbers the rows again when it is asked for and throws the
+    numbering away afterwards. Keeping it would mean the object holds an index
+    per group whether or not anybody asks, which is the cost pandas pays and is
+    the wrong default for a library whose claim is the other one.
     """
 
-    __slots__ = ("_as_index", "_by", "_dropna", "_frame", "_sort")
+    __slots__ = ("_as_index", "_by", "_dropna", "_frame", "_selection", "_single", "_sort")
     """The frame, the key names, and the three flags that survive to the call.
     Slotted for the reason `DataFrameMixin` gives. There is no `_inner`, because
     a group by object has no extension object of its own: it is a frame and a
-    plan for what to do to it."""
+    plan for what to do to it. `_selection` is the columns a `[[...]]` narrowed it
+    to and `_single` is whether the key was written as one name rather than a
+    list, which is what decides whether a group's key is a tuple. Both are set
+    after the object is made, so they are read with a default."""
 
     _frame: DataFrame
     _by: list[str]
@@ -16406,6 +16422,127 @@ class GroupByMixin[Answer]:
         values = self._as_answer(self._frame[self._value_columns()])
         return values / shifted - 1
 
+    def _members(self) -> list[tuple[tuple[Any, ...], list[int]]]:
+        """Every group's key values and row positions, in the order the groups come out.
+
+        The rows are numbered by `ngroup` and each group's key is read off its
+        first row, with a missing key as float nan, which is what pandas names
+        the group `dropna=False` keeps.
+        """
+        from ._frame import DataFrameGroupBy
+
+        numbers = DataFrameGroupBy(self._frame, self._by, True, self._sort, self._dropna).ngroup()
+        rows: dict[int, list[int]] = {}
+        for place, number in enumerate(numbers.tolist()):
+            if number is not None and number == number:
+                rows.setdefault(int(number), []).append(place)
+        columns = [self._frame[name].tolist() for name in self._by]
+        return [
+            (
+                tuple(_GROUP_NAN if _missing(c[rows[n][0]]) else c[rows[n][0]] for c in columns),
+                rows[n],
+            )
+            for n in sorted(rows)
+        ]
+
+    def _named(self, key: tuple[Any, ...], iterating: bool) -> Any:
+        """A group's key as pandas hands it out.
+
+        One key written as a name is the value itself. Several keys are a tuple,
+        and so is one key written as a list, except in `groups` and `indices`,
+        which pandas still keys by the value.
+        """
+        if len(key) == 1 and (getattr(self, "_single", False) or not iterating):
+            return key[0]
+        return key
+
+    def _group(self, places: list[int]) -> Any:
+        """One group's rows, holding the columns this group by hands out."""
+        rows = self._frame.iloc[places]
+        picked = getattr(self, "_selection", None)
+        return self._as_answer(rows if picked is None else rows[picked])
+
+    @property
+    def ngroups(self) -> int:
+        """How many groups there are."""
+        return len(self._members())
+
+    @property
+    def ndim(self) -> int:
+        """Two, the dimensions of what a group by over a frame hands out."""
+        return 2
+
+    def __len__(self) -> int:
+        """How many groups there are."""
+        return self.ngroups
+
+    def __iter__(self) -> Iterator[tuple[Any, Any]]:
+        """Every group as its key and its rows, in the order the groups come out."""
+        for key, places in self._members():
+            yield self._named(key, True), self._group(places)
+
+    @property
+    def groups(self) -> dict[Any, Index]:
+        """Every group's key and the row labels in it."""
+        return {
+            self._named(key, False): self._frame.iloc[places].index
+            for key, places in self._members()
+        }
+
+    @property
+    def indices(self) -> dict[Any, Any]:
+        """Every group's key and the row positions in it, as numpy arrays when numpy is there.
+
+        Unsorted groups over several keys come out the way pandas orders them
+        here, by where each key's value was first seen, one key after another,
+        rather than by where the group was first seen.
+        """
+        members = self._members()
+        if not self._sort and len(self._by) > 1:
+            seen: list[dict[Any, int]] = [{} for _ in self._by]
+            for key, _ in members:
+                for level, value in zip(seen, key, strict=True):
+                    level.setdefault(value, len(level))
+            members.sort(key=lambda member: [s[v] for s, v in zip(seen, member[0], strict=True)])
+        try:
+            import numpy
+        except ImportError:
+            return {self._named(key, False): places for key, places in members}
+        return {
+            self._named(key, False): numpy.array(places, dtype="int64") for key, places in members
+        }
+
+    def get_group(self, name: Any) -> Any:
+        """The rows of the group whose key is `name`, spelled as iterating spells it.
+
+        Raises:
+            KeyError: If no group has that key.
+            TypeError: If the key cannot be hashed, as a dictionary lookup raises.
+        """
+        found = {self._named(key, True): places for key, places in self._members()}
+        wanted = tuple(map(_group_key, name)) if isinstance(name, tuple) else _group_key(name)
+        try:
+            places = found[wanted]
+        except KeyError:
+            raise KeyError(name) from None
+        return self._group(places)
+
+    def pipe(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """Calls `func` on this group by, or hands it in as the keyword a `(func, name)` pair names.
+
+        Raises:
+            ValueError: If the pair's keyword is also passed, in pandas' words.
+        """
+        if isinstance(func, tuple):
+            func, target = func
+            if target in kwargs:
+                raise InvalidArgumentError(
+                    f"{target} is both the pipe target and a keyword argument"
+                )
+            kwargs[target] = self
+            return func(*args, **kwargs)
+        return func(self, *args, **kwargs)
+
     def filter(self, func: Any, dropna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The rows of every group `func` answers True for, in the frame's order.
 
@@ -16633,8 +16770,14 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
                 raise KeyError(name)
         narrowed = DataFrame._wrap(self._frame._inner.select(self._by + names))
         if isinstance(key, str):
-            return SeriesGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna, key)
-        return DataFrameGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna)
+            out: Any = SeriesGroupBy(
+                narrowed, self._by, self._as_index, self._sort, self._dropna, key
+            )
+        else:
+            out = DataFrameGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna)
+            out._selection = names
+        out._single = getattr(self, "_single", False)
+        return out
 
     def _shape(self, kind: str, param: float) -> DataFrame:
         """One reduction over every column that is not a key.
@@ -16867,6 +17010,11 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     def _as_answer(self, out: DataFrame) -> Series:
         """The one column of a frame of answers."""
         return out[self._column]
+
+    @property
+    def ndim(self) -> int:
+        """One, the dimensions of what a group by over a column hands out."""
+        return 1
 
     def _keeps(self, answer: Any) -> bool:
         """Whether a group's answer from `filter` keeps it: any truthy value that is there.

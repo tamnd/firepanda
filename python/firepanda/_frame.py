@@ -1632,8 +1632,9 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
     this differs from the accessor above and is why it holds the keys and the flags as
     well as the frame. Nothing is computed until a reduction is asked for, as in pandas,
     and nothing about the grouping is kept afterwards: `groups`, `indices` and
-    `get_group` are absent rather than slow, because keeping an index per group whether
-    or not anybody asks is the cost this library exists to not pay.
+    `get_group` number the rows again each time they are asked for, because keeping an
+    index per group whether or not anybody asks is the cost this library exists to not
+    pay.
     """
 
     __slots__ = ()
