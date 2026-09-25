@@ -74,6 +74,7 @@ from ._pandas import (
     unique,
 )
 from ._scalars import Timedelta, Timestamp
+from ._timedelta import TimedeltaIndex, timedelta_range
 
 __all__ = [
     "DataFrame",
@@ -82,6 +83,7 @@ __all__ = [
     "NamedAgg",
     "Series",
     "Timedelta",
+    "TimedeltaIndex",
     "Timestamp",
     "__version__",
     "api",
@@ -114,6 +116,7 @@ __all__ = [
     "read_json",
     "reset_option",
     "set_option",
+    "timedelta_range",
     "to_datetime",
     "to_numeric",
     "to_timedelta",

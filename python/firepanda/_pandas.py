@@ -12721,6 +12721,69 @@ class Namespace:
         return self._accessor(obj)
 
 
+_SPAN_COMPONENTS = (
+    "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds",
+)  # fmt: skip
+"""The columns of `components`, largest first, as pandas names them."""
+
+_SPAN_FIELDS = {"seconds": (1, 2, 3), "microseconds": (4, 5), "nanoseconds": (6,)}
+"""Which components each field of a span adds up, and the weights come from
+`_SPAN_WEIGHTS`, so `seconds` is the hours, minutes and seconds past the day."""
+
+_SPAN_WEIGHTS = (1, 3600, 60, 1, 1000, 1, 1)
+"""What each component counts in the field it belongs to."""
+
+
+def _span_parts(values: list[Any]) -> list[tuple[int, ...] | None]:
+    """Every span cut into its seven components, or None for a gap.
+
+    The day is floored, as pandas floors it, so minus one nanosecond is minus one
+    day and the rest of that day counted forward, and every smaller component is
+    then between nought and its largest value.
+    """
+    out: list[tuple[int, ...] | None] = []
+    for value in values:
+        if value is None:
+            out.append(None)
+            continue
+        rest = value.value
+        parts = []
+        for size in (86_400 * 10**9, 3600 * 10**9, 60 * 10**9, 10**9, 10**6, 10**3):
+            whole, rest = divmod(rest, size)
+            parts.append(whole)
+        out.append((*parts, rest))
+    return out
+
+
+def _span_column(parts: list[tuple[int, ...] | None], field: str) -> list[Any]:
+    """One field of every span, with NaN for a gap as pandas has it."""
+    if field == "days":
+        picked: tuple[int, ...] = (0,)
+    else:
+        picked = _SPAN_FIELDS[field]
+    return [
+        float("nan") if part is None else sum(part[at] * _SPAN_WEIGHTS[at] for at in picked)
+        for part in parts
+    ]
+
+
+def _span_type(values: list[Any], whole: str) -> str:
+    """The type of a field column: `whole` without gaps and float64 with them."""
+    return "float64" if any(value != value for value in values) else whole
+
+
+def _span_frame(parts: list[tuple[int, ...] | None], index: Any) -> DataFrame:
+    """The seven components of every span as a frame, which is pandas' `components`."""
+    from ._frame import DataFrame, Series
+
+    gap = any(part is None for part in parts)
+    columns = {}
+    for at, name in enumerate(_SPAN_COMPONENTS):
+        values = [float("nan") if part is None else part[at] for part in parts]
+        columns[name] = Series(values, index=index, dtype="float64" if gap else "int64")
+    return DataFrame(columns, index=index)
+
+
 class DatetimeMixin:
     """The hand written half of `DatetimeProperties`.
 
@@ -12765,6 +12828,26 @@ class DatetimeMixin:
             return Series._wrap(self._series._inner.temporal_part(kind, arg))
         except Exception as error:
             raise translate(error) from None
+
+    def _spans(self, name: str) -> list[tuple[int, ...] | None]:
+        """The components of every span, refusing a column of instants as pandas does."""
+        if not str(self._series.dtype).startswith("timedelta"):
+            raise AttributeError(f"'DatetimeProperties' object has no attribute '{name}'")
+        return _span_parts(self._series.tolist())
+
+    def _span_field(self, field: str) -> Series:
+        """One field of every span, which is how pandas reads `seconds` and the two finer."""
+        from ._frame import Series
+
+        values = _span_column(self._spans(field), field)
+        series = self._series
+        return Series(
+            values, index=series.index, name=series.name, dtype=_span_type(values, "int32")
+        )
+
+    def _span_components(self) -> DataFrame:
+        """The seven components of every span, one column each."""
+        return _span_frame(self._spans("components"), self._series.index)
 
     def _zone(self) -> str | None:
         """Reads the clock the column is read against.
