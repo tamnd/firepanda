@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: convert_dtypes turns NaN into a gap
+
+`convert_dtypes` now turns a NaN in a float column into a missing value, as pandas' nullable float does, before it looks for whole numbers.
+
 ### Added: DataFrame.combine, DataFrame.corrwith and convert_dtypes
 
 `DataFrame.combine` runs a function over each pair of columns across both frames' labels and columns, with pandas' casting, `fill_value` and `overwrite`, and whole number answers cast back the way pandas does. `DataFrame.corrwith` correlates each column, or each row with `axis=1`, with a column or with the shared columns or rows of another frame, with `drop`, `numeric_only`, `min_periods`, Pearson, Spearman and a callable method. `DataFrame.convert_dtypes` and `Series.convert_dtypes` answer the types here that hold a gap, which are pandas' nullable types under their plain names, and turn a float column of whole numbers into `int64`. A float column of whole numbers with a gap stays `float64`, where pandas answers `Int64`.
