@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_datetime answers an index for a list and an instant for one value
+
+`to_datetime` now answers what pandas answers for each kind of input: a column for a column, a `DatetimeIndex` for a list, tuple or index, keeping the index name, and one instant for one value, with None where pandas gives NaT. A list with nothing to read is held at seconds, as in pandas. The `DatetimeIndex` constructor now reads text every row with its own format, the way pandas does, so a list of dates in different shapes builds an index instead of raising. A `DatetimeIndex` can be put in a frame or a column directly, and a column built from an index takes the index name.
+
 ### Added: to_datetime reads every row with its own format
 
 `to_datetime(format="ISO8601")` and `to_datetime(format="mixed")` used to be refused by name. Both now read each row with its own format, as pandas does. `ISO8601` holds every row to the ISO 8601 shapes pandas reads. `mixed` also reads the common shapes dateutil reads: slashed and dotted dates, month first unless the first number cannot be a month, month and weekday names, a clock with AM or PM, and a two digit year in the century nearest today. The unit, the zone, `utc`, `errors="coerce"` and pandas' own errors for text that will not read and for rows at more than one offset all match pandas. A column whose rows share one shape still reads in a single pass through the core.

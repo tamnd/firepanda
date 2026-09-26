@@ -27,6 +27,7 @@ is wrong by up to eleven months with nothing anywhere reporting it. Passing
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
@@ -326,18 +327,47 @@ def test_a_column_of_instants_passes_through(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_the_answer_is_a_series_where_pandas_gives_an_index(firepanda: ModuleType) -> None:
-    """The one divergence a caller meets on their first line, asserted on purpose.
-
-    firepanda's `Index` is a labels object with none of the calendar members a
-    `DatetimeIndex` carries, so answering one would be a name that resolves and
-    then has nothing on it. A `Series` has the `dt` accessor, which is what
-    almost every use of this reaches for next. See #354.
-    """
+@pytest.mark.parametrize(
+    ("build", "kind"),
+    [
+        (lambda m: m.to_datetime(DATES), "DatetimeIndex"),
+        (lambda m: m.to_datetime(tuple(DATES)), "DatetimeIndex"),
+        (lambda m: m.to_datetime(m.Index(["2026-01-01"], name="w")), "DatetimeIndex"),
+        (lambda m: m.to_datetime(m.Series(DATES)), "Series"),
+        (lambda m: m.to_datetime("2026-01-01 10:00"), "Timestamp"),
+        (lambda m: m.to_datetime(1767225600, unit="s"), "Timestamp"),
+    ],
+)
+def test_the_answer_has_the_shape_pandas_gives(
+    firepanda: ModuleType, build: Callable[[Any], Any], kind: str
+) -> None:
+    """A list, a tuple or an index gives an index, a column a column and one value one instant."""
     import pandas as pd
 
-    assert isinstance(firepanda.to_datetime(DATES), firepanda.Series)
-    assert isinstance(pd.to_datetime(DATES), pd.DatetimeIndex)
+    found, expected = build(firepanda), build(pd)
+    assert type(found).__name__ == type(expected).__name__ == kind
+    assert str(found if kind == "Timestamp" else found.tolist()[0]) == str(
+        expected if kind == "Timestamp" else expected.tolist()[0]
+    )
+    assert getattr(found, "name", None) == getattr(expected, "name", None)
+
+
+@needs_pandas
+def test_nothing_to_read_is_seconds(firepanda: ModuleType) -> None:
+    """pandas reads a list or a column of nothing but gaps as instants at seconds."""
+    import pandas as pd
+
+    for build in (
+        lambda m: m.to_datetime([]),
+        lambda m: m.to_datetime([None, "NaT"]),
+        lambda m: m.to_datetime(m.Series([None, None], dtype=float)),
+    ):
+        assert str(build(firepanda).dtype) == str(build(pd).dtype) == "datetime64[s]"
+
+
+def test_one_missing_value_is_none(firepanda: ModuleType) -> None:
+    """pandas answers `NaT` and firepanda, which has no missing instant of its own, None."""
+    assert firepanda.to_datetime(None) is None
 
 
 def test_it_is_exported_from_the_package(firepanda: ModuleType) -> None:

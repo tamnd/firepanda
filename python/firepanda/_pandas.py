@@ -133,6 +133,10 @@ def _temporal_series(values: list[Any], label: Any) -> Any:
         if _temporal(values.dtype) is None:
             return None
         return values._inner.relabel(label)
+    if isinstance(values, IndexMixin):
+        if _temporal(values.dtype) is None:
+            return None
+        return values.to_series().reset_index(drop=True)._inner.relabel(label)
     if not isinstance(values, (list, tuple)):
         return None
     read = _inward(list(values))
@@ -10630,6 +10634,9 @@ class SeriesMixin:
         """
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
+        if name is None and isinstance(data, IndexMixin):
+            # pandas names a column built from an index after the index.
+            name = data.name
         typed = None
         try:
             if keyed:
@@ -22401,13 +22408,9 @@ def to_datetime(
     five are implemented, one is accepted and has no effect, and four are
     refused by name, which is the pattern `_refuse` exists for.
 
-    What it answers is a `Series` and pandas answers a `DatetimeIndex` when it
-    is handed a list. That is the one difference a caller will meet on the
-    first line they write, and it is not hidden: firepanda's `Index` is a
-    labels object with none of the calendar members a `DatetimeIndex` carries,
-    so answering one would be a name that resolves and then has nothing on it,
-    which document 07 argues is worse than a name that resolves to something
-    honest. See #354.
+    What it answers follows what it is handed, as in pandas: a column for a
+    column, a `DatetimeIndex` for a list, a tuple or an index, and a
+    `Timestamp` for a single value, or None where pandas answers `NaT`.
 
     The format is worked out from the first row that is not missing, and only
     ISO 8601 is recognised. pandas guesses more than that, including
@@ -22440,8 +22443,9 @@ def to_datetime(
             parameter means not changing the answer.
 
     Returns:
-        A series of instants, null where the input was null and, under
-        `errors="coerce"`, wherever a row would not read.
+        Instants, null where the input was null and, under `errors="coerce"`,
+        wherever a row would not read: a series for a series, an index for
+        anything else that holds several values, and one instant for one.
 
     Raises:
         NotImplementedError: For the four refused arguments and for a format
@@ -22450,6 +22454,30 @@ def to_datetime(
             carrying more than one offset with no `utc`, and for an `errors`
             that is neither of the two words.
     """
+    from ._datetime import DatetimeIndex
+
+    options = (errors, dayfirst, yearfirst, utc, format, exact, unit, origin)
+    if isinstance(arg, SeriesMixin):
+        return _instants(arg, *options)
+    if isinstance(arg, str) or not hasattr(arg, "__iter__"):
+        return _instants([arg], *options).tolist()[0]
+    return DatetimeIndex(
+        _instants(arg, *options), name=arg.name if isinstance(arg, IndexMixin) else None
+    )
+
+
+def _instants(
+    arg: Any,
+    errors: str,
+    dayfirst: bool,
+    yearfirst: bool,
+    utc: bool,
+    format: str | None,
+    exact: Any,
+    unit: str | None,
+    origin: Any,
+) -> Any:
+    """`to_datetime` as a column whatever it was handed, which the public name reshapes."""
     from ._frame import Series
 
     _held_at("dayfirst", dayfirst, False, "firepanda guesses ISO 8601 and nothing else")
@@ -22463,7 +22491,16 @@ def to_datetime(
     if errors not in ("raise", "coerce"):
         raise ValueError(f"errors must be one of 'raise' or 'coerce', not {errors!r}")
 
-    column = arg if isinstance(arg, SeriesMixin) else Series(arg)
+    if isinstance(arg, SeriesMixin):
+        column = arg
+        if str(arg.dtype) == "float64" and len(arg) and bool(arg.isna().all()):
+            # A column of nothing but gaps is floats here and objects in pandas,
+            # and pandas reads it as instants at seconds, as it does a list.
+            column = Series([None] * len(arg), index=arg.index, name=arg.name, dtype="str")
+    else:
+        values = arg.tolist() if hasattr(arg, "tolist") else list(arg)
+        blank = all(_row_dates.missing(value) for value in values)
+        column = Series(values, dtype="str" if blank else None)
     if format in ("mixed", "ISO8601"):
         return _dates_by_row(column, format == "mixed", errors == "coerce", utc)
     try:

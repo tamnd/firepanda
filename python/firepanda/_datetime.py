@@ -38,11 +38,11 @@ from ._pandas import (
     _NONEXISTENT_REFUSAL,
     NO_DEFAULT,
     _held_at,
+    _instants,
     _is_default,
     _label_of,
     _on_the_clock,
     _spelled,
-    to_datetime,
 )
 from .errors import InvalidArgumentError, translate
 
@@ -87,7 +87,9 @@ class DatetimeIndex(Index):
         rest refused by name for the reason `_refuse` gives. What reads the
         values is `to_datetime`, which is the one parser in the library, so an
         index of instants and a column of instants are built by the same rules
-        and there is no second guesser to keep in step.
+        and there is no second guesser to keep in step. Text is read the way
+        `format="mixed"` reads it, every row with its own format, because that
+        is what pandas' constructor does.
 
         Args:
             data: The instants. Text, whole numbers, a firepanda series of
@@ -153,7 +155,9 @@ class DatetimeIndex(Index):
             return
         values: Any = data.tolist() if isinstance(data, Index) else data
         if not isinstance(values, Series) or not _is_temporal(values.dtype):
-            values = to_datetime(values)
+            values = _instants(
+                values, "raise", False, False, False, "mixed", NO_DEFAULT, None, "unix"
+            )
         try:
             self._inner = values._inner.to_index(label)
         except Exception as error:
