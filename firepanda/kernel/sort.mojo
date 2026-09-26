@@ -357,7 +357,7 @@ def argsort_any_into(
     # A column held as codes sorts on its categories' ranks. The categories are
     # few and are sorted once, and the rows then sort on an int32 each, which
     # radixes, rather than on their strings, which compare.
-    if not col.is_flat():
+    if col.is_coded():
         argsort_any_into(_ranks(col), order, descending, nulls_first)
         return
     # Before the dispatch, because uint8 is in ORDERED and a string column would
@@ -1204,7 +1204,7 @@ def is_sorted_any(
     Raises:
         If the column's dtype is not one firepanda can order.
     """
-    if not col.is_flat():
+    if col.is_coded():
         return is_sorted_any(_ranks(col), descending, nulls_first)
     if col.is_string():
         return _strings_are_sorted(col.strings(), descending, nulls_first)

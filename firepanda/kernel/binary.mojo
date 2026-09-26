@@ -1261,7 +1261,7 @@ def binary_value_any(
         return _dictionary_const_erased(a, b, op, value_on_left)
     # A string column held as codes compares each category once and spreads
     # the answers over the rows, which is the reason to hold it that way.
-    if not a.is_flat() and op.is_comparison():
+    if a.is_coded() and op.is_comparison():
         return a.through_codes(
             binary_value_any(a.distinct(), b, op, value_on_left)
         )

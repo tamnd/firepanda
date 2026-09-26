@@ -7,10 +7,17 @@ the payload side of a view is exercised, and a null row, so the codes' validity
 is.
 """
 
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.encoding import Encoding
 from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
@@ -79,6 +86,26 @@ def test_moving_rows_keeps_the_encoding() raises:
     assert_false(kept.is_flat())
     assert_true(kept.type == LogicalType.STRING)
     same_text(kept, filter_any(flat, mask))
+
+
+def test_only_the_codes_take_the_codes_path() raises:
+    # The paths for the codes ask for the dictionary encoding by name. A column
+    # in an encoding they were not written for has to meet the check at the
+    # values and be refused, not have its buffer read as codes.
+    var col = status()
+    assert_true(col.is_coded())
+    assert_false(col.decoded().is_coded())
+    col.encoding = Encoding(7)
+    assert_false(col.is_coded())
+    with assert_raises(contains="call decoded() first"):
+        _ = take_any(col, [0, 1])
+    var picks: List[UInt32] = [0, 1]
+    with assert_raises(contains="call decoded() first"):
+        _ = gather_any(col, picks)
+    with assert_raises(contains="call decoded() first"):
+        _ = distinct_count_any(col)
+    with assert_raises(contains="call decoded() first"):
+        _ = is_sorted_any(col)
 
 
 def test_a_comparison_with_a_constant_matches_the_flat_one() raises:

@@ -374,7 +374,7 @@ def is_in_any(a: AnyArray, values: AnyArray) raises -> Array[DType.bool]:
     """
     if not values.is_flat():
         return is_in_any(a, values.decoded())
-    if not a.is_flat():
+    if a.is_coded():
         return a.through_codes(
             AnyArray(is_in_any(a.distinct(), values))
         ).as_typed[DType.bool]()

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: the paths written for a dictionary encoded column ask for it by name
+
+Fifty one kernels and string methods that have a fast path over a dictionary encoded column's codes used to take it for any column not held flat. They now ask `is_coded()`, so a column in an encoding they were not written for reaches the check in front of the values and is refused with a message naming `decoded()`, rather than having its buffer read as codes. Nothing is held in such an encoding yet. This is the ground the next encoding of #979, a column held as positions into another, needs before anything builds one.
+
 ### Changed: an exchanged inner join sorts its pairs back on every core
 
 When an inner join's left side is much shorter than its right, the join builds on the left and walks the right, then counting sorts the pairs back into left row order so the exchange stays invisible. That sort ran on one thread. On TPC-H q2, 2,000 European suppliers against 800,000 part supplies, it was 7% of the query's cycles. A pairing of at least 131,072 entries now gets cut into one run per worker. Each run counts its own left rows, the prefix sum goes over the left rows and, within a row, over the runs in order, and each run scatters into places no other run writes, so the order is the same stable one the single thread gave. The two output lists are no longer zero filled before the scatter overwrites them. On a busy 8 core VM the sort dropped to under 2% of q2's cycles, spread across the cores, and q2's best time went from 102.6 to 84.5 ms with the two builds run back to back.
