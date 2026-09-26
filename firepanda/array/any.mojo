@@ -541,6 +541,20 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         return self.encoding == Encoding.FLAT
 
+    def is_coded(self) -> Bool:
+        """Reports whether the column is held as codes into its distinct strings.
+
+        This is the dictionary encoding, which is not the category dtype that
+        `is_dictionary` asks about. A kernel with a path for the codes asks
+        this rather than `not is_flat()`, so that a column in some other
+        encoding misses that path and meets `require_flat`, which names the
+        encoding, instead of having its values read as codes.
+
+        Returns:
+            True if the column's encoding is the dictionary one.
+        """
+        return self.encoding == Encoding.DICTIONARY
+
     def require_flat(self) raises:
         """Raises unless the column's values are laid out flat.
 

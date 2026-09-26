@@ -1316,7 +1316,7 @@ def factorize_any(col: AnyArray) raises -> KeyCodes:
     """
     # A column held as codes into distinct values groups the same way its codes
     # do, and the codes are small integers the direct route takes.
-    if not col.is_flat():
+    if col.is_coded():
         return factorize_any(col.code_column())
     # Before the dispatch, because uint8 is in ALL and a string column would
     # match it and group on the first byte of each view, which puts every name

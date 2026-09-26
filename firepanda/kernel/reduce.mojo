@@ -302,7 +302,7 @@ def distinct_count_any(col: AnyArray) raises -> Int:
         return 0
     # Before the numeric dispatch, because uint8 is in ALL and a string column
     # would match it and count distinct first bytes.
-    if not col.is_flat():
+    if col.is_coded():
         return _distinct_codes(col)
     if col.is_string():
         return distinct_strings(col.strings())
