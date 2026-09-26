@@ -435,9 +435,20 @@ def test_whole_numbers_are_read_the_way_the_parser_reads_them(firepanda: ModuleT
 
 @needs_pandas
 def test_a_column_of_text_is_refused_as_labels(firepanda: ModuleType) -> None:
-    """Text that is not an instant is refused by the parser and not by this."""
-    with pytest.raises(Exception, match="temporal"):
+    """Text that is not an instant raises pandas' own error for text it cannot read."""
+    with pytest.raises(ValueError, match=r"^Unknown datetime string format"):
         firepanda.DatetimeIndex(["not an instant"])
+
+
+@needs_pandas
+def test_text_is_read_every_row_with_its_own_format(firepanda: ModuleType) -> None:
+    """pandas' constructor reads each label on its own, unlike `to_datetime`."""
+    import pandas as pd
+
+    labels = ["2024-01-03", "2024-01-06 19:00:00", "01/02/2024", None]
+    assert [str(v) for v in firepanda.DatetimeIndex(labels).tolist()[:3]] == [
+        str(v) for v in pd.DatetimeIndex(labels).tolist()[:3]
+    ]
 
 
 @needs_pandas
