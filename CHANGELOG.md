@@ -75,6 +75,7 @@ When an inner join's left side is much shorter than its right, the join builds o
 
 - `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
 - `str.join` puts a separator between the characters of every row, and `str.wrap` breaks every row into lines with `textwrap` and every argument pandas takes.
+
 ### Added: POSITIONAL JOIN
 
 `SELECT ... FROM a POSITIONAL JOIN b` now runs, as in DuckDB. Row i of the left side is put beside row i of the right side, and the answer is as long as the longer side, with the shorter side's columns null past its end. It takes no `ON` or `USING`. A new `Positional` operator holds the right side and counts the left rows as they go past, then hands out any right rows left over once the left side is done. A filter over the join stays above it, because moving it under would change which rows line up.
@@ -95,6 +96,7 @@ A `RIGHT JOIN` and a `FULL JOIN` now run instead of being refused when the plan 
 ### Changed: an inner or semi join steps over probe rows that matched nothing
 
 When the built side of an inner or semi join is small, most probe rows usually find nothing: TPC-H q8 probes six million lines against about 1,300 parts and under one in a hundred hits. The pairing walk still visited every row, twice, once to count and once to write. It now reads sixteen probe codes at a time and steps past the block in one go when all sixteen are the miss code, which has no rows behind it. Left, outer and anti joins walk every row as before, since a miss there still makes a row. On a busy 8 core VM this cut the instructions per run by about a fifth on q8 and a sixth on q5. The load on that box was too high for the wall clock to show it cleanly.
+
 ### Added: merge_ordered
 
 - `firepanda.merge_ordered` joins two frames sorted by the key, the way `pandas.merge_ordered` does, as an outer join by default and any of the four joins with `how`. `fill_method="ffill"` carries each side's last row down over the rows where it had no match, keeping an integer column integer once no gap is left, and `left_by` or `right_by` merges group by group and stacks the pieces in the order their values first appear. The mistakes pandas refuses raise its errors in its words.
@@ -127,6 +129,7 @@ When the built side of an inner or semi join is small, most probe rows usually f
 ### Fixed: instants and spans cast to text
 
 `astype(str)` on a column, a frame or an index of instants or spans wrote the count of units since the epoch, `1577836800000000`, where pandas writes `2020-01-01`. It now writes what pandas writes: the date alone when every instant is at midnight, as many fraction digits as the finest instant needs, a zone's offset at the end, and each span as `1 days 02:03:04`, with missing values left missing.
+
 ### Fixed: a frame from labels or names with no values
 
 `DataFrame(index=...)`, `DataFrame(columns=...)` and the two together dropped what they were given and built a frame with no rows and no columns. They now keep the rows and the columns the way pandas does, with every cell missing. pandas makes such columns objects, which firepanda does not have, so they are floats unless `dtype=` names another type.
@@ -232,6 +235,7 @@ When the built side of an inner or semi join is small, most probe rows usually f
 `Series.str.cat(others)` answers a column now instead of refusing. `others` is read the way pandas reads it: a series, a frame's columns, an index, a numpy array of one or two dimensions, a list of strings, or a list of series, indexes and arrays. The pieces meet by position when every label list is the column's own and by label under `join` otherwise, `left`, `right`, `inner` or `outer` in pandas' order. A row with a missing piece is missing unless `na_rep` stands in for it, and a piece that is not text, a list of the wrong length, a bare string and an unknown `join` raise pandas' class with pandas' message. The rows are joined in the interpreter, since the engine has no row by row concatenation yet.
 
 A series built with a name that is not text, `Series(values, name=4)`, answers the number now rather than `'4'`, the way `rename(4)` already did.
+
 ### Changed: a lasting tuple is written a key at a time
 
 `LastingTuple` wrote each row's key tuple a row at a time across the keys and asked its lists which key was which on every row, paying a bounds check each time, which was about a third of the write on ClickBench q18. The size and write passes now go a key at a time down each morsel with a cursor per row, and a four or eight byte key is stored as one word rather than through memcpy. The bytes are the same as before. `_bytes_equal` also reads the bytes past its last whole word as one more overlapping word instead of one at a time. On a six core Linux machine that was busy with other work, alternating the old and new driver, q18 went from 228 to 200 ms at best and 267 to 230 at the median, q39 from 257 to 214 at best, and every answer matched.
@@ -283,6 +287,7 @@ A frame and a column now have `div`, `divide`, `rdiv`, `multiply` and `subtract`
 ### Added: a semi or anti join asks the rest of its condition, and TPC-H q21 runs
 
 A semi or an anti join, and the correlated `EXISTS` and `NOT EXISTS` that become one, now take a condition with more than equalities in it, such as `EXISTS (SELECT 1 FROM lineitem l2 WHERE l2.l_orderkey = l1.l_orderkey AND l2.l_suppkey <> l1.l_suppkey)`. The equalities pair the rows up and the rest is asked of each pairing, and a left row is kept when some pairing passes (semi) or none does (anti). The plan shows it as `JOIN semi [a = k] where k > b` and the JSON form writes it under `"where"`. This is the last piece TPC-H q21 needed, so all 22 TPC-H queries now answer the same as DuckDB (#816).
+
 ### Added: `DataFrame.query` and `DataFrame.eval`
 
 `query` keeps the rows where an expression over the columns is True, and `eval` answers the value of one, or the frame with a column assigned for `c = a + b`. The expression is read with Python's own parser and pandas' three changes: `&` and `|` bind looser than a comparison, a name in backticks may hold spaces, and `@name` reads a variable of the caller, or of `local_dict` and `global_dict`. Chains such as `1 < a < 4`, membership with `in`, `not in` and `==` against a list, the row labels as `index` or by their name, `abs`, and methods such as `b.isna()` and `s.str.startswith('x')` all work, each node worked out over whole columns. A name that is nothing the query can read raises the new `firepanda.errors.UndefinedVariableError`, a subclass of NameError, and the nodes pandas does not read, such as `is` and `if else`, raise NotImplementedError as pandas does. `inplace` works for both.
@@ -294,6 +299,7 @@ A semi or an anti join, and the correlated `EXISTS` and `NOT EXISTS` that become
 ### Fixed: a group fill leaves NaN, not a null, in a float column
 
 A row that `groupby(...).ffill()` or `bfill()` could not fill, because its key is missing or its group has no value yet, is NaN in a float column now, which is what pandas holds there. Before it was a null, which reads the same through `isna` but is a different value in the column.
+
 ### Added: `DataFrame.melt` and `pandas.melt`
 
 `melt` turns a frame long. The id columns repeat once for each value column, a new column holds the name of the column each row came from, and another holds the values, stacked one column after another. It picks columns by default the way pandas does, takes `var_name` from the column labels' own name, and keeps the row labels with `ignore_index=False`, repeated labels included. The stacked values widen the way `concat` widens them. A mix that pandas answers with an object column is refused, and that includes a bool column next to a number column, which pandas' melt turns into object even though its concat of frames does not. A missing column raises pandas' KeyError, and a `value_name` that names an existing column raises its ValueError. `python/tests/test_melt.py` checks all of this against pandas.
@@ -301,9 +307,11 @@ A row that `groupby(...).ffill()` or `bfill()` could not fill, because its key i
 ### Fixed: `kurt` over a column with an infinity answers NaN
 
 An infinity makes the mean NaN and every moment NaN with it, and the sums skipped those NaNs, so `kurt` answered zero where pandas answers NaN. The moments are now summed without skipping, and `python/tests/test_describe.py` checks two columns with infinities against pandas.
+
 ### Added: group ffill, bfill, pct_change and filter
 
 `groupby(...).ffill()` and `bfill()` fill each missing value from the last or next value in its group, and `limit` stops after that many missing rows in a row. A row whose key is missing answers missing, and an integer column that gets a missing value widens to float64, as it does in pandas. `pct_change` divides each value by the group's own shift and subtracts one, with no fill first, as pandas 3 does, and refuses `freq`. `filter` calls the function once per group on the group's rows and keeps the rows of the groups it answers True for. On a frame, an answer that is not one flag raises pandas' TypeError, and on a column any truthy value keeps the group. `dropna=False` is refused. All four carry repeated row labels through unchanged, and `python/tests/test_group_fills.py` checks them against pandas.
+
 ### Changed: text is hashed sixteen bytes a step in two lanes
 
 `hash_bytes`, which every text key goes through on its way into a group by, a join, a factorize or an `isin`, used to take a word of eight bytes at a time through the whole splitmix finalizer, so a key was one long chain of multiplies. It now takes sixteen bytes a step in two lanes of xxHash64's round, reads the bytes left over as overlapping words rather than one at a time, and finishes with the same `mix`. A 90 byte URL hashes in 5 ns rather than 20 and a short key in 1.5 ns rather than 2.2, with the same spread over both the low and the high bits.
@@ -329,9 +337,11 @@ A group by now keeps the first or last `n` rows of every group with `head` and `
 ### Added: `groupby(...).agg` and `aggregate` by name, and `NamedAgg`
 
 A group by now takes `agg` in the four shapes pandas reads when every function is a name: one name answers what the method of that name answers, a list of names over one column answers a column a name, a mapping of column to name answers a column a column, and keywords of `name=(column, function)` or `name=NamedAgg(column, function)` answer a column a keyword. Each column is that method run on its own, so the numbers and types are the method's, and the keys come back as labels or as columns the way `as_index` says. `firepanda.NamedAgg` has pandas 3's fields and printed form, and a pandas one is read too. A mapping handed to one column's `agg` raises `firepanda.errors.SpecificationError`, which is new and carries pandas' name. A Python function, and a list over a frame, which pandas answers with two levels of column labels, are refused by name. `python/tests/test_group_agg.py` checks 47 cases against pandas.
+
 ### Changed: a text filter or gather that keeps enough of the payload shares it
 
 A filter or gather of a text column copied every kept string longer than twelve bytes into a payload of its own, one `memcpy` a row. When the rows it keeps hold at least an eighth of the input's payload bytes it now copies only the sixteen byte views and hands the output the input's payload, which is refcounted, so the bytes stay alive as long as either column needs them. Below an eighth it still copies, so a filter that keeps a handful of rows out of a large column does not hold the rest in memory. Filtering TPC-H's 42,000 q22 customers takes 136 us rather than 920 us for the comment and 127 us rather than 715 us for the address.
+
 ### Fixed: an operator against a moment or a span keeps the column's name
 
 `s - s.min()`, `s > datetime(2024, 1, 1)` and the other operators with a `Timestamp`, `datetime`, `Timedelta` or `timedelta` on one side answered a series with no name, because the scalar was lined up as an unnamed column first. It is now lined up under the column's own name, so the answer keeps it the way pandas does and the way an operator against a number already did.
@@ -343,6 +353,7 @@ A filter or gather of a text column copied every kept string longer than twelve 
 ### Added: `DataFrame(...)` and `Series(...)` read every shape of data pandas does
 
 `DataFrame` now takes a list of records, a list of rows with `columns=`, a two dimensional numpy array with `columns=` and another frame, and `index=` and `columns=` beside any of them. A single value in a mapping is repeated down the rows, series in a mapping are lined up on the union of their labels as pandas lines them up, and a category or an instant series keeps its type. `Series` takes `index=`, one value repeated along it, and a series with an index, which pandas reads as a reindex. A numpy array keeps its own type, int32, uint8 and `datetime64[s]` included, and numpy scalars in a list are read as the values they hold. A shape that would need a column named 0, a column of objects or a numpy array of spans is refused by name, and the wrong lengths raise pandas' own messages. `python/tests/test_construct_shapes.py` checks 56 cases against pandas.
+
 ### Changed: a semi or anti join marks the keys the other side has
 
 A semi, anti or mark join only asks whether the other side has a key, never which of its rows hold it, but the table it probed was the one an inner join uses, built by counting, prefix summing and scattering every row of that side into buckets. It now makes one pass that marks each key the side has, on every core once the side is tall enough, and the streaming join does the same for these three kinds. At SF1 on a laptop, TPC-H q4, which keeps orders that have a late lineitem, goes from about 28 ms to 8.5 ms, and q22's anti join against 1.5 million orders goes from 6.5 ms to 1.3 ms, which takes the query from about 21 ms to 14.5 ms.
@@ -350,6 +361,7 @@ A semi, anti or mark join only asks whether the other side has a key, never whic
 ### Changed: a small filter or gather of text writes its column directly
 
 A filter or gather of a text column below the size where it splits across cores went through `StringBuilder`, which grows two lists a row and then copies both into the finished column. It now runs the same count and copy the split route does, as one worker on the calling thread. Filtering 42,000 rows of TPC-H customers takes 175 us rather than 485 us for the two byte country code and 715 us rather than 1,180 us for the address, and q22 at SF1 goes from about 26 ms to 24 ms.
+
 ### Changed: a regex over a column cuts it finer and walks a greedy repeat in a loop
 
 A regex kernel over a column (match, count, extract and replace) used to hand the cores one piece per 128K rows, which is one piece per streaming chunk, so a chunk was walked on one core. It now cuts a column into about 256 pieces of at least 4096 rows each. The backtracker walks a greedy repeat of one character, such as `[^/]+` or `.*`, in a loop that pushes only the arms leaving the repeat, where it used to push and pop the arm going round once per character, and it keeps its stack height in a counter rather than shortening its lists. A capture rewrite of 4000 URLs with `^https?://(?:www\.)?([^/]+)/.*$` goes from about 1000 ns a row to about 700.
@@ -411,6 +423,7 @@ A `GROUP BY` over one integer key whose values spread wider than the direct tabl
 ### Changed: a sum of an integer column and a constant builds no column
 
 A whole input `SUM(x + c)`, `SUM(x - c)`, `SUM(c - x)` or `SUM(x * c)` over an integer column used to build `x + c` for the chunk and then add it up, which on ClickBench q29 is ninety columns built and read back per chunk, each one a cast of the source to int64 first. `reduce_value_any` in `kernel/fold.mojo` runs the operation inside the sum instead: each row is read, widened, given the operation and added, and nothing is written in between. This is not the algebra 0.8.29 had and 0.8.30 took out, and each of the ninety sums still does its own additions over every row. Integer sums wrap and so do not depend on the order of the additions, which is why the answer is the same bit for bit, and why float columns, divisions and the other reductions stay on the old route. On a loaded 10 core Mac, q29 over 1M rows goes from 146 ms at best to 37 ms, and user CPU time drops by three quarters. All 43 ClickBench answers are unchanged.
+
 ### Changed: a hashed join table keeps a bit per key value when most probes miss
 
 A join build side whose integer keys are too spread out for a table indexed by value now also keeps one bit per value over its range, when the keys fill at most a quarter of that range and the bits are no larger than the hash table. A probe row whose bit is clear is a miss without hashing it into the table, and each morsel stops asking the bits after the first chunk that lets more than half its rows through, so a join where nearly every row hits pays for one chunk of bit tests in sixty four. Ten million probe rows against twenty thousand keys over a million values went from 17.5 to 4.7 ms when the probes miss and stayed at 8.7 to 9.5 ms when they all hit. Ten of the twenty two TPC-H queries keep a sieve at SF1, and over four paired rounds on a loaded laptop q12 ran 1.24 times as fast, q5 and q7 1.22, q8 and q9 1.14 and q4 1.11, while the other four stayed inside the noise band of the queries the change does not touch.

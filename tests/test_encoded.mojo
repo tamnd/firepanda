@@ -306,7 +306,9 @@ def test_a_frame_with_a_column_held_as_codes_joins_and_writes() raises:
     var bare = frame(status().decoded()).group_by(by^, specs^, False, True)
     same_text(grouped[1], bare[1])
     assert_equal(
-        String(from_utf8=Span(write_csv_bytes(frame(status()), WriteOptions()))),
+        String(
+            from_utf8=Span(write_csv_bytes(frame(status()), WriteOptions()))
+        ),
         String(
             from_utf8=Span(
                 write_csv_bytes(frame(status().decoded()), WriteOptions())
