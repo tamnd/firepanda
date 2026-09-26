@@ -6826,14 +6826,17 @@ struct Group(Movable):
 
         # Same reversed, chunk major layout `_stripe` produces, for the same
         # reason: `finish` pops `width` arrays off the back and has one chunk in
-        # column order without copying anything.
+        # column order without copying anything. The pieces are windows, which
+        # the cuts on whole morsels allow. A slice rebuilt a text key column
+        # element by element, which on q33's quarter of a million URLs was a
+        # second copy of every key for no reader's benefit.
         var total = len(out[0])
         var pieces = (total + MORSEL_ROWS - 1) // MORSEL_ROWS
         for c in range(pieces - 1, -1, -1):
             var begin = c * MORSEL_ROWS
             var stop = min(begin + MORSEL_ROWS, total)
             for i in range(self.width - 1, -1, -1):
-                self.emit.append(out[i].slice(begin, stop))
+                self.emit.append(out[i].window(begin, stop - begin))
 
 
 struct Reduce(Movable):
