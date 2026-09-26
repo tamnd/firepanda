@@ -123,6 +123,7 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
+from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.kernel.sort import is_sorted_any
 
 from .keys import align_keys
@@ -816,7 +817,7 @@ def join_indices[
     return paired^
 
 
-def _by_left_row(var paired: JoinIndices, left_rows: Int) -> JoinIndices:
+def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:
     """Puts a pairing that came back in right row order into left row order.
 
     A counting sort rather than a comparison sort, because the key is a left row
@@ -830,6 +831,17 @@ def _by_left_row(var paired: JoinIndices, left_rows: Int) -> JoinIndices:
     order a join without the exchange produces, which is what makes the exchange
     invisible to a caller.
 
+    A tall pairing is sorted on every core. The pairs are cut into one run per
+    worker and each run counts its own left rows, so a left row has one count
+    per run, and the prefix sum goes over the rows and within a row over the
+    runs in order. Every run then scatters into places nobody else writes, and a
+    left row's entries from an earlier run land before a later run's, which is
+    the same stable order the one thread gives. The counts are a list per run as
+    long as the left side, so this waits for a pairing at least half as tall as
+    all of those lists together, which is the case the exchange is for: a short
+    left side matching many right rows. On TPC-H q2, 2,000 European suppliers against
+    800,000 part supplies, the single thread sort was a fifteenth of the query.
+
     Only reachable for an inner join, where every entry names a real row on both
     sides. A kind that can emit a negative left row would need a bucket for it
     and would have to decide where those rows go, and none of them come through
@@ -842,27 +854,85 @@ def _by_left_row(var paired: JoinIndices, left_rows: Int) -> JoinIndices:
     Returns:
         The same pairs in left row order, and in right row order within a left
         row.
+
+    Raises:
+        If a worker raises, which it does not.
     """
     var pairs = len(paired)
     if pairs == 0:
         return paired^
 
-    # Offset by one so that the prefix sum below lands each row's run start in
-    # its own slot rather than the next one's.
-    var starts = List[Int](length=left_rows + 1, fill=0)
-    for i in range(pairs):
-        starts[paired.left_at[i] + 1] += 1
-    for row in range(left_rows):
-        starts[row + 1] += starts[row]
+    var runs = min(worker_count(), pairs // LEFT_MORSEL_ROWS)
+    if pairs < PARALLEL_LEFT_ROWS or runs < 2 or left_rows * runs > 2 * pairs:
+        runs = 1
+    var step = (pairs + runs - 1) // runs
+    # One list of counts per run, laid end to end. A run's counts become the
+    # places its entries go, so each run only ever writes its own stretch.
+    var places = List[Int](length=left_rows * runs, fill=0)
 
-    var left = List[Int](length=pairs, fill=0)
-    var right = List[Int](length=pairs, fill=0)
-    for i in range(pairs):
-        var row = paired.left_at[i]
-        var at = starts[row]
-        starts[row] = at + 1
-        left[at] = row
-        right[at] = paired.right_at[i]
+    def count(run: Int) raises {mut places, imm}:
+        var seat = places.unsafe_ptr().unsafe_offset(run * left_rows)
+        var from_left = paired.left_at.unsafe_ptr()
+        for i in range(run * step, min(run * step + step, pairs)):
+            var row = from_left.unsafe_offset(i).unsafe_load()
+            seat.unsafe_offset(row).unsafe_write(
+                seat.unsafe_offset(row).unsafe_load() + 1
+            )
+
+    # The prefix sum walks the left rows in order and each row's runs in
+    # order. With several runs it is split by left row into as many blocks,
+    # each summed on its own first so that it knows where it starts.
+    var block = (left_rows + runs - 1) // runs
+    var totals = List[Int](length=runs + 1, fill=0)
+
+    def total(b: Int) raises {mut totals, imm}:
+        var at = places.unsafe_ptr()
+        var sum = 0
+        for row in range(b * block, min(b * block + block, left_rows)):
+            for run in range(runs):
+                sum += at.unsafe_offset(run * left_rows + row).unsafe_load()
+        totals[b + 1] = sum
+
+    def settle(b: Int) raises {mut places, imm}:
+        var at = places.unsafe_ptr()
+        var running = totals[b]
+        for row in range(b * block, min(b * block + block, left_rows)):
+            for run in range(runs):
+                var seat = at.unsafe_offset(run * left_rows + row)
+                var here = seat.unsafe_load()
+                seat.unsafe_write(running)
+                running += here
+
+    var left = List[Int](unsafe_uninit_length=pairs)
+    var right = List[Int](unsafe_uninit_length=pairs)
+
+    def scatter(run: Int) raises {mut places, mut left, mut right, imm}:
+        var seat = places.unsafe_ptr().unsafe_offset(run * left_rows)
+        var to_left = left.unsafe_ptr()
+        var to_right = right.unsafe_ptr()
+        var from_left = paired.left_at.unsafe_ptr()
+        var from_right = paired.right_at.unsafe_ptr()
+        for i in range(run * step, min(run * step + step, pairs)):
+            var row = from_left.unsafe_offset(i).unsafe_load()
+            var at = seat.unsafe_offset(row).unsafe_load()
+            seat.unsafe_offset(row).unsafe_write(at + 1)
+            to_left.unsafe_offset(at).unsafe_write(row)
+            to_right.unsafe_offset(at).unsafe_write(
+                from_right.unsafe_offset(i).unsafe_load()
+            )
+
+    if runs == 1:
+        count(0)
+        total(0)
+        settle(0)
+        scatter(0)
+    else:
+        parallel_for(count, runs)
+        parallel_for(total, runs)
+        for b in range(runs):
+            totals[b + 1] += totals[b]
+        parallel_for(settle, runs)
+        parallel_for(scatter, runs)
     return JoinIndices(left^, right^)
 
 
