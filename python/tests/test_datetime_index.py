@@ -337,13 +337,16 @@ def test_the_labels_go_on_a_clock_under_a_policy(
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["tz_localize", "tz_convert"])
-def test_a_zone_that_is_not_a_name_is_refused_by_name(firepanda: ModuleType, kind: str) -> None:
-    """A zone is a string here, because the kernel reads the zone out of one."""
+def test_a_zone_that_is_not_a_name_is_refused_by_name(firepanda: ModuleType) -> None:
+    """A zone to localize to is a string here, because the kernel reads the zone out of one.
+
+    `tz_convert` reads a `tzinfo` as the zone it names, which
+    test_tz_convert_none.py checks against pandas.
+    """
     import datetime
 
     with pytest.raises(NotImplementedError):
-        getattr(made(firepanda), kind)(datetime.UTC)
+        made(firepanda).tz_localize(datetime.UTC)
 
 
 @needs_pandas

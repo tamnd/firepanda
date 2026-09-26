@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _config, _firepanda, _row_dates
-from ._scalars import _inward, _outward, _outward_one, _temporal
+from ._scalars import _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
     DataError,
@@ -70,6 +70,16 @@ if TYPE_CHECKING:
         SeriesGroupBy,
     )
     from ._resample import Resampler
+
+
+def _naive_convert(error: DTypeError) -> DTypeError:
+    """pandas' sentence for converting instants that carry no zone, or the error as it was.
+
+    The core says the same thing and then explains it, and pandas stops after
+    the first sentence, so the explanation is dropped for the words to match.
+    """
+    words = "Cannot convert tz-naive timestamps, use tz_localize to localize"
+    return DTypeError(words) if words in str(error) else error
 
 
 def _beyond_nanoseconds(column: Series) -> None:
@@ -13450,18 +13460,12 @@ class DatetimeMixin:
 
     def _tz_convert(self, tz: Any) -> Series:
         """Reads the same instants against another clock."""
-        if tz is None:
-            raise NotImplementedError(
-                "tz_convert(None) moves the column to UTC and then takes the clock"
-                " off, and taking the clock off is tz_localize(None), so this is"
-                " two operations pandas spells as one"
-            )
-        if not isinstance(tz, str):
-            raise NotImplementedError(
-                "tz has to be a zone name for now, because a tzinfo object is a"
-                " Python object and the kernel reads the zone out of a string"
-            )
-        return self._part("tz_convert", tz)
+        try:
+            if tz is None:
+                return self._part("tz_convert", "UTC").dt.tz_localize(None)
+            return self._part("tz_convert", tz if isinstance(tz, str) else _zone_name(tz))
+        except DTypeError as error:
+            raise _naive_convert(error) from None
 
     def _tz_localize(self, tz: Any, ambiguous: Any, nonexistent: Any) -> Series:
         """Puts the readings on a clock, or takes them off one.

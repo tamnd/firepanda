@@ -42,8 +42,10 @@ from ._pandas import (
     _instants,
     _is_default,
     _label_of,
+    _naive_convert,
     _on_the_clock,
     _spelled,
+    _zone_name,
 )
 from .errors import DTypeError, InvalidArgumentError, translate
 
@@ -453,18 +455,12 @@ class DatetimeIndex(Index):
 
     def tz_convert(self, tz: Any) -> DatetimeIndex:
         """The same instants read against another clock."""
-        if tz is None:
-            raise NotImplementedError(
-                "tz_convert(None) moves the labels to UTC and then takes the"
-                " clock off, and taking the clock off is tz_localize(None), so"
-                " this is two operations pandas spells as one"
-            )
-        if not isinstance(tz, str):
-            raise NotImplementedError(
-                "tz has to be a zone name for now, because a tzinfo object is a"
-                " Python object and the kernel reads the zone out of a string"
-            )
-        return self._moved("tz_convert", tz)
+        try:
+            if tz is None:
+                return self._moved("tz_convert", "UTC").tz_localize(None)
+            return self._moved("tz_convert", tz if isinstance(tz, str) else _zone_name(tz))
+        except DTypeError as error:
+            raise _naive_convert(error) from None
 
     def tz_localize(
         self, tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise"
