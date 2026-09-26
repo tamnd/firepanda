@@ -304,6 +304,8 @@ def distinct_count_any(col: AnyArray) raises -> Int:
     # would match it and count distinct first bytes.
     if col.is_coded():
         return _distinct_codes(col)
+    if col.is_selected():
+        return distinct_count_any(col.decoded())
     if col.is_string():
         return distinct_strings(col.strings())
 

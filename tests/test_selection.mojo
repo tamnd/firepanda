@@ -183,11 +183,15 @@ def test_a_tall_join_holds_positions_and_a_second_join_thins_them() raises:
     var right = DataFrame.from_series(right_cols^)
     var joined = left.join_on(right, ["k"], ["rk"])
     assert_equal(len(joined), n)
-    assert_true(joined.columns[1].only().is_selected())
-    assert_true(joined.columns[3].only().is_selected())
+    assert_true(joined.columns[1].held().is_selected())
+    assert_true(joined.columns[3].held().is_selected())
     # A column handed out as a series is flat.
     assert_true(joined.column("v").values.is_flat())
-    # A method that reads values gathers first.
+    # Reading a column gathers it where it lies, and only that one.
+    assert_equal(joined[1].as_typed_view[DType.int64]()[5], 15)
+    assert_true(joined.columns[1].held().is_flat())
+    assert_true(joined.columns[3].held().is_selected())
+    # So does a method that reads values.
     var specs = List[AggSpec]()
     specs.append(AggSpec("v", AggKind.SUM))
     var summed = joined.group_by(["tag"], specs)

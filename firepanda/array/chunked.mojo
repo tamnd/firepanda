@@ -341,14 +341,11 @@ struct ChunkedArray(Copyable, Movable, Sized):
             out += self.chunks[i].nbytes()
         return out
 
-    def only(ref self) raises -> ref[self.chunks[0]] AnyArray:
-        """Returns the single chunk of a column that has exactly one.
+    def held(ref self) raises -> ref[self.chunks[0]] AnyArray:
+        """Returns the single chunk as it is held, a selection left as one.
 
-        This is the borrow that lets every kernel written against `AnyArray`
-        keep working with a chunked column in front of it. It has to be a
-        reference: a column of ten million rows has one chunk in almost every
-        case that matters, and handing back a copy of it would put a full column
-        copy back into the cost of every operation.
+        For the kernels that move rows, which keep a selection a selection.
+        Anything that reads values calls `only()`.
 
         Returns:
             A reference to the chunk, valid as long as this column is.
@@ -361,6 +358,47 @@ struct ChunkedArray(Copyable, Movable, Sized):
                 "column has "
                 + String(len(self.chunks))
                 + " chunks, not one; call combine() first"
+            )
+        return self.chunks[0]
+
+    def only(ref self) raises -> ref[self.chunks[0]] AnyArray:
+        """Returns the single chunk of a column that has exactly one.
+
+        This is the borrow that lets every kernel written against `AnyArray`
+        keep working with a chunked column in front of it. It has to be a
+        reference: a column of ten million rows has one chunk in almost every
+        case that matters, and handing back a copy of it would put a full column
+        copy back into the cost of every operation.
+
+        A chunk held as a selection is gathered here, in place, the first time
+        it is asked for. A tall join leaves its columns as positions into its
+        inputs so that a column nobody reads is never gathered, and this is the
+        door every read comes through: `DataFrame.__getitem__`, `column_refs`
+        and the frame's own methods. Gathering in place rather than into a copy
+        is what lets it stay a reference, and the values it answers with are the
+        ones the selection stood for, so no reader can tell. The kernels that
+        move rows read `chunks[0]` instead and keep the selection.
+
+        That write goes through a borrow that may be immutable, so two threads
+        must not ask for the same selection at once. Nothing does: the parallel
+        kernels are handed an `AnyArray`, never a column.
+
+        Returns:
+            A reference to the chunk, valid as long as this column is.
+
+        Raises:
+            If the column does not have exactly one chunk.
+        """
+        if len(self.chunks) != 1:
+            raise Error(
+                "column has "
+                + String(len(self.chunks))
+                + " chunks, not one; call combine() first"
+            )
+        if self.chunks[0].is_selected():
+            var gathered = self.chunks[0].decoded()
+            Pointer(to=self.chunks[0]).unsafe_mut_cast[True]()[] = (
+                gathered^
             )
         return self.chunks[0]
 
