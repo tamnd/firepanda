@@ -869,11 +869,10 @@ def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:
     # One list of counts per run, laid end to end. A run's counts become the
     # places its entries go, so each run only ever writes its own stretch.
     var places = List[Int](length=left_rows * runs, fill=0)
-    var from_left = paired.left_at.unsafe_ptr()
-    var from_right = paired.right_at.unsafe_ptr()
 
     def count(run: Int) raises {mut places, imm}:
         var seat = places.unsafe_ptr().unsafe_offset(run * left_rows)
+        var from_left = paired.left_at.unsafe_ptr()
         for i in range(run * step, min(run * step + step, pairs)):
             var row = from_left.unsafe_offset(i).unsafe_load()
             seat.unsafe_offset(row).unsafe_write(
@@ -911,6 +910,8 @@ def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:
         var seat = places.unsafe_ptr().unsafe_offset(run * left_rows)
         var to_left = left.unsafe_ptr()
         var to_right = right.unsafe_ptr()
+        var from_left = paired.left_at.unsafe_ptr()
+        var from_right = paired.right_at.unsafe_ptr()
         for i in range(run * step, min(run * step + step, pairs)):
             var row = from_left.unsafe_offset(i).unsafe_load()
             var at = seat.unsafe_offset(row).unsafe_load()
@@ -932,7 +933,6 @@ def _by_left_row(var paired: JoinIndices, left_rows: Int) raises -> JoinIndices:
             totals[b + 1] += totals[b]
         parallel_for(settle, runs)
         parallel_for(scatter, runs)
-    _ = paired^
     return JoinIndices(left^, right^)
 
 
