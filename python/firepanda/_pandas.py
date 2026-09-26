@@ -18236,9 +18236,7 @@ class IndexMixin:
             if isinstance(key, (list, tuple)):
                 picks = list(key)
                 if picks and all(isinstance(k, bool) for k in picks):
-                    return made._wrap(
-                        self._inner.take([i for i, keep in enumerate(picks) if keep])
-                    )
+                    return made._wrap(self._inner.take([i for i, keep in enumerate(picks) if keep]))
                 return made._wrap(self._inner.take([int(k) for k in picks]))
         except Exception as error:
             raise translate(error) from None
