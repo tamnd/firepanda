@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a lasting map counts and scatters its buckets through a pointer
+
+The pass that sorts a chunk's rows by part indexed a list of counters on every row, which checked the bound and reloaded the list's length each time. It now keeps its morsel's counters through a pointer. On ClickBench q15 the two passes went from about 15% of the query's CPU to about 8%, and the best time from 31.8 to 29.4 ms on a six core Linux machine busy with other work, with every answer the same.
+
 ### Added: to_datetime guesses a format from the first row the way pandas does
 
 `to_datetime` with no format used to read ISO 8601 and refuse anything else. It now guesses a format from the first value that is not missing, as pandas' `guess_datetime_format` does, and holds every row to it, so `01/02/2026`, `Jan 2, 2024`, `31.12.2024` and `Sat, 06 Jan 2024 10:00:00 +0000` read as they do in pandas. When no format can be guessed each row is read on its own, as pandas does. A strptime format the core does not read, such as one with `%B`, `%I` and `%p`, `%j` or `%Z`, is read the same way, with pandas' words for a value that does not match, for data left over, and for a day past the end of its month. Labels in `read_json` are still read as ISO 8601 only, which is what pandas does there.
