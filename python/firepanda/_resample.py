@@ -92,7 +92,7 @@ def _step(rule: Any) -> tuple[int, bool]:
         raise InvalidArgumentError(f"Invalid frequency: {rule}")
     length = float(count) * _NANOS[unit] if count else _NANOS[unit]
     if length == 0:
-        raise ZeroDivisionError("division by zero")
+        raise ZeroDivisionError("integer modulo by zero")
     if length != int(length):
         raise InvalidArgumentError(f"Invalid frequency: {rule}")
     return int(length), unit == "D"
