@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: at_time, between_time and asof on a column and a frame
+
+`Series` and `DataFrame` now have `at_time`, `between_time` and `asof`. The first two choose rows by the time of day of labels that are instants, through the index indexers, and raise pandas' `Index must be DatetimeIndex` on any other labels. `asof` finds the last row at or before each label that holds values, skipping missing values on a column and rows with a missing value in `subset` on a frame. One label answers a value or a row named by the label, several answer a column or a frame on them, and rows that found nothing come back missing with whole numbers widened to floats, as in pandas.
+
 ### Changed: the paths written for a dictionary encoded column ask for it by name
 
 Fifty one kernels and string methods that have a fast path over a dictionary encoded column's codes used to take it for any column not held flat. They now ask `is_coded()`, so a column in an encoding they were not written for reaches the check in front of the values and is refused with a message naming `decoded()`, rather than having its buffer read as codes. Nothing is held in such an encoding yet. This is the ground the next encoding of #979, a column held as positions into another, needs before anything builds one.

@@ -5342,6 +5342,131 @@ def _valid_label(owner: Any, present: Any, last: bool) -> Any:
     return labels[-1] if last else labels[0]
 
 
+_INCLUSIVE = {
+    "both": (True, True),
+    "neither": (False, False),
+    "left": (True, False),
+    "right": (False, True),
+}
+"""Which ends of `between_time` a spelling of `inclusive` takes in."""
+
+
+def _time_rows(owner: Any, axis: Any, pick: Callable[[Any], list[int]]) -> Any:
+    """The rows, or on a frame the columns, whose labels' times of day `pick` chooses.
+
+    `at_time` and `between_time` are the index's two time of day indexers
+    with a `take` after them, and a frame's labels come back as a plain
+    `Index` whatever they hold, so the labels are read as instants here when
+    they are instants and refused with pandas' words when they are not.
+    """
+    from ._datetime import DatetimeIndex
+    from ._frame import Index
+
+    kind = type(owner).__name__
+    number = _axis_number(axis, kind, 0, (0,) if kind == "Series" else (0, 1))
+    labels = owner.index if number == 0 else Index(list(owner.columns))
+    if not str(labels.dtype).startswith("datetime64"):
+        raise TypeError("Index must be DatetimeIndex")
+    return owner.take(pick(DatetimeIndex._wrap(labels._inner)), axis=number)
+
+
+def _index_of(values: list[Any]) -> Any:
+    """Labels as an index, of instants or spans when that is what they are."""
+    from ._datetime import DatetimeIndex
+    from ._frame import Index
+    from ._timedelta import TimedeltaIndex
+
+    if values and all(isinstance(value, datetime.datetime) for value in values):
+        return DatetimeIndex(values)
+    if values and all(isinstance(value, datetime.timedelta) for value in values):
+        return TimedeltaIndex(values)
+    return Index(values)
+
+
+def _asof(owner: Any, where: Any, subset: Any) -> Any:
+    """`asof` on a column or a frame: the last row at or before each label holding values.
+
+    A column skips its missing values and a frame skips every row with a
+    missing value in `subset`, all the columns by default. One label answers
+    one value, or one row named by the label, and several labels answer a
+    column or a frame on them, with the rows that found nothing missing and
+    whole numbers widened to floats to hold them, as pandas does. pandas
+    reads text as an instant whatever the labels are, and so does this.
+
+    Raises:
+        InvalidArgumentError: For a `subset` on a column, or labels that are not
+            sorted upwards, in pandas' words.
+        IndexError: For a lookup with no labels to look in, as pandas raises it.
+    """
+    from ._frame import DataFrame, Index, Series
+    from ._index_join import missing
+    from ._scalars import Timestamp
+
+    column = isinstance(owner, Series)
+    if column and subset is not None:
+        raise InvalidArgumentError("subset is not valid for Series")
+    if isinstance(where, str):
+        where = Timestamp(where)
+    if not owner.index.is_monotonic_increasing:
+        raise InvalidArgumentError("asof requires a sorted index")
+    labels = owner.index.tolist()
+    several = isinstance(where, (list, tuple, Index, Series))
+    if not several:
+        if not labels:
+            raise IndexError("index 0 is out of bounds for axis 0 with size 0")
+        if where < labels[0]:
+            if column:
+                return math.nan
+            return Series([math.nan] * len(owner.columns), index=list(owner.columns), name=where)
+    if column:
+        nulls = [missing(value) for value in owner.tolist()]
+        if not several:
+            at = max(bisect.bisect_right(labels, where) - 1, 0)
+            values = owner.tolist()
+            while at > 0 and nulls[at]:
+                at -= 1
+            return math.nan if values[at] is None else values[at]
+    else:
+        names = list(owner.columns) if subset is None else subset
+        names = [names] if isinstance(names, str) else list(names)
+        absent = [name for name in names if name not in owner.columns]
+        if absent:
+            raise KeyError(f"None of [Index({absent!r}, dtype='str')] are in the [columns]")
+        nulls = [False] * len(owner)
+        for name in names:
+            values = owner[name].tolist()
+            nulls = [gap or missing(value) for gap, value in zip(nulls, values, strict=True)]
+    targets = where if isinstance(where, Index) else _index_of(list(where) if several else [where])
+    if all(nulls):
+        if column:
+            return Series([math.nan] * len(targets), index=targets, name=owner.name)
+        if several:
+            return DataFrame(
+                {name: [math.nan] * len(targets) for name in owner.columns}, index=targets
+            )
+        return Series([math.nan] * len(owner.columns), index=list(owner.columns), name=where)
+    try:
+        found = owner.index.asof_locs(targets, [not gap for gap in nulls])
+    except TypeError:
+        raise TypeError(
+            f"Invalid comparison between dtype={str(targets.dtype).replace('string', 'str')}"
+            f" and {type(labels[0]).__name__}"
+        ) from None
+    if not column and not several:
+        return owner.iloc[found[0]].rename(where)
+    if -1 not in found:
+        return owner.take(found).set_axis(targets)
+
+    def picked(values: Any) -> list[Any]:
+        widened = str(values.dtype).startswith(("int", "uint"))
+        held = values.tolist()
+        return [None if at == -1 else float(held[at]) if widened else held[at] for at in found]
+
+    if column:
+        return Series(picked(owner), index=targets, name=owner.name)
+    return DataFrame({name: picked(owner[name]) for name in owner.columns}, index=targets)
+
+
 _NAN_WHEN_MISSING = ("float", "int", "uint", "string")
 """The types whose missing value pandas hands back as NaN in `to_dict`, since pandas
 holds a missing number as a float and a missing text as NaN in its text type."""
@@ -8424,6 +8549,29 @@ class DataFrameMixin:
             Whatever the function answers.
         """
         return _piped(self, func, args, kwargs)
+
+    def at_time(self, time: Any, asof: bool = False, axis: Any = None) -> Any:
+        """The rows whose label's time of day is `time`, on labels that are instants."""
+        return _time_rows(self, axis, lambda labels: labels.indexer_at_time(time, asof=asof))
+
+    def between_time(
+        self, start_time: Any, end_time: Any, inclusive: str = "both", axis: Any = None
+    ) -> Any:
+        """The rows whose label's time of day is between two times, wrapping past midnight."""
+
+        def pick(labels: Any) -> list[int]:
+            if inclusive not in _INCLUSIVE:
+                raise InvalidArgumentError(
+                    "Inclusive has to be either 'both', 'neither', 'left' or 'right'"
+                )
+            first, last = _INCLUSIVE[inclusive]
+            return labels.indexer_between_time(start_time, end_time, first, last)
+
+        return _time_rows(self, axis, pick)
+
+    def asof(self, where: Any, subset: Any = None) -> Any:
+        """The last row at or before `where` without missing values, or one for each label."""
+        return _asof(self, where, subset)
 
     def first_valid_index(self) -> Any:
         """The label of the first row holding a value, or None when there is none."""
@@ -11912,6 +12060,29 @@ class SeriesMixin:
             Whatever the function answers.
         """
         return _piped(self, func, args, kwargs)
+
+    def at_time(self, time: Any, asof: bool = False, axis: Any = None) -> Any:
+        """The rows whose label's time of day is `time`, on labels that are instants."""
+        return _time_rows(self, axis, lambda labels: labels.indexer_at_time(time, asof=asof))
+
+    def between_time(
+        self, start_time: Any, end_time: Any, inclusive: str = "both", axis: Any = None
+    ) -> Any:
+        """The rows whose label's time of day is between two times, wrapping past midnight."""
+
+        def pick(labels: Any) -> list[int]:
+            if inclusive not in _INCLUSIVE:
+                raise InvalidArgumentError(
+                    "Inclusive has to be either 'both', 'neither', 'left' or 'right'"
+                )
+            first, last = _INCLUSIVE[inclusive]
+            return labels.indexer_between_time(start_time, end_time, first, last)
+
+        return _time_rows(self, axis, pick)
+
+    def asof(self, where: Any, subset: Any = None) -> Any:
+        """The last row at or before `where` without missing values, or one for each label."""
+        return _asof(self, where, subset)
 
     def first_valid_index(self) -> Any:
         """The label of the first row holding a value, or None when there is none."""
