@@ -253,8 +253,8 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
     """One format for the column, worked out once, which is what pandas does too.
 
     pandas raises `unconverted data remains` here. The rule matters more than
-    the message: guessing per row is what `format="mixed"` is for in pandas, and
-    it is refused by name rather than done silently.
+    the message: guessing per row is what `format="mixed"` is for, in pandas and
+    here, and it is only done when asked for.
     """
     with pytest.raises(ValueError):
         firepanda.to_datetime(["2026-01-01", "2026-01-02T03:04:05"])
@@ -268,14 +268,12 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
         ("yearfirst", True),
         ("origin", "julian"),
         ("exact", False),
-        ("format", "ISO8601"),
-        ("format", "mixed"),
     ],
 )
 def test_a_declared_argument_that_is_not_implemented_says_so(
     firepanda: ModuleType, argument: str, value: Any
 ) -> None:
-    """Six refusals, each naming the argument the caller passed.
+    """Four refusals, each naming the argument the caller passed.
 
     They are declared rather than left out for the reason document 18 section 4
     gives. A caller who passes one gets a message about that argument instead of
