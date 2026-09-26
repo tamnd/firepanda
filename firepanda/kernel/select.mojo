@@ -286,7 +286,10 @@ def take_rows[
         A column of length `len(indices)`.
     """
     return _take_core(
-        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, indices
+        col.unsafe_ptr(),
+        col.data.validity,
+        col.null_count() > 0,
+        Span(indices),
     )
 
 
@@ -294,6 +297,30 @@ def take_any(
     col: AnyArray, indices: List[Int], spread: Bool = True
 ) raises -> AnyArray:
     """Gathers rows by position from a column whose dtype is a runtime value.
+
+    `take_span` over the list. See there.
+
+    Args:
+        col: The column to gather from.
+        indices: The rows to take, in output order. A negative index is a null.
+        spread: As `take_span` has it.
+
+    Returns:
+        A column of length `len(indices)` with the same dtype as the input.
+
+    Raises:
+        As `take_span` does.
+    """
+    return take_span(col, Span(indices), spread)
+
+
+def take_span(
+    col: AnyArray, indices: Span[Int, _], spread: Bool = True
+) raises -> AnyArray:
+    """Gathers rows by position from a column whose dtype is a runtime value.
+
+    Over a span rather than a list, so a selection can gather through the
+    positions it already holds without copying them into a list first.
 
     Args:
         col: The column to gather from.
@@ -313,12 +340,12 @@ def take_any(
     # Moving rows does not change what a code means, so an encoded column moves
     # its four byte codes and keeps its categories, and stays encoded.
     if col.is_coded():
-        return col.with_codes(take_any(col.code_column(), indices, spread))
+        return col.with_codes(take_span(col.code_column(), indices, spread))
     # A take of a selection is a take of its positions, and stays a selection
     # over the same source.
     if col.is_selected():
         return col.with_positions(
-            take_any(col.position_column(), indices, spread)
+            take_span(col.position_column(), indices, spread)
         )
     if col.is_string():
         return AnyArray(_take_strings(col.strings(), indices, spread)).retyped(
@@ -360,7 +387,7 @@ def _take_bounds(rows: Int, workers: Int) -> List[Int]:
 
 
 def _take_strings(
-    col: StringArray, indices: List[Int], spread: Bool = True
+    col: StringArray, indices: Span[Int, _], spread: Bool = True
 ) raises -> StringArray:
     """Gathers variable width rows by position.
 
@@ -530,7 +557,7 @@ def _take_core[
     source: Pointer[Scalar[dt], origin],
     validity: Bitmap,
     has_nulls: Bool,
-    indices: List[Int],
+    indices: Span[Int, _],
     spread: Bool = True,
 ) raises -> Array[dt]:
     """The gather loop, over a pointer and a bitmap rather than a column."""
@@ -753,9 +780,9 @@ def gather_any(
         var widened = List[Int](capacity=len(picks))
         for i in range(len(picks)):
             widened.append(Int(picks[i]))
-        return AnyArray(_take_strings(col.strings(), widened, spread)).retyped(
-            col.type
-        )
+        return AnyArray(
+            _take_strings(col.strings(), Span(widened), spread)
+        ).retyped(col.type)
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return with_categories(

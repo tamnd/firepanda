@@ -666,18 +666,26 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         # Imported here and not at the top, because the gather lives with the
         # other kernels that move rows and they import this module.
-        from firepanda.kernel.select import take_any
+        from firepanda.kernel.select import take_span
 
         var rows = self.data.length
-        var picks = List[Int](unsafe_uninit_length=rows)
         var at = self.data.values.bitcast[DType.int64]()
-        var all_valid = self.data.validity.all_valid()
+        # With every row valid the positions are the picks as they lie, an
+        # int64 each, which is an Int. A column can be gathered many times from
+        # one join's positions, and copying them into a list first was a serial
+        # pass as long as the gather for every one of those columns.
+        if self.data.validity.all_valid():
+            return take_span(
+                self.selection_source(),
+                Span(unsafe_ptr=at.unsafe_bitcast[Int](), length=rows),
+            )
+        var picks = List[Int](unsafe_uninit_length=rows)
         for i in range(rows):
-            if all_valid or self.data.validity.get(i):
+            if self.data.validity.get(i):
                 picks[i] = Int(at.unsafe_offset(i).unsafe_load())
             else:
                 picks[i] = -1
-        return take_any(self.selection_source(), picks)
+        return take_span(self.selection_source(), Span(picks))
 
     def _gather_views(
         self, imm categories: StringArray, holes: Bool

@@ -492,10 +492,13 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no column has that name.
         """
         var at = self.schema.index_of(name)
-        var values = ChunkedArray(copy=self.columns[at]).combine()
         # A series is where a column leaves the frame's kernels for a caller's
         # hands, so a column held as positions into a join's inputs is gathered
-        # here rather than taught to every series method.
+        # here rather than taught to every series method. `only` gathers it in
+        # the frame, so asking for the same column again does not gather again.
+        if self.columns[at].num_chunks() == 1:
+            _ = self.columns[at].only()
+        var values = ChunkedArray(copy=self.columns[at]).combine()
         if values.is_selected():
             values = values.decoded()
         var out = Series(name, values^)
@@ -1039,6 +1042,11 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Returns:
             The same values, those columns one value a row.
         """
+        # A selection is gathered in this frame rather than in the copy, so the
+        # next join on the same key finds it gathered.
+        for k in range(len(at)):
+            if self.columns[at[k]].num_chunks() == 1:
+                _ = self.columns[at[k]].only()
         var out = Self(copy=self)
         for k in range(len(at)):
             ref column = out.columns[at[k]]
