@@ -936,16 +936,21 @@ def _bucket(
     var morsels = (rows + LASTING_TEXT_MORSEL - 1) // LASTING_TEXT_MORSEL
     var counts = List[Int](length=morsels * LASTING_TEXT_PARTS, fill=0)
 
+    # Both passes keep their morsel's counters through a pointer rather than
+    # by indexing the list, which checked the bound and reloaded the length on
+    # every row and was most of what the scatter cost on ClickBench q15.
     def count(m: Int) raises {mut counts, imm}:
         var hash = hashes.bitcast[DType.uint64]()
-        var at = m * LASTING_TEXT_PARTS
+        var mine = counts.unsafe_ptr().unsafe_offset(m * LASTING_TEXT_PARTS)
         for i in range(
             m * LASTING_TEXT_MORSEL, min(rows, (m + 1) * LASTING_TEXT_MORSEL)
         ):
             var p = Int(
                 hash.unsafe_offset(i).unsafe_load() >> LASTING_TEXT_PART_SHIFT
             )
-            counts[at + p] += 1
+            mine.unsafe_offset(p).unsafe_store(
+                mine.unsafe_offset(p).unsafe_load() + 1
+            )
 
     parallel_for(count, morsels)
 
@@ -962,15 +967,16 @@ def _bucket(
     def scatter(m: Int) raises {mut counts, mut order, imm}:
         var hash = hashes.bitcast[DType.uint64]()
         var into = order.unsafe_mut_ptr()
-        var at = m * LASTING_TEXT_PARTS
+        var mine = counts.unsafe_ptr().unsafe_offset(m * LASTING_TEXT_PARTS)
         for i in range(
             m * LASTING_TEXT_MORSEL, min(rows, (m + 1) * LASTING_TEXT_MORSEL)
         ):
             var p = Int(
                 hash.unsafe_offset(i).unsafe_load() >> LASTING_TEXT_PART_SHIFT
             )
-            into.unsafe_offset(counts[at + p]).unsafe_write(UInt32(i))
-            counts[at + p] += 1
+            var to = mine.unsafe_offset(p).unsafe_load()
+            into.unsafe_offset(to).unsafe_write(UInt32(i))
+            mine.unsafe_offset(p).unsafe_store(to + 1)
 
     parallel_for(scatter, morsels)
     return starts^
