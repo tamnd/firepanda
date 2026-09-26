@@ -1847,7 +1847,7 @@ def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
     return out^
 
 
-comptime SELECT_MIN_ROWS = 1 << 16
+comptime SELECT_MIN_ROWS = 0
 """How many output rows a join needs before it hands its columns back as
 positions rather than gathering them.
 

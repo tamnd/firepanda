@@ -158,7 +158,7 @@ def test_one_side_shares_one_list_of_positions() raises:
 
 
 def test_a_short_join_output_is_gathered() raises:
-    var picker = RowPicker(SELECT_MIN_ROWS - 1)
+    var picker = RowPicker(-1)
     assert_false(picker.pick(numbers(), [1, 2]).is_selected())
 
 
