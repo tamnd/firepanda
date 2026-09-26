@@ -397,9 +397,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
             )
         if self.chunks[0].is_selected():
             var gathered = self.chunks[0].decoded()
-            Pointer(to=self.chunks[0]).unsafe_mut_cast[True]()[] = (
-                gathered^
-            )
+            Pointer(to=self.chunks[0]).unsafe_mut_cast[True]()[] = gathered^
         return self.chunks[0]
 
     def combine(deinit self) raises -> AnyArray:
