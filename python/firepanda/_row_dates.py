@@ -34,7 +34,7 @@ from typing import Any
 
 from .errors import InvalidArgumentError
 
-__all__ = ["DateParseError", "rows_as_text"]
+__all__ = ["DateParseError", "rows_as_text", "written"]
 
 
 class DateParseError(InvalidArgumentError):
@@ -227,6 +227,8 @@ def _fielded(text: str, rest: str, zone: int | None, today: datetime.date) -> tu
             month_named = _MONTHS[lowered]
         elif lowered in _WEEKDAYS:
             continue
+        elif clock is not None and zone is None and re.fullmatch(r"[+-]\d{2}:?\d{2}", word):
+            zone = _offset(word)
         elif (number := _NUMBERS.fullmatch(word)) is not None and number.group(1):
             if separated is not None:
                 raise _unreadable(text)
@@ -246,6 +248,8 @@ def _fielded(text: str, rest: str, zone: int | None, today: datetime.date) -> tu
         cut = len(digits) - 4
         year = int(digits[:cut]) if cut == 4 else _century(int(digits[:cut]), today)
         month, day = int(digits[cut : cut + 2]), int(digits[cut + 2 :])
+    elif len(numbers) == 3:
+        year, month, day = _dated(numbers, today, text)
     elif not numbers and clock is not None:
         year, month, day = today.year, today.month, today.day
     else:
@@ -339,6 +343,22 @@ def rows_as_text(values: list[Any], mixed: bool, coerce: bool, utc: bool) -> lis
                 if read[text] is None and not coerce:
                     raise InvalidArgumentError(f"Time data {value} is not ISO8601 format.{_HINT}")
         rows.append(read[text])
+    return written(rows, utc)
+
+
+def written(rows: list[tuple[Any, ...] | None], utc: bool) -> list[str | None]:
+    """Rows read into their parts, written back in the one shape the core reads.
+
+    Args:
+        rows: The parts of every row, None where the row is missing.
+        utc: Whether rows at different offsets are read against UTC.
+
+    Returns:
+        One text per row, None where the row is missing.
+
+    Raises:
+        ValueError: For rows at more than one offset without `utc`.
+    """
     present = [row for row in rows if row is not None]
     zones = {row[7] for row in present}
     if len(zones) > 1 and not utc:

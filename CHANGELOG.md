@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_datetime guesses a format from the first row the way pandas does
+
+`to_datetime` with no format used to read ISO 8601 and refuse anything else. It now guesses a format from the first value that is not missing, as pandas' `guess_datetime_format` does, and holds every row to it, so `01/02/2026`, `Jan 2, 2024`, `31.12.2024` and `Sat, 06 Jan 2024 10:00:00 +0000` read as they do in pandas. When no format can be guessed each row is read on its own, as pandas does. A strptime format the core does not read, such as one with `%B`, `%I` and `%p`, `%j` or `%Z`, is read the same way, with pandas' words for a value that does not match, for data left over, and for a day past the end of its month. Labels in `read_json` are still read as ISO 8601 only, which is what pandas does there.
+
 ### Added: tz_convert(None) and tz_convert with a tzinfo
 
 `tz_convert(None)` on a `DatetimeIndex` or through `.dt` now moves the instants to UTC and takes the clock off, as pandas does, where it used to be refused. `tz_convert` also reads a `zoneinfo.ZoneInfo` or `datetime.timezone.utc` as the zone it names instead of refusing anything that is not a string. Converting instants that carry no zone raises a `TypeError` with pandas' own sentence, without the explanation the core adds after it.
