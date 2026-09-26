@@ -99,7 +99,7 @@ from firepanda.kernel.group import (
 from firepanda.kernel.nulls import all_valid_mask, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.rank import rank_any
-from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.select import RowPicker, filter_any, take_any
 from firepanda.kernel.sort import (
     argsort_any,
     argsort_any_into,
@@ -492,7 +492,13 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no column has that name.
         """
         var at = self.schema.index_of(name)
-        var out = Series(name, ChunkedArray(copy=self.columns[at]).combine())
+        var values = ChunkedArray(copy=self.columns[at]).combine()
+        # A series is where a column leaves the frame's kernels for a caller's
+        # hands, so a column held as positions into a join's inputs is gathered
+        # here rather than taught to every series method.
+        if values.is_selected():
+            values = values.decoded()
+        var out = Series(name, values^)
         # A column of a frame has the frame's rows, so it has the frame's labels.
         # This is how a grouped result reaches a caller that wanted one column of
         # it, which is `df.groupby("k")["v"].mean()` and is the shape most of the
@@ -3502,11 +3508,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
 
         var kept = List[Field](capacity=len(wanted))
         var built = List[AnyArray](capacity=len(wanted))
+        # A tall output holds its columns as positions into the two sides, one
+        # buffer a side, and gathers nothing yet. See `RowPicker`.
+        var lefts = RowPicker(len(pairs))
+        var rights = RowPicker(len(pairs))
         for w in range(len(wanted)):
             var i = wanted[w]
             if from_right[i]:
                 built.append(
-                    take_any(other.columns[source_at[i]].only(), pairs.right_at)
+                    rights.pick(
+                        other.columns[source_at[i]].only(), pairs.right_at
+                    )
                 )
             elif pair_with[i] >= 0:
                 built.append(
@@ -3519,7 +3531,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 )
             else:
                 built.append(
-                    take_any(self.columns[source_at[i]].only(), pairs.left_at)
+                    lefts.pick(self.columns[source_at[i]].only(), pairs.left_at)
                 )
             kept.append(Field(fields[i].name, fields[i].dtype))
 

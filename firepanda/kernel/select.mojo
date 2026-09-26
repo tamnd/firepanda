@@ -51,11 +51,13 @@ from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.data import ColumnData
 from firepanda.array.strings import StringArray
 from firepanda.array.strview import VIEW_SIZE, StringView, make_long_at
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
+from firepanda.dtype.logical import logical_for
 from firepanda.exec import parallel_morsels
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.kernel.dictionary import with_categories
@@ -312,6 +314,12 @@ def take_any(
     # its four byte codes and keeps its categories, and stays encoded.
     if col.is_coded():
         return col.with_codes(take_any(col.code_column(), indices, spread))
+    # A take of a selection is a take of its positions, and stays a selection
+    # over the same source.
+    if col.is_selected():
+        return col.with_positions(
+            take_any(col.position_column(), indices, spread)
+        )
     if col.is_string():
         return AnyArray(_take_strings(col.strings(), indices, spread)).retyped(
             col.type
@@ -737,6 +745,10 @@ def gather_any(
     """
     if col.is_coded():
         return col.with_codes(gather_any(col.code_column(), picks, spread))
+    if col.is_selected():
+        return col.with_positions(
+            gather_any(col.position_column(), picks, spread)
+        )
     if col.is_string():
         var widened = List[Int](capacity=len(picks))
         for i in range(len(picks)):
@@ -953,6 +965,10 @@ def filter_counted(
     if col.is_coded():
         return col.with_codes(
             filter_counted(col.code_column(), mask, offsets, spread)
+        )
+    if col.is_selected():
+        return col.with_positions(
+            filter_counted(col.position_column(), mask, offsets, spread)
         )
     if col.is_string():
         return AnyArray(_filter_strings(col.strings(), mask, spread)).retyped(
@@ -1802,3 +1818,175 @@ def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
         i += 1
 
     return out^
+
+
+comptime SELECT_MIN_ROWS = 1 << 16
+"""How many output rows a join needs before it hands its columns back as
+positions rather than gathering them.
+
+Below this a gather is cheap enough that deferring it buys nothing worth the
+bookkeeping. Above it, the case the selection is for is the join whose output
+the next join thins: TPC-H q2 pairs a hundred and sixty thousand supplier and
+stock rows and keeps about six hundred of them one join later, and gathering a
+dozen columns of the hundred and sixty thousand was the largest single cost of
+the query."""
+
+
+struct RowPicker(Movable):
+    """Takes columns from one side of a join, as selections where that pays.
+
+    One of these a side. Every column it hands back as a selection of a flat
+    column shares the one positions buffer it builds from the side's indices,
+    and every column that was already a selection over the same positions
+    shares the one buffer composed from them, so a frame of a dozen columns
+    from two earlier joins costs two lists of positions and not a dozen
+    gathers. A column a selection cannot hold, a nested one or a category or
+    one held as codes, is gathered as it always was.
+    """
+
+    var enabled: Bool
+    """Whether the output is tall enough to be worth it."""
+
+    var ready: Bool
+    """Whether `positions` and `rows_valid` have been built."""
+
+    var positions: Buffer
+    """The indices as int64, shared by every fresh selection."""
+
+    var rows_valid: Bitmap
+    """Which output rows have a row on this side at all."""
+
+    var seen: List[Buffer]
+    """The positions buffers of selections already composed, to know them by."""
+
+    var composed: List[Buffer]
+    """What each of `seen` became, in the same order."""
+
+    def __init__(out self, rows: Int):
+        """Starts a side with nothing built.
+
+        Args:
+            rows: How many rows the output has.
+        """
+        self.enabled = rows >= SELECT_MIN_ROWS
+        self.ready = False
+        self.positions = Buffer(0)
+        self.rows_valid = Bitmap(0)
+        self.seen = List[Buffer]()
+        self.composed = List[Buffer]()
+
+    def pick(mut self, col: AnyArray, indices: List[Int]) raises -> AnyArray:
+        """Takes a column's rows by position, gathered or as a selection.
+
+        Args:
+            col: The column.
+            indices: The rows, in output order, a negative one meaning null.
+
+        Returns:
+            The rows.
+
+        Raises:
+            As a gather does.
+        """
+        if not self.enabled:
+            return take_any(col, indices)
+        if col.is_selected():
+            return self._compose(col, indices)
+        if not col.is_flat() or col.is_nested() or col.dict_values:
+            return take_any(col, indices)
+        self._build(indices)
+        return AnyArray.selection(
+            col,
+            Buffer(copy=self.positions),
+            self._validity(col, indices),
+            len(indices),
+        )
+
+    def _build(mut self, indices: List[Int]):
+        """Builds the shared positions and row validity, once.
+
+        Args:
+            indices: The side's indices.
+        """
+        if self.ready:
+            return
+        self.ready = True
+        var n = len(indices)
+        self.positions = Buffer(overwritten=n * 8)
+        var dst = self.positions.mut_bitcast[DType.int64]()
+        var holes = False
+        for i in range(n):
+            var p = indices[i]
+            holes = holes or p < 0
+            dst.unsafe_offset(i).unsafe_write(Int64(max(p, 0)))
+        self.rows_valid = Bitmap(n)
+        if holes:
+            for i in range(n):
+                if indices[i] < 0:
+                    self.rows_valid.set(i, False)
+
+    def _validity(mut self, col: AnyArray, indices: List[Int]) -> Bitmap:
+        """Which output rows are present, for one column.
+
+        Args:
+            col: The column the rows come from.
+            indices: The side's indices.
+
+        Returns:
+            The shared row validity when the column has no nulls of its own,
+            and otherwise one built for it.
+        """
+        self._build(indices)
+        if col.null_count() == 0:
+            return Bitmap(copy=self.rows_valid)
+        var n = len(indices)
+        var out = Bitmap(n, all_valid=False)
+        for i in range(n):
+            var p = indices[i]
+            if p >= 0 and col.data.validity.get(p):
+                out.set(i, True)
+        return out^
+
+    def _compose(mut self, col: AnyArray, indices: List[Int]) raises -> AnyArray:
+        """Takes rows of a selection by taking its positions, once per buffer.
+
+        Args:
+            col: The selection.
+            indices: The side's indices.
+
+        Returns:
+            A selection over the same source.
+
+        Raises:
+            Never in practice; the signature is the kernels'.
+        """
+        var n = len(indices)
+        var found = -1
+        for k in range(len(self.seen)):
+            if (
+                self.seen[k].unsafe_ptr() == col.data.values.unsafe_ptr()
+                and len(self.seen[k]) == len(col.data.values)
+            ):
+                found = k
+                break
+        if found < 0:
+            var out = Buffer(overwritten=n * 8)
+            var dst = out.mut_bitcast[DType.int64]()
+            var src = col.data.values.bitcast[DType.int64]()
+            for i in range(n):
+                var p = indices[i]
+                dst.unsafe_offset(i).unsafe_write(
+                    src.unsafe_offset(p).unsafe_load() if p >= 0 else 0
+                )
+            self.seen.append(Buffer(copy=col.data.values))
+            self.composed.append(out^)
+            found = len(self.composed) - 1
+        var positions = AnyArray(
+            ColumnData(
+                Buffer(copy=self.composed[found]),
+                self._validity(col, indices),
+                n,
+            ),
+            logical_for(DType.int64),
+        )
+        return col.with_positions(positions^)
