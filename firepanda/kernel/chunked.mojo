@@ -306,6 +306,6 @@ def take_chunked(col: ChunkedArray, indices: List[Int]) raises -> ChunkedArray:
         If the column's dtype is not one firepanda has a layout for.
     """
     if col.num_chunks() == 1:
-        return ChunkedArray(take_any(col.only(), indices))
+        return ChunkedArray(take_any(col.held(), indices))
     var flat = ChunkedArray(copy=col).combine()
     return ChunkedArray(take_any(flat, indices))

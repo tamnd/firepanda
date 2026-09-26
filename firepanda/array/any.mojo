@@ -48,7 +48,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind, logical_for
 
 from .array import Array
 from .data import ColumnData
-from .encoding import Encoding
+from .encoding import NO_LAYOUT, Encoding
 from .nested import (
     ROOT,
     NestedNode,
@@ -375,9 +375,17 @@ struct AnyArray(Copyable, Movable, Sized):
     def dtype(self) -> DType:
         """Returns the physical dtype.
 
+        A column held as a selection answers `NO_LAYOUT`, a dtype no dispatch
+        names. Its values buffer holds positions and not values, and a kernel
+        that picks an arm by the dtype and then reads through `unsafe_ptr`
+        never asks the encoding, so this is where it is stopped: it matches no
+        arm and raises.
+
         Returns:
             The dtype the values buffer is laid out as.
         """
+        if self.encoding == Encoding.SELECTION:
+            return NO_LAYOUT
         return self.type.physical
 
     def is_valid(self, i: Int) -> Bool:
@@ -417,6 +425,13 @@ struct AnyArray(Copyable, Movable, Sized):
             The size in bytes.
         """
         var out = self.data.validity.byte_length()
+        if self.encoding == Encoding.SELECTION:
+            # The positions and the whole source, which other selections may
+            # share. Counting it here overstates a frame's total and is still
+            # the honest answer for one column, which does hold it alive.
+            return (
+                out + len(self.data.values) + self.selection_source().nbytes()
+            )
         if self.encoding == Encoding.DICTIONARY:
             # The codes and the distinct strings, which is the number the
             # encoding exists to make small.
@@ -503,6 +518,15 @@ struct AnyArray(Copyable, Movable, Sized):
         Raises:
             If the column is not a string column, or the row is out of range.
         """
+        if self.encoding == Encoding.SELECTION:
+            if i < 0 or i >= self.data.length:
+                raise Error(String("row ", i, " of ", self.data.length))
+            if not self.data.validity.get(i):
+                return String()
+            var at = self.data.values.bitcast[DType.int64]()
+            return self.selection_source().text_at(
+                Int(at.unsafe_offset(i).unsafe_load())
+            )
         if self.encoding != Encoding.DICTIONARY:
             return self.strings()[i]
         if i < 0 or i >= self.data.length:
@@ -608,6 +632,8 @@ struct AnyArray(Copyable, Movable, Sized):
             return Self(copy=self)
         if self.encoding == Encoding.DICTIONARY:
             return self._decode_dictionary()
+        if self.encoding == Encoding.SELECTION:
+            return self._decode_selection()
         raise Error(
             "column is "
             + String(self.type)
@@ -628,6 +654,38 @@ struct AnyArray(Copyable, Movable, Sized):
         var out = self._gather_views(self.text.value(), False)
         out.type = self.type
         return out^
+
+    def _decode_selection(self) raises -> Self:
+        """Gathers the source's rows by position. See `decoded`.
+
+        Returns:
+            The rows, flat.
+
+        Raises:
+            As the gather does.
+        """
+        # Imported here and not at the top, because the gather lives with the
+        # other kernels that move rows and they import this module.
+        from firepanda.kernel.select import take_span
+
+        var rows = self.data.length
+        var at = self.data.values.bitcast[DType.int64]()
+        # With every row valid the positions are the picks as they lie, an
+        # int64 each, which is an Int. A column can be gathered many times from
+        # one join's positions, and copying them into a list first was a serial
+        # pass as long as the gather for every one of those columns.
+        if self.data.validity.all_valid():
+            return take_span(
+                self.selection_source(),
+                Span(unsafe_ptr=at.unsafe_bitcast[Int](), length=rows),
+            )
+        var picks = List[Int](unsafe_uninit_length=rows)
+        for i in range(rows):
+            if self.data.validity.get(i):
+                picks[i] = Int(at.unsafe_offset(i).unsafe_load())
+            else:
+                picks[i] = -1
+        return take_span(self.selection_source(), Span(picks))
 
     def _gather_views(
         self, imm categories: StringArray, holes: Bool
@@ -726,6 +784,107 @@ struct AnyArray(Copyable, Movable, Sized):
         codes.text = StringArray(copy=self.text.value())
         codes.encoding = self.encoding
         return codes^
+
+    @staticmethod
+    def selection(
+        source: Self, var positions: Buffer, var validity: Bitmap, length: Int
+    ) raises -> Self:
+        """Holds some of a column's rows as positions into it.
+
+        Copies no values. The positions buffer is shared rather than copied, so
+        every column a join takes from one side can hold the same one.
+
+        Args:
+            source: The column the rows come from. Flat, and neither nested nor
+                a category column, whose codes and categories do not fit in the
+                one node a selection keeps.
+            positions: One int64 a row, the source row it is. A null row's
+                position is never read.
+            validity: Which rows are present, with the source's own nulls
+                already folded in.
+            length: The number of rows.
+
+        Returns:
+            The rows, in the selection encoding.
+
+        Raises:
+            If the source is not a column a selection can hold.
+        """
+        if not source.is_flat() or source.is_nested() or source.dict_values:
+            raise Error(
+                "column is "
+                + String(source.type)
+                + " held "
+                + String(source.encoding)
+                + ", which a selection does not hold"
+            )
+        var out = Self(ColumnData(positions^, validity^, length), source.type)
+        if source.text:
+            out.nested.append(
+                NestedNode(
+                    "source",
+                    ROOT,
+                    StringArray(copy=source.text.value()),
+                    source.type,
+                )
+            )
+        else:
+            out.nested.append(
+                NestedNode(
+                    "source", source.type, ROOT, ColumnData(copy=source.data)
+                )
+            )
+        out.encoding = Encoding.SELECTION
+        return out^
+
+    def is_selected(self) -> Bool:
+        """Reports whether the column is held as positions into another.
+
+        Returns:
+            True if the column's encoding is the selection one.
+        """
+        return self.encoding == Encoding.SELECTION
+
+    def selection_source(self) -> Self:
+        """The column a selection's positions point into, sharing its bytes.
+
+        Returns:
+            The source, flat.
+        """
+        ref node = self.nested[0]
+        if node.text:
+            var out = Self(StringArray(copy=node.text.value()))
+            out.type = node.type
+            return out^
+        return Self(ColumnData(copy=node.data), node.type)
+
+    def position_column(self) -> Self:
+        """Views a selection's positions as an int64 column.
+
+        Shares the buffers, and carries the rows' validity. The selection's
+        `code_column`: a kernel that only moves rows moves these and hands them
+        to `with_positions`, which is how a take of a take stays one list of
+        positions into the first source rather than becoming a gather.
+
+        Returns:
+            A flat int64 column over the positions.
+        """
+        return Self(ColumnData(copy=self.data), logical_for(DType.int64))
+
+    def with_positions(self, var positions: Self) -> Self:
+        """Puts the source and the encoding back on a run of positions.
+
+        Args:
+            positions: The positions, as `position_column` hands them out and a
+                kernel that moves rows returns them.
+
+        Returns:
+            The run as a selection over this one's source.
+        """
+        positions.type = self.type
+        positions.nested = List[NestedNode](copy=self.nested)
+        positions.encoding = self.encoding
+        return positions^
 
     def distinct(self) -> Self:
         """The distinct values of a dictionary encoded column, as a flat column.
@@ -1211,6 +1370,8 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         if self.encoding == Encoding.DICTIONARY:
             return self.with_codes(self.code_column().slice(start, end))
+        if self.encoding == Encoding.SELECTION:
+            return self.with_positions(self.position_column().slice(start, end))
         if self.is_string():
             return Self(self.strings().slice(start, end))
         if self.is_nested():
@@ -1296,6 +1457,10 @@ struct AnyArray(Copyable, Movable, Sized):
             )
         if self.encoding == Encoding.DICTIONARY:
             return self.with_codes(self.code_column().window(at, length))
+        if self.encoding == Encoding.SELECTION:
+            return self.with_positions(
+                self.position_column().window(at, length)
+            )
         if self.is_string():
             return Self(self.strings().window(at, length)).retyped(self.type)
         var out = Self(

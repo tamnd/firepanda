@@ -18,8 +18,18 @@ the flat layout can ask for it and decode anything else first.
 The first encoding past flat is the dictionary one, for string columns. The
 second box of #979 put a check in front of every read of a column's values, so a
 kernel that has not been taught it gets an error naming `decoded()` rather than
-codes it takes for text.
+codes it takes for text. The second is the selection, a column held as positions
+into the one its rows came from, which is how a join hands back its output.
 """
+
+
+comptime NO_LAYOUT = DType.int256
+"""The dtype a column held as a selection answers `dtype()` with.
+
+Any dtype that no dispatch list in `dtype/lists.mojo` names would do. The point
+is that a kernel which picks its arm by `dtype()` and then reads through
+`unsafe_ptr` matches none and raises, rather than reading the positions as
+values, and Mojo has no dtype that means none at all."""
 
 
 struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -47,6 +57,23 @@ struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
     rows' validity, and the distinct strings are its `text`. The logical type
     stays string, which is the difference from `astype("category")`: a user
     who reads `dtype` cannot tell."""
+
+    comptime SELECTION = Self(2)
+    """A column held as one int64 position per row into another column, the
+    one the rows came from.
+
+    What a join or a take builds when the rows it picks are likely to be
+    thinned again before anything reads them. The positions are the column's
+    `data.values`, its validity is the rows' validity with the source's nulls
+    already folded in, and the source column is the one node in `nested`. The
+    logical type is the source's. Every column a join takes from one side
+    shares the one positions buffer, so a second join or a filter over the
+    result moves one list of positions rather than every column, and only what
+    is left at the end is gathered from the sources.
+
+    `dtype()` answers `NO_LAYOUT` for it, so a kernel that dispatches on
+    the physical dtype without asking the encoding matches no arm and raises,
+    rather than reading positions as values."""
 
     def __init__(out self, code: UInt64):
         """Names a layout by its code.
@@ -88,5 +115,7 @@ struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("flat")
         elif self == Self.DICTIONARY:
             writer.write("dictionary")
+        elif self == Self.SELECTION:
+            writer.write("selection")
         else:
             writer.write("encoding ", self.code)

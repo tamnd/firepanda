@@ -232,6 +232,9 @@ struct Catalog(Movable, Sized):
             Error: If the name is empty, which no query can say.
         """
         self._require_a_name(name)
+        # The plan's operators read values, and a join's output can hold its
+        # columns as positions into its inputs.
+        frame = frame.gathered()
         var at = self.find(name)
         if at != NOT_FOUND and self._kinds[at] == KIND_FRAME:
             self._frames[self._slots[at]] = frame^
