@@ -50,6 +50,7 @@ from .errors import (
     IndexingError,
     InvalidArgumentError,
     MergeError,
+    OutOfBoundsDatetime,
     OutOfBoundsError,
     SpecificationError,
     UnsupportedError,
@@ -69,6 +70,38 @@ if TYPE_CHECKING:
         SeriesGroupBy,
     )
     from ._resample import Resampler
+
+
+def _beyond_nanoseconds(column: Series) -> None:
+    """Raises pandas' error for the first instant a nanosecond count cannot reach.
+
+    The core refuses the restatement with a type error that says the range is
+    int64. pandas raises `OutOfBoundsDatetime` naming the first instant outside
+    it, read on the UTC wall clock and to the second, so the instants are
+    compared with the two ends here to find that one. A column that is inside
+    the range everywhere raises nothing and the core's error goes on.
+
+    Args:
+        column: The instants that were being restated.
+
+    Raises:
+        OutOfBoundsDatetime: For the first instant before 1677-09-21 00:12:43
+            or after 2262-04-11 23:47:16 and a fraction.
+    """
+    from ._scalars import Timestamp
+
+    if column.dt.tz is not None:
+        column = column.dt.tz_convert("UTC").dt.tz_localize(None)
+    column = column.reset_index(drop=True)
+    outside = (column < Timestamp("1677-09-21 00:12:43.145225")) | (
+        column > Timestamp("2262-04-11 23:47:16.854775")
+    )
+    for position, beyond in enumerate(outside.tolist()):
+        if beyond is True:
+            instant = column.iloc[position : position + 1].dt.strftime("%Y-%m-%d %H:%M:%S")
+            raise OutOfBoundsDatetime(
+                f"Out of bounds nanosecond timestamp: {instant.tolist()[0]}"
+            ) from None
 
 
 def _values_of(inner: Any) -> list[Any]:
@@ -13402,7 +13435,12 @@ class DatetimeMixin:
             " needs the cast to look at the values first, and it looks at the"
             " types only",
         )
-        return self._part("as_unit", unit)
+        try:
+            return self._part("as_unit", unit)
+        except DTypeError:
+            if unit == "ns":
+                _beyond_nanoseconds(self._series)
+            raise
 
     def _named(self, kind: str, locale: Any) -> Series:
         """Writes out the name of the day or the month."""

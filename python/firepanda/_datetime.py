@@ -37,6 +37,7 @@ from ._pandas import (
     _NONEXISTENT,
     _NONEXISTENT_REFUSAL,
     NO_DEFAULT,
+    _beyond_nanoseconds,
     _held_at,
     _instants,
     _is_default,
@@ -44,7 +45,7 @@ from ._pandas import (
     _on_the_clock,
     _spelled,
 )
-from .errors import InvalidArgumentError, translate
+from .errors import DTypeError, InvalidArgumentError, translate
 
 __all__ = ["DatetimeIndex"]
 
@@ -429,7 +430,12 @@ class DatetimeIndex(Index):
             " needs the cast to look at the values first, and it looks at the"
             " types only",
         )
-        return self._moved("as_unit", unit)
+        try:
+            return self._moved("as_unit", unit)
+        except DTypeError:
+            if unit == "ns":
+                _beyond_nanoseconds(self.to_series())
+            raise
 
     def day_name(self, locale: Any = None) -> Index:
         """The name of the day of the week of every label."""

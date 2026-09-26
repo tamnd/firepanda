@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: as_unit names the first instant nanoseconds cannot reach
+
+`as_unit("ns")` on a `DatetimeIndex` or through `.dt` now raises `OutOfBoundsDatetime` with pandas' own sentence, `Out of bounds nanosecond timestamp:` followed by the first instant outside the range on the UTC wall clock and to the second, where it used to raise a type error from the core. An `except` clause written against pandas now catches it. Instants just inside either end of the range still restate.
+
 ### Added: to_datetime answers an index for a list and an instant for one value
 
 `to_datetime` now answers what pandas answers for each kind of input: a column for a column, a `DatetimeIndex` for a list, tuple or index, keeping the index name, and one instant for one value, with None where pandas gives NaT. A list with nothing to read is held at seconds, as in pandas. The `DatetimeIndex` constructor now reads text every row with its own format, the way pandas does, so a list of dates in different shapes builds an index instead of raising. A `DatetimeIndex` can be put in a frame or a column directly, and a column built from an index takes the index name.
