@@ -237,16 +237,12 @@ def test_a_format_reads_what_the_guesser_will_not(firepanda: ModuleType) -> None
 
 
 @needs_pandas
-def test_the_guesser_refuses_rather_than_picks(firepanda: ModuleType) -> None:
-    """The one place this is deliberately stricter than pandas, and why.
+def test_the_guesser_reads_month_first_as_pandas_does(firepanda: ModuleType) -> None:
+    """pandas reads `01/02/2026` as the second of January, month first, and so does this."""
+    import pandas as pd
 
-    pandas reads `01/02/2026` as the second of January. Somebody who wrote it
-    meaning the first of February gets a column that is wrong by a month and no
-    warning anywhere. firepanda says it does not recognise the shape and names
-    the value, which costs the caller one `format=` and cannot be wrong quietly.
-    """
-    with pytest.raises(ValueError, match="01/02/2026"):
-        firepanda.to_datetime(["01/02/2026"])
+    expected = [str(value) for value in pd.to_datetime(["01/02/2026"])]
+    assert [str(value) for value in firepanda.to_datetime(["01/02/2026"])] == expected
 
 
 @needs_pandas

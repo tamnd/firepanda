@@ -40,7 +40,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda, _row_dates
+from . import _config, _firepanda, _row_dates, _row_formats
 from ._scalars import _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
@@ -22555,6 +22555,46 @@ def _instants(
             )
         )
     except Exception as error:
+        if unit is not None:
+            raise translate(error) from None
+        read = _dates_by_format(column, format, errors == "coerce", utc)
+        if read is None:
+            raise translate(error) from None
+        return read
+
+
+def _dates_by_format(column: Any, format: str | None, coerce: bool, utc: bool) -> Any:
+    """`to_datetime` of text the core would not read, read against one format the way pandas does.
+
+    The core guesses ISO 8601 and nothing else, and it has no month names and
+    no twelve hour clock. pandas guesses a format from the first value and
+    holds every row to it, or reads every row on its own when it cannot guess
+    one, so a column the core refused is read again here by those rules. That
+    either reads it or raises the error pandas raises for the first row that
+    does not read.
+
+    Returns:
+        The instants, or None when the column is not text or the format has a
+        directive `_row_formats` does not read, and the core's error stands.
+    """
+    from ._frame import Series
+
+    values = column.tolist()
+    if not all(isinstance(value, str) or _row_dates.missing(value) for value in values):
+        return None
+    if format is not None and not _row_formats.readable(format):
+        return None
+    if format is None:
+        first = next((value for value in values if isinstance(value, str)), None)
+        format = None if first is None else _row_formats.guess(first)
+        if format is None:
+            texts = _row_dates.rows_as_text(values, True, coerce, utc)
+    if format is not None:
+        texts = _row_dates.written(_row_formats.rows_by_format(values, format, coerce), utc)
+    read = Series(texts, index=column.index, name=column.name, dtype="str")
+    try:
+        return Series._wrap(read._inner.to_datetime("", "ns", False, utc))
+    except Exception as error:
         raise translate(error) from None
 
 
@@ -23720,7 +23760,8 @@ def _json_epochs(values: list[Any], kind: str, options: dict[str, Any]) -> Any:
     if kind != "str":
         return None
     try:
-        return to_datetime(Series(values, dtype="str"))
+        # Only the ISO 8601 reading, since pandas reads labels such as "1.5" as text here.
+        return Series._wrap(Series(values, dtype="str")._inner.to_datetime("", "ns", False, False))
     except Exception:  # pandas tries every reading and keeps the text when none works
         return None
 
