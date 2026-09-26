@@ -888,6 +888,34 @@ def test_a_mark_join_writes_what_its_column_is_called_and_reads_it_back() raises
     )
 
 
+def test_an_asof_join_writes_its_comparison_and_reads_it_back() raises:
+    for code in range(8):
+        var keep = code >= 4
+        var backward = code % 4 < 2
+        var strict = code % 2 == 1
+        var plan = Plan()
+        var left = plan.scan("t", List[String](), 0)
+        var right = plan.scan("u", List[String](), 1)
+        var at = plan.asof_join(
+            left,
+            right,
+            [plan.exprs.column("a")],
+            [plan.exprs.column("k")],
+            keep,
+            backward,
+            strict,
+        )
+        var text = to_json(plan, at)
+        assert_true(
+            text.find('"compare": "') != -1, "the comparison is written"
+        )
+        var back = _trip(plan, at)
+        ref node = back.plan.nodes[back.root]
+        assert_equal(node.op, Int(plan.nodes[at].op), "the kind comes back")
+        assert_equal(node.flags[0], backward, "which way it looks")
+        assert_equal(node.flags[1], strict, "and whether equal is too close")
+
+
 def test_a_semi_join_writes_the_rest_of_its_condition_and_reads_it_back() raises:
     var plan = Plan()
     var left = plan.scan("t", List[String](), 0)

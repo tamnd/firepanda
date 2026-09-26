@@ -4811,6 +4811,95 @@ def test_a_filter_over_a_positional_join_stays_above_it() raises:
     )
 
 
+def test_an_asof_join_takes_the_latest_band_at_or_below() raises:
+    # Sale 1 is below every band, so the inner join drops it.
+    var out = run(
+        "SELECT qty, band FROM sales ASOF JOIN tiers ON qty >= band", session()
+    )
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 30, 15], "qty")
+    same(read_back(out, "band"), [3, 20, 3, 40, 3, 3, 20, 20, 3], "band")
+
+
+def test_a_strict_asof_join_passes_over_an_equal_band() raises:
+    var out = run(
+        "SELECT qty, band FROM sales ASOF JOIN tiers ON qty > band", session()
+    )
+    same(read_back(out, "qty"), [5, 20, 40, 12, 8, 25, 30, 15], "qty")
+    same(read_back(out, "band"), [3, 3, 20, 3, 3, 20, 20, 3], "band")
+
+
+def test_an_asof_join_can_look_forward() raises:
+    same(
+        answer("SELECT band FROM sales ASOF JOIN tiers ON qty <= band", "band"),
+        [20, 20, 3, 40, 20, 20, 40, 3, 40, 20],
+        "band",
+    )
+
+
+def test_an_asof_join_written_the_other_way_round_is_the_same() raises:
+    same(
+        answer("SELECT band FROM sales ASOF JOIN tiers ON band <= qty", "band"),
+        [3, 20, 3, 40, 3, 3, 20, 20, 3],
+        "band",
+    )
+
+
+def test_an_asof_left_join_keeps_the_sale_with_no_band() raises:
+    same(
+        gapped(
+            run(
+                "SELECT band FROM sales ASOF LEFT JOIN tiers ON qty >= band",
+                session(),
+            ),
+            "band",
+        ),
+        [3, 20, 3, 40, 3, 3, 20, -1, 20, 3],
+        "band",
+    )
+
+
+def test_an_asof_join_only_looks_inside_its_equal_key() raises:
+    # Shop 1 starts at floor 11 and shop 2 at floor 22.
+    var out = run(
+        (
+            "SELECT qty, floor FROM sales ASOF JOIN shops ON sales.shop ="
+            " shops.shop AND qty >= floor"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [40, 12, 25, 30], "qty")
+    same(read_back(out, "floor"), [22, 11, 11, 11], "floor")
+
+
+def test_a_filter_on_the_right_of_an_asof_join_stays_above_it() raises:
+    # Under the join it would leave band 3 alone and sale 20 would take it.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales ASOF JOIN tiers ON qty >= band WHERE"
+                " band < 20"
+            ),
+            "qty",
+        ),
+        [5, 3, 12, 8, 15],
+        "qty",
+    )
+
+
+def test_a_filter_on_the_left_of_an_asof_join_answers_the_same() raises:
+    same(
+        answer(
+            (
+                "SELECT band FROM sales ASOF JOIN tiers ON qty >= band WHERE"
+                " qty > 10"
+            ),
+            "band",
+        ),
+        [20, 40, 3, 20, 20, 3],
+        "band",
+    )
+
+
 def test_a_right_join_keeps_the_shop_that_sold_nothing() raises:
     # Shop 3 has no sale, so its one row comes out with the sale side null.
     same(

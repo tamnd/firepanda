@@ -255,6 +255,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Apply,
+    AsOf,
     Case,
     Cast,
     Choose,
@@ -3378,6 +3379,60 @@ def _lower_positional(
     pipe.add(Node(Positional(side^)))
 
 
+def _lower_asof(
+    plan: Plan,
+    at: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+    mut pipe: Pipeline,
+) raises:
+    """Lowers an ASOF join into an `AsOf` node.
+
+    The right side is built into a frame first, the way a hash join's is, and
+    the keys go over by position. The last pair is the compared column and the
+    pairs before it are the equal keys.
+
+    Args:
+        plan: The plan.
+        at: The join node.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: Whatever the right side itself refuses.
+    """
+    var right = plan.nodes[at].inputs[1]
+    var parts = plan.nodes[at].parts
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    for i in range(parts - 1):
+        left_keys.append(plan.exprs.nodes[plan.nodes[at].exprs[i]].at)
+        right_keys.append(plan.exprs.nodes[plan.nodes[at].exprs[parts + i]].at)
+    var left_on = plan.exprs.nodes[plan.nodes[at].exprs[parts - 1]].at
+    var right_on = plan.exprs.nodes[plan.nodes[at].exprs[2 * parts - 1]].at
+    var side: DataFrame
+    if plan.nodes[right].kind == NodeKind.SCAN:
+        side = _take(frames, taken, plan, right)
+    else:
+        var built = _lower_from(plan, right, frames, taken)
+        side = built^.run()
+    pipe.add(
+        Node(
+            AsOf(
+                side^,
+                left_keys^,
+                right_keys^,
+                left_on,
+                right_on,
+                plan.nodes[at].flags[0],
+                plan.nodes[at].flags[1],
+                JoinKind(UInt8(plan.nodes[at].op)) == JoinKind.ASOF_LEFT,
+            )
+        )
+    )
+
+
 def _lower_join(
     plan: Plan,
     at: Int,
@@ -3457,6 +3512,9 @@ def _lower_join(
                 " computed key would have to be computed on the build side too,"
                 " which is a projection over a frame rather than over a chunk"
             )
+    if kind.is_asof():
+        _lower_asof(plan, at, frames, taken, pipe)
+        return
     var left_key = plan.nodes[at].exprs[0]
     var right_key = plan.nodes[at].exprs[parts]
     var left_on = plan.exprs.nodes[left_key].name.copy()

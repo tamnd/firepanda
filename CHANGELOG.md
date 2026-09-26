@@ -103,6 +103,9 @@ When an inner join's left side is much shorter than its right, the join builds o
 
 - `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
 - `str.join` puts a separator between the characters of every row, and `str.wrap` breaks every row into lines with `textwrap` and every argument pandas takes.
+### Added: ASOF JOIN
+
+`ASOF JOIN` and `ASOF LEFT JOIN` written with `ON` now run, as in DuckDB. The condition is equal keys, which may be none, and exactly one inequality between a column on each side. For each left row the join takes the right rows whose keys agree and whose value passes the inequality, and of those the nearest one, so `a.t >= b.t` is the latest right row at or before the left row and `a.t <= b.t` the earliest at or after it. An inner ASOF join drops a left row that found nothing and an ASOF LEFT JOIN keeps it with the right side null. The compared columns can be numbers, dates or times. A new `AsOf` operator sorts the right side by key and value once and does a binary search per left row, and a filter on the left side can go under the join while one on the right side stays above it. ASOF with `USING` and ASOF RIGHT or FULL are still refused by name.
 
 ### Added: POSITIONAL JOIN
 
