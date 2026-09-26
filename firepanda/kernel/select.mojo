@@ -1947,7 +1947,9 @@ struct RowPicker(Movable):
                 out.set(i, True)
         return out^
 
-    def _compose(mut self, col: AnyArray, indices: List[Int]) raises -> AnyArray:
+    def _compose(
+        mut self, col: AnyArray, indices: List[Int]
+    ) raises -> AnyArray:
         """Takes rows of a selection by taking its positions, once per buffer.
 
         Args:
@@ -1962,11 +1964,10 @@ struct RowPicker(Movable):
         """
         var n = len(indices)
         var found = -1
+        var held = col.data.values.unsafe_ptr()
+        var rows = len(col.data.values)
         for k in range(len(self.seen)):
-            if (
-                self.seen[k].unsafe_ptr() == col.data.values.unsafe_ptr()
-                and len(self.seen[k]) == len(col.data.values)
-            ):
+            if self.seen[k].unsafe_ptr() == held and len(self.seen[k]) == rows:
                 found = k
                 break
         if found < 0:

@@ -1363,9 +1363,7 @@ struct AnyArray(Copyable, Movable, Sized):
         if self.encoding == Encoding.DICTIONARY:
             return self.with_codes(self.code_column().slice(start, end))
         if self.encoding == Encoding.SELECTION:
-            return self.with_positions(
-                self.position_column().slice(start, end)
-            )
+            return self.with_positions(self.position_column().slice(start, end))
         if self.is_string():
             return Self(self.strings().slice(start, end))
         if self.is_nested():
