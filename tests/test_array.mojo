@@ -687,9 +687,7 @@ def test_decoding_a_dictionary_gives_the_rows_back() raises:
     assert_equal(s.null_count(), 1)
     # No string bytes were copied: the long rows point into the categories'
     # own payload.
-    assert_true(
-        s.payload.unsafe_ptr() == col.text.value().payload.unsafe_ptr()
-    )
+    assert_true(s.payload.unsafe_ptr() == col.text.value().payload.unsafe_ptr())
 
 
 def test_a_code_outside_the_categories_is_refused() raises:

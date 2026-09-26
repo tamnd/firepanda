@@ -213,9 +213,11 @@ def _word(ptr: Pointer[UInt8, _], at: Int) -> UInt64:
     Returns:
         The word.
     """
-    return ptr.unsafe_offset(at).unsafe_bitcast[UInt64]().unsafe_load[
-        alignment=1
-    ]()
+    return (
+        ptr.unsafe_offset(at)
+        .unsafe_bitcast[UInt64]()
+        .unsafe_load[alignment=1]()
+    )
 
 
 @always_inline
@@ -230,9 +232,9 @@ def _half(ptr: Pointer[UInt8, _], at: Int) -> UInt64:
         The word, widened.
     """
     return UInt64(
-        ptr.unsafe_offset(at).unsafe_bitcast[UInt32]().unsafe_load[
-            alignment=1
-        ]()
+        ptr.unsafe_offset(at)
+        .unsafe_bitcast[UInt32]()
+        .unsafe_load[alignment=1]()
     )
 
 
