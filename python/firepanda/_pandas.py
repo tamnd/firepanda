@@ -40,7 +40,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda
+from . import _config, _firepanda, _row_dates
 from ._scalars import _inward, _outward, _outward_one, _temporal
 from .errors import (
     ColumnNotFoundError,
@@ -22398,7 +22398,7 @@ def to_datetime(
 
     Hand written rather than generated for the reason the top of this file
     gives: what it does depends on its arguments. Ten of them are declared,
-    four are implemented, one is accepted and has no effect, and five are
+    five are implemented, one is accepted and has no effect, and four are
     refused by name, which is the pattern `_refuse` exists for.
 
     What it answers is a `Series` and pandas answers a `DatetimeIndex` when it
@@ -22416,6 +22416,8 @@ def to_datetime(
     months and that nothing anywhere reports, so firepanda refuses the shapes
     it does not recognise and names the value in the message. Passing `format`
     reads anything, including the shapes the guesser will not touch.
+    `format="ISO8601"` and `format="mixed"` read every row with its own format,
+    the way pandas does, which `_row_dates` describes.
 
     Args:
         arg: The values. A firepanda series, or anything a series is built
@@ -22426,7 +22428,8 @@ def to_datetime(
         yearfirst: Refused, for the same reason.
         utc: Whether to read every row against UTC, which is the only way a
             column carrying more than one offset can be read at all.
-        format: The format the text is written in, or None to work it out.
+        format: The format the text is written in, None to work it out from
+            the first row, or `ISO8601` or `mixed` to work it out on every row.
         exact: Refused. It is a question about a regular expression search that
             this parser does not do.
         unit: What whole numbers are counts of, as one of `s`, `ms`, `us` and
@@ -22441,7 +22444,7 @@ def to_datetime(
         `errors="coerce"`, wherever a row would not read.
 
     Raises:
-        NotImplementedError: For the five refused arguments and for a format
+        NotImplementedError: For the four refused arguments and for a format
             firepanda's guesser does not recognise.
         ValueError: For a row that does not match the format, for a column
             carrying more than one offset with no `utc`, and for an `errors`
@@ -22457,16 +22460,12 @@ def to_datetime(
             "exact= is not supported yet, because it asks whether the format may match"
             " part of the value, and this parser reads the whole of it or none of it"
         )
-    if format in ("mixed", "ISO8601"):
-        raise NotImplementedError(
-            f"format={format!r} is not supported yet, because it asks for the format to"
-            " be worked out per row, and firepanda works one out from the first row and"
-            " holds every other row to it"
-        )
     if errors not in ("raise", "coerce"):
         raise ValueError(f"errors must be one of 'raise' or 'coerce', not {errors!r}")
 
     column = arg if isinstance(arg, SeriesMixin) else Series(arg)
+    if format in ("mixed", "ISO8601"):
+        return _dates_by_row(column, format == "mixed", errors == "coerce", utc)
     try:
         return Series._wrap(
             column._inner.to_datetime(
@@ -22476,6 +22475,34 @@ def to_datetime(
                 utc,
             )
         )
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _dates_by_row(column: Any, mixed: bool, coerce: bool, utc: bool) -> Any:
+    """`to_datetime` with `format="ISO8601"` or `format="mixed"`, every row read on its own.
+
+    A column whose rows all share one shape reads in one pass through the core,
+    which is what the first attempt checks. Otherwise the rows are read in
+    `_row_dates` and handed back to the core in one shape. A column that is not
+    text is read the way it is without a format, since pandas ignores the
+    format for values that are already instants or numbers.
+    """
+    from ._frame import Series
+
+    values = column.tolist()
+    textual = all(isinstance(value, str) or _row_dates.missing(value) for value in values)
+    present = any(not _row_dates.missing(value) for value in values)
+    if not textual or present:
+        try:
+            return Series._wrap(column._inner.to_datetime("", "ns", not textual and coerce, utc))
+        except Exception as error:
+            if not textual:
+                raise translate(error) from None
+    texts = _row_dates.rows_as_text(values, mixed, coerce, utc)
+    read = Series(texts, index=column.index, name=column.name, dtype="str")
+    try:
+        return Series._wrap(read._inner.to_datetime("", "ns", False, utc))
     except Exception as error:
         raise translate(error) from None
 
