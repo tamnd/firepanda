@@ -20,7 +20,9 @@ from firepanda.array.strings import strings_from_list
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.frame.frame import DataFrame
+from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
+from firepanda.kernel.group import AggKind
 from firepanda.kernel.select import (
     SELECT_MIN_ROWS,
     RowPicker,
@@ -185,6 +187,14 @@ def test_a_tall_join_holds_positions_and_a_second_join_thins_them() raises:
     assert_true(joined.columns[3].only().is_selected())
     # A column handed out as a series is flat.
     assert_true(joined.column("v").values.is_flat())
+    # A method that reads values gathers first.
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var summed = joined.group_by(["tag"], specs)
+    assert_equal(len(summed), n)
+    assert_equal(summed.column("tag").text(0), "t0")
+    var sorted = joined.sort_by("v", descending=True)
+    assert_equal(sorted.column("k").as_typed[DType.int64]()[0], Int64(n - 1))
 
     var few = Array[DType.int64](3)
     few.set_valid(0, 7)

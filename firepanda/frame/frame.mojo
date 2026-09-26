@@ -833,6 +833,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: Whatever the conversion raises.
         """
+        if self._holds_selection():
+            return self.gathered()._converted(name, to, strict)
         var index = self.schema.index_of(name)
         var converted = cast_chunked(self.columns[index], to, strict)
         if self.columns[index].type.is_variable_width():
@@ -855,6 +857,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: Whatever the conversion raises.
         """
+        if self._holds_selection():
+            return self.gathered()._converted(name, to, strict)
         var index = self.schema.index_of(name)
         var converted = cast_chunked(self.columns[index], to, strict)
         if self.columns[index].type.is_variable_width():
@@ -1047,6 +1051,82 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     column.chunks[c] = column.chunks[c].decoded()
         return out^
 
+    def _holds_selection(self) -> Bool:
+        """Reports whether any chunk of any column is held as a selection.
+
+        Only the methods that move rows read a selection. Every other method
+        checks this first and runs on `gathered()` when it is true.
+
+        Returns:
+            True if some chunk is a selection.
+        """
+        for i in range(len(self.columns)):
+            for c in range(len(self.columns[i].chunks)):
+                if self.columns[i].chunks[c].is_selected():
+                    return True
+        return False
+
+    def _read_by(
+        self, by: List[String], specs: List[AggSpec]
+    ) raises -> List[Int]:
+        """Returns the positions of the columns a reduction reads.
+
+        A reduction reads its keys and the columns its specs name, and drops
+        every other column from what it returns, so only these need gathering.
+
+        Args:
+            by: The key columns.
+            specs: The reductions.
+
+        Returns:
+            The positions of the named columns this frame has.
+        """
+        var at = List[Int](capacity=len(by) + 2 * len(specs))
+        for i in range(len(by)):
+            if self.has(by[i]):
+                at.append(self.index_of(by[i]))
+        for s in range(len(specs)):
+            if self.has(specs[s].column):
+                at.append(self.index_of(specs[s].column))
+            if self.has(specs[s].other):
+                at.append(self.index_of(specs[s].other))
+        return at^
+
+    def _holds_selection_at(self, at: List[Int]) -> Bool:
+        """Reports whether a chunk of a column at some positions is a selection.
+
+        Args:
+            at: The column positions.
+
+        Returns:
+            True if some chunk of one of them is a selection.
+        """
+        for k in range(len(at)):
+            for c in range(len(self.columns[at[k]].chunks)):
+                if self.columns[at[k]].chunks[c].is_selected():
+                    return True
+        return False
+
+    def _gathered_at(self, at: List[Int]) raises -> Self:
+        """Returns the frame with the selections at some positions gathered.
+
+        Args:
+            at: The column positions.
+
+        Returns:
+            The same values, no chunk of those columns a selection.
+
+        Raises:
+            If a selection cannot be gathered.
+        """
+        var out = Self(copy=self)
+        for k in range(len(at)):
+            ref column = out.columns[at[k]]
+            for c in range(len(column.chunks)):
+                if column.chunks[c].is_selected():
+                    column.chunks[c] = column.chunks[c].decoded()
+        return out^
+
     def gathered(self) raises -> Self:
         """Returns the frame with every column held as a selection gathered.
 
@@ -1213,6 +1293,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If no column has that name.
         """
+        if self._holds_selection():
+            return self.gathered().set_index(name, drop)
         var at = self.schema.index_of(name)
         var labels = ChunkedArray(copy=self.columns[at]).combine()
         var out = self.drop([name]) if drop else Self(copy=self)
@@ -1303,6 +1385,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 looked up against this index's own, or if the fill value is text
                 and a column is not or the other way round.
         """
+        if self._holds_selection():
+            return self.gathered().reindex(labels, fill_value)
         return self.reindex(
             Index(AnyArray(copy=labels), self.index.name.copy()), fill_value
         )
@@ -1331,6 +1415,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: For the reasons the overload above raises.
         """
+        if self._holds_selection():
+            return self.gathered().reindex(target^, fill_value)
         var labels = target.materialize()
         if len(labels) == 0:
             # The lookup is skipped rather than run over nothing, because a list
@@ -1675,6 +1761,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             missing, if the limit or the offset is negative, or if a key dtype
             is not sortable.
         """
+        if self._holds_selection():
+            return self.gathered().argsort_limit(
+                by, descending, nulls_first, limit, offset
+            )
         if len(by) == 0:
             raise Error("sort needs at least one key column")
         if len(descending) != len(by) or len(nulls_first) != len(by):
@@ -1787,6 +1877,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If the mask length does not match, or as `argsort_limit` does.
         """
+        if self._holds_selection():
+            return self.gathered().filter_sort_limit(
+                mask, by, descending, nulls_first, limit, offset
+            )
         if len(mask) != self.rows:
             raise Error(
                 "filter mask must be as long as the frame is tall; frame has "
@@ -1850,6 +1944,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If the name is missing or the dtype is not one firepanda can order.
         """
+        if self._holds_selection():
+            self = self.gathered()
         return self.columns[self.schema.index_of(name)].prove_sorted()
 
     def nunique(mut self, name: String) raises -> Int:
@@ -1874,6 +1970,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If the name is missing or the dtype is not one firepanda can count.
         """
+        if self._holds_selection():
+            self = self.gathered()
         return self.columns[self.schema.index_of(name)].prove_distinct()
 
     def is_monotonic_increasing(mut self, name: String) raises -> Bool:
@@ -1959,6 +2057,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no specs were given, if a name is missing, if two outputs would
             collide, or if a dtype involved has no physical layout.
         """
+        var read = self._read_by(List[String](), specs)
+        if self._holds_selection_at(read):
+            return self._gathered_at(read).agg(specs)
         if len(specs) == 0:
             raise Error("agg: at least one reduction is required")
 
@@ -2027,6 +2128,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `agg` does, and if the frame has no columns.
         """
+        if self._holds_selection():
+            return self.gathered().agg_all(kind)
         var specs = List[AggSpec](capacity=self.width())
         for i in range(len(self.schema)):
             specs.append(
@@ -2335,6 +2438,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a name is missing or repeated, if two outputs would collide, if
             no specs were given, or if a dtype involved has no physical layout.
         """
+        if self._holds_selection():
+            return self.gathered().group_broadcast(by, specs)
         if len(specs) == 0:
             raise Error(
                 "group broadcast: at least one aggregate is required, because"
@@ -2460,6 +2565,11 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             dtype involved has no physical layout, or if `as_index` is asked for
             with more than one key.
         """
+        var read = self._read_by(by, specs)
+        if self._holds_selection_at(read):
+            return self._gathered_at(read).group_by(
+                by, specs, dropna, sort, as_index
+            )
         if as_index and len(by) != 1:
             raise Error(
                 "group by: as_index needs exactly one key, and "
@@ -2651,6 +2761,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `group_nlargest` does.
         """
+        if self._holds_selection():
+            return self.gathered()._group_top(by, column, n, largest, dropna)
         var at = List[Int](capacity=len(by))
         for i in range(len(by)):
             var idx = self.schema.index_of(by[i])
@@ -2781,6 +2893,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `nlargest` does.
         """
+        if self._holds_selection():
+            return self.gathered()._top_rows(column, n, largest, keep)
         if keep != "first" and keep != "last":
             raise Error(
                 "top rows: keep must be either first or last, not " + keep
@@ -3027,6 +3141,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a name is missing or repeated, if the transform is not one of
             the seven, or if a fold has no answer on a column's type.
         """
+        if self._holds_selection():
+            return self.gathered().group_scan(by, kind, periods, dropna, sort)
         var at = List[Int](capacity=len(by))
         for i in range(len(by)):
             var idx = self.schema.index_of(by[i])
@@ -3156,6 +3272,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `group_agg` does.
         """
+        if self._holds_selection():
+            return self.gathered().group_broadcast(by, kind, dropna)
         var at = List[Int](capacity=len(by))
         for i in range(len(by)):
             at.append(self.schema.index_of(by[i]))
@@ -3225,6 +3343,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If a key is missing or a column's type cannot be sorted.
         """
+        if self._holds_selection():
+            return self.gathered().group_rank(
+                by, method, ascending, na, pct, dropna
+            )
         var at = List[Int](capacity=len(by))
         for i in range(len(by)):
             at.append(self.schema.index_of(by[i]))
@@ -3605,6 +3727,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a named column does not exist, or if a dtype has no physical
             layout.
         """
+        if self._holds_selection():
+            return self.gathered().drop_nulls(subset)
         # The mask reads validity and nothing else, so these are borrowed. They
         # used to be deep copies, which on a frame of ten million rows meant
         # copying every column in the frame to find out which rows to keep.
@@ -3638,6 +3762,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             is neither one row nor as tall as the frame, or if the dtype has no
             physical layout.
         """
+        if self._holds_selection():
+            return self.gathered().fill_null(name, value^)
         var at = self.index_of(name)
         var column = Series(name, AnyArray(copy=self.columns[at].only()))
         return self.with_column(column.fill_null(value))
@@ -3668,6 +3794,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             side is neither one row nor as tall as the frame, or if the dtype
             has no physical layout.
         """
+        if self._holds_selection():
+            return self.gathered().pick(name, cond, otherwise)
         var at = self.index_of(name)
         var column = Series(name, AnyArray(copy=self.columns[at].only()))
         return self.with_column(column.pick(cond, otherwise))
@@ -3735,6 +3863,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             Error: If the row labels differ and either index has a duplicate, or
                 the operation is not defined on some pair of column dtypes.
         """
+        if self._holds_selection() or other._holds_selection():
+            return self.gathered().binary(
+                other.gathered(), op, fill_value, flip
+            )
         var plan = plan_indexes(self.index, other.index)
         var rows = self.rows if plan.identical else len(plan.left)
         var names = plan_columns(self.names(), other.names())
@@ -3783,6 +3915,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             Error: If the operation is not defined on some column's dtype and
                 the constant's type.
         """
+        if self._holds_selection():
+            return self.gathered().binary(value, op, value_on_left)
         var made = List[Series](capacity=len(self.columns))
         for i in range(len(self.columns)):
             made.append(
@@ -3824,6 +3958,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 text when broadcasting along the columns, or if the operation is
                 not defined on some pair of dtypes.
         """
+        if self._holds_selection():
+            return self.gathered().binary(other, op, axis, flip)
         if axis == 0:
             return self._along_index(other, op, flip)
         if axis != 1:
@@ -3852,6 +3988,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             Error: If the series labels are not text, or the operation is not
                 defined on some pair of dtypes.
         """
+        if self._holds_selection():
+            return self.gathered()._along_columns(other, op, flip)
         var labels = _label_names(other.index)
         var names = plan_columns(self.names(), labels)
         var found = other.index.get_indexer(AnyArray(strings_from_list(names)))
@@ -3887,6 +4025,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             Error: If the row labels differ and either side has a duplicate, or
                 the operation is not defined on some pair of dtypes.
         """
+        if self._holds_selection():
+            return self.gathered()._along_index(other, op, flip)
         var plan = plan_indexes(self.index, other.index)
         var values = AnyArray(copy=other.values) if plan.identical else reindex(
             other.values, plan.right
@@ -3925,6 +4065,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 same column names in the same order, or the comparison is not
                 defined on some pair of dtypes.
         """
+        if self._holds_selection() or other._holds_selection():
+            return self.gathered().compare(other.gathered(), op)
         if not self.index.equals(other.index) or self.names() != other.names():
             raise Error(
                 "frame: can only compare identically-labeled (both index and"
@@ -3957,6 +4099,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             Error: If the operation is not defined on some column's dtype.
         """
+        if self._holds_selection():
+            return self.gathered().unary(op)
         var made = List[Series](capacity=len(self.columns))
         for i in range(len(self.columns)):
             made.append(
@@ -3983,6 +4127,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             Error: If the two lists differ in length or a position is outside
                 the frame.
         """
+        if self._holds_selection():
+            return self.gathered().rounded(at, decimals)
         if len(at) != len(decimals):
             raise Error(
                 "round was given a different number of places and columns"
@@ -5930,6 +6076,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # for to find out what went wrong, so the reason goes where the table
         # would have been.
         try:
+            if self._holds_selection():
+                self.gathered().write_to(writer)
+                return
             var options = DisplayOptions()
             writer.write(
                 render_table(
