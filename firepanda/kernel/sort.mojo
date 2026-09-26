@@ -360,6 +360,10 @@ def argsort_any_into(
     if col.is_coded():
         argsort_any_into(_ranks(col), order, descending, nulls_first)
         return
+    # A selection's buffer holds positions, so its values are gathered first.
+    if col.is_selected():
+        argsort_any_into(col.decoded(), order, descending, nulls_first)
+        return
     # Before the dispatch, because uint8 is in ORDERED and a string column would
     # match it and sort on the first byte of each view, which is a plausible
     # looking wrong answer rather than an error.
@@ -1206,6 +1210,8 @@ def is_sorted_any(
     """
     if col.is_coded():
         return is_sorted_any(_ranks(col), descending, nulls_first)
+    if col.is_selected():
+        return is_sorted_any(col.decoded(), descending, nulls_first)
     if col.is_string():
         return _strings_are_sorted(col.strings(), descending, nulls_first)
     comptime for candidate in ORDERED:

@@ -1047,6 +1047,28 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     column.chunks[c] = column.chunks[c].decoded()
         return out^
 
+    def gathered(self) raises -> Self:
+        """Returns the frame with every column held as a selection gathered.
+
+        A tall join hands its columns back as positions into its inputs, which
+        a caller that runs arbitrary kernels over the output cannot read. The
+        columns held as codes stay codes.
+
+        Returns:
+            The same values, no chunk a selection.
+
+        Raises:
+            If a selection cannot be gathered.
+        """
+        var out = Self(copy=self)
+        for i in range(len(out.columns)):
+            for c in range(len(out.columns[i].chunks)):
+                if out.columns[i].chunks[c].is_selected():
+                    out.columns[i].chunks[c] = (
+                        out.columns[i].chunks[c].decoded()
+                    )
+        return out^
+
     def decoded(self) raises -> Self:
         """Returns the frame with every column held one value a row.
 

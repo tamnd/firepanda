@@ -189,7 +189,7 @@ def test_a_tall_join_holds_positions_and_a_second_join_thins_them() raises:
     var few = Array[DType.int64](3)
     few.set_valid(0, 7)
     few.set_valid(1, Int64(n - 1))
-    few.set_valid(2, 12345)
+    few.set_valid(2, Int64(n // 2))
     var few_cols = List[Series]()
     few_cols.append(Series("w", AnyArray(few^)))
     var wanted = DataFrame.from_series(few_cols^)

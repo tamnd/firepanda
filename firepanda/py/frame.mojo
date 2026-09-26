@@ -1750,12 +1750,16 @@ struct PyDataFrame(Movable, Writable):
         if len(lefts) != len(rights):
             raise tagged(VALUE, "len(right_on) must equal len(left_on)")
         try:
+            # A tall join holds its columns as positions into its inputs. The
+            # pandas surface runs any kernel on what it gets back, so it gets
+            # the rows gathered.
             return PythonObject(
                 alloc=Self(
                     ArcPointer(
                         Self._frame(py_self)[]
                         .frame[]
                         .join_on(right[], lefts, rights, kind, tail)
+                        .gathered()
                     )
                 )
             )
