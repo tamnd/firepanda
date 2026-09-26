@@ -397,7 +397,6 @@ def test_the_five_unwritten_names_are_absent_rather_than_refusing(
     [
         (lambda s: zoned(s).dt.round("h", ambiguous="infer"), "ambiguous="),
         (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
-        (lambda s: s.dt.tz_convert(None), r"tz_convert\(None\)"),
         (lambda s: s.dt.floor(1), "freq has to be a string"),
         (lambda s: s.dt.tz_localize(3), "tz has to be a zone name"),
     ],
@@ -405,7 +404,7 @@ def test_the_five_unwritten_names_are_absent_rather_than_refusing(
 def test_a_declared_argument_that_is_not_written_says_so(
     firepanda: ModuleType, call: Any, expected: str
 ) -> None:
-    """Five refusals, one test each, so none of them can be dropped by a tidy up.
+    """Four refusals, one test each, so none of them can be dropped by a tidy up.
 
     The argument document 26 makes for the reductions and document 27 repeats
     for the transformations. A parameter that is accepted and ignored is right at

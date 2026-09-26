@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: tz_convert(None) and tz_convert with a tzinfo
+
+`tz_convert(None)` on a `DatetimeIndex` or through `.dt` now moves the instants to UTC and takes the clock off, as pandas does, where it used to be refused. `tz_convert` also reads a `zoneinfo.ZoneInfo` or `datetime.timezone.utc` as the zone it names instead of refusing anything that is not a string. Converting instants that carry no zone raises a `TypeError` with pandas' own sentence, without the explanation the core adds after it.
+
 ### Added: as_unit names the first instant nanoseconds cannot reach
 
 `as_unit("ns")` on a `DatetimeIndex` or through `.dt` now raises `OutOfBoundsDatetime` with pandas' own sentence, `Out of bounds nanosecond timestamp:` followed by the first instant outside the range on the UTC wall clock and to the second, where it used to raise a type error from the core. An `except` clause written against pandas now catches it. Instants just inside either end of the range still restate.
