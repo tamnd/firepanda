@@ -23,6 +23,15 @@ into the one its rows came from, which is how a join hands back its output.
 """
 
 
+comptime NO_LAYOUT = DType.int256
+"""The dtype a column held as a selection answers `dtype()` with.
+
+Any dtype that no dispatch list in `dtype/lists.mojo` names would do. The point
+is that a kernel which picks its arm by `dtype()` and then reads through
+`unsafe_ptr` matches none and raises, rather than reading the positions as
+values, and Mojo has no dtype that means none at all."""
+
+
 struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
     """The physical layout of a column, separate from its logical type."""
 
@@ -62,7 +71,7 @@ struct Encoding(Equatable, ImplicitlyCopyable, Movable, Writable):
     result moves one list of positions rather than every column, and only what
     is left at the end is gathered from the sources.
 
-    `dtype()` answers `DType.invalid` for it, so a kernel that dispatches on
+    `dtype()` answers `NO_LAYOUT` for it, so a kernel that dispatches on
     the physical dtype without asking the encoding matches no arm and raises,
     rather than reading positions as values."""
 

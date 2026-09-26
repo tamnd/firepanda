@@ -15,6 +15,7 @@ from std.testing import (
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.encoding import NO_LAYOUT
 from firepanda.array.strings import strings_from_list
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
@@ -114,7 +115,7 @@ def test_a_selection_is_refused_by_a_kernel_that_reads_values() raises:
     # Its buffer holds positions. A kernel that dispatches on the dtype must
     # not match an arm and read them as values.
     var held = select(numbers(), [0, 1, 2])
-    assert_true(held.dtype() == DType.invalid)
+    assert_true(held.dtype() == NO_LAYOUT)
     assert_equal(String(held.encoding), "selection")
     with assert_raises(contains="call decoded() first"):
         _ = held.as_typed_view[DType.int64]()[0]
@@ -194,9 +195,9 @@ def test_a_tall_join_holds_positions_and_a_second_join_thins_them() raises:
     var wanted = DataFrame.from_series(few_cols^)
     var thin = joined.join_on(wanted, ["rk"], ["w"])
     assert_equal(len(thin), 3)
-    var k = thin.column("k").values
-    var v = thin.column("v").values
-    var tag = thin.column("tag").values
+    var k = thin.column("k").values.copy()
+    var v = thin.column("v").values.copy()
+    var tag = thin.column("tag").values.copy()
     for i in range(3):
         var at = k.as_typed_view[DType.int64]()[i]
         assert_equal(v.as_typed_view[DType.int64]()[i], at * 3)

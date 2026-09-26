@@ -48,7 +48,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind, logical_for
 
 from .array import Array
 from .data import ColumnData
-from .encoding import Encoding
+from .encoding import NO_LAYOUT, Encoding
 from .nested import (
     ROOT,
     NestedNode,
@@ -375,16 +375,17 @@ struct AnyArray(Copyable, Movable, Sized):
     def dtype(self) -> DType:
         """Returns the physical dtype.
 
-        A column held as a selection answers `DType.invalid`. Its values buffer
-        holds positions and not values, and a kernel that picks an arm by the
-        dtype and then reads through `unsafe_ptr` never asks the encoding, so
-        this is where it is stopped: it matches no arm and raises.
+        A column held as a selection answers `NO_LAYOUT`, a dtype no dispatch
+        names. Its values buffer holds positions and not values, and a kernel
+        that picks an arm by the dtype and then reads through `unsafe_ptr`
+        never asks the encoding, so this is where it is stopped: it matches no
+        arm and raises.
 
         Returns:
             The dtype the values buffer is laid out as.
         """
         if self.encoding == Encoding.SELECTION:
-            return DType.invalid
+            return NO_LAYOUT
         return self.type.physical
 
     def is_valid(self, i: Int) -> Bool:
