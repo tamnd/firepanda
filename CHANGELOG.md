@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: an exchanged inner join sorts its pairs back on every core
+
+When an inner join's left side is much shorter than its right, the join builds on the left and walks the right, then counting sorts the pairs back into left row order so the exchange stays invisible. That sort ran on one thread. On TPC-H q2, 2,000 European suppliers against 800,000 part supplies, it was 7% of the query's cycles. A pairing of at least 131,072 entries now gets cut into one run per worker. Each run counts its own left rows, the prefix sum goes over the left rows and, within a row, over the runs in order, and each run scatters into places no other run writes, so the order is the same stable one the single thread gave. The two output lists are no longer zero filled before the scatter overwrites them. On a busy 8 core VM the sort dropped to under 2% of q2's cycles, spread across the cores, and q2's best time went from 102.6 to 84.5 ms with the two builds run back to back.
+
 ### Added: The members only an index of instants has
 
 `DatetimeIndex` now has `shift`, `snap`, `indexer_at_time`, `indexer_between_time`, `isocalendar`, `mean`, `std`, `to_julian_date`, `to_pydatetime`, `time`, `timetz`, `tzinfo` and `resolution`. `shift` and `snap` count along calendar frequencies such as `MS`, `W-MON` and `B` with the steps `date_range` already uses, and a label between two landing dates rolls the way pandas rolls it. The time of day indexers read times the way pandas does, including the evening time pandas reads a missing label as, so a range that wraps past midnight takes it in as it does in pandas. Slicing or picking labels out of an index of instants or spans now keeps its type. `shift` without `freq` raises `NullFrequencyError`, since firepanda keeps no frequency on an index.
