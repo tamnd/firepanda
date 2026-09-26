@@ -109,6 +109,11 @@ def _catalog() raises -> Catalog:
     return catalog^
 
 
+def _asof(condition: String) -> String:
+    """An ASOF join of `t` onto `u` on a condition, reading `a`."""
+    return "SELECT a FROM t ASOF JOIN u ON " + condition
+
+
 def _plan(sql: StringSlice) raises -> String:
     """Parses a query, lowers it, binds it and prints the plan.
 
@@ -1662,6 +1667,45 @@ def test_a_positional_join_pairs_by_place_with_no_key() raises:
     )
 
 
+def test_an_asof_join_keeps_its_inequality_last() raises:
+    assert_true("JOIN asof [a >= k]" in _plan(_asof("t.a >= u.k")))
+    assert_true("JOIN asof [a < k]" in _plan(_asof("t.a < u.k")))
+    # Written with the right side first, it is turned round.
+    assert_true("JOIN asof [a > k]" in _plan(_asof("u.k < t.a")))
+    assert_true("JOIN asof [a <= k]" in _plan(_asof("u.k >= t.a")))
+
+
+def test_an_asof_join_puts_its_equal_keys_first() raises:
+    assert_true(
+        "JOIN asof [a = b, a >= k]" in _plan(_asof("t.a >= u.k AND t.a = u.b"))
+    )
+
+
+def test_an_asof_left_join_is_its_own_kind() raises:
+    assert_true(
+        "JOIN asof left [a >= k]"
+        in _plan("SELECT a FROM t ASOF LEFT JOIN u ON t.a >= u.k")
+    )
+
+
+def test_an_asof_join_needs_exactly_one_inequality() raises:
+    with assert_raises(contains="only equalities"):
+        _ = _plan(_asof("t.a = u.k"))
+    with assert_raises(contains="more than one"):
+        _ = _plan(_asof("t.a >= u.k AND t.a < u.b"))
+    with assert_raises(contains="something else"):
+        _ = _plan(_asof("t.a >= u.k OR t.a = u.b"))
+    with assert_raises(contains="column of the other"):
+        _ = _plan(_asof("t.a >= t.a"))
+
+
+def test_the_asof_joins_not_lowered_yet_say_so() raises:
+    with assert_raises(contains="USING"):
+        _ = _plan("SELECT a FROM t ASOF JOIN u USING (k)")
+    with assert_raises(contains="ASOF RIGHT or FULL"):
+        _ = _plan("SELECT a FROM t ASOF RIGHT JOIN u ON t.a >= u.k")
+
+
 def test_each_outer_join_keeps_the_side_its_word_names() raises:
     assert_true("JOIN left [a = k]" in _plan(_outer("LEFT")))
     assert_true("JOIN right [a = k]" in _plan(_outer("RIGHT")))
@@ -3202,8 +3246,6 @@ def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
 
 
 def test_the_joins_with_no_node_yet_each_say_which_one() raises:
-    with assert_raises(contains="ASOF join"):
-        _ = _plan("SELECT a FROM t ASOF JOIN u ON t.a = u.k")
     with assert_raises(contains="alias on a table function"):
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):

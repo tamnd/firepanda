@@ -256,6 +256,26 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     on the rows past its end.
     """
 
+    comptime ASOF = Self(9)
+    """Each left row with the nearest right row on one side of it.
+
+    The keys but the last are equal keys, and the last pair is compared with
+    an inequality rather than for equality. Of the right rows the equal keys
+    agree with and the inequality lets through, the nearest one is the match.
+    A left row with no match is dropped.
+    """
+
+    comptime ASOF_LEFT = Self(10)
+    """An ASOF join that keeps a left row with no match, the right side null."""
+
+    def is_asof(self) -> Bool:
+        """Reports whether this is one of the two ASOF joins.
+
+        Returns:
+            True for ASOF and ASOF_LEFT.
+        """
+        return self == Self.ASOF or self == Self.ASOF_LEFT
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -291,10 +311,11 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Reports whether a left row with no match still produces a row.
 
         Returns:
-            True for left, outer, anti and mark.
+            True for left, outer, anti, mark and ASOF left.
         """
         return (
-            self == Self.LEFT
+            self == Self.ASOF_LEFT
+            or self == Self.LEFT
             or self == Self.OUTER
             or self == Self.ANTI
             or self == Self.MARK
@@ -322,6 +343,10 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("mark")
         elif self == Self.POSITIONAL:
             writer.write("positional")
+        elif self == Self.ASOF:
+            writer.write("asof")
+        elif self == Self.ASOF_LEFT:
+            writer.write("asof left")
         else:
             writer.write("cross")
 

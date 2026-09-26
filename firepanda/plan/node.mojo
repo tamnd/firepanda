@@ -192,6 +192,21 @@ comptime SET_INTERSECT = 2
 """The rows the first input and the second both have."""
 
 
+def asof_compare(backward: Bool, strict: Bool) -> String:
+    """Writes an ASOF join's inequality as SQL spells it, left side first.
+
+    Args:
+        backward: Whether the left value is the larger one.
+        strict: Whether an equal value does not match.
+
+    Returns:
+        One of `>=`, `>`, `<=` and `<`.
+    """
+    if backward:
+        return ">" if strict else ">="
+    return "<" if strict else "<="
+
+
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
 
@@ -743,6 +758,11 @@ struct Plan(Movable, Sized):
                     ),
                 )
             )
+        if kind.is_asof() and len(left_keys) == 0:
+            raise Error(
+                "an ASOF join compares one column on each side, and it was"
+                " given no key to hold the comparison"
+            )
         if kind == JoinKind.POSITIONAL and len(left_keys) != 0:
             raise Error(
                 "a positional join pairs rows by where they are and takes no"
@@ -806,6 +826,48 @@ struct Plan(Movable, Sized):
                 String(),
             )
         )
+
+    def asof_join(
+        mut self,
+        left: Int,
+        right: Int,
+        var left_keys: List[Int],
+        var right_keys: List[Int],
+        keep: Bool,
+        backward: Bool,
+        strict: Bool,
+    ) raises -> Int:
+        """Builds an ASOF join.
+
+        The keys are laid out the way `join` lays them out, and the last pair is
+        the inequality rather than an equal key. Which way it points goes in the
+        flags, backward first and strict second, so `left.t >= right.t` is
+        backward and not strict.
+
+        Args:
+            left: The left input.
+            right: The right input.
+            left_keys: The equal keys on the left, then the compared column.
+            right_keys: The same on the right.
+            keep: Whether a left row with no match is kept, ASOF LEFT JOIN.
+            backward: Whether the left value is the larger one.
+            strict: Whether an equal value does not match.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            Whatever `join` refuses, which includes no keys at all.
+        """
+        var at = self.join(
+            left,
+            right,
+            left_keys^,
+            right_keys^,
+            JoinKind.ASOF_LEFT if keep else JoinKind.ASOF,
+        )
+        self.nodes[at].flags = [backward, strict]
+        return at
 
     def sort(
         mut self,

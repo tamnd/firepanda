@@ -98,6 +98,7 @@ from firepanda.plan.node import (
     SET_UNION,
     NodeKind,
     Plan,
+    asof_compare,
 )
 
 
@@ -496,7 +497,7 @@ def _join_of(word: String) raises -> JoinKind:
     Raises:
         Error: If nothing is called that.
     """
-    for code in range(Int(JoinKind.POSITIONAL.code) + 1):
+    for code in range(Int(JoinKind.ASOF_LEFT.code) + 1):
         var kind = JoinKind(UInt8(code))
         if String(kind) == word:
             return kind
@@ -861,6 +862,11 @@ def _node_json(
         out += String('"kind": "join", "how": ', _quoted(String(how)))
         if how == JoinKind.MARK:
             out += String(', "mark": ', _quoted(node.names[0]))
+        if how.is_asof():
+            out += String(
+                ', "compare": ',
+                _quoted(asof_compare(node.flags[0], node.flags[1])),
+            )
         out += ', "on": ['
         for i in range(node.parts):
             if i != 0:
@@ -1700,6 +1706,31 @@ def _join_node_of(
             "the condition of a join",
             plan.exprs,
             expr_ids,
+        )
+    if how.is_asof():
+        var compare = text_of(
+            bytes,
+            members[_need(bytes, members, "compare", "an ASOF join")].value,
+        )
+        var backward = compare.startswith(">")
+        if compare != asof_compare(backward, compare.byte_length() == 1):
+            raise Error(
+                String(
+                    (
+                        "an ASOF join compares with >=, >, <= or <, and this"
+                        " one says "
+                    ),
+                    compare,
+                )
+            )
+        return plan.asof_join(
+            left,
+            right,
+            left_keys^,
+            right_keys^,
+            how == JoinKind.ASOF_LEFT,
+            backward,
+            compare.byte_length() == 1,
         )
     return plan.join(
         left, right, left_keys^, right_keys^, how, mark^, residual^

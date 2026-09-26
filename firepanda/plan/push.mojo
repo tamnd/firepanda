@@ -557,9 +557,13 @@ def _join(
     # a left join does not drop the left row it matched, it null extends it
     # instead, and a null is not what the predicate was asked about. A cross
     # join is an inner join with nothing asked of the pair, so it lets one go
-    # either way too. A right or an outer join keeps everything where it was.
+    # either way too. An ASOF join matches each left row on its own, so a left
+    # row dropped below it is the same row dropped above it, but a right row
+    # dropped below it can move which row is nearest, so only the left side's
+    # predicates go. A right or an outer join keeps everything where it was.
     var leftwards = (
         inner
+        or kind.is_asof()
         or kind == JoinKind.CROSS
         or kind == JoinKind.LEFT
         or kind == JoinKind.SEMI

@@ -33,6 +33,7 @@ from firepanda.exec import (
     Collect,
     Compute,
     Constant,
+    AsOf,
     Cross,
     Positional,
     Cut,
@@ -3410,6 +3411,72 @@ def test_a_positional_join_hands_out_the_right_rows_past_the_left() raises:
 def test_a_positional_join_is_not_row_local() raises:
     # Which right row a left row meets depends on how many came before it.
     assert_false(node_is_row_local(Node(Positional(_two_tags([7, 9])))))
+
+
+def _asof(keep: Bool, backward: Bool = True) raises -> DataFrame:
+    """Runs `n` of the six rows against tags 2 and 5 as an ASOF join."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            AsOf(
+                _two_tags([2, 5]),
+                List[Int](),
+                List[Int](),
+                0,
+                0,
+                backward,
+                False,
+                keep,
+            )
+        )
+    )
+    return pipeline^.run()
+
+
+def test_an_asof_join_takes_the_nearest_tag_at_or_below() raises:
+    var out = _asof(False)
+    assert_equal(len(out), 5, "row 1 is below every tag")
+    assert_equal(len(out.schema), 3, "both sides end to end")
+    var n = read_back(out, "n")
+    var tags = read_back(out, "tag")
+    for i in range(5):
+        assert_equal(n[i], Int64(i + 2), String("n at ", i))
+        assert_equal(tags[i], Int64(2 if i < 3 else 5), String("tag at ", i))
+
+
+def test_an_asof_left_join_keeps_the_row_with_no_tag() raises:
+    var out = _asof(True)
+    assert_equal(len(out), 6)
+    var there = present(out, "tag")
+    for i in range(6):
+        assert_equal(there[i], i > 0, String("tag there at ", i))
+
+
+def test_an_asof_join_forward_takes_the_nearest_tag_at_or_above() raises:
+    var out = _asof(False, False)
+    assert_equal(len(out), 5, "row 6 is above every tag")
+    var tags = read_back(out, "tag")
+    for i in range(5):
+        assert_equal(tags[i], Int64(2 if i < 2 else 5), String("tag at ", i))
+
+
+def test_an_asof_join_is_row_local() raises:
+    assert_true(
+        node_is_row_local(
+            Node(
+                AsOf(
+                    _two_tags([2, 5]),
+                    List[Int](),
+                    List[Int](),
+                    0,
+                    0,
+                    True,
+                    False,
+                    False,
+                )
+            )
+        )
+    )
 
 
 def test_a_right_join_hands_out_the_build_row_nothing_matched() raises:

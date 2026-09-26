@@ -57,6 +57,7 @@ from firepanda.plan.node import (
     SET_INTERSECT,
     NodeKind,
     Plan,
+    asof_compare,
 )
 
 
@@ -356,14 +357,19 @@ def _line(plan: Plan, at: Int) raises -> String:
         return written + "]"
 
     if node.kind == NodeKind.JOIN:
+        var how = JoinKind(UInt8(node.op))
         var pairs = String()
         for i in range(node.parts):
             if i != 0:
                 pairs += ", "
             pairs += render_expr(plan.exprs, node.exprs[i])
-            pairs += " = "
+            if how.is_asof() and i == node.parts - 1:
+                pairs += String(
+                    " ", asof_compare(node.flags[0], node.flags[1]), " "
+                )
+            else:
+                pairs += " = "
             pairs += render_expr(plan.exprs, node.exprs[node.parts + i])
-        var how = JoinKind(UInt8(node.op))
         var written = String("JOIN ", how, " [", pairs, "]")
         for i in range(2 * node.parts, len(node.exprs)):
             written += " and " if i != 2 * node.parts else " where "

@@ -447,8 +447,8 @@ Checked against DuckDB both ways.
 
 Named tables, the table functions above, the derived tables and the CTEs above,
 and the joins over them. So is a `LATERAL` derived table.
-`ASOF` is refused by name, since it matches on the nearest value rather than
-an equal one. A `POSITIONAL` join is lowered, and it pairs the two sides by row
+An `ASOF` join is lowered when it is written with `ON`, and refused by name
+with `USING` or as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
 number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
 refused as well, since the merged name is on both sides and a column a subquery
 computed carries no table to tell the two apart. Each is a refusal by
@@ -4455,11 +4455,14 @@ def _join_kind(text: StringSlice) raises -> JoinKind:
     """
     var said = String(text).upper()
     if said.find("ASOF") != -1:
-        raise Error(
-            "firepanda does not lower an ASOF join yet, which matches a row"
-            " against the nearest value rather than an equal one and so is a"
-            " different operator and not a different condition"
-        )
+        if said.find("RIGHT") != -1 or said.find("FULL") != -1:
+            raise Error(
+                "firepanda lowers an ASOF join and an ASOF LEFT JOIN, and not"
+                " an ASOF RIGHT or FULL JOIN yet"
+            )
+        if said.find("LEFT") != -1:
+            return JoinKind.ASOF_LEFT
+        return JoinKind.ASOF
     if said.find("POSITIONAL") != -1:
         return JoinKind.POSITIONAL
     # Neither takes a LEFT or a RIGHT in front of it, in DuckDB or here, so
@@ -5274,6 +5277,14 @@ def _joined(
         # key to find. The grammar gives it no condition to write.
         return _pair(plan, left, right, List[Int](), List[Int](), kind)
 
+    if kind.is_asof():
+        if node.kind == REF_JOIN_USING:
+            raise Error(
+                "firepanda lowers an ASOF join written with ON, and not one"
+                " written with USING yet"
+            )
+        return _asof(ast, node.children, plan, left, right, scope, kind)
+
     if node.kind == REF_JOIN_USING:
         var named = List[String]()
         for i in range(ast.length(node.children)):
@@ -5416,6 +5427,123 @@ def _joined(
     for i in range(len(rest)):
         out.at = plan.filter(out.at, rest[i])
     return out^
+
+
+def _asof(
+    ast: Ast,
+    children: UInt32,
+    mut plan: Plan,
+    left: _From,
+    right: _From,
+    mut scope: _Scope,
+    kind: JoinKind,
+) raises -> _From:
+    """Lowers an ASOF join's condition and puts the join over its two inputs.
+
+    The condition is split on `AND`, and each part has to compare a column of
+    one side with a column of the other. The parts that say `=` are equal keys
+    and exactly one part says `>=`, `>`, `<=` or `<`, which is what the nearest
+    row is measured by. That is DuckDB's rule too. A part written with the
+    right side first is turned round, so `u.t <= t.t` is `t.t >= u.t`.
+
+    Args:
+        ast: The arenas.
+        children: The join's condition.
+        plan: Where the nodes go.
+        left: The left input.
+        right: The right input.
+        scope: What the FROM has put in reach.
+        kind: ASOF or ASOF_LEFT.
+
+    Returns:
+        The join, with the two schemas end to end.
+
+    Raises:
+        If there is no condition, a part is not a comparison between the two
+        sides, or there is not exactly one inequality.
+    """
+    var written = ast.items(children)
+    if len(written) == 0:
+        raise Error(
+            "an ASOF join needs an ON with the inequality it matches the"
+            " nearest row by"
+        )
+    var conjuncts = List[UInt32]()
+    _conjuncts(ast, written[0], conjuncts)
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    var left_on = -1
+    var right_on = -1
+    var backward = False
+    var strict = False
+    var walk = _Walk()
+    for i in range(len(conjuncts)):
+        var one = ast.exprs[Int(conjuncts[i])]
+        var op = (
+            String(ast.text(one.payload)) if one.kind
+            == EXPR_BINARY else String()
+        )
+        if op != "=" and op != ">=" and op != ">" and op != "<=" and op != "<":
+            raise Error(
+                "an ASOF join's condition is equalities and one inequality"
+                " between its two sides, joined by AND, and this part is"
+                " something else"
+            )
+        var a = _lower_operand(ast, one.a, plan, walk, scope, False)
+        var b = _lower_operand(ast, one.b, plan, walk, scope, False)
+        var first = _side(plan, a, left, right)
+        var second = _side(plan, b, left, right)
+        var turned = first == _RIGHT and second == _LEFT
+        if not turned and not (first == _LEFT and second == _RIGHT):
+            raise Error(
+                String(
+                    (
+                        "an ASOF join compares a column of one side with a"
+                        " column of the other, and this "
+                    ),
+                    op,
+                    " does not",
+                )
+            )
+        var here = b if turned else a
+        var there = a if turned else b
+        if op == "=":
+            left_keys.append(here)
+            right_keys.append(there)
+            continue
+        if left_on != -1:
+            raise Error(
+                "an ASOF join matches the nearest row by one inequality, and"
+                " this condition has more than one"
+            )
+        left_on = here
+        right_on = there
+        # Turned round, a greater than on the right side is a less than on
+        # the left.
+        backward = op.startswith(">") != turned
+        strict = op.byte_length() == 1
+    if left_on == -1:
+        raise Error(
+            "an ASOF join needs one inequality to match the nearest row by,"
+            " and this condition has only equalities"
+        )
+    left_keys.append(left_on)
+    right_keys.append(right_on)
+    var at = plan.asof_join(
+        left.at,
+        right.at,
+        left_keys^,
+        right_keys^,
+        kind == JoinKind.ASOF_LEFT,
+        backward,
+        strict,
+    )
+    var schema = Schema(copy=left.schema)
+    var origin = left.origin.copy()
+    for i in range(len(right.schema)):
+        schema.append(right.schema[i].copy())
+        origin.append(right.origin[i])
+    return _From(at, schema^, origin^)
 
 
 def _source(

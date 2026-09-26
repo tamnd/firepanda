@@ -186,7 +186,11 @@ from firepanda.kernel.select import (
     select_positions,
     take_any,
 )
-from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.sort import (
+    argsort_any_into,
+    argsort_multi,
+    identity_permutation,
+)
 from firepanda.kernel.topn import top_rows
 from firepanda.kernel.temporal import (
     TRUNC_CODES,
@@ -5481,6 +5485,372 @@ struct Positional(Movable):
         return Chunk(out^, rows)
 
 
+struct AsOf(Movable):
+    """Pairs each row of a chunk with the nearest right row before or after it.
+
+    An ASOF join has equal keys, which may be none, and one inequality between
+    a column on each side. For each left row it takes the right rows whose keys
+    agree and whose value passes the inequality, and of those the one whose
+    value is nearest. With `left.t >= right.t` that is the latest right row at
+    or before the left row, with `>` it has to be strictly before, and `<=` and
+    `<` look forwards for the earliest one instead.
+
+    `bind` builds the right side once. The right rows are numbered by their key
+    tuple, sorted by group and then by value, and a row with a null key or a
+    null value is left out, since it can pass no comparison. After that the
+    node only reads, so it is row local like `Join`, and each left row is one
+    lookup of its group and one binary search inside it.
+
+    An inner ASOF join drops a left row that found nothing and a left one keeps
+    it with the right side's columns null.
+
+    The values are compared as int64, which covers every integer and every date
+    and time type, unless either side is a float, and then both are compared as
+    float64.
+    """
+
+    var side: Schema
+    """The right side's columns, appended after the chunk's."""
+
+    var right: List[AnyArray]
+    """The right side, one array per column."""
+
+    var height: Int
+    """How many rows the right side has."""
+
+    var left_keys: List[Int]
+    """The positions of the equal keys in the chunk."""
+
+    var right_keys: List[Int]
+    """The positions of the equal keys in the right side, in the same order."""
+
+    var left_on: Int
+    """The position of the compared column in the chunk."""
+
+    var right_on: Int
+    """The position of the compared column in the right side."""
+
+    var backward: Bool
+    """Whether the left value is the larger, `>=` or `>`, so the match is at or
+    before it rather than at or after it."""
+
+    var strict: Bool
+    """Whether an equal value is too close, `>` or `<` rather than `>=` or
+    `<=`."""
+
+    var keep: Bool
+    """Whether a left row with no match is kept, which is ASOF LEFT JOIN."""
+
+    var _groups: Dict[String, Int]
+    """Each key tuple on the right side, packed, and the group it numbers."""
+
+    var _starts: List[Int]
+    """Where each group starts in `_rows`, with one more entry at the end."""
+
+    var _rows: List[Int]
+    """The right rows, by group and then by value."""
+
+    var _ints: List[Int64]
+    """The value of each row in `_rows`, when the values compare as integers."""
+
+    var _floats: List[Float64]
+    """The value of each row in `_rows`, when either side is a float."""
+
+    var _floaty: Bool
+    """Whether the values compare as floats."""
+
+    def __init__(
+        out self,
+        var right: DataFrame,
+        var left_keys: List[Int],
+        var right_keys: List[Int],
+        left_on: Int,
+        right_on: Int,
+        backward: Bool,
+        strict: Bool,
+        keep: Bool,
+    ) raises:
+        """Takes the right side and the condition in.
+
+        Args:
+            right: The frame each chunk row is matched against. Consumed.
+            left_keys: The equal keys' positions in the chunk. Consumed.
+            right_keys: The equal keys' positions in the right side. Consumed.
+            left_on: The compared column's position in the chunk.
+            right_on: The compared column's position in the right side.
+            backward: Whether the match is at or before the left value.
+            strict: Whether an equal value does not match.
+            keep: Whether a left row with no match is kept.
+
+        Raises:
+            If a column's chunks cannot be stacked, or the two key lists are
+            different lengths.
+        """
+        if len(left_keys) != len(right_keys):
+            raise Error(
+                "an ASOF join has the same number of equal keys on each side"
+            )
+        self.side = Schema(copy=right.schema)
+        self.height = right.rows
+        var columns = right^.into_columns()
+        var backwards = List[AnyArray](capacity=len(columns))
+        while len(columns) > 0:
+            backwards.append(columns.pop().combine())
+        self.right = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            self.right.append(backwards.pop())
+        self.left_keys = left_keys^
+        self.right_keys = right_keys^
+        self.left_on = left_on
+        self.right_on = right_on
+        self.backward = backward
+        self.strict = strict
+        self.keep = keep
+        self._groups = Dict[String, Int]()
+        self._starts = List[Int]()
+        self._rows = List[Int]()
+        self._ints = List[Int64]()
+        self._floats = List[Float64]()
+        self._floaty = False
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Builds the right side and reports both schemas end to end.
+
+        The build waits until here because whether the values compare as floats
+        depends on the chunk's column as well as on the right side's.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            Both schemas end to end, the right side's columns nullable when a
+            left row with no match is kept.
+
+        Raises:
+            If the compared columns are not numbers or dates and times, or an
+            equal key has a different type on each side.
+        """
+        var mine = input[self.left_on].dtype
+        var theirs = self.side[self.right_on].dtype
+        for t in [mine, theirs]:
+            if not (t.is_numeric() or t.is_temporal()):
+                raise Error(
+                    String(
+                        (
+                            "an ASOF join compares a number or a date or a time"
+                            " on each side, and one side is "
+                        ),
+                        t,
+                    )
+                )
+        for k in range(len(self.left_keys)):
+            var here = input[self.left_keys[k]].dtype
+            var there = self.side[self.right_keys[k]].dtype
+            if here != there:
+                raise Error(
+                    String(
+                        "an ASOF join's equal key is ",
+                        here,
+                        " on the left and ",
+                        there,
+                        " on the right, and it has to be one type on both",
+                    )
+                )
+        self._floaty = mine.is_float() or theirs.is_float()
+        self._build()
+        var out = input^
+        for c in range(len(self.side)):
+            var field = self.side[c].copy()
+            if self.keep:
+                field.nullable = True
+            out.append(field^)
+        return out^
+
+    def _build(mut self) raises:
+        """Numbers the right side's groups and sorts each one by value.
+
+        Raises:
+            If a key cannot be packed or the values cannot be cast.
+        """
+        var rows = self.height
+        self._groups = Dict[String, Int]()
+        var group = Array[DType.int64](rows)
+        if len(self.right_keys) == 0:
+            for i in range(rows):
+                group.set_valid(i, Int64(0))
+            if rows > 0:
+                self._groups[String()] = 0
+        else:
+            var packed = pack_keys(self.right, self.right_keys, rows)
+            ref texts = packed.strings()
+            for i in range(rows):
+                if not packed.is_valid(i):
+                    group.set_null(i)
+                    continue
+                var key = texts[i]
+                var found = self._groups.get(key)
+                if found:
+                    group.set_valid(i, Int64(found.value()))
+                else:
+                    var next = len(self._groups)
+                    self._groups[key^] = next
+                    group.set_valid(i, Int64(next))
+        var values = cast_any(
+            self.right[self.right_on],
+            DType.float64 if self._floaty else DType.int64,
+        )
+        var counts = List[Int](length=len(self._groups), fill=0)
+        for i in range(rows):
+            if group.is_valid(i) and values.is_valid(i):
+                counts[Int(group[i])] += 1
+        self._starts = List[Int](capacity=len(counts) + 1)
+        var total = 0
+        for g in range(len(counts)):
+            self._starts.append(total)
+            total += counts[g]
+        self._starts.append(total)
+        var keys = List[AnyArray]()
+        keys.append(AnyArray(group^))
+        keys.append(values.copy())
+        var order = argsort_multi(keys, [False, False], [False, False])
+        self._rows = List[Int](capacity=total)
+        self._ints = List[Int64]()
+        self._floats = List[Float64]()
+        ref groups = keys[0].as_typed_view[DType.int64]()
+        for n in range(rows):
+            var i = Int(order[n])
+            if not groups.is_valid(i) or not values.is_valid(i):
+                continue
+            self._rows.append(i)
+            if self._floaty:
+                self._floats.append(values.as_typed_view[DType.float64]()[i])
+            else:
+                self._ints.append(values.as_typed_view[DType.int64]()[i])
+
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
+        """Matches every row of the chunk against the right side.
+
+        Args:
+            chunk: The chunk. Consumed.
+            spread: Whether the gathers may hand themselves out to workers.
+
+        Returns:
+            Each kept left row with its match beside it, or nothing when no
+            row is kept.
+
+        Raises:
+            If a key cannot be packed or a column cannot be gathered.
+        """
+        var rows = len(chunk)
+        if rows == 0:
+            return None
+        var columns = chunk^.into_columns()
+        var values = cast_any(
+            columns[self.left_on],
+            DType.float64 if self._floaty else DType.int64,
+        )
+        var packed = Optional[AnyArray]()
+        if len(self.left_keys) > 0:
+            packed = pack_keys(columns, self.left_keys, rows)
+        var left_at = List[Int](capacity=rows)
+        var right_at = List[Int](capacity=rows)
+        for i in range(rows):
+            var hit = -1
+            var group = -1
+            if values.is_valid(i):
+                if packed:
+                    if packed.value().is_valid(i):
+                        var found = self._groups.get(
+                            packed.value().strings()[i]
+                        )
+                        if found:
+                            group = found.value()
+                elif len(self._groups) > 0:
+                    group = 0
+            if group >= 0:
+                var lo = self._starts[group]
+                var hi = self._starts[group + 1]
+                var at: Int
+                if self._floaty:
+                    at = _nearest(
+                        self._floats,
+                        lo,
+                        hi,
+                        values.as_typed_view[DType.float64]()[i],
+                        self.backward,
+                        self.strict,
+                    )
+                else:
+                    at = _nearest(
+                        self._ints,
+                        lo,
+                        hi,
+                        values.as_typed_view[DType.int64]()[i],
+                        self.backward,
+                        self.strict,
+                    )
+                if at >= 0:
+                    hit = self._rows[at]
+            if hit >= 0 or self.keep:
+                left_at.append(i)
+                right_at.append(hit)
+        if len(left_at) == 0:
+            return None
+        var out = List[AnyArray](capacity=len(columns) + len(self.right))
+        for c in range(len(columns)):
+            out.append(take_any(columns[c], left_at, spread))
+        for c in range(len(self.right)):
+            out.append(take_any(self.right[c], right_at, spread))
+        return Chunk(out^, len(left_at))
+
+
+def _nearest[
+    dt: DType
+](
+    values: List[Scalar[dt]],
+    lo: Int,
+    hi: Int,
+    x: Scalar[dt],
+    backward: Bool,
+    strict: Bool,
+) -> Int:
+    """Finds the value nearest `x` on one side of it in a sorted run.
+
+    Args:
+        values: The values, sorted ascending between `lo` and `hi`.
+        lo: Where the run starts.
+        hi: Where the run ends, one past its last value.
+        x: The value to look from.
+        backward: Whether to look at or below `x` rather than at or above it.
+        strict: Whether a value equal to `x` is left out.
+
+    Parameters:
+        dt: The dtype of the values.
+
+    Returns:
+        The index of the nearest value, the last of several equal ones looking
+        backward and the first looking forward, or -1 when there is none.
+    """
+    # The first index whose value is past `x`, where past takes in an equal
+    # value when an equal one is allowed on the backward side or refused on the
+    # forward side.
+    var take_equal = backward != strict
+    var a = lo
+    var b = hi
+    while a < b:
+        var mid = (a + b) // 2
+        var below = values[mid] <= x if take_equal else values[mid] < x
+        if below:
+            a = mid + 1
+        else:
+            b = mid
+    if backward:
+        return a - 1 if a > lo else -1
+    return a if a < hi else -1
+
+
 def _names_include(fields: List[Field], name: String) -> Bool:
     """Reports whether a field of that name has already been planned.
 
@@ -7887,6 +8257,7 @@ comptime Node = Variant[
     Settle,
     Cross,
     Positional,
+    AsOf,
     Limit,
     Sort,
     Window,
@@ -7971,6 +8342,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Settle].bind(input^)
     if node.isa[Cross]():
         return node[Cross].bind(input^)
+    if node.isa[AsOf]():
+        return node[AsOf].bind(input^)
     if node.isa[Positional]():
         return node[Positional].bind(input^)
     if node.isa[Sort]():
@@ -8104,7 +8477,7 @@ def node_is_row_local(node: Node) -> Bool:
         `Truncate`,
         `Presence`,
         `Fill`,
-        `Choose`, `Constant`, `Cast`, `Join`, `Settle` and `Cross`, except a
+        `Choose`, `Constant`, `Cast`, `Join`, `Settle`, `Cross` and `AsOf`, except a
         right or a full `Join`, which notes the build rows it used as chunks go
         past.
     """
@@ -8134,6 +8507,7 @@ def node_is_row_local(node: Node) -> Bool:
         or (node.isa[Join]() and not node[Join].holds_hits())
         or node.isa[Settle]()
         or node.isa[Cross]()
+        or node.isa[AsOf]()
     )
 
 
@@ -8404,6 +8778,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Settle].process(chunk^)
     if node.isa[Cross]():
         return node[Cross].process(chunk^)
+    if node.isa[AsOf]():
+        return node[AsOf].process(chunk^)
     if node.isa[Positional]():
         return node[Positional].process(chunk^)
     if node.isa[Limit]():
@@ -8500,6 +8876,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Settle].process(chunk^)
     if node.isa[Cross]():
         return node[Cross].process(chunk^, False)
+    if node.isa[AsOf]():
+        return node[AsOf].process(chunk^, False)
     raise Error("apply: this node carries state between chunks")
 
 
