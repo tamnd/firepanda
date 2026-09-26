@@ -112,7 +112,7 @@ from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import StringArray, StringBuilder, _bytes_equal
 from firepanda.array.strview import (
     INLINE_CAPACITY,
     VIEW_SIZE,
@@ -344,7 +344,7 @@ struct LastingText(Movable):
         """
         if rows <= 0:
             return
-        var hashes = Buffer(rows * 8)
+        var hashes = Buffer(overwritten=rows * 8)
         _hash_rows(col, rows, hashes)
 
         var order = Array[DType.uint32](overwritten=rows)
@@ -396,14 +396,29 @@ struct _TextStore(Movable):
     """The distinct keys of a `LastingText`, in ordinal order.
 
     In pieces, one per chunk that brought new keys, because a chunk knows its
-    own new keys and joining them up is work for the end.
+    own new keys and joining them up is work for the end. Beside the pieces is
+    a flat array of sixteen bytes a key, its head, which is what a probe reads
+    to compare a row against a stored key.
+
+    The head is the first word of the key's view, its length and first four
+    bytes, and then either the rest of the view for a key of at most twelve
+    bytes, which holds the key itself, or the piece the key is in and where its
+    bytes start in that piece's payload. A probe used to find the piece by a
+    binary search over where each one starts and then read the piece's view,
+    which was two dependent loads before the bytes, and the walk could not
+    prefetch any of it. An ordinal now names its head, so the walk can ask for
+    the head a few rows before it compares and for the bytes a few rows after
+    that.
     """
 
     var pieces: List[StringArray]
     """The keys, a piece at a time."""
 
-    var bases: List[Int]
-    """The first ordinal in each piece."""
+    var heads: Buffer
+    """Two words a key, in ordinal order, as the struct's docstring says."""
+
+    var room: Int
+    """How many heads `heads` has room for."""
 
     var groups: Int
     """Ordinals handed out so far."""
@@ -411,18 +426,78 @@ struct _TextStore(Movable):
     def __init__(out self):
         """Constructs an empty store."""
         self.pieces = List[StringArray]()
-        self.bases = List[Int]()
+        self.heads = Buffer(0)
+        self.room = 0
         self.groups = 0
 
     def add(mut self, var piece: StringArray):
         """Appends a chunk's new keys, which take the next ordinals.
 
         Args:
-            piece: The keys, in ordinal order.
+            piece: The keys, in ordinal order. A finished column, so every long
+                view is in payload block zero.
         """
-        self.bases.append(self.groups)
-        self.groups += len(piece)
+        var count = len(piece)
+        if self.groups + count > self.room:
+            var grown = max(self.room * 2, self.groups + count, 1 << 10)
+            var bigger = Buffer(overwritten=grown * 16)
+            if self.groups > 0:
+                unsafe_memcpy(
+                    dest=bigger.unsafe_mut_ptr(),
+                    src=self.heads.unsafe_ptr(),
+                    count=self.groups * 16,
+                )
+            self.heads = bigger^
+            self.room = grown
+        var into = self.heads.mut_bitcast[DType.uint64]().unsafe_offset(
+            self.groups * 2
+        )
+        var views = piece.views.bitcast[DType.uint64]()
+        var tag = UInt64(len(self.pieces)) << 32
+        for j in range(count):
+            var first = views.unsafe_offset(j * 2).unsafe_load()
+            var second = views.unsafe_offset(j * 2 + 1).unsafe_load()
+            if Int(first & 0xFFFFFFFF) > INLINE_CAPACITY:
+                # The block index is the low half and is zero, and the offset
+                # is the high half.
+                second = tag | (second >> 32)
+            into.unsafe_offset(j * 2).unsafe_store(first)
+            into.unsafe_offset(j * 2 + 1).unsafe_store(second)
+        self.groups += count
         self.pieces.append(piece^)
+
+    def head(self, ordinal: Int) -> UnsafePointer[UInt64, ImmutAnyOrigin]:
+        """Returns where a stored key's head is, for a probe to prefetch.
+
+        Args:
+            ordinal: The stored key's ordinal.
+
+        Returns:
+            The address of its two words.
+        """
+        return (
+            self.heads.bitcast[DType.uint64]()
+            .unsafe_offset(ordinal * 2)
+            .unsafe_origin_cast[ImmutAnyOrigin]()
+        )
+
+    def bytes_at(self, ordinal: Int) -> UnsafePointer[UInt8, ImmutAnyOrigin]:
+        """Returns where a stored key's bytes are, for a probe to prefetch.
+
+        Args:
+            ordinal: The stored key's ordinal. Must be a key longer than twelve
+                bytes, whose bytes are in a payload.
+
+        Returns:
+            The address of its first byte.
+        """
+        var second = self.head(ordinal).unsafe_offset(1).unsafe_load()
+        return (
+            self.pieces[Int(second >> 32)]
+            .payload.unsafe_ptr()
+            .unsafe_offset(Int(second & 0xFFFFFFFF))
+            .unsafe_origin_cast[ImmutAnyOrigin]()
+        )
 
     def holds(self, ordinal: Int, col: StringArray, i: Int) -> Bool:
         """Compares a stored key against a row of a chunk.
@@ -435,19 +510,23 @@ struct _TextStore(Movable):
         Returns:
             True if the two are byte-identical.
         """
-        # The last piece whose first ordinal is not past this one. There is a
-        # piece per chunk that brought new keys, which is a handful, and the
-        # probe that got here has already paid a cache miss.
-        var low = 0
-        var high = len(self.bases) - 1
-        while low < high:
-            var middle = (low + high + 1) // 2
-            if self.bases[middle] <= ordinal:
-                low = middle
-            else:
-                high = middle - 1
-        return self.pieces[low].element_equals_foreign(
-            ordinal - self.bases[low], col.view(i), col
+        var head = self.head(ordinal)
+        var row = col.views.bitcast[DType.uint64]().unsafe_offset(i * 2)
+        var first = head.unsafe_load()
+        if first != row.unsafe_load():
+            return False
+        var count = Int(first & 0xFFFFFFFF)
+        if count <= INLINE_CAPACITY:
+            # A short view is zero padded, so its second word is the rest of
+            # the key and nothing else.
+            return head.unsafe_offset(1).unsafe_load() == row.unsafe_offset(
+                1
+            ).unsafe_load()
+        return _bytes_equal(
+            col.unsafe_bytes(i),
+            Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=self.bytes_at(ordinal), length=count
+            ),
         )
 
     def stacked(self) raises -> StringArray:
@@ -525,19 +604,47 @@ def _walk(
             var stop = starts[p + 1]
             var opened = 0
             for k in range(starts[p], stop):
-                # The table is past every cache on the column this exists
-                # for, so the slot the row after next wants is read for
-                # while this row is still waiting on its own.
-                if k + PROBE_LOOKAHEAD < stop:
-                    var next_row = Int(
-                        rows_of.unsafe_offset(k + PROBE_LOOKAHEAD).unsafe_load()
+                # The table and the stored keys are past every cache on the
+                # column this exists for, and a row waits on three loads in a
+                # row: its slot, the stored key's head, and the stored key's
+                # bytes. So each is asked for ahead of the row that wants it,
+                # the slot furthest ahead, and the head and the bytes once
+                # the load before them has had time to land. A row whose
+                # first slot is not its key only has its slot fetched early.
+                if k + 2 * PROBE_LOOKAHEAD < stop:
+                    var far = Int(
+                        rows_of.unsafe_offset(
+                            k + 2 * PROBE_LOOKAHEAD
+                        ).unsafe_load()
                     )
-                    var ahead = (
-                        hash.unsafe_offset(next_row).unsafe_load() & mask
-                    )
+                    var ahead = hash.unsafe_offset(far).unsafe_load() & mask
                     prefetch[PrefetchOptions().for_read().high_locality()](
                         table.unsafe_offset((base + Int(ahead)) * 2)
                     )
+                if k + PROBE_LOOKAHEAD < stop:
+                    var near = Int(
+                        rows_of.unsafe_offset(k + PROBE_LOOKAHEAD).unsafe_load()
+                    )
+                    var ordinal = _settled(table, hash, near, base, mask)
+                    if ordinal >= 0:
+                        prefetch[PrefetchOptions().for_read().high_locality()](
+                            store.head(ordinal)
+                        )
+                if k + PROBE_LOOKAHEAD // 2 < stop:
+                    var close = Int(
+                        rows_of.unsafe_offset(
+                            k + PROBE_LOOKAHEAD // 2
+                        ).unsafe_load()
+                    )
+                    var ordinal = _settled(table, hash, close, base, mask)
+                    if (
+                        ordinal >= 0
+                        and Int(store.head(ordinal).unsafe_load() & 0xFFFFFFFF)
+                        > INLINE_CAPACITY
+                    ):
+                        prefetch[PrefetchOptions().for_read().high_locality()](
+                            store.bytes_at(ordinal)
+                        )
                 var i = Int(rows_of.unsafe_offset(k).unsafe_load())
                 var wanted = hash.unsafe_offset(i).unsafe_load()
                 var at = wanted & mask
@@ -573,6 +680,38 @@ def _walk(
 
     parallel_for(walk, tasks)
     return added^
+
+
+@always_inline
+def _settled(
+    table: UnsafePointer[UInt64, _],
+    hash: UnsafePointer[UInt64, _],
+    row: Int,
+    base: Int,
+    mask: UInt64,
+) -> Int:
+    """Returns the stored ordinal in a row's first slot, if it may be the row's.
+
+    Only a hint for `_walk` to prefetch by: a settled slot whose hash matches.
+
+    Args:
+        table: The slots, two words each.
+        hash: The rows' hashes.
+        row: The row.
+        base: The first slot of the row's part.
+        mask: The part's capacity less one.
+
+    Returns:
+        The ordinal, or -1 when the slot is empty, pending or another hash's.
+    """
+    var wanted = hash.unsafe_offset(row).unsafe_load()
+    var slot = (base + Int(wanted & mask)) * 2
+    var word = table.unsafe_offset(slot + 1).unsafe_load()
+    if word == 0 or word & LASTING_TEXT_PENDING != 0:
+        return -1
+    if table.unsafe_offset(slot).unsafe_load() != wanted:
+        return -1
+    return Int(word) - 1
 
 
 def _walk_exact(
@@ -1186,7 +1325,7 @@ struct LastingKeys(Movable):
     ) raises:
         """Does what `_hashed` says for `count` rows from `start`, writing
         their ordinals to the front of `ours`."""
-        var hashes = Buffer(count * 8)
+        var hashes = Buffer(overwritten=count * 8)
         _hash_keys[dt](col, start, count, hashes)
 
         var order = Array[DType.uint32](overwritten=count)
@@ -1389,7 +1528,7 @@ struct LastingTuple(Movable):
 
         var payload = Buffer(overwritten=max(total, 1))
         var out = payload.unsafe_mut_ptr()
-        var views = Buffer(rows * VIEW_SIZE)
+        var views = Buffer(overwritten=rows * VIEW_SIZE)
         var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
 
         def write(begin: Int, stop: Int) raises {imm}:

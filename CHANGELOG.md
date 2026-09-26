@@ -205,6 +205,9 @@ When the built side of an inner or semi join is small, most probe rows usually f
 ### Added: the rest of pandas.errors
 
 `firepanda.errors` now has a class for every class in `pandas.errors`, 40 more, from `AbstractMethodError` to `ValueLabelTypeMismatch`, each on the same builtins and under the same parents as pandas' class, so an `except` clause or a warnings filter that names one of them works unchanged. Most are raised by readers and writers firepanda does not have yet and are carried for the name.
+### Changed: a stored text key is compared through a flat head the walk can prefetch
+
+`LastingText` found a stored key by a binary search over where each piece of keys starts and then read that piece's view, two dependent loads before the key's bytes, and the probe could not ask for any of them early. The store now keeps sixteen bytes a key beside the pieces, the length and first four bytes and then either the rest of a short key or where a long key's bytes are, so an ordinal names its head. The walk asks for a row's slot sixteen rows ahead, for the stored key's head eight rows ahead and for its bytes four rows ahead. `Group` also cuts its output into windows over the key columns instead of copying them, which rebuilt every text key a second time, and three scratch buffers that are written in full are no longer zeroed first. On a six core Linux machine that was busy with other work, alternating the old and new driver over eight rounds, q34 went from 121 to 93 ms at best, q33 from 169 to 146 and q18 from 187 to 173, and every answer matched.
 
 ### Added: apply, agg, transform, mode and transpose on a frame, and agg and transform on a column
 
