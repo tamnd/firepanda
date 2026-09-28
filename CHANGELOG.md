@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Text joined and repeated by operators, lists beside a frame, and spans beside NaT
+
+A column of text takes `+` with text, a list of text or another column of text, lined up by label with a missing row on either side missing in the answer, and `*` with a whole number or a column of them repeats each row, as pandas does. Every other arithmetic on text, and ordering text against a number, is refused with pandas' words, while a number is never equal to text. A list, a tuple or a numpy array beside a frame is read as a series along the columns, or along the rows for the named form on the rows, with pandas' message when the length is wrong. Spans scaled or divided by `NaT` are refused as pandas refuses them.
+
 ### Added: Lists beside a series, numbers read as spans or instants, and rounding spans
 
 A list, tuple or numpy array beside a series is read as a series on the same labels, with pandas' messages when the lengths differ. `astype` reads a column of numbers as counts of the unit it names when asked for `timedelta64[unit]` or `datetime64[unit]`, spans round, floor and ceil to a fixed frequency with ties to even, a `TimedeltaIndex` shifts, rounds and hands back Python timedeltas, spans and instants take a quantile, a clip bound and an interpolation, the spread of instants is a span, a span over a missing span is a NaN rather than a missing value, and `symmetric_difference` of an index with a frequency infers the frequency of its answer as pandas does.

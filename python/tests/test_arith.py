@@ -365,8 +365,8 @@ def test_two_columns_with_no_operation_between_them_say_so_pandas_way(
         with pytest.raises(TypeError, match="not supported for dtype"):
             call()
 
-    with pytest.raises(TypeError, match="operation 'mul' not supported"):
-        words * numbers
+    # Text times whole numbers repeats each row its own count, as pandas 3 does.
+    assert (words * numbers).tolist() == ["a", "bb", "ccc"]
 
     with pytest.raises(TypeError, match="no common type"):
         numbers + "x"
