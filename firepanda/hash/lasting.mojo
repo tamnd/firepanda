@@ -329,21 +329,25 @@ struct LastingText(Movable):
 
     def ordinals(
         mut self, col: StringArray, rows: Int, mut codes: Array[DType.uint32]
-    ) raises:
+    ) raises -> List[Int]:
         """Gives every row of one chunk the ordinal its key holds in the map.
 
         The steps are the ones the struct's docstring lists. The ordinals a
         chunk's new keys get are consecutive and in the order the chunk first
-        carried them, which `LastingTuple` relies on to find its first rows.
+        carried them.
 
         Args:
             col: The chunk's key column. Must have no nulls, for the reason
                 `LastingKeys.ordinals` gives.
             rows: The chunk's height.
             codes: Filled with one ordinal per row of the chunk.
+
+        Returns:
+            The rows that brought a new key, in row order, which is ordinal
+            order. `LastingTuple` gathers its key columns at them.
         """
         if rows <= 0:
-            return
+            return List[Int]()
         var hashes = Buffer(overwritten=rows * 8)
         _hash_rows(col, rows, hashes)
 
@@ -376,6 +380,7 @@ struct LastingText(Movable):
                 take_any(AnyArray(col.copy()), firsts).strings().copy()
             )
         _place(self.parts.slots, order, starts, codes, kind, lead)
+        return firsts^
 
     def take_keys(mut self) raises -> StringArray:
         """Gives up the key store as a column.
@@ -1219,7 +1224,7 @@ struct LastingKeys(Movable):
             # itself, which is why nothing is appended to the store here.
             self.opened = True
             self.textual = True
-            self.text.ordinals(key.strings(), rows, codes)
+            _ = self.text.ordinals(key.strings(), rows, codes)
             self.groups = self.text.__len__()
             return
 
@@ -1647,16 +1652,8 @@ struct LastingTuple(Movable):
         parallel_morsels(write, rows, LASTING_TEXT_MORSEL)
 
         var tuples = StringArray(views^, payload^, Bitmap(rows), rows)
-        self.text.ordinals(tuples, rows, codes)
-
-        # The map hands ordinals out in row order, so a group's first row is the
-        # row whose ordinal is the next one due.
-        var firsts = List[Int]()
-        var seen = codes.unsafe_ptr()
-        for i in range(rows):
-            if Int(seen[i]) == self.groups:
-                firsts.append(i)
-                self.groups += 1
+        var firsts = self.text.ordinals(tuples, rows, codes)
+        self.groups += len(firsts)
         if len(firsts) > 0:
             for k in range(len(at)):
                 self.keys[k].append(take_any(columns[at[k]], firsts))

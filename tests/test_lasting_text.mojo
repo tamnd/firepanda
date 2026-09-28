@@ -23,12 +23,16 @@ def _check(chunks: List[List[String]]) raises:
             builder.append(chunks[c][i].as_bytes())
         var col = builder^.finish()
         var codes = Array[DType.uint32](rows)
-        map.ordinals(col, rows, codes)
+        var firsts = map.ordinals(col, rows, codes)
+        var new = 0
         for i in range(rows):
             var key = chunks[c][i]
             if key not in want:
+                assert_equal(firsts[new], i)
+                new += 1
                 want[key] = len(want)
             assert_equal(Int(codes[i]), want[key])
+        assert_equal(len(firsts), new)
     assert_equal(map.__len__(), len(want))
     var keys = map.take_keys()
     assert_equal(len(keys), len(want))
