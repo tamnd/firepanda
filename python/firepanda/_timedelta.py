@@ -26,11 +26,12 @@ resolves.
 from __future__ import annotations
 
 import datetime
-from typing import Any, cast
+from typing import Any
 
 from ._date_range import _UNITS, _frequency, _points
 from ._frame import DataFrame, Index, Series
 from ._frequency import _conforming, _held, _hold, _offset_of
+from ._held_freq import HeldFreq
 from ._pandas import (
     NO_DEFAULT,
     _held_values,
@@ -52,7 +53,7 @@ def _is_span(dtype: Any) -> bool:
     return str(dtype).startswith("timedelta64")
 
 
-class TimedeltaIndex(Index):
+class TimedeltaIndex(HeldFreq, Index):
     """An index whose labels are spans, which is `pandas.TimedeltaIndex`."""
 
     __slots__ = ()
@@ -195,12 +196,6 @@ class TimedeltaIndex(Index):
             return infer_freq(self)
         except ValueError:
             return None
-
-    def insert(self, loc: int, item: Any) -> TimedeltaIndex:
-        """The index with one label put in at a position, read as pandas reads it."""
-        from ._pandas import _temporal_insert
-
-        return cast(TimedeltaIndex, _temporal_insert(self, loc, item))
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""

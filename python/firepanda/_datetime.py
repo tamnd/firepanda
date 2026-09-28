@@ -36,6 +36,7 @@ from typing import Any, cast
 
 from ._frame import Index, Series
 from ._frequency import _conforming, _hold, _offset_of
+from ._held_freq import HeldFreq
 from ._pandas import (
     _NONEXISTENT,
     _NONEXISTENT_REFUSAL,
@@ -69,7 +70,7 @@ def _is_temporal(dtype: Any) -> bool:
     return str(dtype).startswith("datetime64")
 
 
-class DatetimeIndex(Index):
+class DatetimeIndex(HeldFreq, Index):
     """An index whose labels are instants, which is `pandas.DatetimeIndex`.
 
     Everything an `Index` does, plus the calendar. The labels are a timestamp
@@ -448,8 +449,16 @@ class DatetimeIndex(Index):
             raise translate(error) from None
 
     def normalize(self) -> DatetimeIndex:
-        """Every label with the time of day set to midnight."""
-        return self._moved("normalize", "")
+        """Every label with the time of day set to midnight.
+
+        The answer holds the frequency its labels keep, so month ends stay
+        month ends and hours that fall on one day keep none, as in pandas.
+        """
+        from ._held_freq import _inferred
+
+        made = self._moved("normalize", "")
+        made._freq = _inferred(made)
+        return made
 
     def floor(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
         """Every label moved back to the frequency below it."""
@@ -462,12 +471,6 @@ class DatetimeIndex(Index):
     def round(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Any:
         """Every label moved to the nearer frequency, with a half going to the even one."""
         return self._rounded("round", freq, ambiguous, nonexistent)
-
-    def insert(self, loc: int, item: Any) -> DatetimeIndex:
-        """The index with one label put in at a position, read as pandas reads it."""
-        from ._pandas import _temporal_insert
-
-        return cast(DatetimeIndex, _temporal_insert(self, loc, item))
 
     def as_unit(self, unit: str, round_ok: bool = True) -> DatetimeIndex:
         """The same instants counted in another resolution."""
@@ -503,13 +506,22 @@ class DatetimeIndex(Index):
         return self._part("strftime", date_format)
 
     def tz_convert(self, tz: Any) -> DatetimeIndex:
-        """The same instants read against another clock."""
+        """The same instants read against another clock.
+
+        A fixed step survives the move, and a calendar step, which the new wall
+        clock would read differently, does not, as in pandas.
+        """
+        from . import offsets
+
         try:
             if tz is None:
-                return self._moved("tz_convert", "UTC").tz_localize(None)
-            return self._moved("tz_convert", tz if isinstance(tz, str) else _zone_name(tz))
+                made = self._moved("tz_convert", "UTC").tz_localize(None)
+            else:
+                made = self._moved("tz_convert", tz if isinstance(tz, str) else _zone_name(tz))
         except DTypeError as error:
             raise _naive_convert(error) from None
+        made._freq = self.freq if isinstance(self.freq, offsets.Tick) else None
+        return made
 
     def tz_localize(
         self, tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise"
@@ -527,8 +539,13 @@ class DatetimeIndex(Index):
                 " Python object and the kernel reads the zone out of a string"
             )
         if not (_is_default(ambiguous) and _is_default(nonexistent)):
-            return self._placed("tz_localize", tz, ambiguous, nonexistent)
-        return self._moved("tz_localize", tz)
+            made = self._placed("tz_localize", tz, ambiguous, nonexistent)
+        else:
+            made = self._moved("tz_localize", tz)
+        # pandas keeps the step on UTC, which has no change of clocks, or on one label.
+        one = len(self) == 1 and self[0] is not NaT
+        made._freq = self.freq if tz.upper() == "UTC" or one else None
+        return made
 
     def _labels(self) -> list[Any]:
         """The labels as timestamps, with None for a missing one."""

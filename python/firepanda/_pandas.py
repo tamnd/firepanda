@@ -22776,6 +22776,11 @@ class IndexMixin:
         _refuse("limit", limit, "there is no filling for it to limit")
         _refuse("tolerance", tolerance, "there is no filling for it to bound")
         wanted = target._inner if isinstance(target, IndexMixin) else target
+        listed = self._temporal and not isinstance(target, IndexMixin)
+        if listed:
+            # The core reads a list of plain values, so instants and spans go in
+            # as an index of their own, and the name stays this index's name.
+            wanted = Index(list(target), name=self.name)._inner
         try:
             answer: Any = self._inner.reindex(wanted)
         except Exception as error:
@@ -23339,7 +23344,23 @@ class IndexMixin:
         """
         from ._frame import Series
 
-        _refuse("key", key, "running a function over the labels before sorting is not written")
+        if key is not None:
+            # pandas sorts what the key answers for the labels, stably, and takes
+            # the labels in that order.
+            from ._frame import Index
+
+            keyed = key(self)
+            if not isinstance(keyed, IndexMixin):
+                keyed = Index(list(keyed))
+            if len(keyed) != len(self):
+                raise ValueError(
+                    "User-provided `key` function must not change the shape of the array."
+                )
+            _, order = keyed.sort_values(
+                return_indexer=True, ascending=ascending, na_position=na_position
+            )
+            made = self.take(order)
+            return (made, order) if return_indexer else made
         column = self.to_series()
         front = _na_first(na_position)
         down = _directions(ascending, 1)[0]
