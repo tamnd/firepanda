@@ -58,14 +58,84 @@ and that arithmetic is in the Python layer where the pandas surface lives.
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.data import ColumnData
 from firepanda.array.strings import (
     StringArray,
     StringBuilder,
     strings_from_list,
 )
+from firepanda.bitmap.bitmap import Bitmap
+from firepanda.buffer.buffer import Buffer
+from firepanda.dtype.lists import dtype_size
 from firepanda.dtype.logical import LogicalType
+from firepanda.exec.morsel import parallel_morsels
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.sort import argsort_any
+
+
+comptime PARALLEL_SPREAD_ROWS = 1 << 16
+"""How tall a coded column has to be before its answers are spread on every
+core. Below this the one thread loop in `through_codes` is done before the
+tasks would have started."""
+
+
+def through_codes_any(col: AnyArray, per_category: AnyArray) raises -> AnyArray:
+    """Spreads an answer worked out once per category over the rows, on every
+    core.
+
+    `AnyArray.through_codes` does the same on one thread, because a column
+    cannot reach the morsel runtime from where it lives. That thread was most of
+    a comparison against a coded column: TPC-H q10's `l_returnflag == "R"`
+    compares three categories and then spends 6.9 milliseconds writing six
+    million answers one after another, into a buffer it had zeroed first.
+
+    Only the case that is one byte an answer with no null among them is split,
+    which is what a comparison or a membership test hands back. Everything else
+    goes to `through_codes` as it did.
+
+    Args:
+        col: A dictionary encoded column.
+        per_category: One value per category.
+
+    Returns:
+        One value per row, with `per_category`'s type.
+
+    Raises:
+        As `through_codes` does, or if a worker fails.
+    """
+    var rows = len(col)
+    var count = len(per_category)
+    if (
+        rows < PARALLEL_SPREAD_ROWS
+        or not col.is_coded()
+        or count == 0
+        or count != len(col.text.value())
+        or per_category.is_string()
+        or per_category.is_nested()
+        or per_category.null_count() > 0
+        or dtype_size(per_category.type.physical) != 1
+    ):
+        return col.through_codes(per_category)
+    # Every row is written below, a null row's too, since the clamp gives its
+    # code an answer that the validity then hides.
+    var values = Buffer(overwritten=rows)
+    var top = UInt32(count - 1)
+
+    def spread(start: Int, stop: Int) raises {mut values, imm}:
+        var codes = col.data.values.bitcast[DType.int32]()
+        var src = per_category.data.values.unsafe_ptr()
+        var dst = values.unsafe_mut_ptr()
+        for i in range(start, stop):
+            var code = min(UInt32(codes.unsafe_offset(i).unsafe_load()), top)
+            dst.unsafe_offset(i).unsafe_write(
+                src.unsafe_offset(Int(code)).unsafe_load()
+            )
+
+    parallel_morsels(spread, rows)
+    return AnyArray(
+        ColumnData(values^, Bitmap(copy=col.data.validity), rows),
+        per_category.type,
+    )
 
 
 def encode_dictionary(

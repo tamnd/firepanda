@@ -141,6 +141,26 @@ def test_a_lookup_in_a_set_matches_the_flat_one() raises:
     same_mask(is_in_any(col, col), is_in_any(col.decoded(), col.decoded()))
 
 
+def test_a_tall_column_spreads_its_answers_on_every_core() raises:
+    # Tall enough for `through_codes_any` to split the rows, with a null row in
+    # every morsel so the clamp and the validity are both read.
+    var n = (1 << 17) + 3
+    var codes = Array[DType.int32](n)
+    for i in range(n):
+        codes.set_valid(i, Int32(i % 3))
+        if i % 1000 == 7:
+            codes.set_null(i)
+    var col = AnyArray.dictionary_encoded(
+        codes^, strings_from_list(["ok", "late", "a status too long to inline"])
+    )
+    var flat = col.decoded()
+    var got = binary_value_any(col, Value(String("late")), BinaryOp.EQ)
+    var want = binary_value_any(flat, Value(String("late")), BinaryOp.EQ)
+    same_mask(got.as_typed[DType.bool](), want.as_typed[DType.bool]())
+    var wanted = AnyArray(strings_from_list(["ok"]))
+    same_mask(is_in_any(col, wanted), is_in_any(flat, wanted))
+
+
 def frame(var text: AnyArray) raises -> DataFrame:
     var n = Array[DType.int64](8)
     for i in range(8):

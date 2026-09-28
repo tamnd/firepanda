@@ -49,6 +49,7 @@ from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_morsels
 from firepanda.hash.function import DEFAULT_SEED, hash_bytes, hash_of
 from firepanda.hash.table import HashTable
+from firepanda.kernel.dictionary import through_codes_any
 
 from .mask import repair_range
 
@@ -375,8 +376,8 @@ def is_in_any(a: AnyArray, values: AnyArray) raises -> Array[DType.bool]:
     if not values.is_flat():
         return is_in_any(a, values.decoded())
     if a.is_coded():
-        return a.through_codes(
-            AnyArray(is_in_any(a.distinct(), values))
+        return through_codes_any(
+            a, AnyArray(is_in_any(a.distinct(), values))
         ).as_typed[DType.bool]()
     if a.is_string() != values.is_string():
         raise Error(
