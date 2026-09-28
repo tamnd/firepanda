@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Writing into a frame through loc, iloc, at and iat
+
+A frame now takes `df.loc[rows, columns] = value` and the same through `iloc`, `at` and `iat`. Each named column is written the way a series is, so a value that does not fit raises pandas' `TypeError` and a gap in some rows of whole numbers makes them float64, while a write that covers every row by a slice refuses to change the type, as pandas 3 does. A list goes one value a column, rows of values one row a row, a series by column name into one row, and a frame by name. `loc` with a new name makes a column, float64 for numbers and text for text, and with a new row label puts a row on the end with pandas' types. `iloc` with a frame of values, and cells pandas would hold as objects, are refused.
+
 ### Added: Writing into a series with s[key] = value, loc, iloc, at and iat
 
 A series now takes writes as pandas 3 does. A label, a list of labels, a slice, a mask, or a position through `iloc` and `iat` picks the rows, and one value, a list, or a series goes in. A series is lined up on the labels under `loc` and a mask, and read by position under `iloc`. A value that does not fit the column raises pandas' `TypeError`, a gap widens whole numbers to float64, and `loc`, `at` or `s[label]` with a new label puts a row on the end. The write rebinds the series, so copies taken before keep their values.

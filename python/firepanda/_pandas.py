@@ -4849,6 +4849,69 @@ class _Selection:
         except Exception as error:
             raise translate(error) from None
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Writes the value into the cells the key names, `df.loc[key] = value`.
+
+        Each column the key names is written the way a series is, with the same
+        rules for what fits, and the frame's one slot is rebound to the frame the
+        written columns make. `loc` with a name the frame does not have makes a
+        new column, and with one row label it does not have puts a new row on
+        the end. `iloc` past the end refuses. A write that covers every row by a
+        slice refuses a value that would change the column's type, where a
+        write to some rows widens whole numbers to float64, as in pandas.
+        """
+        from ._frame import Series
+
+        labelled = isinstance(self, _Labelled)
+        owner = self._owner
+        rows, columns = _two_axes(key)
+        names = owner._inner.names()
+        height = owner._inner.length()
+        fresh: list[str] = []
+        if labelled:
+            picked, fresh = _written_names(self, columns, names)
+        else:
+            width = len(names)
+            whole = isinstance(columns, int) and not isinstance(columns, bool)
+            if whole and not -width <= columns < width:
+                raise OutOfBoundsError("iloc cannot enlarge its target object")
+            listed = _list_like(columns) and not _is_mask(columns)
+            if listed and any(not -width <= int(at) < width for at in columns):
+                raise OutOfBoundsError("single positional indexer is out-of-bounds")
+            picked = self._columns(columns, names)
+        one = isinstance(picked, str)
+        chosen = list(names) if picked is EVERY else [picked] if one else list(picked)
+        where: tuple[Any, ...] | None = None
+        try:
+            where = self._rows(rows, height)
+        except KeyError:
+            if not labelled or _list_like(rows) or isinstance(rows, slice):
+                raise
+        one_row = where is not None and where[0] == "one"
+        if not labelled and one_row and not -height <= where[1] < height:
+            raise OutOfBoundsError("iloc cannot enlarge its target object")
+        single = where is None or where[0] == "one"
+        given = dict(zip(chosen, _spread(value, chosen, one, single, labelled), strict=True))
+        if where is None:
+            owner._inner = _row_added(owner, rows, given, fresh, columns is not EVERY)._inner
+            return
+        full = where[0] == "every" or (where[0] == "range" and where[1:] == (0, height))
+        written = []
+        for name in list(names) + fresh:
+            if name not in given:
+                written.append((name, Series._wrap(owner._inner.column(name))))
+                continue
+            part = given[name]
+            if name in fresh and full:
+                written.append((name, owner._assigned(name, part)[name]))
+                continue
+            column = _gaps(owner, part) if name in fresh else owner[name]
+            answer = _written(column, where, part, not labelled)
+            if full and name not in fresh and str(answer.dtype) != str(column.dtype):
+                raise _refused(str(column.dtype), _shown(part))
+            written.append((name, answer))
+        owner._inner = _rebuilt(written)
+
 
 def _row_type(types: list[str]) -> str:
     """The one type a row across columns of these types has, as pandas decides it.
@@ -5390,6 +5453,27 @@ class _Cell:
         except Exception as error:
             raise translate(error) from None
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Writes one value, `df.at[label, name] = value` or `df.iat[row, column] = value`.
+
+        `at` is `loc` with a pair of labels, so a new label makes a new row or
+        column. `iat` refuses a position past either end with numpy's words.
+        """
+        name = "at" if self._labelled else "iat"
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise InvalidArgumentError(f"{name} takes a row and a column, and got one key")
+        owner = self._owner
+        if self._labelled:
+            _Labelled(owner)[key] = value
+            return
+        row, column = int(key[0]), int(key[1])
+        for position, size in ((row, owner._inner.length()), (column, len(owner._inner.names()))):
+            if not -size <= position < size:
+                raise OutOfBoundsError(
+                    f"index {position} is out of bounds for axis 0 with size {size}"
+                )
+        _Positional(owner)[row, column] = value
+
 
 class _Along:
     """`s.loc` and `s.iloc`, which are the frame's pair with one axis gone.
@@ -5792,7 +5876,7 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
     marks = _write_marks(column, where)
     kept = marks.unary("invert")
     if isinstance(value, SeriesMixin) and not by_position:
-        lined = value if value.index.equals(column.index) else value.reindex(column.index)
+        lined = _lined_up(value, column)
         target = _written_column(printed, lined, marks)
         base = column if target == printed else column.astype(target)
         if str(lined.dtype) != target:
@@ -5847,6 +5931,24 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
         raise translate(error) from None
 
 
+def _lined_up(value: Any, column: Any) -> Any:
+    """A series of values lined up on a column's labels, all gaps where no label is shared.
+
+    Labels of kinds that cannot meet, text against numbers, share none, which is
+    how pandas lines them up.
+    """
+    from ._frame import Series
+
+    if value.index.equals(column.index):
+        return value
+    try:
+        return value.reindex(column.index)
+    except DTypeError:
+        kind = str(value.dtype)
+        kind = "float64" if kind in _WHOLE_RANGES or kind == "bool" else kind
+        return Series([None] * len(column), index=column.index, dtype=kind)
+
+
 def _enlarged(column: Any, label: Any, value: Any) -> Any:
     """The column with one row put on the end under a new label, `s.loc[label] = value`.
 
@@ -5862,6 +5964,155 @@ def _enlarged(column: Any, label: Any, value: Any) -> Any:
     else:
         row = Series([value], index=[label], name=column.name)
     return concat([column, row]).rename_axis(column.index.name)
+
+
+def _written_names(selection: Any, key: Any, names: list[str]) -> tuple[Any, list[str]]:
+    """The columns a `loc` write names, and the ones among them the frame does not have.
+
+    One name or a list of names the frame does not have is new columns, which
+    the write makes. Every other key is read as `loc` reads it.
+    """
+    if isinstance(key, str) and key not in names:
+        return key, [key]
+    if isinstance(key, list) and key and not _is_mask(key):
+        fresh = [one for one in dict.fromkeys(key) if isinstance(one, str) and one not in names]
+        if fresh:
+            return [str(one) for one in key], fresh
+    return selection._columns(key, names), []
+
+
+def _spread(value: Any, chosen: list[str], one: bool, single: bool, labelled: bool) -> list[Any]:
+    """The value each named column takes, as pandas spreads one value over columns.
+
+    A frame gives each column its own, lined up by name, with gaps for a name
+    it does not have. A series goes by the column names into one row, and whole
+    into every column across several. A list goes one value a column, and rows
+    of values one row of them a row.
+
+    Raises:
+        ValueError: For a list or rows of the wrong width, in pandas' words.
+        UnsupportedError: For a frame of values under `iloc`.
+    """
+    from ._frame import DataFrame, Series
+
+    if isinstance(value, DataFrame):
+        if not labelled:
+            raise UnsupportedError(
+                "iloc with a frame of values is not supported yet, because pandas lines"
+                " its columns up in a way that follows how it stores them"
+            )
+        gaps = Series([None] * len(value), index=value.index, dtype="float64")
+        return [value[name] if name in list(value.columns) else gaps for name in chosen]
+    if one:
+        return [value]
+    if isinstance(value, Series):
+        if single:
+            labels = value.index.tolist()
+            return [value[name] if name in labels else None for name in chosen]
+        return [value] * len(chosen)
+    numpy = _is_numpy(value)
+    rows = not numpy and _list_like(value) and value and all(_list_like(row) for row in value)
+    if (numpy and value.ndim == 2) or rows:
+        grid = value if numpy else [list(row) for row in value]
+        if single or any(len(row) != len(chosen) for row in grid):
+            raise InvalidArgumentError(
+                "Must have equal len keys and value when setting with an ndarray"
+            )
+        if numpy:
+            return [grid[:, at] for at in range(len(chosen))]
+        return [[row[at] for row in grid] for at in range(len(chosen))]
+    if numpy or _list_like(value):
+        values = value.tolist() if numpy else list(value)
+        if len(values) != len(chosen):
+            raise InvalidArgumentError(
+                "Must have equal len keys and value when setting with an iterable"
+            )
+        return values
+    return [value] * len(chosen)
+
+
+def _shown(value: Any) -> str:
+    """A value as pandas prints it in the message for one that does not fit."""
+    return str(value.tolist() if hasattr(value, "tolist") else value)
+
+
+def _gaps(owner: Any, value: Any) -> Any:
+    """A new column of gaps for a `loc` write to some rows, typed by what goes in.
+
+    Numbers make float64 and text makes text, which is where pandas lands.
+
+    Raises:
+        UnsupportedError: For anything else, which pandas holds as objects.
+    """
+    from ._frame import Series
+
+    if isinstance(value, SeriesMixin):
+        printed = str(value.dtype)
+        sample: Any = (
+            "" if printed in ("str", "string") else 0.0 if printed in _ARRAY_KINDS else True
+        )
+    elif _list_like(value) or _is_numpy(value):
+        present = [one for one in list(value) if not _missing(one)]
+        sample = present[0] if present else 0.0
+    else:
+        sample = value
+    if isinstance(sample, str):
+        return Series([None] * len(owner), index=owner.index, dtype="str")
+    if (isinstance(sample, (int, float)) and not isinstance(sample, bool)) or _is_numpy_int(sample):
+        names = owner._inner.names()
+        if names:
+            # NaN times anything is NaN, so the gaps come out of one column operation.
+            return Series._wrap(owner._inner.column(names[0])).isna().astype("float64") * math.nan
+        return Series([None] * len(owner), index=owner.index, dtype="float64")
+    raise UnsupportedError(
+        f"a new column of {type(sample).__name__} with gaps is not supported yet, because"
+        " pandas holds it as objects and firepanda has no object column"
+    )
+
+
+def _row_added(owner: Any, label: Any, given: dict[str, Any], fresh: list[str], some: bool) -> Any:
+    """The frame with one row put on the end under a new label, `df.loc[label] = value`.
+
+    A key of one row label makes the row the way `concat` would, where a float
+    makes whole numbers float64 and a number makes flags that number's type. A
+    key that names columns too makes a row of gaps first and writes into it, as
+    pandas does, so every column of whole numbers becomes float64.
+
+    Raises:
+        UnsupportedError: For a cell pandas would hold as objects.
+    """
+    columns = []
+    every = list(owner._inner.names()) + fresh
+    for name in every:
+        part = given.get(name)
+        column = _gaps(owner, part) if name in fresh else owner[name]
+        printed = str(column.dtype)
+        if some and printed in _WHOLE_RANGES:
+            column, printed = column.astype("float64"), "float64"
+        if some and printed == "bool":
+            part = None
+        if printed == "bool" and (part is None or _missing(part)):
+            raise UnsupportedError(
+                "a gap in a column of flags is not supported yet, because pandas holds it as"
+                " objects and firepanda has no object column"
+            )
+        if printed == "bool" and not isinstance(part, bool) and isinstance(part, (int, float)):
+            column = column.astype("int64" if isinstance(part, int) else "float64")
+        columns.append((name, _enlarged(column, label, part)))
+    return _side_by_side(columns)
+
+
+def _side_by_side(columns: list[tuple[str, Any]]) -> Any:
+    """A frame of columns that share their labels, stacked side by side."""
+    from ._frame import DataFrame, _series_to_frame
+
+    pieces = [_series_to_frame(column._inner, name)._inner for name, column in columns]
+    return DataFrame._wrap(pieces[0].stack_columns(pieces[1:]))
+
+
+def _rebuilt(columns: list[tuple[str, Any]]) -> Any:
+    """The inner frame of columns that share their labels, for a write to rebind."""
+    return _side_by_side(columns)._inner
 
 
 __all__ = ["NO_DEFAULT", "DataFrameMixin", "IndexMixin", "SeriesMixin"]
