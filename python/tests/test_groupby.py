@@ -44,8 +44,8 @@ OTHER = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
 DATA: dict[str, Any] = {"k": KEYS, "v": VALUES, "w": OTHER}
 """Floats rather than integers for the same reason `test_reductions.py` gives.
 
-Four rows per group, which is what `skew` needs before it has an answer at all,
-so the eighteen can be tested as one list rather than with an exception in it.
+Four rows per group, which is what `skew` and `kurt` need before it has an answer at all,
+so the nineteen can be tested as one list rather than with an exception in it.
 """
 
 OVER_A_FRAME = [
@@ -62,12 +62,13 @@ OVER_A_FRAME = [
     "var",
     "sem",
     "skew",
+    "kurt",
     "quantile",
     "prod",
     "any",
     "all",
 ]
-"""The seventeen that answer a frame. `size` answers a column and is its own test."""
+"""The eighteen that answer a frame. `size` answers a column and is its own test."""
 
 
 def same_values(mine: Any, theirs: Any) -> None:

@@ -1794,6 +1794,13 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def kurt(self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
+        """The excess kurtosis within each group. Over every column that is not a key."""
+        try:
+            return self._reduce("kurt", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
     def quantile(
         self, q: Any = 0.5, interpolation: str = "linear", numeric_only: bool = False
     ) -> DataFrame:
@@ -1913,7 +1920,7 @@ class DataFrameGroupBy(DataFrameGroupByMixin):
 class SeriesGroupBy(SeriesGroupByMixin):
     """One column of a grouped frame, waiting for a reduction.
 
-    Reached from `df.groupby(...)[name]`. The same eighteen reductions over one column
+    Reached from `df.groupby(...)[name]`. The same nineteen reductions over one column
     instead of all of them, answering a column rather than a frame, which is the whole
     difference between the two classes.
     """
@@ -2064,6 +2071,15 @@ class SeriesGroupBy(SeriesGroupByMixin):
         """The skewness within each group. Over the column."""
         try:
             return self._reduce("skew", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def kurt(
+        self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> DataFrame | Series:
+        """The excess kurtosis within each group. Over the column."""
+        try:
+            return self._reduce("kurt", 0.0, numeric_only, skipna)
         except Exception as error:
             raise translate(error) from None
 
