@@ -33,6 +33,7 @@ from __future__ import annotations
 import bisect
 import calendar as _calendar
 import datetime
+import inspect
 import itertools
 import re
 from collections.abc import Callable
@@ -532,7 +533,33 @@ class _Monthly(_Landing):
     _anchor: str | None = None
     _default = 12
 
-    def __init__(self, n: Any = 1, normalize: bool = False, **anchor: Any) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Each class names its own anchor, as pandas' classes do, so it can be passed by
+        # position and shows in the signature.
+        super().__init_subclass__(**kwargs)
+        shown = [
+            inspect.Parameter("n", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=1),
+            inspect.Parameter("normalize", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=False),
+        ]
+        if cls._anchor is not None:
+            kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
+            shown.append(inspect.Parameter(cls._anchor, kind, default=None))
+        cls.__signature__ = inspect.Signature(shown)
+
+    def __init__(self, n: Any = 1, normalize: bool = False, *by: Any, **anchor: Any) -> None:
+        if len(by) > (self._anchor is not None):
+            taken = 2 + (self._anchor is not None)
+            raise TypeError(
+                f"{type(self).__name__}() takes at most {taken} positional arguments"
+                f" ({2 + len(by)} given)"
+            )
+        if by:
+            if self._anchor in anchor:
+                raise TypeError(
+                    f"{type(self).__name__}() got multiple values for keyword argument"
+                    f" '{self._anchor}'"
+                )
+            anchor[self._anchor] = by[0]
         super().__init__(n, normalize)
         if self._anchor is not None:
             given = anchor.pop(self._anchor, None)

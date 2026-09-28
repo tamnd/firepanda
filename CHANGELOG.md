@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: offset anchors by position, and taking no zone off
+
+The month anchored offsets name their anchor in their signature, as pandas' `YearEnd` shows `month`, and take it as the third positional argument. `Series.dt.tz_localize(None)` and `DatetimeIndex.tz_localize(None)` on moments that carry no zone hand back the readings as pandas does, where they used to raise.
+
 ### Added: offsets as resample rules and as spans
 
 `resample` takes a tick or `Day` from `firepanda.offsets` as its rule, the same as its frequency text, and refuses a calendar offset the way it refuses the calendar text. A rule that is neither text nor an offset raises pandas' `TypeError`. `Timedelta` reads a tick, keeping the tick's unit for milliseconds and finer and seconds for anything coarser, and refuses `Day` and calendar offsets with pandas' words.
