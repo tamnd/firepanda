@@ -45,6 +45,7 @@ deep copied every column on the way in, which on a filter is the entire cost of
 the operation paid twice.
 """
 
+from std.bit import count_trailing_zeros
 from std.memory import unsafe_memcpy
 from std.sys.info import simd_width_of
 from std.sys.intrinsics import PrefetchOptions, prefetch
@@ -208,6 +209,21 @@ Wider would find fewer empty blocks and narrower would spend more of the loop
 deciding. Sixty four is also small enough that a block with something in it
 falls back to the row at a time loop over sixty four rows rather than over the
 whole morsel, so the fallback costs the block test and nothing else.
+"""
+
+comptime FILTER_SPARSE_SHARE = 8
+"""Below one kept row in this many, a morsel copies only the rows it keeps.
+
+The copy writes every row and advances by the mask byte, so it reads the whole
+column whatever the mask keeps. On a mask that keeps one row in fifty, which is
+q6's, that reads fifty rows to keep one, where finding the kept rows in the mask
+and reading only those touches a cache line of the column for each one.
+
+Filtering six million doubles on the 13900K, a mask keeping one row in a hundred
+went from 0.80 to 0.33 ms, one in fifty from 0.89 to 0.52 and one in twenty four
+from 0.89 to 0.36. One in sixteen and one in twelve were a little faster this
+way and one in eight was even, so the line is at one in eight. q6's filter of
+two columns went from 2.2 to 1.2 ms.
 """
 
 comptime MASK_SAMPLE_BLOCK = 64
@@ -1417,6 +1433,34 @@ def _filter_spread[
         var limit = places[w + 1]
         var written = places[w]
         var i = w * FILTER_MORSEL_ROWS
+        var end = min(i + FILTER_MORSEL_ROWS, n)
+        if skipping and (limit - written) * FILTER_SPARSE_SHARE < end - i:
+            # Few enough kept rows that visiting only those beats copying every
+            # row and advancing by the bit. Eight mask bytes are one word, a
+            # true byte is a one in the low bit of its byte, and the lowest set
+            # bit of the word names the next kept row of the eight.
+            while i + 8 <= end:
+                var word = (
+                    mask_bytes.unsafe_offset(i)
+                    .unsafe_bitcast[UInt64]()
+                    .unsafe_load()
+                )
+                while word != 0:
+                    var k = Int(count_trailing_zeros(word)) >> 3
+                    target.unsafe_offset(written).unsafe_write(
+                        source.unsafe_offset(i + k).unsafe_load()
+                    )
+                    written += 1
+                    word &= word - 1
+                i += 8
+            while i < end:
+                if Bool(mask_values.unsafe_offset(i).unsafe_load()):
+                    target.unsafe_offset(written).unsafe_write(
+                        source.unsafe_offset(i).unsafe_load()
+                    )
+                    written += 1
+                i += 1
+            return
 
         if skipping:
             # A worker cannot walk out of its own morsel here. Leaving it would
