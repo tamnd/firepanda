@@ -2868,9 +2868,13 @@ def test_a_where_under_a_window_changes_what_the_window_reduces() raises:
     )
 
 
-def test_a_running_window_is_refused_by_name() raises:
-    with assert_raises(contains="OVER an ORDER BY"):
-        _ = run("SELECT SUM(qty) OVER (ORDER BY qty) FROM sales", session())
+def test_a_running_window_adds_up_to_the_row() raises:
+    # The ordered windows have a file of their own, `test_sql_frames.mojo`.
+    same(
+        answer("SELECT SUM(qty) OVER (ORDER BY qty) AS x FROM sales", "x"),
+        [9, 64, 4, 159, 29, 17, 89, 1, 119, 44],
+        "x",
+    )
 
 
 def test_a_query_may_read_a_subquery_where_a_table_goes() raises:

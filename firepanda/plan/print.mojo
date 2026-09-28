@@ -41,6 +41,7 @@ from firepanda.dtype.logical import TypeKind
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import WINDOW_FOLD, window_function_name
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.temporal import civil_from_days
 from firepanda.kernel.unary import UnaryOp
@@ -248,18 +249,27 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
         )
 
     if node.kind == ExprKind.WINDOW:
-        var written = String(
-            agg_kind(node.op),
-            "(",
-            render_expr(tree, node.children[0]),
-            ") over (",
-        )
+        ref frame = node.frame
+        var written = String(agg_kind(node.op)) if frame.function == WINDOW_FOLD else window_function_name(frame.function)
+        written += "("
+        for i in range(frame.args):
+            if i != 0:
+                written += ", "
+            written += render_expr(tree, node.children[i])
+        written += ") over ("
+        var first = frame.args
         for i in range(node.parts):
             written += "partition " if i == 0 else ", "
-            written += render_expr(tree, node.children[1 + i])
-        for i in range(1 + node.parts, len(node.children)):
-            written += "order " if i == 1 + node.parts else ", "
+            written += render_expr(tree, node.children[first + i])
+        var keys = first + node.parts
+        for i in range(keys, len(node.children)):
+            if i == keys:
+                written += " order " if node.parts > 0 else "order "
+            else:
+                written += ", "
             written += render_expr(tree, node.children[i])
+            written += frame.order_text(i - keys)
+        written += String(frame)
         return written + ")"
 
     var written = String(node.name, "(")

@@ -55,6 +55,9 @@ A column or an index of spans times or over a number, `s * 3`, `s / 7` or `s // 
 ### Added: An index of instants or spans passes its frequency on
 
 A DatetimeIndex or a TimedeltaIndex now hands its frequency to the index an operation builds, by pandas' rules. unique, drop_duplicates, fillna, dropna, view and a same type astype keep it. take and sort_values keep it when the positions make a slice, times the slice's step, so a daily index sorted backwards is `-1D`, and a mask keeps it when the labels it keeps are one run. delete and insert keep it at the ends, union and intersection keep it or read it off the labels the way pandas does, append keeps it for pieces that follow on, and reindex takes the target's. normalize reads it off the labels, tz_localize keeps it on UTC, tz_convert keeps a fixed step, and arithmetic keeps, flips or scales it. `Index.sort_values` now takes `key`, and reindex of an index of instants takes a list of them.
+### Added: SQL windows with an ORDER BY, a frame and the window functions
+
+A window in SQL can now be ordered and framed. `OVER (PARTITION BY ... ORDER BY ...)` runs the fold up to the row's last peer, and `ROWS`, `RANGE` and `GROUPS` frames take `UNBOUNDED`, `n PRECEDING`, `n FOLLOWING` and `CURRENT ROW` bounds with `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` and `NO OTHERS`. `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value` and `nth_value` are lowered, the five that read another row take `IGNORE NULLS`, and a `QUALIFY` can filter on any of them. Sums, counts, averages, minimums and maximums over a frame are answered from blocks folded once, so a running total costs a logarithm per row rather than the width of the frame. An order key's nulls go last whichever way it sorts, as in DuckDB. A named `WINDOW` clause is still refused by name.
 
 ### Added: Index arithmetic and comparisons
 

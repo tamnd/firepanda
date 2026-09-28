@@ -4252,18 +4252,34 @@ def test_a_qualify_with_no_window_in_it_is_a_where_written_wrong() raises:
         _ = _plan("SELECT a FROM t QUALIFY b > 1")
 
 
+def test_an_ordered_window_carries_its_order_and_its_frame() raises:
+    assert_equal(
+        _plan(
+            "SELECT sum(b) OVER (PARTITION BY g ORDER BY a DESC ROWS BETWEEN 1"
+            " PRECEDING AND CURRENT ROW) AS s FROM t"
+        ),
+        (
+            "PROJECT [__win_0 as s]\n"
+            "  WINDOW [sum(b) over (partition g order a desc rows between 1"
+            " preceding and current row) as __win_0]\n"
+            "    SCAN t []\n"
+        ),
+    )
+    assert_equal(
+        _plan("SELECT rank() OVER (ORDER BY a NULLS FIRST) AS r FROM t"),
+        (
+            "PROJECT [__win_0 as r]\n"
+            "  WINDOW [rank() over (order a nulls first) as __win_0]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
 def test_the_windows_with_no_operator_yet_each_say_which_one() raises:
-    with assert_raises(contains="OVER an ORDER BY"):
-        _ = _plan("SELECT sum(b) OVER (ORDER BY a) FROM t")
-    with assert_raises(contains="OVER a frame"):
-        _ = _plan(
-            "SELECT sum(b) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
-            " FROM t"
-        )
     with assert_raises(contains="WINDOW clause"):
         _ = _plan("SELECT sum(b) OVER w FROM t WINDOW w AS (PARTITION BY g)")
-    with assert_raises(contains="rather than a fold"):
-        _ = _plan("SELECT row_number() OVER () FROM t")
+    with assert_raises(contains="neither an aggregate nor one of the window"):
+        _ = _plan("SELECT upper(g) OVER () FROM t")
 
 
 def main() raises:

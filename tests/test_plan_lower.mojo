@@ -3326,22 +3326,23 @@ def test_two_windows_that_partition_differently_are_refused() raises:
     var root = plan.window(scan, [by_team, overall], ["worked", "total"])
     _ = bind(plan, root, shift_schemas())
 
-    with assert_raises(contains="partitions differently from the first one"):
+    with assert_raises(contains="partitions or orders differently"):
         _ = lower(plan, root, shift_frame())
 
 
-def test_an_ordered_window_is_refused_by_name() raises:
-    # An ordering inside the window is a running fold, which is a different loop
-    # rather than an argument to this one.
+def test_two_windows_that_order_differently_want_two_nodes() raises:
+    # One operator sorts once, so a second ordering is a second node, and a
+    # node that holds both is a plan built wrong rather than a query.
     var plan = Plan()
     var scan = plan.scan("shifts", List[String](), 0)
     var team = plan.exprs.column("team")
     var hours = plan.exprs.column("hours")
     var running = plan.exprs.window(AggKind.SUM, hours, [team], [hours])
-    var root = plan.window(scan, [running], ["running"])
+    var other = plan.exprs.window(AggKind.SUM, hours, [team], [team])
+    var root = plan.window(scan, [running, other], ["running", "other"])
     _ = bind(plan, root, shift_schemas())
 
-    with assert_raises(contains="is ordered, and an ordered window"):
+    with assert_raises(contains="partitions or orders differently"):
         _ = lower(plan, root, shift_frame())
 
 

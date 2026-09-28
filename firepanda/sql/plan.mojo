@@ -443,6 +443,20 @@ a null `x` is null against every arm and falls through to the `ELSE`, and an
 arm that names a null is never matched by anything, including by a null `x`.
 Checked against DuckDB both ways.
 
+### A window sorts once per partitioning and ordering
+
+`OVER (PARTITION BY p ORDER BY o ROWS ...)` is a window expression carrying its
+arguments, its keys, the directions of its order keys and its frame, and every
+window in a block with the same partition keys and the same ordering lands in
+one `WINDOW` node, which the operator answers with one sort. The frame is not
+part of that grouping, since two frames over one ordering read the same sorted
+rows. The ranks, `ntile`, `lag`, `lead`, `first_value`, `last_value` and
+`nth_value` are lowered beside the folds, `IGNORE NULLS` is taken by the five
+that read another row, and an order key's nulls go last in either direction
+unless the query says otherwise, which is what DuckDB does. A frame's offsets
+and the counts those functions take are constants, and a named `WINDOW` clause
+is refused by name.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
@@ -486,6 +500,17 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.io.parse import parse_float, parse_int
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import (
+    WINDOW_FIRST_VALUE,
+    WINDOW_FOLD,
+    WINDOW_LAG,
+    WINDOW_LAST_VALUE,
+    WINDOW_LEAD,
+    WINDOW_NTH_VALUE,
+    WINDOW_NTILE,
+    WindowFrame,
+    window_function_named,
+)
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.parse_time import parse_instant
 from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
@@ -568,7 +593,18 @@ from .ast import (
     LITERAL_NUMBER,
     LITERAL_STRING,
     NO_NODE,
+    BOUND_FOLLOWING,
+    BOUND_PRECEDING,
+    BOUND_UNBOUNDED_FOLLOWING,
+    BOUND_UNBOUNDED_PRECEDING,
+    EXCLUDE_NO_OTHERS,
+    FRAME_RANGE,
+    NULLS_FIRST,
     NULLS_LAST,
+    frame_end,
+    frame_exclude,
+    frame_mode,
+    frame_start,
     REF_FUNCTION,
     REF_JOIN,
     REF_JOIN_NEAREST,
@@ -1834,10 +1870,9 @@ def _check_functions(ast: Ast, registry: Registry) raises:
         if call_flags(ast.exprs[at].a) & CALL_FILTER != 0:
             _call_modifiers(ast, ast.exprs[at])
 
-        # A call with an `OVER` on it is left alone. `_lower_over` refuses one
-        # by name already and says the more useful thing while it does it,
-        # since `row_number` is not a kernel anybody is waiting on. It is a
-        # window function, and the catalog calls it an aggregate.
+        # A call with an `OVER` on it is left alone. `_lower_over` knows the
+        # window functions and refuses the rest by name, and `row_number` is a
+        # window function the catalog calls an aggregate.
         if ast.exprs[at].b != NO_NODE:
             continue
 
@@ -2533,8 +2568,9 @@ struct _Walk(Movable):
     """What each of those is called in the window node's output."""
 
     var window_keys: List[String]
-    """What each one partitions by, written out, so that two windows over the
-    same keys land in the same node and two over different keys do not."""
+    """What each one partitions and orders by, written out, so that two windows
+    over the same keys in the same order land in the same node and two that
+    differ do not."""
 
     var scalars: List[UInt32]
     """The uncorrelated subqueries a cross join has already been built for, as
@@ -3469,7 +3505,7 @@ def _lower_expr(
         return built
 
     if node.kind == EXPR_FUNCTION:
-        _call_modifiers(ast, node)
+        _call_modifiers(ast, node, windowed=node.b != NO_NODE)
         var name = fold(_one_name(ast, node.payload, "a function"))
         if node.b != NO_NODE:
             return _lower_over(ast, at, name, plan, walk, scope, grouped)
@@ -3950,7 +3986,7 @@ def _call_arguments(ast: Ast, node: Expr) -> List[UInt32]:
     return out^
 
 
-def _call_modifiers(ast: Ast, node: Expr) raises:
+def _call_modifiers(ast: Ast, node: Expr, windowed: Bool = False) raises:
     """Turns down the five things a call may carry that change what it reads.
 
     The transformer reads all five and the printer writes all five back, so a
@@ -3960,9 +3996,14 @@ def _call_modifiers(ast: Ast, node: Expr) raises:
     state instead of its answer, or a `FILTER` the transformer could not put
     under the argument as a `CASE`.
 
+    `IGNORE NULLS` and `RESPECT NULLS` are let through on a call with an
+    `OVER`, because the window functions that read another row do have a rule
+    for a null, and `_lower_over` says which of them take one.
+
     Args:
         ast: The arenas.
         node: The `EXPR_FUNCTION`.
+        windowed: Whether the call has an `OVER` on it.
 
     Raises:
         Error: If the call carries any of them.
@@ -3979,6 +4020,8 @@ def _call_modifiers(ast: Ast, node: Expr) raises:
         raise not_implemented(CALL_MODIFIER, "EXPORT_STATE", "")
     if call_sorts(node.a) != 0:
         raise not_implemented(CALL_ARGUMENT, "ORDER BY", "")
+    if windowed:
+        return
     if flags & CALL_IGNORE_NULLS != 0:
         raise not_implemented(CALL_ARGUMENT, "IGNORE NULLS", "")
     if flags & CALL_RESPECT_NULLS != 0:
@@ -4002,10 +4045,16 @@ def _lower_over(
     it was and the node that computes it is built afterwards, once the walk has
     found all of them.
 
-    What it partitions by is written out and kept beside it, because two windows
-    over the same keys are one grouping pass and belong in one node, and two
-    over different keys are two nodes. Written out rather than compared by arena
-    index, since `PARTITION BY k` lowered twice is two indices for one key.
+    What it partitions and orders by is written out and kept beside it, because
+    two windows over the same keys in the same order are one sort and belong in
+    one node, and two that differ are two nodes. Written out rather than
+    compared by arena index, since `PARTITION BY k` lowered twice is two indices
+    for one key. The frame is not part of that: windows with different frames
+    over one ordering share the sort and each read their own frame off it.
+
+    A frame's offsets have to be constants, as DuckDB has them in practice, and
+    the counts `ntile`, `lag`, `lead` and `nth_value` take have to be constants
+    too, since the operator holds each as one number rather than a column.
 
     Args:
         ast: The arenas.
@@ -4021,7 +4070,7 @@ def _lower_over(
 
     Raises:
         If the window is a shape this does not lower yet, or if the function is
-        not one the engine folds.
+        not one the engine has.
     """
     var node = ast.exprs[Int(at)]
     var window = ast.exprs[Int(node.b)]
@@ -4035,60 +4084,113 @@ def _lower_over(
                 ast.text(window.payload),
             )
         )
-    if ast.length(window.a) != 0:
+    var function = window_function_named(name)
+    if function == -1 and not _is_aggregate(name):
         raise Error(
             String(
                 name,
                 (
-                    " is computed OVER an ORDER BY, which is a running fold"
-                    " over the partition rather than one value across it, and"
-                    " firepanda has no operator for that yet"
+                    " is computed OVER a window, and it is neither an aggregate"
+                    " nor one of the window functions"
                 ),
             )
         )
-    if window.b != NO_NODE:
+    var frame = WindowFrame()
+    frame.function = WINDOW_FOLD if function == -1 else function
+    var flags = call_flags(node.a)
+    var reads_a_row = (
+        function == WINDOW_LAG
+        or function == WINDOW_LEAD
+        or function == WINDOW_FIRST_VALUE
+        or function == WINDOW_LAST_VALUE
+        or function == WINDOW_NTH_VALUE
+    )
+    if flags & (CALL_IGNORE_NULLS | CALL_RESPECT_NULLS) != 0 and not reads_a_row:
         raise Error(
             String(
                 name,
                 (
-                    " is computed OVER a frame, and the only frame firepanda"
-                    " has is the whole partition"
+                    " takes no IGNORE NULLS or RESPECT NULLS, which is for the"
+                    " window functions that read another row"
                 ),
             )
         )
-    if not _is_aggregate(name):
-        raise Error(
-            String(
-                "firepanda computes a fold OVER a partition, and ",
-                name,
-                (
-                    " is a window function of its own rather than a fold, so"
-                    " there is nothing for it to reduce"
-                ),
-            )
-        )
+    frame.ignore_nulls = (flags & CALL_IGNORE_NULLS) != 0
 
     var args = _call_arguments(ast, node)
-    var distinct = (call_flags(node.a) & CALL_DISTINCT) != 0
-    var over: Int
-    if name == "count" and (call_flags(node.a) & CALL_STAR) != 0:
-        if distinct:
+    var distinct = (flags & CALL_DISTINCT) != 0
+    if distinct and function != -1:
+        raise Error(String(name, " takes no DISTINCT"))
+    var operands = List[Int]()
+    if function == -1:
+        if name == "count" and (flags & CALL_STAR) != 0:
+            if distinct:
+                raise Error(
+                    "count(DISTINCT *) has no column to count the distinct"
+                    " values of, and counting distinct whole rows is SELECT"
+                    " DISTINCT with a count around it"
+                )
+            operands.append(plan.exprs.literal(Value(Int64(1))))
+        elif len(args) == 1:
+            operands.append(
+                _lower_operand(ast, args[0], plan, walk, scope, grouped)
+            )
+        else:
             raise Error(
-                "count(DISTINCT *) has no column to count the distinct values"
-                " of, and counting distinct whole rows is SELECT DISTINCT with"
-                " a count around it"
+                String(
+                    "firepanda folds ",
+                    name,
+                    " over one argument, and this call has ",
+                    len(args),
+                )
             )
-        over = plan.exprs.literal(Value(Int64(1)))
-    elif len(args) == 1:
-        over = _lower_operand(ast, args[0], plan, walk, scope, grouped)
-    else:
+    elif function == WINDOW_NTILE:
+        if len(args) != 1:
+            raise Error(
+                String("ntile takes one argument and this call has ", len(args))
+            )
+        frame.amount = _constant_count(ast, args[0], "the buckets of ntile")
+        if frame.amount < 1:
+            raise Error("ntile needs at least one bucket")
+    elif function == WINDOW_LAG or function == WINDOW_LEAD:
+        if len(args) < 1 or len(args) > 3:
+            raise Error(
+                String(
+                    name,
+                    " takes one to three arguments and this call has ",
+                    len(args),
+                )
+            )
+        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        if len(args) > 1:
+            frame.amount = _signed_count(ast, args[1], String("the offset of ", name))
+        if len(args) > 2:
+            operands.append(
+                _lower_operand(ast, args[2], plan, walk, scope, grouped)
+            )
+    elif function == WINDOW_NTH_VALUE:
+        if len(args) != 2:
+            raise Error(
+                String(
+                    "nth_value takes two arguments and this call has ",
+                    len(args),
+                )
+            )
+        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        frame.amount = _constant_count(ast, args[1], "the row nth_value reads")
+        if frame.amount < 1:
+            raise Error("nth_value counts its rows from one")
+    elif reads_a_row:
+        if len(args) != 1:
+            raise Error(
+                String(
+                    name, " takes one argument and this call has ", len(args)
+                )
+            )
+        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+    elif len(args) != 0:
         raise Error(
-            String(
-                "firepanda folds ",
-                name,
-                " over one argument, and this call has ",
-                len(args),
-            )
+            String(name, " takes no arguments and this call has ", len(args))
         )
 
     var partition = List[Int]()
@@ -4097,18 +4199,151 @@ def _lower_over(
         partition.append(_lower_operand(ast, entry, plan, walk, scope, grouped))
         key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
 
-    var kind = _agg_kind(name, distinct)
-    var built = plan.exprs.window(
+    # DuckDB puts the nulls last whichever way a key sorts, in a window as in
+    # an ORDER BY, unless the query says otherwise.
+    var order = List[Int]()
+    key += "|"
+    for entry in ast.items(window.a):
+        var sort = ast.stmts[Int(entry)]
+        if sort.a == NO_NODE:
+            raise Error("a window orders by expressions, and ALL is not one")
+        order.append(_lower_operand(ast, sort.a, plan, walk, scope, grouped))
+        var down = sort.b == SORT_DESCENDING
+        var last = sort.payload != NULLS_FIRST
+        frame.descending.append(down)
+        frame.nulls_last.append(last)
+        key += String(
+            _shape(plan.exprs, order[len(order) - 1]),
+            " desc" if down else "",
+            "" if last else " nulls first",
+            ";",
+        )
+
+    if window.b != NO_NODE:
+        _read_frame(ast, window.b, len(order), frame)
+
+    var kind = _agg_kind(name, distinct) if function == -1 else AggKind.SUM
+    var built = plan.exprs.framed(
         kind,
-        over,
+        operands^,
         partition^,
-        List[Int](),
+        order^,
+        frame^,
         empty_is_null=not _counts_rows(kind),
     )
     var place = walk._record_window(
         built, String("__win_", len(walk.windows)), key^
     )
     return plan.exprs.column(String(walk.window_names[place]))
+
+
+def _signed_count(ast: Ast, at: UInt32, what: String) raises -> Int:
+    """Reads a whole number that has to be a constant and may be negative.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        what: What it is, for the message.
+
+    Returns:
+        The number.
+
+    Raises:
+        If the expression is not an integer literal, or one with a minus.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_UNARY and ast.text(node.payload) == "-":
+        return -_constant_count(ast, node.a, what)
+    return _constant_count(ast, at, what)
+
+
+def _frame_offset(ast: Ast, at: UInt32, whole: Bool) raises -> Float64:
+    """Reads one `n PRECEDING` or `n FOLLOWING` offset.
+
+    Args:
+        ast: The arenas.
+        at: The offset expression.
+        whole: Whether it counts rows or peer groups, and so has to be whole.
+
+    Returns:
+        The offset.
+
+    Raises:
+        If it is not a number written as a constant, is negative, or is a
+        fraction where a count is wanted.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_UNARY and ast.text(node.payload) == "-":
+        raise Error("a frame offset is a distance, and a negative one is none")
+    if node.kind != EXPR_LITERAL or node.b != LITERAL_NUMBER:
+        raise Error(
+            "firepanda lowers a frame offset written as a number, and this one"
+            " is an expression"
+        )
+    var text = ast.text(node.payload)
+    var by = atof(text)
+    if by < 0:
+        raise Error(String("a frame offset of ", text, " is negative"))
+    if whole and by != Float64(Int(by)):
+        raise Error(
+            String(
+                "a ROWS or GROUPS frame counts whole rows, and ",
+                text,
+                " is not whole",
+            )
+        )
+    return by
+
+
+def _read_frame(
+    ast: Ast, at: UInt32, sorts: Int, mut frame: WindowFrame
+) raises:
+    """Reads a window's frame clause into the frame the plan carries.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_FRAME`.
+        sorts: How many order keys the window has.
+        frame: Where it goes.
+
+    Raises:
+        If the frame starts at the end of the partition or ends at its start,
+        which DuckDB turns down too, or if a `RANGE` offset has other than one
+        order key to count along.
+    """
+    var node = ast.exprs[Int(at)]
+    var tags = node.payload
+    var mode = frame_mode(tags)
+    var start = frame_start(tags)
+    var end = frame_end(tags)
+    if start == BOUND_UNBOUNDED_FOLLOWING:
+        raise Error("a frame cannot start at UNBOUNDED FOLLOWING")
+    if end == BOUND_UNBOUNDED_PRECEDING:
+        raise Error("a frame cannot end at UNBOUNDED PRECEDING")
+    frame.mode = Int(mode)
+    frame.start = Int(start)
+    frame.end = Int(end)
+    var whole = mode != FRAME_RANGE
+    if start == BOUND_PRECEDING or start == BOUND_FOLLOWING:
+        frame.start_by = _frame_offset(ast, node.a, whole)
+    if end == BOUND_PRECEDING or end == BOUND_FOLLOWING:
+        frame.end_by = _frame_offset(ast, node.b, whole)
+    var offset = (
+        start == BOUND_PRECEDING
+        or start == BOUND_FOLLOWING
+        or end == BOUND_PRECEDING
+        or end == BOUND_FOLLOWING
+    )
+    if mode == FRAME_RANGE and offset and sorts != 1:
+        raise Error(
+            String(
+                "a RANGE frame with an offset counts along one ORDER BY key,"
+                " and this window has ",
+                sorts,
+            )
+        )
+    var exclude = frame_exclude(tags)
+    frame.exclude = 0 if exclude == EXCLUDE_NO_OTHERS else Int(exclude)
 
 
 def _shape(exprs: Expressions, root: Int) raises -> String:

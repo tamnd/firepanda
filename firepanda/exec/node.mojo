@@ -170,6 +170,12 @@ from firepanda.kernel.regex.program import Program
 from firepanda.kernel.regex.replace import Rewrite
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.fold import reduce_value_any
+from firepanda.kernel.framed import (
+    WINDOW_FOLD,
+    WindowFrame,
+    framed_windows,
+    window_type,
+)
 from firepanda.kernel.running import (
     accumulate_any,
     settle_any,
@@ -1507,13 +1513,13 @@ struct Window(Movable):
     which is also how DuckDB runs them, and the plan is what decides the order
     they go in.
 
-    The frame is the partition and nothing else. There is no `ROWS BETWEEN`
-    here and no ordering inside the window, so every row of a partition gets the
-    same value, which is the whole of `OVER (PARTITION BY ...)` with no frame
-    clause and none of `OVER (ORDER BY ...)`. An ordered window is a running
-    fold rather than one value broadcast, and it is a different loop rather than
-    an argument to this one, so lowering refuses it rather than answering it
-    wrongly.
+    With no order keys and every window a fold over the whole partition, every
+    row of a partition gets the same value, and that is one grouped reduction
+    per window read back through the partition ordinals. Anything else, an
+    `ORDER BY`, a frame, a rank or a function that reads another row, sorts the
+    partitions and is answered by `framed_windows` in `kernel/framed.mojo`.
+    Every window in one operator shares the ordering as well as the
+    partitioning, since the sort is the expensive part and it is done once.
 
     Chunk boundaries survive, as they do through a sort. The input's row counts
     are recorded on the way in and the output is cut at the same places, so a
@@ -1525,7 +1531,22 @@ struct Window(Movable):
     """The partition columns, as input positions. Empty is the whole frame."""
 
     var sources: List[Int]
-    """The column each window reduces, as input positions."""
+    """The column each window reduces, as input positions, or -1 for a function
+    that reads no column, which is `rank()` and the rest of the ranks."""
+
+    var seconds: List[Int]
+    """Per window, the column of its second argument, which is the default of
+    `lag` and `lead`, or -1."""
+
+    var order: List[Int]
+    """The order columns, as input positions, shared by every window here."""
+
+    var frames: List[WindowFrame]
+    """Per window, the function, the frame and the directions of the order
+    columns."""
+
+    var types: List[LogicalType]
+    """Per window, the type it answers, filled in by `bind`."""
 
     var kinds: List[AggKind]
     """Which reduction each window is."""
@@ -1572,6 +1593,9 @@ struct Window(Movable):
         var kinds: List[AggKind],
         var names: List[String],
         var marked: List[Bool] = List[Bool](),
+        var order: List[Int] = List[Int](),
+        var frames: List[WindowFrame] = List[WindowFrame](),
+        var seconds: List[Int] = List[Int](),
     ) raises:
         """Constructs a window.
 
@@ -1584,6 +1608,11 @@ struct Window(Movable):
             marked: Per window, whether a partition that held no value answers
                 null. An empty list is none of them, which is what a plan built
                 by the pandas front end asks for. Consumed.
+            order: The order columns, as input positions. Consumed.
+            frames: Per window, the function and the frame. An empty list is a
+                fold over the whole partition for each. Consumed.
+            seconds: Per window, the column of the second argument, or -1. An
+                empty list is none. Consumed.
 
         Raises:
             If there is no window to compute, or if the lists that describe them
@@ -1619,8 +1648,34 @@ struct Window(Movable):
                     " of them said whether folding nothing answers null",
                 )
             )
+        if len(frames) == 0:
+            for _ in range(len(sources)):
+                var frame = WindowFrame()
+                for _ in range(len(order)):
+                    frame.descending.append(False)
+                    frame.nulls_last.append(True)
+                frames.append(frame^)
+        if len(seconds) == 0:
+            for _ in range(len(sources)):
+                seconds.append(-1)
+        if len(frames) != len(sources) or len(seconds) != len(sources):
+            raise Error(
+                String(
+                    "window: ",
+                    len(sources),
+                    " columns, ",
+                    len(frames),
+                    " frames and ",
+                    len(seconds),
+                    " second arguments",
+                )
+            )
         self.keys = keys^
         self.sources = sources^
+        self.seconds = seconds^
+        self.order = order^
+        self.frames = frames^
+        self.types = List[LogicalType]()
         self.kinds = kinds^
         self.marked = marked^
         self.counts = List[Bool]()
@@ -1665,11 +1720,53 @@ struct Window(Movable):
                         )
                     )
 
+        for k in range(len(self.order)):
+            var at = self.order[k]
+            if at < 0 or at >= len(input):
+                raise Error(
+                    String(
+                        "window: order column ",
+                        at,
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+
         var fields = List[Field](capacity=len(input) + len(self.sources))
         for i in range(len(input)):
             fields.append(input[i].copy())
         for a in range(len(self.sources)):
             var at = self.sources[a]
+            var second = self.seconds[a]
+            if second < -1 or second >= len(input):
+                raise Error(
+                    String(
+                        "window: column ",
+                        second,
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+            var function = self.frames[a].function
+            if function != WINDOW_FOLD:
+                if at < -1 or at >= len(input):
+                    raise Error(
+                        String(
+                            "window: column ",
+                            at,
+                            " is outside a schema of ",
+                            len(input),
+                            " columns",
+                        )
+                    )
+                var read = input[at].dtype if at >= 0 else LogicalType.INT64
+                var answer = window_type(function, read)
+                self.counts.append(False)
+                self.types.append(answer)
+                fields.append(Field(self.names[a], answer))
+                continue
             if at < 0 or at >= len(input):
                 raise Error(
                     String(
@@ -1697,12 +1794,9 @@ struct Window(Movable):
             self.counts.append(
                 _sum_counts(kind, self.marked[a], source, input[at].nullable)
             )
-            fields.append(
-                Field(
-                    self.names[a],
-                    agg_type(kind, source, whole_column=False),
-                )
-            )
+            var answer = agg_type(kind, source, whole_column=False)
+            self.types.append(answer)
+            fields.append(Field(self.names[a], answer))
 
         self.input = input^
         self.width = len(self.input)
@@ -1806,16 +1900,38 @@ struct Window(Movable):
         if rows == 0:
             return
 
+        var sorted = len(self.order) > 0
+        for a in range(len(self.frames)):
+            if not self.frames[a].is_whole():
+                sorted = True
+
         var codes = Array[DType.uint32](rows)
         var groups = 1
-        if len(self.keys) > 0:
+        if sorted:
+            # The answers come back one per row in the order the rows arrived,
+            # so the ordinals that read them out are the row numbers.
+            for i in range(rows):
+                codes[i] = UInt32(i)
+        elif len(self.keys) > 0:
             var refs = borrow_columns(flat)
             var local = group_ordinals(refs, self.keys, rows)
             groups = local.groups
             codes = local^.into_codes()
 
         var made = List[AnyArray](capacity=len(self.sources))
-        for a in range(len(self.sources)):
+        if sorted:
+            made = framed_windows(
+                flat,
+                self.keys,
+                self.order,
+                self.frames,
+                self.sources,
+                self.seconds,
+                self.kinds,
+                self.marked,
+                self.types,
+            )
+        for a in range(len(self.sources) if not sorted else 0):
             var one = aggregate_group_any(
                 flat[self.sources[a]],
                 self.kinds[a],
