@@ -47,6 +47,9 @@ A whole number read through `dt` or a `DatetimeIndex` from instants or spans wit
 ### Added: Read a missing value out the way pandas spells it
 
 A gap read out of a column through `tolist`, iteration, `iloc`, `iat`, `loc`, `at` or `items` now comes back as pandas hands it out for the column's type. A float column, an integer column with a gap, a text column and a category column hand out `nan`, and a column of flags hands out None, as an object column does in pandas. A frame cell and an index read the same way, a category's missing row has a code of -1, and a NaN given back among text or asked for by `get_indexer` finds the gap. A missing instant or span still reads as None, since firepanda has no `NaT` yet.
+### Changed: a tuple of keys is read back from the map at the end
+
+A group by on several keys with text among them writes each row's keys out as bytes and looks those up in the text map, which already stores every distinct tuple. Each chunk also gathered its new groups' keys out of its own columns, a second copy of the same values, and then found its new groups again with a serial pass over the ordinals. The text map now hands back the rows it already knew were new, and the key columns are read out of the stored tuples once, on the cores, when the operator finishes. On a six core Linux machine, alternating the old and new driver over eight rounds, ClickBench q18 went from 106 to 84 ms at best, and every answer matched.
 
 ### Added: groupby sample
 
