@@ -1297,9 +1297,10 @@ def test_a_call_modifier_is_refused_here_not_in_the_transformer() raises:
 
 def test_a_modifier_on_a_windowed_call_is_refused_too() raises:
     # The `OVER` path lowers somewhere else, and it reads the same flags on the
-    # way past, so a null treatment beside a window stops rather than being
-    # dropped on the floor.
-    with assert_raises(contains="IGNORE NULLS inside a call"):
+    # way past, so a null treatment on a fold stops rather than being dropped
+    # on the floor. DuckDB turns it down too, and only lag, lead and the value
+    # functions take one.
+    with assert_raises(contains="takes no IGNORE NULLS"):
         _ = _plan("SELECT sum(a IGNORE NULLS) OVER () FROM t")
 
 
