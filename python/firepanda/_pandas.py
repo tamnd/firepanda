@@ -9822,6 +9822,89 @@ class DataFrameMixin(_Carries):
 
         to_pickle(self, path, compression, protocol, storage_options)
 
+    def to_parquet(
+        self,
+        path: Any = None,
+        *,
+        engine: Any = "auto",
+        compression: Any = "snappy",
+        index: bool | None = None,
+        partition_cols: Any = None,
+        storage_options: Any = None,
+        filesystem: Any = None,
+        **kwargs: Any,
+    ) -> bytes | None:
+        """Writes the frame as Parquet through pyarrow, which has to be installed.
+
+        The row labels, each column's pandas type and `attrs` go in the `pandas`
+        metadata pandas writes, so pandas reads the file back as this frame, and
+        `read_parquet` reads a file pandas wrote the same way.
+
+        Args:
+            path: A path, a URL pyarrow knows, a binary handle, or None for the
+                file's bytes.
+            engine: `"auto"` or `"pyarrow"`.
+            compression: The codec, `"snappy"`, `"gzip"`, `"brotli"`, `"lz4"`,
+                `"zstd"` or None.
+            index: True to store the row labels as columns, False to leave them
+                out, and None to store a range of integers as metadata alone.
+            partition_cols: Columns to split the rows into folders by.
+            storage_options: Refused, as pandas refuses them for a local file.
+            filesystem: A pyarrow file system.
+            **kwargs: Handed to pyarrow's writer, apart from `schema`, which the
+                table is cast to.
+
+        Returns:
+            The file's bytes when `path` is None, and None otherwise.
+        """
+        from ._columnar import to_parquet
+
+        return to_parquet(
+            self,
+            path,
+            engine,
+            compression,
+            index,
+            partition_cols,
+            storage_options,
+            filesystem,
+            **kwargs,
+        )
+
+    def to_feather(self, path: Any, **kwargs: Any) -> None:
+        """Writes the frame as Feather, the Arrow IPC file, through pyarrow.
+
+        Args:
+            path: A path or a binary handle.
+            **kwargs: Handed to `pyarrow.feather.write_feather`.
+        """
+        from ._columnar import to_feather
+
+        to_feather(self, path, **kwargs)
+
+    def to_orc(
+        self,
+        path: Any = None,
+        *,
+        engine: Any = "pyarrow",
+        index: bool | None = None,
+        engine_kwargs: Any = None,
+    ) -> bytes | None:
+        """Writes the frame as ORC through pyarrow. ORC keeps no row labels.
+
+        Args:
+            path: A path, a binary handle, or None for the file's bytes.
+            engine: `"pyarrow"`, the only one.
+            index: Whether to store the row labels, which have to be the default.
+            engine_kwargs: Handed to `pyarrow.orc.write_table`.
+
+        Returns:
+            The file's bytes when `path` is None, and None otherwise.
+        """
+        from ._columnar import to_orc
+
+        return to_orc(self, path, engine, index, engine_kwargs)
+
     def to_csv(
         self,
         path_or_buf: Any = None,
