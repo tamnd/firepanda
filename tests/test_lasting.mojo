@@ -79,6 +79,15 @@ def test_the_direct_table_hands_over_mid_chunk() raises:
     _check[DType.int64](chunks)
 
 
+def test_a_tall_chunk_then_another() raises:
+    # A chunk tall enough that its table is grown well past the first size,
+    # then a chunk that brings as many new keys as it repeats old ones.
+    var chunks = List[List[Int]]()
+    chunks.append(_spread(300_000, 150_000, 11))
+    chunks.append(_spread(140_000, 200_000, 12))
+    _check[DType.int64](chunks)
+
+
 def test_narrow_signed_keys() raises:
     var chunks = List[List[Int]]()
     for c in range(3):
