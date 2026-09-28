@@ -239,12 +239,15 @@ def _caller_variables(
 ) -> dict[str, Any]:
     """The variables `@name` can read: the caller's globals, then its locals."""
     found: dict[str, Any] = {}
-    try:
-        # Four frames up is whoever called `df.query`: this function, `_evaluate`,
-        # the module's `query` or `evaluate`, and the method sit in between.
-        caller = sys._getframe(4 + level)
-    except ValueError:
-        caller = None
+    # Four frames up is whoever called `df.query`: this function, `_evaluate`,
+    # the module's `query` or `evaluate`, and the method sit in between. The
+    # wrappers that carry `attrs` add frames of their own, which are not counted.
+    caller: Any = sys._getframe(0)
+    steps = 4 + level
+    while caller is not None and steps:
+        caller = caller.f_back
+        if caller is not None and not caller.f_code.co_filename.endswith("_attrs.py"):
+            steps -= 1
     if caller is not None:
         found.update(caller.f_globals)
         found.update(caller.f_locals)
