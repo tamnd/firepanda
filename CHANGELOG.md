@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Calendar parts of a column with a gap, typed as in pandas
+
+A whole number read through `dt` or a `DatetimeIndex` from instants or spans with a gap, such as `year`, `hour`, `dayofweek` or `days`, is now float64 with NaN in the gap, as pandas gives it, where it was int32 with a gap. The yes or no fields, such as `is_month_start` and `is_leap_year`, answer False for a gap as pandas does, where they answered missing. Without a gap nothing changes.
+
 ### Added: NaT, the missing moment and span
 
 `firepanda.NaT` is pandas' missing moment and span: one value, a `datetime` that never equals anything, sorts against nothing and turns the arithmetic it meets into itself, with its fields NaN and the methods pandas refuses refused with pandas' words. A gap in a column of instants or spans now reads out as `NaT` through `tolist`, iteration, `iat`, a frame cell and an index, `Timestamp(None)`, `Timedelta(None)`, `to_datetime(None)` and `to_timedelta(None)` answer it, and a reduction over only gaps answers it where it answered NaN. `NaT` goes back in wherever pandas takes it, so a column built from it, `fillna`, `where`, `replace`, `isin`, `get_loc`, `in` and adding it to a span column all match pandas. Replacing a moment or a span, which never matched a row before, now does.

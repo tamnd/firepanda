@@ -38,6 +38,7 @@ from ._pandas import (
     _NONEXISTENT_REFUSAL,
     NO_DEFAULT,
     _beyond_nanoseconds,
+    _gap_part,
     _held_at,
     _held_values,
     _instants,
@@ -179,10 +180,15 @@ class DatetimeIndex(Index):
         ways and the day of the year two, and the core keeps one name for each
         because a kernel does not need three. The property resolves the spelling
         before it calls, which is the same thing `tools/bindings.py` does for the
-        `dt` accessor.
+        `dt` accessor. A gap reads out as `_gap_part` says.
         """
         try:
-            return Index._wrap(self._inner.temporal_part(kind, arg))
+            part = self._inner.temporal_part(kind, arg)
+            if not part.null_count():
+                return Index._wrap(part)
+            # An index's inner column casts nothing, so a gap goes through a column.
+            column = Series(_held_values(part))._inner
+            return Index(Series._wrap(_gap_part(column)).tolist())
         except Exception as error:
             raise translate(error) from None
 

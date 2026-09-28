@@ -155,21 +155,14 @@ def test_a_missing_label_has_no_calendar_field(firepanda: ModuleType, field: str
 
 @needs_pandas
 @pytest.mark.parametrize("field", ASKED)
-def test_a_missing_label_answers_neither_yes_nor_no(firepanda: ModuleType, field: str) -> None:
-    """The gap test the seven yes or no fields have instead, and why they have it.
+def test_a_missing_label_answers_no_as_in_pandas(firepanda: ModuleType, field: str) -> None:
+    """The seven yes or no fields answer `False` for a missing label, as pandas does.
 
-    pandas answers `False` for a label that is not an instant, because the array
-    it hands back has no missing value to answer with. That reads as a label
-    which is an instant and is not the first of its month, which is not what was
-    asked. This answers a missing value, and the two rows either side of the gap
-    still agree.
+    pandas' answer is a numpy bool array, which has no missing value to put there,
+    so a gap reads as no, and the rows either side of it agree.
     """
     mine = getattr(made(firepanda, HOLED), field).tolist()
-    theirs_ = list(getattr(theirs(HOLED), field))
-    assert mine[1] is None
-    assert bool(theirs_[1]) is False
-    assert mine[0] == bool(theirs_[0])
-    assert mine[2] == bool(theirs_[2])
+    assert mine == [bool(value) for value in getattr(theirs(HOLED), field)]
 
 
 @needs_pandas

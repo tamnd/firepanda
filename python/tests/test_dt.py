@@ -196,21 +196,15 @@ def test_a_part_gives_the_pandas_answer(firepanda: ModuleType, name: str) -> Non
 
 @both
 @pytest.mark.parametrize("name", FLAGS)
-def test_a_flag_gives_the_pandas_answer_where_the_row_is_there(
-    firepanda: ModuleType, name: str
-) -> None:
-    """The three present rows agree, and the missing one is the documented difference.
+def test_a_flag_gives_the_pandas_answer_on_every_row(firepanda: ModuleType, name: str) -> None:
+    """Every row agrees, and a missing row is `False`, as pandas answers it.
 
-    pandas answers False for a NaT because its answer is a numpy bool array and
-    there is no third value to put in one. This answers missing, and the reason
-    is that Arrow has a validity bit and a row that is not there has no month to
-    be the end of.
+    pandas' answer is a numpy bool array, which has no third value, so a row
+    that is not there reads as no.
     """
     mine = read(getattr(stamps(firepanda).dt, name))
     them = list(getattr(theirs().dt, name))
-    assert mine[:3] == them[:3], f"{name}: {mine} against {them}"
-    assert mine[3] is None
-    assert them[3] is False
+    assert mine == them, f"{name}: {mine} against {them}"
 
 
 @both
