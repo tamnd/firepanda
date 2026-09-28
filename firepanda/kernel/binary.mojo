@@ -84,6 +84,7 @@ from firepanda.kernel.dictionary import (
     decode_dictionary,
     dictionary_codes,
     same_categories,
+    through_codes_any,
 )
 from firepanda.kernel.parse_time import parse_instant
 
@@ -1262,8 +1263,8 @@ def binary_value_any(
     # A string column held as codes compares each category once and spreads
     # the answers over the rows, which is the reason to hold it that way.
     if a.is_coded() and op.is_comparison():
-        return a.through_codes(
-            binary_value_any(a.distinct(), b, op, value_on_left)
+        return through_codes_any(
+            a, binary_value_any(a.distinct(), b, op, value_on_left)
         )
 
     # A Python scalar arrives without a width and takes the column's, so this

@@ -31,6 +31,9 @@ The month anchored offsets name their anchor in their signature, as pandas' `Yea
 ### Added: pandas.offsets and DateOffset
 
 `firepanda.offsets` now carries every name in `pandas.tseries.offsets`, and `firepanda.DateOffset` is the same class pandas exports. Month, quarter, half year and year offsets and their business forms, the semi month, week, week of month, Easter and 52 or 53 week fiscal offsets, business days and business hours with custom week masks and holidays, `Day` and the ticks all move a `Timestamp` the way pandas 3 does, including zero steps, negative steps, `normalize`, zoned moments and the time unit. They print, compare, hash, roll forward and back and read their own frequency text as pandas does. An offset adds to and subtracts from a column of moments and an index of moments, and `date_range` takes one as its `freq`. Business hours that run over midnight and a holiday calendar other than numpy's are refused. `test_offsets.py` checks 567 cases against pandas.
+### Changed: a comparison against a coded column spreads its answers on every core
+
+Comparing a dictionary coded text column with a constant, or asking it `is_in`, answers once per distinct value and then copies each row's answer out by its code. That copy ran on one core, and on TPC-H q10's `l_returnflag == "R"` over six million rows it took 6.9ms of the query. A column of 65536 rows or more now copies in morsels on every core, and a shorter one keeps the old path.
 
 ### Fixed: astype("category") of a column that is not text refuses cleanly
 
