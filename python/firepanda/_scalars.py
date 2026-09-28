@@ -339,6 +339,21 @@ def _stepped(value: int, period: int, mode: int) -> int:
     return quotient * period
 
 
+def _whole_date(text: str) -> str:
+    """A year, a year and month, or a quarter, spelled as the day it starts on.
+
+    pandas reads `2024`, `2024-3`, `2024/03` and `2024Q1` as the first day of
+    the span they name, which ISO 8601 alone does not.
+    """
+    found = re.fullmatch(r"(\d{4})(?:[-/](\d{1,2})|Q([1-4]))?", text)
+    if found is None:
+        return text
+    year, month, quarter = found.groups()
+    if quarter is not None:
+        month = str(int(quarter) * 3 - 2)
+    return f"{year}-{int(month or 1):02d}-01"
+
+
 def _kind(value: Any) -> str:
     """Names the type of a value the way a CPython error message names one.
 
@@ -792,6 +807,7 @@ class Timestamp(_datetime.datetime):
         cleaned = trimmed
         if fraction is not None and len(digits) > 6:
             cleaned = trimmed[: fraction.start() + 7] + trimmed[fraction.end() :]
+        cleaned = _whole_date(cleaned)
         try:
             made = _datetime.datetime.fromisoformat(cleaned.replace(" ", "T", 1))
         except ValueError as bad:

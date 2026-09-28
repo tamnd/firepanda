@@ -1312,3 +1312,30 @@ def test_a_moment_out_of_a_column_could_be_one_of_these(firepanda: ModuleType) -
         made = firepanda.Timestamp(stored, unit="us")
         assert made == firepanda.Timestamp(expected)
         assert repr(made) == repr(pd.Timestamp(expected))
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "text", ["2024", "2024-03", "2024-3", "2024/03", " 2024 ", "2024Q1", "2024Q4"]
+)
+def test_a_year_a_month_or_a_quarter_is_the_day_it_starts_on(
+    firepanda: ModuleType, text: str
+) -> None:
+    """pandas reads a partial date as the first day of the span it names."""
+    import pandas as pd
+
+    mine, theirs = firepanda.Timestamp(text), pd.Timestamp(text)
+    assert (mine.isoformat(), mine.unit) == (theirs.isoformat(), theirs.unit)
+
+
+@needs_pandas
+@pytest.mark.parametrize("text", ["2024-13", "2024Q5", "24"])
+def test_a_partial_date_pandas_cannot_read_raises_a_value_error(
+    firepanda: ModuleType, text: str
+) -> None:
+    import pandas as pd
+
+    with pytest.raises(ValueError):
+        pd.Timestamp(text)
+    with pytest.raises(ValueError):
+        firepanda.Timestamp(text)
