@@ -42,7 +42,7 @@ from ._pandas import (
     _span_type,
     to_timedelta,
 )
-from ._scalars import Timedelta
+from ._scalars import NaT, Timedelta
 from .errors import InvalidArgumentError, translate
 
 __all__ = ["TimedeltaIndex", "timedelta_range"]
@@ -196,6 +196,40 @@ class TimedeltaIndex(HeldFreq, Index):
             return infer_freq(self)
         except ValueError:
             return None
+
+    def shift(self, periods: int = 1, freq: Any = None) -> TimedeltaIndex:
+        """Every span moved `periods` steps of `freq`, or of the step the index holds.
+
+        The step has to be a fixed length, and the answer holds the frequency it
+        held, as a span added to spans does.
+
+        Raises:
+            NullFrequencyError: Without a frequency given or held.
+        """
+        from .errors import NullFrequencyError
+        from .offsets import _elapsed
+
+        if freq is None:
+            if self.freq is None:
+                raise NullFrequencyError("Cannot shift with no freq")
+            freq = self.freq
+        return self + _elapsed(_offset_of(freq) * periods)
+
+    def floor(self, freq: Any) -> TimedeltaIndex:
+        """Every span moved down to a whole number of steps of a fixed frequency."""
+        return TimedeltaIndex(self._column().dt.floor(freq), name=self.name)
+
+    def ceil(self, freq: Any) -> TimedeltaIndex:
+        """Every span moved up to a whole number of steps of a fixed frequency."""
+        return TimedeltaIndex(self._column().dt.ceil(freq), name=self.name)
+
+    def round(self, freq: Any) -> TimedeltaIndex:  # type: ignore[override]
+        """Every span moved to the nearer whole step of a fixed frequency, even on a tie."""
+        return TimedeltaIndex(self._column().dt.round(freq), name=self.name)
+
+    def to_pytimedelta(self) -> list[Any]:
+        """Every label as a Python timedelta, `NaT` for a missing one, as a list."""
+        return [NaT if label is NaT else label.to_pytimedelta() for label in self.tolist()]
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""
