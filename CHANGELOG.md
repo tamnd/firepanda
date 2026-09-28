@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dayfirst and yearfirst in to_datetime and DatetimeIndex
+
+`to_datetime` and `DatetimeIndex` used to refuse `dayfirst` and `yearfirst`. They now read the way pandas does, which hands both to dateutil. `dayfirst` reaches the guesser too, so `01/02/2024` is the first of February and, as in pandas, so is `2024-01-02`. `yearfirst` changes rows read on their own, such as `10/11/12` with no format to guess. An explicit format and `ISO8601` ignore both. The same work fixed two things found on the way: a row with no year, such as `01/02` or `Jan 2`, is now in the year 1 as in pandas rather than in the current year, and `str` of a `Timestamp` before the year 1000 pads the year to four digits, as pandas does, while its repr still does not.
+
 ## [0.8.35] - 2026-09-28
 
 Built against Mojo 1.0.0 (ed45d567).

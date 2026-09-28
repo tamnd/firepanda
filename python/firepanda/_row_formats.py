@@ -348,7 +348,7 @@ def _printed(moment: datetime.datetime, zone: int | None, fmt: str) -> str:
     return moment.strftime(fmt)
 
 
-def guess(text: str) -> str | None:
+def guess(text: str, dayfirst: bool = False) -> str | None:
     """The format pandas guesses from one value, or None when it cannot guess one.
 
     This is pandas' `guess_datetime_format`. The value is read the way dateutil
@@ -356,11 +356,12 @@ def guess(text: str) -> str | None:
     each part of the reading printed in each directive, in pandas' order of
     preference. The guess has to cover a year, a month and a day, except for a
     year alone and a year and month with a hyphen, and has to read the value
-    back to the same text.
+    back to the same text. `dayfirst` is handed to the reading, as pandas
+    hands it to dateutil.
     """
     today = datetime.date.today()
     try:
-        parts = _loose_parts(text.strip(), today)
+        parts = _loose_parts(text.strip(), today, dayfirst)
     except ValueError:
         return None
     year, month, day, hour, minute, second, fraction, zone = parts

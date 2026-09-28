@@ -1621,24 +1621,27 @@ class Timestamp(_datetime.datetime):
         The offset carries a colon here where `__repr__` writes it without one,
         so the same moment is `13:45:06+02:00` printed and `13:45:06+0200`
         echoed. There is no reason for the two to differ and pandas differs
-        anyway, so both are copied.
+        anyway, so both are copied. The year is padded to four digits here
+        and not in `__repr__`, which pandas does too.
 
         Returns:
             The text.
         """
-        return self._spelled(offset=True, colon=True)
+        return self._spelled(offset=True, colon=True, padded=True)
 
-    def _spelled(self, offset: bool, colon: bool = False) -> str:
+    def _spelled(self, offset: bool, colon: bool = False, padded: bool = False) -> str:
         """The date and time with a space in the middle, pandas' printed form.
 
         Returns:
             The text.
         """
-        # The year is not padded to four digits, because pandas does not pad it
-        # and `Timestamp("0001-01-01")` prints as `1-01-01` there. That only
-        # shows up before the year 1000, which a microsecond moment can reach.
+        # The year is not padded to four digits in the echo, because pandas does
+        # not pad it and `Timestamp("0001-01-01")` echoes as `1-01-01` there,
+        # while `str` of the same moment is `0001-01-01`. That only shows up
+        # before the year 1000, which a microsecond moment can reach.
+        year = f"{self.year:04d}" if padded else f"{self.year}"
         base = (
-            f"{self.year}-{self.month:02d}-{self.day:02d} "
+            f"{year}-{self.month:02d}-{self.day:02d} "
             f"{self.hour:02d}:{self.minute:02d}:{self.second:02d}"
         )
         # Nine digits when there is anything below the microsecond and six when

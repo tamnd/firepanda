@@ -102,8 +102,9 @@ class DatetimeIndex(Index):
                 `tz_localize` after the fact, which is written.
             ambiguous: Refused away from its default, since it only means
                 something alongside `tz=`, which is refused.
-            dayfirst: Refused. Only ISO 8601 is guessed and it has one order.
-            yearfirst: Refused, for the same reason.
+            dayfirst: Whether two small numbers are read day first, as
+                `to_datetime` reads them with `format="mixed"`.
+            yearfirst: Whether three small numbers are read year first.
             dtype: Refused. The unit comes off the values and `as_unit` changes
                 it afterwards.
             copy: Refused. There is one behaviour and it always copies.
@@ -132,8 +133,6 @@ class DatetimeIndex(Index):
             "raise",
             "it only means something alongside tz=, which is tz_localize after the fact",
         )
-        _held_at("dayfirst", dayfirst, False, "only ISO 8601 is guessed and it has one order")
-        _held_at("yearfirst", yearfirst, False, "only ISO 8601 is guessed and it has one order")
         if dtype is not None:
             raise NotImplementedError(
                 "dtype= is not supported yet, because the unit is read off the"
@@ -159,7 +158,7 @@ class DatetimeIndex(Index):
         values: Any = data.tolist() if isinstance(data, Index) else data
         if not isinstance(values, Series) or not _is_temporal(values.dtype):
             values = _instants(
-                values, "raise", False, False, False, "mixed", NO_DEFAULT, None, "unix"
+                values, "raise", dayfirst, yearfirst, False, "mixed", NO_DEFAULT, None, "unix"
             )
         try:
             self._inner = values._inner.to_index(label)
