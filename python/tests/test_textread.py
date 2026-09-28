@@ -155,6 +155,7 @@ CASES: dict[str, tuple[str, dict[str, Any]]] = {
     "infinity": ("a,b\n1.5,2\ninf,3\n", {}),
     "nan": ("a,b\nnan,2\n1.5,3\n", {}),
     "exponents": ("a,b\n1e3,2\n", {}),
+    "past int64": ("a,b\n18446744073709551615,1\n0,2\n", {}),
     "carriage returns": ("a,b\r\n1,2\r\n3,4\r\n", {}),
     "extra fields cut": ("a,b\n1,2,3\n4,5\n", {"index_col": False}),
     "bad lines skipped": ("a,b\n1,2\n3,4,5\n6,7\n", {"on_bad_lines": "skip"}),
@@ -229,6 +230,7 @@ FILES = {
     "a trailing comma": "a,b,\n1,2,\n",
     "text with a gap": "a,b\nx,1\ny,\n",
     "a line of spaces": "a\n1\n \n2\n",
+    "past int64": "v,u\n1,0\n2,18446744073709551615\n",
 }
 
 

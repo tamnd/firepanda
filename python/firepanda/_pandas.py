@@ -130,8 +130,17 @@ def _values_of(inner: Any) -> list[Any]:
 
 
 def _held_values(inner: Any) -> list[Any]:
-    """A column's values with None for a gap, which is what the code in here reads."""
-    return _outward(list(inner.to_list()), inner.dtype())
+    """A column's values with None for a gap, which is what the code in here reads.
+
+    The core hands a uint64 value out through a signed integer, so one past the int64
+    range arrives negative and is put back here.
+    """
+    dtype = inner.dtype()
+    values = list(inner.to_list())
+    if dtype == "uint64":
+        values = [value + (1 << 64) if value is not None and value < 0 else value
+                  for value in values]
+    return _outward(values, dtype)
 
 
 _NAN_GAPS = ("float", "int", "uint", "str", "string", "large_string", "category")

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: uint64 values past the int64 range
+
+A uint64 value above the int64 range came back from `tolist()`, `to_csv` and every other path through the column's values as a negative number, because the core hands the values out through a signed integer. They are now put back before anyone sees them. `read_csv` on a plain file also read such a value as float64, where pandas reads uint64, and now reads it as pandas does.
+
 ### Added: `read_csv` takes every argument, plus `read_table` and `read_fwf`
 
 `read_csv` now reads what pandas reads: a path, a handle, bytes or a URL, compressed or not, in any encoding, with every one of pandas' arguments. A plain file with pandas' defaults still goes to the core reader. Everything else goes to a new Python reader in `_textread.py`, which splits the text the way pandas' C parser does and picks each column's type the way it does. That covers separators, whitespace and patterns, `header`, `names`, `skiprows`, `nrows`, `skipfooter`, `dtype`, `converters`, missing text, `parse_dates`, `thousands`, `decimal`, comments, quoting and escapes, bad lines, and `chunksize` and `iterator` through `TextFileReader`. Blank and repeated names, an extra leading field, padded numbers, an empty file and a byte order mark now come out as in pandas as well. `read_table` and `read_fwf` are new, and a missing file is now `FileNotFoundError`.
