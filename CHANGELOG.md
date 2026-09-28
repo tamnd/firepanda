@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: `cat.codes` answers pandas' width
+
+`Series.cat.codes` answers the codes in the narrowest integer type that holds them, int8 for fewer than 128 categories and int16 up to 32767, as pandas does. The column still stores int32 codes, for the reason document 26 gives, and the answer is cast to the narrow width.
+
 ### Added: Categorical, CategoricalDtype and CategoricalIndex
 
 `firepanda.Categorical`, `CategoricalDtype` and `CategoricalIndex` follow pandas. A category column's `dtype` is now a `CategoricalDtype` that carries its categories and order flag and still equals the word `"category"`, `astype` takes one with categories decided, `Categorical.from_codes` and `codes` hold the codes as narrow as pandas does, a `Series` built from a `Categorical` keeps its categories, and each prints the way pandas prints it.

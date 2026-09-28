@@ -6,13 +6,9 @@ disagreements a caller can cause is a `ValueError` rather than a quiet answer.
 Every one of those is measured against pandas rather than against a constant,
 for the reason `test_astype.py` gives at more length.
 
-One difference is asserted rather than worked around, because it is a
-decision somebody made on purpose. It is the width of the codes. pandas answers
-int8 for a column of three categories and firepanda answers int32, which
-document 26 argues for and which a caller can see through
-`Series.cat.codes.dtype`. The values agree, so a program comparing codes to
-codes is fine and a program comparing dtypes is not, and it should find that
-out here rather than in production.
+The codes are stored as int32, which document 26 argues for, and are answered
+in the narrowest integer type that holds them, as pandas answers them, so a
+column of three categories has int8 codes in both.
 """
 
 from __future__ import annotations
@@ -78,10 +74,9 @@ def test_the_categories_are_the_ones_pandas_finds_in_the_same_order(
 
 @needs_pandas
 def test_the_codes_are_the_ones_pandas_writes(firepanda: ModuleType) -> None:
-    """The values agree. The width does not, and that is document 26's decision."""
+    """The values agree, and so does the width."""
     assert made(firepanda).cat.codes.tolist() == theirs().cat.codes.tolist()
-    assert made(firepanda).cat.codes.dtype == "int32"
-    assert str(theirs().cat.codes.dtype) == "int8"
+    assert made(firepanda).cat.codes.dtype == str(theirs().cat.codes.dtype) == "int8"
 
 
 @needs_pandas

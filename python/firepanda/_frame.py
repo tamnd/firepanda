@@ -870,9 +870,11 @@ class CategoricalAccessor(CategoricalMixin):
 
     @property
     def codes(self) -> Series:
-        """Which category each row holds, as positions into the categories."""
+        """Which category each row holds, as positions into the categories, in the
+        narrowest integer type that holds them.
+        """
         try:
-            return self._codes()
+            return self._shown_codes()
         except Exception as error:
             raise translate(error) from None
 

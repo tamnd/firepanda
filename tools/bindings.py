@@ -1495,8 +1495,9 @@ def _categorical_members() -> tuple[Member, ...]:
         Member(
             name="codes",
             kind="property",
-            body="self._codes()",
-            doc="Which category each row holds, as positions into the categories.",
+            body="self._shown_codes()",
+            doc="Which category each row holds, as positions into the categories, in the "
+            "narrowest integer type that holds them.",
             returns="Series",
         ),
         Member(
@@ -3674,7 +3675,8 @@ SERIES = Exposed(
             name="dtype",
             kind="property",
             body="self._shown_dtype()",
-            doc="The type of the values, as a string rather than a numpy dtype, or a `CategoricalDtype` for categories.",
+            doc="The type of the values, as a string rather than a numpy dtype, "
+            "or a `CategoricalDtype` for categories.",
             returns="Any",
         ),
         Member(
@@ -4365,7 +4367,8 @@ INDEX = Exposed(
             name="dtype",
             kind="property",
             body="self._shown_dtype()",
-            doc="The type of the labels, as a string rather than a numpy dtype, or a `CategoricalDtype` for categories.",
+            doc="The type of the labels, as a string rather than a numpy dtype, "
+            "or a `CategoricalDtype` for categories.",
             returns="Any",
         ),
         Member(
