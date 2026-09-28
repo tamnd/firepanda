@@ -83,18 +83,10 @@ def test_the_codes_are_the_ones_pandas_writes(firepanda: ModuleType) -> None:
 def test_the_codes_carry_the_row_labels_and_not_the_column_name(
     firepanda: ModuleType,
 ) -> None:
-    """Both of those are pandas, and the second one reads like an oversight there.
-
-    The column name is dropped here and pandas drops it too. What is asserted is
-    the empty string rather than the None pandas answers, because a firepanda
-    series with no name reports an empty string everywhere and not only here.
-    That is a difference of its own and it is filed rather than papered over in
-    this test, since fixing it in one place would make the accessor disagree with
-    the rest of the library.
-    """
+    """Both of those are pandas, and the second one reads like an oversight there."""
     mine = firepanda.Series(WORDS, name="part").astype("category")
     assert mine.name == "part"
-    assert mine.cat.codes.name == ""
+    assert mine.cat.codes.name is None
     assert theirs().cat.codes.name is None
     assert len(mine.cat.codes) == len(mine)
 

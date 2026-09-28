@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: `cat.codes` has no name
+
+`Series.cat.codes` answered an empty name, and pandas answers none. It now has no name, whatever the column is called.
+
 ### Changed: `cat.codes` answers pandas' width
 
 `Series.cat.codes` answers the codes in the narrowest integer type that holds them, int8 for fewer than 128 categories and int16 up to 32767, as pandas does. The column still stores int32 codes, for the reason document 26 gives, and the answer is cast to the narrow width.
