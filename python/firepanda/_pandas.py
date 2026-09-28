@@ -12665,6 +12665,11 @@ class DataFrameMixin(_Carries):
         dtypes = [_named_dtype(asked[name]) for name in names]
         for name, wanted in zip(names, dtypes, strict=True):
             _category_of(str(self[name].dtype), wanted)
+            refused = _temporal_cast_refused(str(self[name].dtype), wanted)
+            if refused and strictly:
+                raise TypeError(refused)
+            if refused:
+                return DataFrame._wrap(self._inner)
         try:
             answer = DataFrame._wrap(self._inner.cast(names, dtypes, True))
         except Exception as error:
@@ -15354,6 +15359,11 @@ class SeriesMixin(_Carries):
         if texts is not None:
             return Series(texts, dtype="str", index=self.index, name=self.name)
         _category_of(str(self.dtype), wanted)
+        refused = _temporal_cast_refused(str(self.dtype), wanted)
+        if refused:
+            if strictly:
+                raise TypeError(refused)
+            return Series._wrap(self._inner)
         try:
             return Series._wrap(self._inner.cast(wanted, True))
         except Exception as error:
@@ -25026,6 +25036,26 @@ def _unit_of(printed: str) -> str:
     return printed.partition("[")[2].rstrip("]").partition(", ")[0]
 
 
+def _temporal_cast_refused(printed: str, wanted: str) -> str:
+    """pandas' reason for refusing to cast instants or spans to a number, or empty text.
+
+    pandas casts instants and spans to int64, their counts, and refuses every
+    float and every other whole number type, naming the int64 cast as the way
+    round for the latter.
+    """
+    kind = "Datetime" if printed.startswith("datetime64") else "Timedelta"
+    if not printed.startswith(("datetime64", "timedelta64")):
+        return ""
+    if wanted.startswith("float"):
+        return f"Cannot cast {kind}Array to dtype {wanted}"
+    if wanted.startswith(("int", "uint")) and wanted != "int64":
+        return (
+            f"Converting from {printed} to {wanted} is not supported."
+            " Do obj.astype('int64').astype(dtype) instead"
+        )
+    return ""
+
+
 def _counts_target(printed: str, dtype: Any) -> str:
     """The instant or span type an `astype` reads a column of numbers into, or empty text.
 
@@ -26469,8 +26499,9 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
 
     The unit of the answer follows pandas: text is microseconds, or finer when
     a value needs it, whole numbers are in `unit` or the coarsest of the four
-    units that holds it, floats are nanoseconds, and text mixed with spans
-    takes the finer of microseconds and their units.
+    units that holds it, floats are nanoseconds, text mixed with spans takes
+    the finer of microseconds and their units, and nothing but missing values
+    is seconds, or nanoseconds for a column of floats.
 
     Returns:
         A `Timedelta`, `NaT`, a column of elapsed times or a `TimedeltaIndex`.
@@ -26520,7 +26551,10 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     present = [value for value in values if not _missing(value)]
     texts = any(isinstance(value, str) for value in present)
     counts = any(isinstance(value, numbers.Real) for value in present)
-    if not present or any(isinstance(value, float) for value in present):
+    if all(span is None for span in spans):
+        # Nothing read as a span, which pandas holds in seconds unless the column was floats.
+        target = "ns" if column is not None and str(column.dtype).startswith("float") else "s"
+    elif any(isinstance(value, float) for value in present):
         target = "ns"
     else:
         units = [span.unit for span in spans if span is not None]
@@ -26529,8 +26563,11 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
             units.append("ns" if counts else "us")
         target = max(units, key=["s", "ms", "us", "ns"].index)
     counts = [None if span is None else span.value for span in spans]
-    built = to_datetime(Series(counts, dtype="int64" if None not in counts else None), unit="ns")
-    built = (built - Timestamp(0)).dt.as_unit(target)
+    # An empty list is built from one count and cut back, so it keeps the labels' type.
+    built = to_datetime(
+        Series(counts or [0], dtype="int64" if None not in counts else None), unit="ns"
+    )
+    built = (built - Timestamp(0)).dt.as_unit(target).iloc[: len(counts)]
     if column is None:
         from ._timedelta import TimedeltaIndex
 

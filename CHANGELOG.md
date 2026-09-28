@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Instants and spans refuse the casts pandas refuses, and elapsed times read from gaps are seconds
+
+`astype` on a column of instants or spans refuses every float type and every whole number type but int64 with pandas' `TypeError` and words, in a series and in a frame, where it used to hand back counts. `to_timedelta` on an empty list or on nothing but missing values answers seconds, as pandas does, or nanoseconds for a column of floats, and an empty list no longer fails.
+
 ### Added: Text joined and repeated by operators, lists beside a frame, and spans beside NaT
 
 A column of text takes `+` with text, a list of text or another column of text, lined up by label with a missing row on either side missing in the answer, and `*` with a whole number or a column of them repeats each row, as pandas does. Every other arithmetic on text, and ordering text against a number, is refused with pandas' words, while a number is never equal to text. A list, a tuple or a numpy array beside a frame is read as a series along the columns, or along the rows for the named form on the rows, with pandas' message when the length is wrong. Spans scaled or divided by `NaT` are refused as pandas refuses them.
