@@ -1210,7 +1210,13 @@ def _core(source: Any, values: dict[str, Any], separator: Any) -> Any:
         return None
     for name in list(frame.columns):
         column = frame[name]
-        if str(column.dtype) != "string" or not len(column):
+        if not len(column):
+            continue
+        if str(column.dtype) == "float64":
+            if not column.isna().any() and column.abs().max() >= 2.0**63:
+                return None
+            continue
+        if str(column.dtype) != "string":
             continue
         if column.isna().all():
             frame[name] = column.astype("float64")
