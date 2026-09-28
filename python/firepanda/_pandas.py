@@ -23441,6 +23441,126 @@ def _printed(shown: Any) -> str:
     )
 
 
+def _index_text(index: Any) -> str:
+    """What pandas prints for an index: its labels in brackets, then its attributes.
+
+    A port of pandas' `format_object_summary`. The labels wrap at `display.width`,
+    and past `display.max_seq_items` only ten from each end print, with dots between.
+    Instants and spans are quoted, and a date index is named for what it holds. A frame's
+    labels that are still a range print as pandas' `RangeIndex`, by their ends and step.
+    """
+    from ._config import get_option
+
+    if index._inner.is_range():
+        height = len(index)
+        start = index[0] if height else 0
+        step = index[1] - index[0] if height > 1 else 1
+        name = "" if index.name is None else f", name={_pprinted(index.name)}"
+        return f"RangeIndex(start={start}, stop={start + height * step}, step={step}{name})"
+    dtype = str(index.dtype)
+    if dtype.startswith("datetime64"):
+        klass = "DatetimeIndex"
+    elif dtype.startswith("timedelta64"):
+        klass = "TimedeltaIndex"
+    elif dtype.startswith(("int", "uint", "float", "bool", "string", "str")):
+        klass = "Index"
+    else:
+        return repr(index._inner)
+    values = index.tolist()
+    present = [v for v in values if not _missing(v)]
+    if klass == "DatetimeIndex":
+        dates = "," not in dtype and all(
+            v.hour == v.minute == v.second == v.microsecond == v.nanosecond == 0 for v in present
+        )
+
+        def formatter(v: Any) -> str:
+            if _missing(v):
+                return "'NaT'"
+            return f"'{v.strftime('%Y-%m-%d') if dates else v}'"
+
+    elif klass == "TimedeltaIndex":
+        days = all(v.seconds == v.microseconds == v.nanoseconds == 0 for v in present)
+
+        def formatter(v: Any) -> str:
+            if _missing(v):
+                return "NaT"
+            return f"'{v.days} days'" if days else f"'{v}'"
+
+    else:
+        gap = "nan" if dtype.startswith(("float", "str")) else "<NA>"
+
+        def formatter(v: Any) -> str:
+            return gap if _missing(v) else _pprinted(v)
+
+    width = get_option("display.width") or 80
+    most = get_option("display.max_seq_items") or len(values)
+    text = dtype.startswith("str")
+    summary = _summary(values, formatter, not text, klass, width, most)
+    attrs = [f"dtype='{'str' if dtype == 'string' else dtype}'"]
+    if index.name is not None:
+        attrs.append(f"name={_pprinted(index.name)}")
+    if len(values) > most:
+        attrs.append(f"length={len(values)}")
+    if klass != "Index":
+        attrs.append("freq=None")
+    return f"{klass}({summary}{', '.join(attrs)})"
+
+
+def _pprinted(value: Any) -> str:
+    """pandas' `default_pprint`: text quoted with its tabs and newlines escaped, the rest `str`."""
+    if isinstance(value, str):
+        escaped = value.replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
+        return f"'{escaped}'"
+    return str(value)
+
+
+def _summary(
+    values: list[Any], formatter: Any, justify: bool, name: str, width: int, most: int
+) -> str:
+    """The bracketed labels of an index, wrapped and cut the way pandas does it."""
+    space1 = "\n" + " " * (len(name) + 1)
+    space2 = "\n" + " " * (len(name) + 2)
+    n = len(values)
+    cut = n > most
+    if n == 0:
+        return "[], "
+    if n == 1:
+        return f"[{formatter(values[0])}], "
+    if n == 2:
+        return f"[{formatter(values[0])}, {formatter(values[-1])}], "
+    if most == 1:
+        head, tail = [], [formatter(values[-1])]
+    elif cut:
+        shown = min(most // 2, 10)
+        head = [formatter(v) for v in values[:shown]]
+        tail = [formatter(v) for v in values[-shown:]]
+    else:
+        head, tail = [], [formatter(v) for v in values]
+    if justify and (cut or not (len(", ".join(head)) < width and len(", ".join(tail)) < width)):
+        size = max(len(x) for x in head + tail)
+        head = [x.rjust(size) for x in head]
+        tail = [x.rjust(size) for x in tail]
+
+    def extend(summary: str, line: str, value: str, room: int) -> tuple[str, str]:
+        if len(line.rstrip()) + len(value.rstrip()) >= room:
+            summary += line.rstrip()
+            line = space2
+        return summary, line + value
+
+    summary, line = "", space2
+    for value in head:
+        summary, line = extend(summary, line, value + ", ", width)
+    if cut:
+        summary += line.rstrip() + space2 + "..."
+        line = space2
+    for value in tail[:-1]:
+        summary, line = extend(summary, line, value + ", ", width)
+    summary, line = extend(summary, line, tail[-1], width - 2)
+    summary += line + "],"
+    summary += space1 if len(summary) > width else " "
+    return "[" + summary[len(space2) :]
+
+
 def _text_written(text: str, buf: Any, encoding: Any) -> Any:
     """Answers the text, or writes it to a path or anything with a `write` method."""
     if buf is None:

@@ -4343,14 +4343,14 @@ INDEX = Exposed(
         Member(
             name="__repr__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_index_text(self)",
             doc="The index, rendered.",
             returns="str",
         ),
         Member(
             name="__str__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_index_text(self)",
             doc="The index, rendered. Same as repr, which is what pandas does.",
             returns="str",
         ),
@@ -5145,6 +5145,9 @@ def wrapper() -> str:
     # writes a frame as a summary and a zoned instant as its count.
     if any("_printed(" in m.body for m in every):
         mixins.add("_printed")
+    # An index prints its labels through the same port of pandas' summary.
+    if any("_index_text(" in m.body for m in every):
+        mixins.add("_index_text")
     # `df.iloc` and the three properties beside it are the same case a third
     # time. Each answers a small object that holds the frame and reads a key,
     # and the key is the whole of what they do, so the class is hand written
