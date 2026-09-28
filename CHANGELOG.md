@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: An index prints what pandas prints
+
+`repr` and `str` of an `Index`, a `DatetimeIndex` and a `TimedeltaIndex` used to print the core's summary, so a zoned index printed the counts behind its instants. They now go through a port of pandas' `format_object_summary`: the labels in brackets, wrapped at `display.width`, cut to ten from each end past `display.max_seq_items` with dots between, then the type, the name, the length when cut, and `freq` for instants and spans. Labels that are still a range print as a `RangeIndex`. Dates at midnight print as dates, whole days as days, text is quoted with its tabs and newlines escaped, and a gap prints as pandas prints it for each kind. 24 shapes and 16 option combinations match pandas.
+
 ### Added: A frame and a column print what pandas prints
 
 `repr` and `str` of a `DataFrame` printed a summary of its columns, and a column of instants with a zone printed their counts. Both now go through the text formatter under pandas' display options, so a frame prints its rows, a long one loses its middle to dots, a wide one is cut to fit the terminal or wrapped at `display.width`, and a zoned instant prints as a time with its offset. `to_string` takes `max_rows`, `min_rows`, `max_cols` and `line_width` instead of refusing them, and cuts and wraps the way pandas does.

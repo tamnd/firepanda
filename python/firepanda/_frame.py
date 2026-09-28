@@ -39,6 +39,7 @@ from ._pandas import (
     _ewm,
     _expanding,
     _grouped,
+    _index_text,
     _Labelled,
     _Point,
     _Positional,
@@ -4507,14 +4508,14 @@ class Index(IndexMixin):
     def __repr__(self) -> str:
         """The index, rendered."""
         try:
-            return repr(self._inner)
+            return _index_text(self)
         except Exception as error:
             raise translate(error) from None
 
     def __str__(self) -> str:
         """The index, rendered. Same as repr, which is what pandas does."""
         try:
-            return repr(self._inner)
+            return _index_text(self)
         except Exception as error:
             raise translate(error) from None
 
