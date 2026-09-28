@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: kurt of a float column summed in pandas' order
+
+`Series.kurt` and `DataFrame.kurt` on a float column now take pandas' `nankurt` sums in numpy when numpy is installed, over the whole column with its gaps as zeros, as pandas does. Far from zero the fourth moment moves with the order of adding, and at values near 4.6e18 with a spread of 4e9 two orders differ by 2e-7, which is more than pandas' own distance from the exact answer, so only the same order agrees. Without numpy the answer comes from the column's own sums as before, and whole number columns keep the exact shift from their least value.
+
 ## [0.8.36] - 2026-09-28
 
 Built against Mojo 1.0.0 (ed45d567).
