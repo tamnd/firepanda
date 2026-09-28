@@ -203,11 +203,9 @@ def test_a_bare_string_is_a_scalar_and_needs_an_index(firepanda: ModuleType) -> 
 
 
 def test_a_shape_that_is_not_a_frame_says_so(firepanda: ModuleType) -> None:
-    """One value is pandas' mistake, and a flat list would need a column named 0."""
+    """One value is pandas' mistake."""
     with pytest.raises(ValueError, match="not properly called"):
         firepanda.DataFrame(42)
-    with pytest.raises(NotImplementedError, match="list of values"):
-        firepanda.DataFrame([1, 2])
 
 
 def test_the_declared_pandas_parameters_are_refused_by_name(firepanda: ModuleType) -> None:

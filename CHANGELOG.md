@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: SQL named windows
 
 A `WINDOW w AS (...)` clause now lowers. `OVER w` is the window as it is written, and `OVER (w ORDER BY ...)` or `OVER (w ROWS ...)` starts from it and adds what `w` leaves out. One named window may start from another, written before or after it. As in DuckDB, a window that adds a partition or an order `w` already has, or starts from a `w` with a frame, is refused, as are a name given twice and a name that is not given. A column named after its call spells the window out, so `sum(x) OVER w` is called `sum(x) OVER (PARTITION BY g)`, the name DuckDB gives it.
+### Added: Column names that are not text
+
+A frame's columns and a series' name can be whole numbers, floats, bools, instants or spans, as in pandas. A frame built from a list of lists, a numpy array or a flat list names its columns 0, 1, 2 and so on, `columns` answers a `RangeIndex` or an int64 index for them, and `transpose` works for row labels of any of those kinds, dates included. Selecting, `loc`, `at`, `drop`, `rename`, `sort_values`, `groupby`, `set_index`, `astype`, `merge`, `concat`, `drop_duplicates`, `nlargest`, `reindex` and the repr all read such names, `concat(axis=1, ignore_index=True)` numbers the columns, and the Arrow export names each field with the text of its name. The extension still holds text, so a name that is not text is written into text on the way in and read back on the way out, as document 94 of the compat notes describes. Names that mix text with other kinds print and work, and only `columns` refuses them, because pandas answers an index of objects there.
 
 ### Added: The columns of a frame as an index
 

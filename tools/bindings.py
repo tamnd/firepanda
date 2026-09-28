@@ -3087,7 +3087,7 @@ FRAME = Exposed(
         Member(
             name="__arrow_c_schema__",
             kind="dunder",
-            body="self._inner.arrow_c_schema()",
+            body="_arrow_inner(self).arrow_c_schema()",
             doc="The frame's Arrow schema, as an arrow_schema PyCapsule.",
             returns="object",
         ),
@@ -3095,7 +3095,7 @@ FRAME = Exposed(
             name="__arrow_c_array__",
             kind="dunder",
             signature="requested_schema: object | None = None",
-            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            body="tuple(_arrow_inner(self).arrow_c_array(requested_schema))",
             doc="The frame's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
         ),
@@ -3103,7 +3103,7 @@ FRAME = Exposed(
             name="__arrow_c_stream__",
             kind="dunder",
             signature="requested_schema: object | None = None",
-            body="self._inner.arrow_c_stream(requested_schema)",
+            body="_arrow_inner(self).arrow_c_stream(requested_schema)",
             doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
             returns="object",
         ),
@@ -5157,6 +5157,8 @@ def wrapper() -> str:
     # The column labels are handed out as an index, which is built by hand.
     if any("_column_labels(" in m.body for m in every):
         mixins.add("_column_labels")
+    if any("_arrow_inner(" in m.body for m in every):
+        mixins.add("_arrow_inner")
     # An index prints its labels through the same port of pandas' summary.
     if any("_index_text(" in m.body for m in every):
         mixins.add("_index_text")
