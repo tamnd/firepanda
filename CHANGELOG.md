@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.to_html and the notebook repr
+
+`DataFrame.to_html` takes every one of pandas' arguments and writes the same markup, character for character, and `DataFrame._repr_html_` gives a notebook the table pandas shows, under the same display options. The cells are the text `to_string` writes, so floats, dates, spans, gaps and cut rows and columns look as they do in pandas. `sparsify` is accepted and has nothing to do, because firepanda has no MultiIndex.
+
 ### Fixed: uint64 values past the int64 range
 
 A uint64 value above the int64 range came back from `tolist()`, `to_csv` and every other path through the column's values as a negative number, because the core hands the values out through a signed integer. They are now put back before anyone sees them. `read_csv` on a plain file also read such a value as float64, where pandas reads uint64, and now reads it as pandas does.

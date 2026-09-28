@@ -10077,6 +10077,112 @@ class DataFrameMixin(_Carries):
         )
         return _text_written(text, buf, encoding)
 
+    def to_html(
+        self,
+        buf: Any = None,
+        *,
+        columns: Any = None,
+        col_space: Any = None,
+        header: bool = True,
+        index: bool = True,
+        na_rep: str = "NaN",
+        formatters: Any = None,
+        float_format: Any = None,
+        sparsify: Any = None,
+        index_names: bool = True,
+        justify: Any = None,
+        max_rows: Any = None,
+        max_cols: Any = None,
+        show_dimensions: Any = False,
+        decimal: str = ".",
+        bold_rows: bool = True,
+        classes: Any = None,
+        escape: bool = True,
+        notebook: bool = False,
+        border: Any = None,
+        table_id: Any = None,
+        render_links: bool = False,
+        encoding: Any = None,
+    ) -> Any:
+        """The frame as an HTML table, written to a file or answered.
+
+        The cells are the ones `to_string` writes, trimmed and with `&`, `<` and
+        `>` escaped, and the row labels are header cells when `bold_rows` is
+        set. `notebook` wraps the table in the `div` and scoped style a
+        notebook shows. `sparsify` only matters for a MultiIndex, which
+        firepanda does not have.
+
+        Returns:
+            The markup when `buf` is None, and None otherwise.
+        """
+        from ._html import to_html
+
+        text = to_html(
+            self,
+            {
+                "columns": columns,
+                "col_space": col_space,
+                "header": header,
+                "index": index,
+                "na_rep": na_rep,
+                "formatters": formatters,
+                "float_format": float_format,
+                "index_names": index_names,
+                "justify": justify,
+                "max_rows": max_rows,
+                "max_cols": max_cols,
+                "min_rows": None,
+                "show_dimensions": show_dimensions,
+                "decimal": decimal,
+                "bold_rows": bold_rows,
+                "classes": classes,
+                "escape": escape,
+                "border": border,
+                "table_id": table_id,
+                "render_links": render_links,
+            },
+            notebook,
+        )
+        return _text_written(text, buf, encoding)
+
+    def _repr_html_(self) -> str | None:
+        """The table a notebook shows, under the display options, as pandas draws it.
+
+        None when `display.notebook_repr_html` is off, which makes the notebook
+        fall back to the text repr.
+        """
+        from ._config import get_option
+        from ._html import to_html
+
+        if not get_option("display.notebook_repr_html"):
+            return None
+        return to_html(
+            self,
+            {
+                "columns": None,
+                "col_space": None,
+                "header": True,
+                "index": True,
+                "na_rep": "NaN",
+                "formatters": None,
+                "float_format": get_option("display.float_format"),
+                "index_names": True,
+                "justify": None,
+                "max_rows": get_option("display.max_rows"),
+                "max_cols": get_option("display.max_columns"),
+                "min_rows": get_option("display.min_rows"),
+                "show_dimensions": get_option("display.show_dimensions"),
+                "decimal": ".",
+                "bold_rows": True,
+                "classes": None,
+                "escape": True,
+                "border": None,
+                "table_id": None,
+                "render_links": False,
+            },
+            True,
+        )
+
     def to_dict(self, orient: str = "dict", *, into: Any = dict, index: bool = True) -> Any:
         """The frame as Python mappings and lists, in one of pandas' seven shapes.
 
