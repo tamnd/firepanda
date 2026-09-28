@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: A row of values written through loc is read as numpy reads it
+
+`df.loc[label] = [1, 2.5]` now reads whole numbers beside a float as floats, as pandas does when it turns the list into a numpy array, so a new row made from them makes whole number columns float64. A list with text, a flag or a gap in it keeps each value's own type, as numpy's object array does.
+
 ### Added: Writing into a frame through loc, iloc, at and iat
 
 A frame now takes `df.loc[rows, columns] = value` and the same through `iloc`, `at` and `iat`. Each named column is written the way a series is, so a value that does not fit raises pandas' `TypeError` and a gap in some rows of whole numbers makes them float64, while a write that covers every row by a slice refuses to change the type, as pandas 3 does. A list goes one value a column, rows of values one row a row, a series by column name into one row, and a frame by name. `loc` with a new name makes a column, float64 for numbers and text for text, and with a new row label puts a row on the end with pandas' types. `iloc` with a frame of values, and cells pandas would hold as objects, are refused.

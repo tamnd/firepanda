@@ -34,6 +34,10 @@ def flagged(m: ModuleType) -> Any:
     return frame
 
 
+def numbers(m: ModuleType) -> Any:
+    return m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]})
+
+
 def repeated(m: ModuleType) -> Any:
     return m.DataFrame({"a": [1, 2, 3]}, index=[10, 10, 20])
 
@@ -109,6 +113,9 @@ WRITES: dict[str, Callable[[ModuleType], Any]] = {
     "new row whole float": at(flagged, lambda m, f: loc(f, 40, [5.0, 1.0, "w", True])),
     "new row number into flags": at(flagged, lambda m, f: loc(f, 40, [5, 1.0, "w", 1])),
     "new row fraction": at(flagged, lambda m, f: loc(f, 40, [5.5, 1.0, "w", True])),
+    "new row of numbers reads as floats": at(numbers, lambda m, f: loc(f, 9, [1, 2.5])),
+    "new row of whole numbers": at(numbers, lambda m, f: loc(f, 9, [1, 2])),
+    "row of numbers into whole numbers": at(numbers, lambda m, f: loc(f, 1, [7, 8.5])),
     "new row keeps the index name": at(named, lambda m, f: loc(f, (5, "a"), 0)),
     "repeated label": at(repeated, lambda m, f: loc(f, (10, "a"), 0)),
     "iloc cell": at(mixed, lambda m, f: iloc(f, (1, 2), "k")),
