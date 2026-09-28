@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.to_xml
+
+`DataFrame.to_xml` writes the frame as an XML document the way pandas does, with one element per row and each column as an element inside it, or as an attribute through `attr_cols`. It takes pandas' `index`, `root_name`, `row_name`, `na_rep`, `elem_cols`, `namespaces`, `prefix`, `encoding`, `xml_declaration`, `pretty_print` and `compression`. `parser="etree"` uses the standard library, and the default `lxml` parser, along with an XSLT `stylesheet`, needs lxml installed, as in pandas. The document is answered as text, or written as bytes to a path or a binary handle. `to_pickle` and `to_xml` now share one writer for compressed bytes.
+
 ### Added: DatetimeIndex and TimedeltaIndex hold a frequency
 
 An index made by `date_range`, `bdate_range` or `timedelta_range` holds the offset it was made at, as `freq` and `freqstr`, and its repr shows it as pandas does. The constructors take `freq=`, where `infer` takes the frequency the labels keep and any other frequency has to be one they keep, with pandas' error when it is not, and `freq` can be set the same way. A slice keeps the frequency, times its step, and a copy, a new name, `as_unit` and `shift` keep it too, where `shift` now uses the held frequency when none is given. `Index` of an index of instants or spans is now a `DatetimeIndex` or a `TimedeltaIndex`, as in pandas. The index of a series or a frame does not keep its frequency yet, because the core rebuilds it.

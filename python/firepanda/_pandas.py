@@ -10510,6 +10510,66 @@ class DataFrameMixin(_Carries):
         )
         return _text_written(text, buf, encoding)
 
+    def to_xml(
+        self,
+        path_or_buffer: Any = None,
+        *,
+        index: bool = True,
+        root_name: Any = "data",
+        row_name: Any = "row",
+        na_rep: Any = None,
+        attr_cols: Any = None,
+        elem_cols: Any = None,
+        namespaces: Any = None,
+        prefix: Any = None,
+        encoding: str = "utf-8",
+        xml_declaration: Any = True,
+        pretty_print: Any = True,
+        parser: Any = "lxml",
+        stylesheet: Any = None,
+        compression: Any = "infer",
+        storage_options: Any = None,
+    ) -> Any:
+        """The frame as an XML document, written to a file or answered.
+
+        Each row is an element named `row_name` under a root named `root_name`,
+        holding one element per column, or the columns in `attr_cols` as its
+        attributes and the ones in `elem_cols` as elements. The index comes
+        first when `index` is true, and a missing value is left out, or written
+        as `na_rep`. A path or a binary handle gets the encoded bytes,
+        compressed as the name or `compression` says.
+
+        `parser="etree"` builds the document with the standard library, and the
+        default `lxml` needs lxml installed, as in pandas. Only lxml runs an XSLT
+        `stylesheet` over the document.
+
+        Raises:
+            ImportError: For the lxml parser when lxml is not installed.
+            ValueError: For a parser other than lxml and etree, or a stylesheet
+                without lxml.
+            TypeError: For columns given as something that is not a list.
+            KeyError: For a column the frame lacks, or a prefix with no namespace.
+        """
+        from ._xml import to_xml
+
+        options = {
+            "index": index,
+            "root_name": root_name,
+            "row_name": row_name,
+            "na_rep": na_rep,
+            "attr_cols": attr_cols,
+            "elem_cols": elem_cols,
+            "namespaces": namespaces,
+            "prefix": prefix,
+            "encoding": encoding,
+            "xml_declaration": xml_declaration,
+            "pretty_print": pretty_print,
+            "stylesheet": stylesheet,
+            "compression": compression,
+            "storage_options": storage_options,
+        }
+        return to_xml(self, path_or_buffer, parser, options)
+
     def _repr_html_(self) -> str | None:
         """The table a notebook shows, under the display options, as pandas draws it.
 
