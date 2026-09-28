@@ -72,12 +72,22 @@ def _step(rule: Any) -> tuple[int, bool]:
     Raises:
         InvalidArgumentError: For a rule pandas cannot read, with its message.
         ZeroDivisionError: For a rule of no length, as pandas raises.
-        NotImplementedError: For a calendar offset or a rule that is not text.
+        TypeError: For a rule that is neither text nor an offset, as pandas raises.
+        NotImplementedError: For a calendar offset.
     """
-    if not isinstance(rule, str):
+    from .offsets import BaseOffset, Day, Tick
+
+    if isinstance(rule, Tick | Day):
+        # A tick or a day is one length, which its frequency text says.
+        rule = rule.freqstr
+    elif isinstance(rule, BaseOffset):
         raise NotImplementedError(
-            "resample: a rule is read from text for now, like '6h' or 'D', because an offset"
-            " object is pandas' offsets namespace, which firepanda does not have"
+            f"resample: the offset {rule!r} is a calendar offset, whose bins are not all one"
+            " length, and firepanda resamples on fixed steps of days and less for now"
+        )
+    elif not isinstance(rule, str):
+        raise TypeError(
+            f"Argument 'freq' has incorrect type (expected str, got {type(rule).__name__})"
         )
     found = re.fullmatch(r"\s*(\d+(?:\.\d*)?)?\s*([A-Za-z]+)(-[A-Za-z]+)?\s*", rule)
     if found is None:

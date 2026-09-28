@@ -447,3 +447,59 @@ def test_easter_matches_dateutil() -> None:
     for year in range(1600, 2401):
         for method in (1, 2, 3):
             assert _easter(year, method) == easter.easter(year, method)
+
+
+def hourly(m: ModuleType) -> Any:
+    return m.Series(range(6), index=m.date_range("2024-01-01", periods=6, freq="5h"))
+
+
+ELSEWHERE: dict[str, Callable[[ModuleType], Any]] = {
+    "resample by hours": lambda m: hourly(m).resample(m.offsets.Hour(12)).sum().tolist(),
+    "resample by a day": lambda m: hourly(m).resample(m.offsets.Day()).sum().tolist(),
+    "resample by minutes": lambda m: hourly(m).resample(m.offsets.Minute(300)).sum().tolist(),
+    "span of hours": lambda m: (
+        m.Timedelta(m.offsets.Hour(2)),
+        m.Timedelta(m.offsets.Hour(2)).unit,
+    ),
+    "span of a step back": lambda m: m.Timedelta(m.offsets.Second(-1)),
+    "span of nanoseconds": lambda m: (
+        m.Timedelta(m.offsets.Nano(5)),
+        m.Timedelta(m.offsets.Nano(5)).unit,
+    ),
+    "span of milliseconds": lambda m: m.Timedelta(m.offsets.Milli(3)).unit,
+}
+
+REFUSED_ELSEWHERE: dict[str, Callable[[ModuleType], Any]] = {
+    "span of a day": lambda m: m.Timedelta(m.offsets.Day()),
+    "span of a month end": lambda m: m.Timedelta(m.offsets.MonthEnd()),
+    "resample by a number": lambda m: hourly(m).resample(5),
+}
+
+
+@needs_pandas
+@pytest.mark.parametrize("name", list(ELSEWHERE))
+def test_a_tick_is_read_where_pandas_reads_one(firepanda: ModuleType, name: str) -> None:
+    """`resample` takes a tick or a day as its rule, and `Timedelta` reads a tick."""
+    import pandas as pd
+
+    assert repr(ELSEWHERE[name](firepanda)) == repr(ELSEWHERE[name](pd))
+
+
+@needs_pandas
+@pytest.mark.parametrize("name", list(REFUSED_ELSEWHERE))
+def test_an_offset_pandas_does_not_read_raises_its_error(firepanda: ModuleType, name: str) -> None:
+    """A day or a calendar offset is not a span, and a number is not a rule."""
+    import pandas as pd
+
+    with pytest.raises(Exception) as theirs:
+        REFUSED_ELSEWHERE[name](pd)
+    kind = ValueError if theirs.errisinstance(ValueError) else TypeError
+    with pytest.raises(kind) as mine:
+        REFUSED_ELSEWHERE[name](firepanda)
+    assert str(mine.value) == str(theirs.value)
+
+
+def test_a_calendar_offset_as_a_rule_is_refused(firepanda: ModuleType) -> None:
+    """Bins of a calendar offset are not all one length, which resample does not do yet."""
+    with pytest.raises(NotImplementedError):
+        hourly(firepanda).resample(firepanda.offsets.MonthEnd())

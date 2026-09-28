@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: offsets as resample rules and as spans
+
+`resample` takes a tick or `Day` from `firepanda.offsets` as its rule, the same as its frequency text, and refuses a calendar offset the way it refuses the calendar text. A rule that is neither text nor an offset raises pandas' `TypeError`. `Timedelta` reads a tick, keeping the tick's unit for milliseconds and finer and seconds for anything coarser, and refuses `Day` and calendar offsets with pandas' words.
+
 ### Added: pandas.offsets and DateOffset
 
 `firepanda.offsets` now carries every name in `pandas.tseries.offsets`, and `firepanda.DateOffset` is the same class pandas exports. Month, quarter, half year and year offsets and their business forms, the semi month, week, week of month, Easter and 52 or 53 week fiscal offsets, business days and business hours with custom week masks and holidays, `Day` and the ticks all move a `Timestamp` the way pandas 3 does, including zero steps, negative steps, `normalize`, zoned moments and the time unit. They print, compare, hash, roll forward and back and read their own frequency text as pandas does. An offset adds to and subtracts from a column of moments and an index of moments, and `date_range` takes one as its `freq`. Business hours that run over midnight and a holiday calendar other than numpy's are refused. `test_offsets.py` checks 567 cases against pandas.

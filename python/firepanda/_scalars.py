@@ -1876,6 +1876,12 @@ class Timedelta(_datetime.timedelta):
             return value * scale, _COARSEST[scale] if unit is not None else "ns"
         if isinstance(value, str):
             return cls._parse(value)
+        from .offsets import Tick
+
+        if isinstance(value, Tick):
+            # pandas keeps a tick's own unit, and seconds for anything coarser.
+            unit = value._prefix if value._prefix in ("ms", "us", "ns") else "s"
+            return value.nanos, unit
         raise InvalidArgumentError(
             "Value must be Timedelta, string, integer, float, timedelta or"
             f" convertible, not {_kind(value)}"
