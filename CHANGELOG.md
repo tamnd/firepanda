@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.35] - 2026-09-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, `MultiIndex`, `RangeIndex`, `TimedeltaIndex` and `Interval` arrive, along with `merge_asof`, `merge_ordered`, `align`, `pivot` and `pivot_table`, `crosstab`, `cut` and `qcut`, `read_json` and `to_json`, `to_csv`, `to_numpy`, `to_numeric`, `to_timedelta`, `date_range` with calendar steps, and `map`, `apply`, `agg` and `transform` on frames and columns, and `to_datetime` reads formats the way pandas guesses them. In SQL, right, full, cross, ASOF and POSITIONAL joins run. The ClickBench group by got faster: a lasting tuple is written a key at a time, a stored text key is compared through a flat head the walk prefetches, the bucket pass counts through a pointer, and a grown table is zeroed on the cores, which together take about a tenth to a quarter off q15, q18, q33, q34 and q39 at 1M rows.
+
 ### Changed: a grown lasting table is zeroed a part at a time on the cores
 
 When a lasting map grows its table for a chunk that could be all new keys, the new table can be tens of megabytes, and it was zeroed on the calling thread with its page faults before the parts were moved in on the cores. Each part now zeroes its own share as it moves. On a six core Linux machine that was heavily loaded by other work, alternating the old and new driver over six rounds, ClickBench q15 went from 72 to 58 ms at best and q34 from 186 to 174, and every answer matched.
