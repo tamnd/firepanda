@@ -227,6 +227,24 @@ def _temporal_series(values: list[Any], label: Any) -> Any:
     return moments._inner.relabel(label)
 
 
+def _gap_part(part: Any) -> Any:
+    """A part read from instants or spans, typed as pandas types it when a row is a gap.
+
+    A whole number read from a column with a gap is a float in pandas, since numpy has
+    no integer that can hold a NaN, so it is cast, and a flag read from a gap is false.
+    Without a gap the part is handed back as it came.
+    """
+    from ._frame import Series
+
+    if not part.null_count():
+        return part
+    if part.dtype() in _SIGNED:
+        return part.cast("float64", True)
+    if part.dtype() == "bool":
+        return part.fill_null(Series([False])._inner)
+    return part
+
+
 def _temporal_operand(owner: Any, other: Any) -> Any:
     """A moment or a span on the other side of an operator, as a column to line up with.
 
@@ -13424,12 +13442,12 @@ class DatetimeMixin:
 
         Thirty of the names come through here, and the string is the frequency,
         the unit, the format or the zone for the seven that take one and empty
-        for the rest.
+        for the rest. A gap reads out as `_gap_part` says.
         """
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.temporal_part(kind, arg))
+            return Series._wrap(_gap_part(self._series._inner.temporal_part(kind, arg)))
         except Exception as error:
             raise translate(error) from None
 
