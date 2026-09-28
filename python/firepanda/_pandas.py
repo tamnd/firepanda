@@ -8607,6 +8607,16 @@ class DataFrameMixin(_Carries):
 
         return DataFrame._wrap(self._inner)
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """How pickle writes a frame: its Arrow export as bytes, with the labels beside it.
+
+        `_pickle.py` has the layout, which needs neither pyarrow nor Python
+        values for the columns.
+        """
+        from . import _pickle
+
+        return _pickle.frame_rebuilt, (_pickle.frame_state(self),)
+
     def __copy__(self) -> DataFrame:
         """`copy.copy(df)`, which pandas answers with `copy()` and so does this."""
         return self.copy()
@@ -9790,6 +9800,27 @@ class DataFrameMixin(_Carries):
         if not _same_values(self.index.to_series(), other.index.to_series()):
             return False
         return all(_same_values(self[name], other[name]) for name in self.columns)
+
+    def to_pickle(
+        self,
+        path: Any,
+        *,
+        compression: Any = "infer",
+        protocol: int = 5,
+        storage_options: Any = None,
+    ) -> None:
+        """Pickles the frame to a file or a binary handle, as `firepanda.to_pickle` does.
+
+        Args:
+            path: A path, or a handle with `write`.
+            compression: `"infer"` to go by the name's ending, None, or one of
+                `"gzip"`, `"bz2"`, `"zip"`, `"xz"`, `"zstd"` and `"tar"`.
+            protocol: The pickle protocol, the highest when negative.
+            storage_options: Options for a remote file, which is not supported.
+        """
+        from ._pickle import to_pickle
+
+        to_pickle(self, path, compression, protocol, storage_options)
 
     def to_csv(
         self,
@@ -12727,6 +12758,16 @@ class SeriesMixin(_Carries):
 
         return Series._wrap(self._inner)
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """How pickle writes a column: its Arrow export as bytes, with the labels beside it.
+
+        `_pickle.py` has the layout, which needs neither pyarrow nor Python
+        values for the columns.
+        """
+        from . import _pickle
+
+        return _pickle.column_rebuilt, (_pickle.column_state(self),)
+
     def __copy__(self) -> Series:
         """`copy.copy(s)`, answered with `copy()` the way pandas answers it."""
         return self.copy()
@@ -13398,6 +13439,27 @@ class SeriesMixin(_Carries):
         if not _same_values(self.index.to_series(), other.index.to_series()):
             return False
         return _same_values(self, other)
+
+    def to_pickle(
+        self,
+        path: Any,
+        *,
+        compression: Any = "infer",
+        protocol: int = 5,
+        storage_options: Any = None,
+    ) -> None:
+        """Pickles the column to a file or a binary handle, as `firepanda.to_pickle` does.
+
+        Args:
+            path: A path, or a handle with `write`.
+            compression: `"infer"` to go by the name's ending, None, or one of
+                `"gzip"`, `"bz2"`, `"zip"`, `"xz"`, `"zstd"` and `"tar"`.
+            protocol: The pickle protocol, the highest when negative.
+            storage_options: Options for a remote file, which is not supported.
+        """
+        from ._pickle import to_pickle
+
+        to_pickle(self, path, compression, protocol, storage_options)
 
     def to_csv(
         self,
@@ -21125,6 +21187,16 @@ class IndexMixin:
             raise translate(error) from None
         return copied
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """How pickle writes an index: its Arrow export as bytes, with the labels beside it.
+
+        `_pickle.py` has the layout, which needs neither pyarrow nor Python
+        values for the columns.
+        """
+        from . import _pickle
+
+        return _pickle.index_rebuilt, (_pickle.index_state(self),)
+
     def __copy__(self) -> Index:
         """`copy.copy(index)`, which pandas answers with `copy()`.
 
@@ -25647,6 +25719,14 @@ def _text_plain(value: Any) -> str:
     return text
 
 
+def _text_name(value: Any) -> str:
+    """A column's name as pandas prints it, a tuple with its items bare, as `(a, 1)`."""
+    if isinstance(value, tuple):
+        inner = ", ".join(_text_name(item) for item in value)
+        return f"({inner},)" if len(value) == 1 else f"({inner})"
+    return _text_plain(value)
+
+
 def _text_trimmed(texts: list[str], decimal: str) -> list[str]:
     """Drops trailing zeros from every number with a point, equally, keeping one.
 
@@ -26158,7 +26238,7 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
     if getattr(column.index, "freq", None) is not None:
         parts.append(f"Freq: {column.index.freqstr}")
     if kw["name"] and column.name is not None:
-        parts.append(f"Name: {_text_plain(column.name)}")
+        parts.append(f"Name: {_text_name(column.name)}")
     length = kw["length"]
     if length is True or (length == "truncate" and dots is not None):
         parts.append(f"Length: {rows}")
