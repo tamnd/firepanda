@@ -8848,13 +8848,14 @@ class DataFrameMixin(_Carries):
         This is a group by on the columns and its `size`, as pandas has it. A
         list of columns, the whole frame included, labels the answer by levels
         even when it names one column, and one name labels it by that column.
-        Without `sort` the combinations come in the order they first appear.
+        The combinations are taken in the order they first appear and a stable
+        sort by count keeps that order among equal counts, as pandas does.
         """
         from ._multi import MultiIndex
 
         one = subset is not None and _is_scalar(subset)
         names = list(self.columns) if subset is None else [subset] if one else list(subset)
-        counts = self.groupby(names[0] if one else names, sort=sort, dropna=dropna).size()
+        counts = self.groupby(names[0] if one else names, sort=False, dropna=dropna).size()
         if sort:
             counts = counts.sort_values(ascending=ascending, kind="stable")
         if normalize:
