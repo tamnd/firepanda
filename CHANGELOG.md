@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Rolling windows measured as a span of time
+
+`rolling` takes a window given as text such as `"30s"`, a `Timedelta`, a `timedelta` or a fixed offset, and reaches back that far along the row labels or along the column named by `on`, which may hold dates or durations. Each window starts and stops where pandas' own bounds put it, under every `closed` and with `center`, over times that rise or fall. `on` works for a window of rows too, leaves its column out of the reduction and puts it back into the answer where pandas does. Picking columns out of a window with `[]` keeps the window, `obj`, `on` and `window` answer what pandas answers, and the window prints pandas' repr. The mistakes are pandas' own words: a month, which is not a fixed span, times out of order or with a gap, a `step`, and an `on` that is not a column of dates.
+
 ### Fixed: `cat.codes` has no name
 
 `Series.cat.codes` answered an empty name, and pandas answers none. It now has no name, whatever the column is called.
