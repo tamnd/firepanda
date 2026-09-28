@@ -199,9 +199,12 @@ def _reduced_outward(answer: Any, kind: str, dtype: str) -> Any:
     read = _temporal(dtype)
     if read is None or isinstance(answer, bool) or not isinstance(answer, (int, float)):
         return answer
-    kinds = {"min", "max", "median", "mean"}
+    kinds = {"min", "max", "median", "mean", "quantile"}
     if read[0] == "span":
         kinds |= {"sum", "std"}
+    elif kind == "std" and "," not in dtype:
+        # The spread of instants is a span, in the instants' unit.
+        return _outward_one(round(answer), dtype.replace("datetime64", "timedelta64"))
     if kind not in kinds:
         return answer
     return _outward_one(round(answer), dtype)
@@ -257,6 +260,33 @@ def _gap_part(part: Any) -> Any:
     if part.dtype() == "bool":
         return part.fill_null(Series([False])._inner)
     return part
+
+
+_COMPARISONS = ("eq", "ne", "lt", "le", "gt", "ge")
+
+
+def _listed_operand(owner: Any, other: Any, op: str) -> Any:
+    """A list, a tuple or a numpy array beside a series, as a series on its labels.
+
+    pandas lines the values up by position, so they take the owner's labels and
+    name. A length that differs is refused with pandas' message, which is
+    numpy's for arithmetic and pandas' own for a comparison.
+    """
+    from ._frame import Series
+
+    listed = isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
+    if not listed:
+        return other
+    if len(other) != len(owner):
+        if op in _COMPARISONS:
+            raise InvalidArgumentError(
+                "Lengths must match to compare", (len(owner),), (len(other),)
+            )
+        raise InvalidArgumentError(
+            "operands could not be broadcast together with shapes"
+            f" ({len(owner)},) ({len(other)},) "
+        )
+    return Series(other if _is_numpy(other) else list(other), index=owner.index, name=owner.name)
 
 
 def _temporal_operand(owner: Any, other: Any) -> Any:
@@ -315,6 +345,64 @@ def _counts_as_spans(counts: Any, unit: str) -> Any:
     return to_timedelta(counts.where(counts.abs() < math.inf), unit=unit).dt.as_unit(unit)
 
 
+def _span_rounded(spans: Any, kind: str, freq: Any) -> Any:
+    """Spans moved to a whole number of steps of a fixed frequency, as pandas moves them.
+
+    `floor` and `ceil` go down and up, and `round` goes to the nearer, to the
+    even step on a tie, which is pandas' rule for spans. A step no longer than
+    the unit leaves every span as it is.
+    """
+    from ._frequency import _offset_of
+    from .offsets import Day, Tick, _elapsed
+
+    offset = _offset_of(freq)
+    if not isinstance(offset, (Tick, Day)):
+        raise InvalidArgumentError(f"{offset!r} is a non-fixed frequency")
+    unit = _unit_of(str(spans.dtype))
+    step = _elapsed(offset)._nanos / _UNIT_NANOS[unit]
+    if step <= 1:
+        return spans.copy()
+    counts = _span_counts(spans, unit)
+    low = counts // step
+    if kind == "ceil":
+        low = -((-counts) // step)
+    elif kind == "round":
+        rest = counts - low * step
+        up = (rest * 2 > step) | ((rest * 2 == step) & (low % 2 == 1))
+        low = low + up.astype("float64")
+    return _counts_as_spans(low * step, unit)
+
+
+def _counts_as_instants(counts: Any, unit: str) -> Any:
+    """Whole float counts of a unit since the epoch as instants, with NaT for NaN."""
+    from ._scalars import Timestamp
+
+    return (_counts_as_spans(counts, unit) + Timestamp("1970-01-01")).dt.as_unit(unit)
+
+
+def _truncated(counts: Any) -> Any:
+    """Float counts cut toward zero, with NaN for an infinite count."""
+    counts = counts.where(counts.abs() < math.inf)
+    return (counts // 1).where(counts >= 0, -((-counts) // 1))
+
+
+def _instant_counts(instants: Any) -> Any:
+    """A series of instants as float counts of its unit since the epoch, NaN for NaT."""
+    from ._frame import Series
+
+    return Series._wrap(instants._inner.cast("float64", True))
+
+
+def _nan_filled(numbers: Any) -> Any:
+    """A float series with NaN in each gap, which is how pandas holds a missing float."""
+    from ._frame import DataFrame
+
+    if numbers._inner.null_count() == 0:
+        return numbers
+    framed = DataFrame._wrap(numbers.to_frame("numbers")._inner._widened_for_missing())
+    return framed["numbers"].rename(numbers.name)
+
+
 def _floored(left: Any, right: Any) -> Any:
     """Counts floored over counts, which is 0 over a zero span, as numpy answers it."""
     return (left // right).where(right != 0, (left * 0).abs())
@@ -343,11 +431,11 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
         unit = max(_unit_of(str(left.dtype)), _unit_of(str(right.dtype)), key=_SPAN_UNITS.index)
         mine, theirs = _span_counts(left, unit), _span_counts(right, unit)
         if op == "truediv":
-            return mine / theirs
+            return _nan_filled(mine / theirs)
         floor = _floored(mine, theirs)
         if op == "mod":
             return _counts_as_spans(mine - theirs * floor, unit)
-        return floor if floor.isna().any() else floor.astype("int64")
+        return _nan_filled(floor) if floor.isna().any() else floor.astype("int64")
     spans, scale = (left, right) if _is_spans(left) else (right, left)
     if op == "mul" and type(scale).__name__ in ("bool", "bool_"):
         raise TypeError(
@@ -362,9 +450,7 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
     unit = _unit_of(str(spans.dtype))
     counts = _span_counts(spans, unit)
     got = counts * scale if op == "mul" else counts / scale
-    got = got.where(got.abs() < math.inf)
-    whole = (got // 1).where(got >= 0, -((-got) // 1))
-    return _counts_as_spans(whole, unit)
+    return _counts_as_spans(_truncated(got), unit)
 
 
 def _offset_operand(owner: Any, offset: Any, op: str, flip: bool) -> Any:
@@ -5703,6 +5789,16 @@ def _interpolated(
         raise NotImplementedError("Categorical does not implement interpolate")
     elif kind in _FLOATING:
         values = column if kind == "float64" else column.astype("float64")
+    elif kind.startswith(("timedelta64[", "datetime64[")) and "," not in kind:
+        # pandas draws the line through the counts and truncates each point to a whole count.
+        if gaps in (0, len(column)):
+            return column
+        unit = _unit_of(kind)
+        values = _span_counts(column, unit) if kind[0] == "t" else _instant_counts(column)
+        direction, area = _interpolation_limits(method, index, limit, direction, area, kwargs)
+        points = _interpolation_points(values, method, index)
+        whole = _truncated(_interpolated_line(values, points, limit, direction, area))
+        return _counts_as_spans(whole, unit) if kind[0] == "t" else _counts_as_instants(whole, unit)
     else:
         raise NotImplementedError(
             f"interpolating a {kind} column is not supported yet, because pandas reads its"
@@ -12442,7 +12538,11 @@ class DataFrameMixin(_Carries):
             asked = {str(one): wanted for one, wanted in dtype.items()}
         else:
             asked = dict.fromkeys(self._inner.names(), dtype)
-        decided = {name: wanted for name, wanted in asked.items() if _decided_categories(wanted)}
+        decided = {
+            name: wanted
+            for name, wanted in asked.items()
+            if _decided_categories(wanted) or _counts_target(str(self[name].dtype), wanted)
+        }
         if decided:
             rest = {name: wanted for name, wanted in asked.items() if name not in decided}
             out = self._astype(rest, copy, errors) if rest else self
@@ -13842,6 +13942,12 @@ class SeriesMixin(_Carries):
         low, high = _thresholds(lower, upper)
         if low is None and high is None:
             return _kept(self, self.copy(), inplace)
+        if _temporal(self.dtype) is not None:
+            # A moment or a span bound is a column of it, which the comparison reads.
+            low, high = (
+                bound if bound is None or bound is NaT else _temporal_operand(self, bound)
+                for bound in (low, high)
+            )
         labels = self._inner.labels().to_list()
         printed = self._inner.dtype()
         answer = self._inner
@@ -14478,7 +14584,7 @@ class SeriesMixin(_Carries):
             return NotImplemented
         if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
-        other = _temporal_operand(self, other)
+        other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
@@ -14512,7 +14618,7 @@ class SeriesMixin(_Carries):
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
-        other = _temporal_operand(self, other)
+        other = _temporal_operand(self, _listed_operand(self, other, op))
         scaled = None if fill_value is not None else _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
@@ -15122,6 +15228,14 @@ class SeriesMixin(_Carries):
         unit = _unit_change(str(self.dtype), dtype)
         if unit:
             return self.dt.as_unit(unit)
+        target = _counts_target(str(self.dtype), dtype)
+        if target:
+            unit = _unit_of(target)
+            if target.startswith("timedelta"):
+                return to_timedelta(self, unit=unit).dt.as_unit(unit)
+            if str(self.dtype).startswith("float"):
+                return _counts_as_instants(_truncated(self.astype("float64")), unit)
+            return to_datetime(self, unit=unit).dt.as_unit(unit)
         wanted = _named_dtype(dtype)
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
@@ -15438,6 +15552,16 @@ class DatetimeMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def to_pytimedelta(self) -> list[Any]:
+        """Every span as a Python timedelta, `NaT` for a missing one, as a list.
+
+        pandas answers a numpy array of objects, and a list is the convention
+        document 41 set for what firepanda answers position by position.
+        """
+        if not str(self._series.dtype).startswith("timedelta64"):
+            raise AttributeError("'DatetimeProperties' object has no attribute 'to_pytimedelta'")
+        return [NaT if one is NaT else one.to_pytimedelta() for one in self._series.tolist()]
+
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
         """Moves every clock to a frequency, one of three ways.
 
@@ -15450,6 +15574,8 @@ class DatetimeMixin:
         asked for only when one of the two is not the default, since asking is a
         boundary crossing and the default changes no answer either way.
         """
+        if str(self._series.dtype).startswith("timedelta64"):
+            return _span_rounded(self._series, kind, freq)
         if not isinstance(freq, str):
             raise NotImplementedError(
                 "freq has to be a string for now, because an offset object carries"
@@ -24785,6 +24911,19 @@ def _unit_of(printed: str) -> str:
     if not printed.startswith(("datetime64[", "timedelta64[")):
         return ""
     return printed.partition("[")[2].rstrip("]").partition(", ")[0]
+
+
+def _counts_target(printed: str, dtype: Any) -> str:
+    """The instant or span type an `astype` reads a column of numbers into, or empty text.
+
+    pandas reads each number as a count of the type's unit, so
+    `astype("timedelta64[s]")` on 5 is five seconds, and a missing number is NaT.
+    """
+    wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    numbers = printed.startswith(("int", "uint", "float"))
+    if not numbers or not wanted.startswith(("datetime64[", "timedelta64[")) or "," in wanted:
+        return ""
+    return wanted if _unit_of(wanted) in _UNIT_ORDER else ""
 
 
 def _unit_change(printed: str, dtype: Any) -> str:

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Lists beside a series, numbers read as spans or instants, and rounding spans
+
+A list, tuple or numpy array beside a series is read as a series on the same labels, with pandas' messages when the lengths differ. `astype` reads a column of numbers as counts of the unit it names when asked for `timedelta64[unit]` or `datetime64[unit]`, spans round, floor and ceil to a fixed frequency with ties to even, a `TimedeltaIndex` shifts, rounds and hands back Python timedeltas, spans and instants take a quantile, a clip bound and an interpolation, the spread of instants is a span, a span over a missing span is a NaN rather than a missing value, and `symmetric_difference` of an index with a frequency infers the frequency of its answer as pandas does.
+
 ### Added: Spans scaled by a number and divided by a span
 
 A column or an index of spans times or over a number, `s * 3`, `s / 7` or `s // 2`, is now spans, truncated toward zero as pandas truncates, with NaT over zero. A span over a span is floats, a floor of spans is whole numbers when nothing is missing, and a remainder of spans is spans in the finer unit, with the sign of the divisor. A number series times a span series lines up by label. A fixed offset such as `Day(1)` or `Hour(2)` added to spans is the span it lasts, and `Timestamp` and `Timedelta` read numpy's `datetime64` and `timedelta64`, so these work on the right of an operator too. `TimedeltaIndex` keeps the scaled frequency, so `timedelta_range("1h", periods=3, freq="h") * 2` holds `2h`.

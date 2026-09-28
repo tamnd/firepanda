@@ -247,6 +247,14 @@ class HeldFreq:
         ordered = sort is False or self.is_monotonic_increasing
         return self._holding(made, freq if ordered and _one_run(mask) else None)
 
+    def symmetric_difference(
+        self, other: Any, result_name: Any = None, sort: bool | None = None
+    ) -> Any:
+        made = super().symmetric_difference(other, result_name, sort)
+        if not isinstance(made, HeldFreq) or self.freq is None:
+            return made
+        return self._holding(made, _inferred(made))
+
     def where(self, cond: Any, other: Any = None) -> Any:
         made = super().where(cond, other)
         kept = all(bool(one) for one in list(cond))
