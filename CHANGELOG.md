@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: describe over a column's groups, and pd.Grouper
+
+`SeriesGroupBy.describe` answers the count, mean, spread, extremes and percentiles of each group as float64 columns on the keys, with the same percentile labels as `Series.describe`. `firepanda.Grouper` groups by a column, and on its own it brings its own `sort` and `dropna` as pandas reads them, so a plain one leaves the groups in the order they are first seen. A grouper with a frequency bins a column of moments as `resample(freq, on=key)` does, and prints as pandas' `TimeGrouper`.
+
 ### Added: a Python function over the groups
 
 `GroupBy.agg`, `GroupBy.transform` and a new `GroupBy.apply` take a Python function and run it once a group, as pandas does. `agg` hands it a column's values in each group and reads the type from the answers, and a function can sit in a list, a mapping or the named form beside the names, with lambdas numbered as pandas numbers them. `transform` fits each answer to its group's rows and puts them back in the frame's order, with a row whose key is missing answering missing. `apply` answers one row a group for one value or for a series with the same text labels each time, and the rows on their own labels when `group_keys=False`, which `groupby` now takes. An answer pandas would put on a MultiIndex is refused.
