@@ -35,6 +35,7 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda, api, errors, offsets
+from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
 from ._config import (
     describe_option,
     get_option,
@@ -83,6 +84,9 @@ from ._timedelta import TimedeltaIndex, timedelta_range
 from .offsets import DateOffset
 
 __all__ = [
+    "Categorical",
+    "CategoricalDtype",
+    "CategoricalIndex",
     "DataFrame",
     "DateOffset",
     "DatetimeIndex",

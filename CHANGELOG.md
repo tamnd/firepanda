@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Categorical, CategoricalDtype and CategoricalIndex
+
+`firepanda.Categorical`, `CategoricalDtype` and `CategoricalIndex` follow pandas. A category column's `dtype` is now a `CategoricalDtype` that carries its categories and order flag and still equals the word `"category"`, `astype` takes one with categories decided, `Categorical.from_codes` and `codes` hold the codes as narrow as pandas does, a `Series` built from a `Categorical` keeps its categories, and each prints the way pandas prints it.
+
 ### Added: grouping by a category column, and observed=False
 
 A frame groups by a category column in the order of its categories, and the key comes back as a category column, or as labels that print as pandas' `CategoricalIndex`, carrying every category. `observed=False` makes a group of each category that has no rows, and each reduction answers for it what pandas answers for an empty group: zero for `size`, `count`, `sum` and `nunique`, one for `prod`, false for `any`, true for `all`, and a gap for the rest, with `agg` reading each function it is given. `idxmax` and `idxmin` raise pandas' error when a category has no rows, and `apply`, a function passed to `agg`, and several keys with `observed=False` are refused. An index of categories now has `categories`, `ordered` and `codes`.
