@@ -5444,6 +5444,31 @@ class _Along:
         except Exception as error:
             raise translate(error) from None
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Writes the value into the rows the key names, `s.loc[key] = value`.
+
+        `loc` with one label the series does not have puts a new row on the
+        end, and `iloc` past the end refuses, both as pandas does. The series'
+        one slot is rebound to the written column, as `inplace` does.
+        """
+        if isinstance(key, tuple):
+            raise IndexingError("Too many indexers")
+        owner = self._owner
+        height = owner._inner.length()
+        if self._labelled:
+            try:
+                where = _by_label(owner.index, key, height)
+            except KeyError:
+                if _list_like(key) or isinstance(key, slice):
+                    raise
+                owner._inner = _enlarged(owner, key, value)._inner
+                return
+        else:
+            where = _by_position(key, height)
+            if where[0] == "one" and not -height <= where[1] < height:
+                raise OutOfBoundsError("iloc cannot enlarge its target object")
+        owner._inner = _written(owner, where, value, not self._labelled)._inner
+
 
 class _Point:
     """`s.at` and `s.iat`, which are one value and one coordinate.
@@ -5487,6 +5512,356 @@ class _Point:
             return _cell_of(inner, found)
         except Exception as error:
             raise translate(error) from None
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Writes one value, `s.at[label] = value` or `s.iat[position] = value`."""
+        owner = self._owner
+        if self._labelled:
+            _Along(owner, True)[key] = value
+            return
+        height = owner._inner.length()
+        position = int(key)
+        if not -height <= position < height:
+            raise OutOfBoundsError(
+                f"index {position} is out of bounds for axis 0 with size {height}"
+            )
+        owner._inner = _written(owner, ("one", position), value)._inner
+
+
+_WRONG_LENGTH = "cannot set using a list-like indexer with a different length than the value"
+"""What pandas says when a list of values is not as long as the rows it goes into."""
+
+_TEXT_ONLY = "Value should be a string or missing value"
+"""The half of pandas' refusal that a text column adds to the usual sentence."""
+
+_WHOLE_RANGES = {
+    f"{sign}int{bits}": (
+        (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if sign == "" else (0, 2**bits - 1)
+    )
+    for sign in ("", "u")
+    for bits in (8, 16, 32, 64)
+}
+"""The least and most each whole number type holds, which a written value must fit."""
+
+
+def _refused(printed: str, shown: Any, kind: str = "") -> TypeError:
+    """pandas' `TypeError` for a value a column cannot hold, for one value or several.
+
+    A text column says which kind of value it got, or that it wanted an array of
+    text, and every other column names the value and the type.
+    """
+    if printed in ("str", "string"):
+        if kind:
+            return DTypeError(
+                f"Invalid value '{shown}' for dtype 'str'. {_TEXT_ONLY}, got '{kind}' instead."
+            )
+        return DTypeError(f"Invalid value for dtype 'str'. {_TEXT_ONLY} (or array of those).")
+    return DTypeError(f"Invalid value '{shown}' for dtype '{printed}'")
+
+
+def _written_one(printed: str, value: Any) -> tuple[str, Any]:
+    """The type a column takes to hold one written value, and the value as it goes in.
+
+    This is pandas 3's rule for writing into a column, which is stricter than
+    `where`: a value must fit the column as it is, and the one widening is a
+    gap written into whole numbers, which makes them float64 because numpy has
+    no whole number gap. Text goes into instants and spans as it would be read.
+
+    Raises:
+        DTypeError: For a value the column cannot hold, in pandas' words.
+    """
+    from ._scalars import NaT, Timedelta, Timestamp
+
+    if value is None or value is NaT or (isinstance(value, float) and value != value):
+        if printed == "bool":
+            raise _refused(printed, "nan")
+        widened = "float64" if printed in _SIGNED or printed in _UNSIGNED else printed
+        return widened, None
+    value = _plain(value)
+    if printed in _WHOLE_RANGES and not isinstance(value, bool):
+        least, most = _WHOLE_RANGES[printed]
+        whole = isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+        if whole and least <= value <= most:
+            return printed, int(value)
+        raise _refused(printed, value)
+    if printed in ("str", "string"):
+        if isinstance(value, str):
+            return printed, value
+        raise _refused(printed, value, type(value).__name__)
+    if printed.startswith("datetime64"):
+        zoned = "," in printed
+        moment = value
+        if isinstance(value, str):
+            moment = Timestamp(value)
+        if isinstance(moment, datetime.datetime) and (moment.tzinfo is not None) == zoned:
+            return printed, Timestamp(moment)
+        raise _refused(printed, value)
+    if printed.startswith("timedelta64"):
+        if isinstance(value, (str, datetime.timedelta)):
+            return printed, Timedelta(value)
+        raise _refused(printed, value)
+    if printed == "category" or _holds(printed, value):
+        return printed, value
+    raise _refused(printed, value)
+
+
+def _written_kind(values: list[Any]) -> str:
+    """The numpy kind a list of values is read as when it is written, one letter.
+
+    pandas makes an array of the list first, so a list of flags and whole
+    numbers is whole numbers, a float anywhere makes floats, and None among
+    numbers or text among anything else is an array of objects.
+    """
+    kinds = set()
+    for value in values:
+        value = _plain(value)
+        if isinstance(value, bool):
+            kinds.add("b")
+        elif isinstance(value, int):
+            kinds.add("i")
+        elif isinstance(value, float):
+            kinds.add("f")
+        elif isinstance(value, str):
+            kinds.add("U")
+        elif value is None:
+            kinds.add("N")
+        else:
+            kinds.add("O")
+    if kinds <= {"b"}:
+        return "b"
+    if kinds <= {"b", "i"}:
+        return "i"
+    if kinds <= {"b", "i", "f"}:
+        return "f"
+    if kinds <= {"U", "N"} or kinds <= {"N"}:
+        return "U"
+    return "O"
+
+
+def _written_many(printed: str, values: list[Any], shown: Any, kind: str | None) -> None:
+    """Refuses a list of values a column cannot hold as pandas does, reading it as an array.
+
+    A list is stricter than one value, because it is read as a numpy array
+    first: floats go into whole numbers only when a whole array of them is, and
+    a gap among numbers is an array of objects, which no numeric column takes.
+
+    A numpy array is read by its own kind, so an array of floats with no
+    fraction goes into whole numbers where a list of them does not.
+
+    Raises:
+        DTypeError: For a list the column cannot hold, in pandas' words.
+    """
+    array = kind is not None
+    kind = kind or _written_kind(values)
+    if printed in _WHOLE_RANGES:
+        least, most = _WHOLE_RANGES[printed]
+        whole = kind in "iu" or (
+            array and kind == "f" and all(v == v and float(v).is_integer() for v in values)
+        )
+        fits = whole and all(least <= int(_plain(v)) <= most for v in values)
+    elif printed in _FLOATING:
+        fits = kind in ("i", "u", "f")
+    elif printed == "bool":
+        fits = kind == "b"
+    elif printed in ("str", "string"):
+        fits = kind == "U"
+    else:
+        for value in values:
+            _written_one(printed, value)
+        return
+    if not fits:
+        raise _refused(printed, shown)
+
+
+def _written_column(printed: str, value: Any, marks: Any) -> str:
+    """The type a column takes to hold the rows of another column that are written.
+
+    A column is read by its type rather than value by value, so floats with no
+    fraction go into whole numbers, and a gap among the rows written makes whole
+    numbers float64, as a single gap does.
+
+    Raises:
+        DTypeError: For a column of values this one cannot hold.
+    """
+    from ._frame import Series
+
+    given = str(value.dtype)
+    going = Series._wrap(value._inner.filter_rows(marks))
+    gaps = bool(going.isna().any())
+    if printed in _WHOLE_RANGES:
+        if given in _WHOLE_RANGES or given in _FLOATING:
+            whole = going.dropna()
+            if given in _FLOATING and bool((whole != whole.round()).any()):
+                raise _refused(printed, going.tolist())
+            return "float64" if gaps else printed
+    elif printed in _FLOATING:
+        if given in _WHOLE_RANGES or given in _FLOATING:
+            return printed
+    elif printed in (given, "category") or {printed, given} <= {"str", "string"}:
+        return printed
+    raise _refused(printed, going.tolist())
+
+
+_ARRAY_KINDS = {
+    **{printed: "i" for printed in _SIGNED},
+    **{printed: "u" for printed in _UNSIGNED},
+    **{printed: "f" for printed in _FLOATING},
+    "bool": "b",
+    "str": "U",
+    "string": "U",
+}
+"""The numpy kind of each column type, for a column written by position as an array."""
+
+
+def _as_written(printed: str, value: Any) -> Any:
+    """One value of a list that fits, as the column holds it, a flag among numbers a number."""
+    value = _plain(value)
+    if printed in _WHOLE_RANGES:
+        return int(value)
+    if printed in _FLOATING:
+        return float(value)
+    return _written_one(printed, value)[1]
+
+
+def _row_numbers(column: Any) -> Any:
+    """0 to n - 1 as a column, counted in the core rather than built in Python."""
+    return (column.isna() | column.notna()).astype("int64").cumsum() - 1
+
+
+def _write_marks(column: Any, where: tuple[Any, ...]) -> Any:
+    """The rows a read key names, as an inner column of flags with no gaps."""
+    from ._frame import Series
+
+    height = column._inner.length()
+    if where[0] == "mask":
+        flags = where[1]
+        if flags.length() != height:
+            raise OutOfBoundsError(
+                f"Boolean index has wrong length: {flags.length()} instead of {height}"
+            )
+        return _no_gaps(flags)
+    if where[0] == "every":
+        return (column.isna() | column.notna())._inner
+    rows = _row_numbers(column)
+    if where[0] == "range":
+        return ((rows >= where[1]) & (rows < where[2]))._inner
+    return Series._wrap(rows._inner).isin(_write_positions(where, height))._inner
+
+
+def _write_positions(where: tuple[Any, ...], height: int) -> list[int]:
+    """The positions a read key names, in the key's order, counted from the front.
+
+    Raises:
+        OutOfBoundsError: For a position past either end, in pandas' words.
+    """
+    if where[0] == "one":
+        asked = [where[1]]
+    elif where[0] == "range":
+        asked = list(range(where[1], where[2]))
+    else:
+        asked = list(where[1])
+    found = []
+    for position in asked:
+        counted = position + height if position < 0 else position
+        if not 0 <= counted < height:
+            raise OutOfBoundsError(
+                f"index {position} is out of bounds for axis 0 with size {height}"
+            )
+        found.append(counted)
+    return found
+
+
+def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool = False) -> Any:
+    """The column with `value` written into the rows a read key names, as pandas writes.
+
+    One value and a column of values are put in with `pick`, which chooses row
+    by row between the column and the value in the core. A column of values
+    is lined up on the labels first, except under `iloc`, where pandas reads it
+    by position as an array of its own type.
+    A list of values goes into the rows in the key's order, the last one
+    winning when a row is named twice, by stacking the rows that are kept with
+    the new ones and putting them back in row order.
+
+    Raises:
+        DTypeError: For a value the column cannot hold, in pandas' words.
+        InvalidArgumentError: For a list of values of the wrong length.
+    """
+    from ._frame import DataFrame, Series
+
+    printed = str(column.dtype)
+    marks = _write_marks(column, where)
+    kept = marks.unary("invert")
+    if isinstance(value, SeriesMixin) and not by_position:
+        lined = value if value.index.equals(column.index) else value.reindex(column.index)
+        target = _written_column(printed, lined, marks)
+        base = column if target == printed else column.astype(target)
+        if str(lined.dtype) != target:
+            # The rows that are not written may be gaps the labels left, which a
+            # column of whole numbers cannot be cast with, and they are never read.
+            lined = (lined.fillna(0) if target in _WHOLE_RANGES else lined).astype(target)
+        try:
+            return Series._wrap(base._inner.pick(kept, lined._inner))
+        except Exception as error:
+            raise translate(error) from None
+    if _list_like(value) or _is_numpy(value):
+        if where[0] == "one":
+            raise InvalidArgumentError("setting an array element with a sequence.")
+        kind = value.dtype.kind if _is_numpy(value) else None
+        if isinstance(value, SeriesMixin):
+            kind = _ARRAY_KINDS.get(str(value.dtype), "O")
+        values = value.tolist() if _is_numpy(value) or kind else list(value)
+        height = column._inner.length()
+        if where[0] in ("mask", "every"):
+            rows = _row_numbers(column)
+            positions = Series._wrap(rows._inner.filter_rows(marks)).tolist()
+        else:
+            positions = _write_positions(where, height)
+        if len(values) != len(positions):
+            raise InvalidArgumentError(_WRONG_LENGTH)
+        _written_many(printed, values, value, kind)
+        if not positions:
+            return column
+        placed = dict(zip(positions, values, strict=True))
+        order = sorted(placed)
+        name = column.name
+        old = column.to_frame("value").assign(row=_row_numbers(column))
+        old = DataFrame._wrap(old._inner.filter_rows(kept))
+        going = [_as_written(printed, placed[at]) for at in order]
+        new = Series(going, index=column.index.take(order)).astype(printed).to_frame("value")
+        new = new.assign(row=order)
+        stacked = concat([old, new]).sort_values("row", kind="stable")
+        return stacked["value"].rename(name).rename_axis(column.index.name)
+    target, held = _written_one(printed, value)
+    if not bool(marks.reduce("max", 0.0)):
+        return column
+    base = column if target == printed else column.astype(target)
+    if held is None:
+        taken = base._inner.missing_row()
+    elif target.startswith(("datetime64", "timedelta64")):
+        taken = Series([held]).astype(target)._inner
+    else:
+        taken = _fallback(target, held, base)
+    try:
+        return Series._wrap(base._inner.pick(kept, taken))
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _enlarged(column: Any, label: Any, value: Any) -> Any:
+    """The column with one row put on the end under a new label, `s.loc[label] = value`.
+
+    The row's type meets the column's the way `concat` meets two, so a float
+    after whole numbers makes floats, and a gap makes whole numbers float64.
+    """
+    from ._frame import Series
+
+    printed = str(column.dtype)
+    if _missing(value) or value is None:
+        kind = "float64" if printed in _WHOLE_RANGES or printed == "bool" else printed
+        row = Series([None], index=[label], dtype=kind, name=column.name)
+    else:
+        row = Series([value], index=[label], name=column.name)
+    return concat([column, row]).rename_axis(column.index.name)
 
 
 __all__ = ["NO_DEFAULT", "DataFrameMixin", "IndexMixin", "SeriesMixin"]
@@ -11024,6 +11399,25 @@ class SeriesMixin:
             except Exception as error:
                 raise translate(error) from None
         return _Along(self, True)[key]
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Writes the value into the rows the key names, `s[key] = value`.
+
+        The key is read as `__getitem__` reads it: a slice of whole numbers is
+        positions and everything else goes through `loc`, so one label the series
+        does not have puts a new row on the end. The value must fit the column
+        as pandas 3 requires, and the series' one slot is rebound to the written
+        column, so a copy taken before keeps what it had.
+
+        Raises:
+            DTypeError: For a value the column cannot hold, in pandas' words.
+            InvalidArgumentError: For a list of values of the wrong length.
+        """
+        if isinstance(key, slice) and _counts_rather_than_names(key):
+            where = _by_position(key, self._inner.length())
+            self._inner = _written(self, where, value, True)._inner
+            return
+        _Along(self, True)[key] = value
 
     def __iter__(self) -> Iterator[Any]:
         """The values, one at a time.
