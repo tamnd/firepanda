@@ -4276,9 +4276,17 @@ def test_an_ordered_window_carries_its_order_and_its_frame() raises:
     )
 
 
+def test_a_named_window_plans_as_the_window_written_out() raises:
+    assert_equal(
+        _plan(
+            "SELECT sum(b) OVER (w ORDER BY a) AS s FROM t WINDOW w AS"
+            " (PARTITION BY g)"
+        ),
+        _plan("SELECT sum(b) OVER (PARTITION BY g ORDER BY a) AS s FROM t"),
+    )
+
+
 def test_the_windows_with_no_operator_yet_each_say_which_one() raises:
-    with assert_raises(contains="WINDOW clause"):
-        _ = _plan("SELECT sum(b) OVER w FROM t WINDOW w AS (PARTITION BY g)")
     with assert_raises(contains="neither an aggregate nor one of the window"):
         _ = _plan("SELECT upper(g) OVER () FROM t")
 
