@@ -5387,7 +5387,7 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
         if step == 1:
             return ("range", start, max(start, stop))
         return ("gather", list(range(start, stop, step)))
-    if isinstance(key, (list, tuple)):
+    if isinstance(key, list) or (isinstance(key, tuple) and getattr(index, "nlevels", 1) == 1):
         if _is_mask(key):
             if len(key) != height:
                 raise OutOfBoundsError(
@@ -5408,6 +5408,48 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
     if isinstance(found, int):
         return ("one", found)
     return ("gather", _flattened(found))
+
+
+def _level_axes(owner: Any, key: tuple[Any, ...]) -> tuple[Any, Any]:
+    """A `loc` tuple on rows labelled by several levels, split into a row key and a column key.
+
+    The whole tuple is a row label when some row has it, and a row and a
+    column otherwise, which is the order pandas tries them in.
+
+    Raises:
+        KeyError: For a column that is not there, when the tuple is not a row either.
+    """
+    try:
+        _by_label(owner.index, key, owner._inner.length())
+    except KeyError:
+        if len(key) != 2:
+            raise
+        column = key[1]
+        scalar = _is_scalar(column) and not isinstance(column, slice)
+        if scalar and column not in owner._inner.names():
+            raise KeyError(column) from None
+        return key[0], column
+    return key, EVERY
+
+
+def _prefix_dropped(owner: Any, rows: Any, answer: Any) -> Any:
+    """What `loc` answered, without the levels a key naming only the first few named.
+
+    pandas keeps every level for a key that names them all, and drops the
+    named ones for a key that names fewer, so `loc["x"]` is labelled by the
+    levels after the first.
+    """
+    if not isinstance(answer, (DataFrameMixin, SeriesMixin)) or not _has_levels(owner):
+        return answer
+    if type(rows) is tuple:
+        count = len(rows)
+    elif _is_scalar(rows) and rows is not EVERY:
+        count = 1
+    else:
+        return answer
+    if not _has_levels(answer) or count >= answer.index.nlevels:
+        return answer
+    return answer.droplevel(list(range(count)))
 
 
 def _called_key(key: Any, owner: Any, labelled: bool) -> Any:
@@ -5470,10 +5512,24 @@ class _Selection:
         A single row with more than one column is a row as a series, labelled
         by the column names and named by the row's label, and it takes the one
         type every column fits, which `_row_type` works out.
+
+        On rows labelled by several levels a tuple is first read as one row
+        label, and as a row and a column when no row has it, as pandas reads
+        it. A key naming some of the levels drops them from the answer.
         """
+        labelled = isinstance(self, _Labelled)
+        key = _called_key(key, self._owner, labelled)
+        if labelled and type(key) is tuple and _has_levels(self._owner):
+            rows, columns = _level_axes(self._owner, key)
+        else:
+            rows, columns = _two_axes(key)
+        answer = self._picked(rows, columns)
+        return _prefix_dropped(self._owner, rows, answer) if labelled else answer
+
+    def _picked(self, rows: Any, columns: Any) -> Any:
+        """The frame, column or value a row key and a column key name."""
         from ._frame import DataFrame, Series
 
-        rows, columns = _two_axes(_called_key(key, self._owner, isinstance(self, _Labelled)))
         inner = self._owner._inner
         names = inner.names()
         picked = self._columns(columns, names)
@@ -6160,11 +6216,13 @@ class _Along:
         from ._frame import Series
 
         key = _called_key(key, self._owner, self._labelled)
-        if isinstance(key, tuple):
+        levels = self._labelled and _has_levels(self._owner)
+        if isinstance(key, tuple) and not levels:
             # A tuple is how a caller names a second axis, and there is not one
             # to name. pandas raises its own IndexingError here, which this
             # cannot be a subclass of without importing pandas, so the sentence
-            # is pandas' and the class is not.
+            # is pandas' and the class is not. On labels of several levels a
+            # tuple is one label.
             raise InvalidArgumentError("Too many indexers")
         inner = self._owner._inner
         height = inner.length()
@@ -6181,9 +6239,10 @@ class _Along:
                     # callers rather than by the one binding underneath.
                     raise OutOfBoundsError("single positional indexer is out-of-bounds")
                 return _cell_of(inner, where[1])
-            return Series._wrap(_narrowed(inner, where))
+            answer = Series._wrap(_narrowed(inner, where))
         except Exception as error:
             raise translate(error) from None
+        return _prefix_dropped(self._owner, key, answer) if levels else answer
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Writes the value into the rows the key names, `s.loc[key] = value`.
@@ -7485,6 +7544,77 @@ def _repeated_positions(count: int, repeats: Any, axis: Any) -> list[int]:
     return [position for position, each in enumerate(whole) for _ in range(each)]
 
 
+def _relevelled(owner: Any, axis: Any, change: Any, verb: str | None = None) -> Any:
+    """The frame or column with the labels on one axis rewritten by an index method.
+
+    `change` takes the index and answers the new one, which is how `droplevel`,
+    `swaplevel` and `reorder_levels` share the rest.
+
+    Raises:
+        TypeError: For swapping or reordering the levels of a flat axis, in pandas' words.
+    """
+    from ._frame import DataFrame
+    from ._multi import MultiIndex
+
+    frame = isinstance(owner, DataFrame)
+    owner_type = "DataFrame" if frame else "Series"
+    number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
+    index = owner.index if number == 0 else owner.columns
+    if verb is not None and not isinstance(index, MultiIndex):
+        raise TypeError(f"Can only {verb} levels on a hierarchical axis.")
+    return _with_axis(owner, change(index), number)
+
+
+def _cross_section(owner: Any, key: Any, axis: Any, level: Any, drop_level: bool) -> Any:
+    """The rows whose labels hold a key on some levels, which is `xs`.
+
+    Without `level` this is `loc` on the rows, or the column of that name
+    across. With `level` the key is one value per named level, and the named
+    levels are dropped from the answer unless `drop_level` is False.
+
+    Raises:
+        KeyError: When no row holds the key.
+    """
+    from ._frame import DataFrame
+    from ._multi import MultiIndex
+
+    frame = isinstance(owner, DataFrame)
+    number = _align_axis(axis, "DataFrame" if frame else "Series", (0, 1) if frame else (0,))
+    if number == 1:
+        if level is not None:
+            raise NotImplementedError(
+                "xs with level= across the columns is not supported yet, because a firepanda"
+                " frame names its columns with one level"
+            )
+        return owner[key]
+    index = owner.index
+    if not isinstance(index, MultiIndex):
+        if level is not None:
+            index._only_level(level)
+        return owner.loc[key]
+    keys = key if isinstance(key, tuple) else (key,)
+    if level is None:
+        if drop_level:
+            return owner.loc[key] if not frame else owner.loc[key, :]
+        numbers = list(range(len(keys)))
+    else:
+        numbers = index._level_numbers(level)
+    if len(numbers) != len(keys):
+        raise KeyError(key)
+    wanted = [index._code_of(n, part) for n, part in zip(numbers, keys, strict=True)]
+    if None in wanted:
+        raise KeyError(key)
+    codes = [index._codes[n] for n in numbers]
+    pairs = list(zip(codes, wanted, strict=True))
+    rows = [at for at in range(len(index)) if all(c[at] == w for c, w in pairs)]
+    if not rows:
+        raise KeyError(key)
+    answer = owner.iloc[rows]
+    if drop_level and len(numbers) < index.nlevels:
+        return answer.droplevel(numbers)
+    return answer
+
+
 def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
     """The frame or column with new labels on one axis, which is `set_axis`.
 
@@ -8689,6 +8819,104 @@ class DataFrameMixin(_Carries):
         """The frame with new row or column labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
 
+    def droplevel(self, level: Any, axis: Any = 0) -> DataFrame:
+        """The frame without some levels of its row labels, or of its column names."""
+        return _relevelled(self, axis, lambda index: index.droplevel(level))
+
+    def swaplevel(self, i: Any = -2, j: Any = -1, axis: Any = 0) -> DataFrame:
+        """The frame with two levels of its row labels traded places."""
+        return _relevelled(self, axis, lambda index: index.swaplevel(i, j), "swap")
+
+    def reorder_levels(self, order: Any, axis: Any = 0) -> DataFrame:
+        """The frame with the levels of its row labels in a given order."""
+        return _relevelled(self, axis, lambda index: index.reorder_levels(order), "reorder")
+
+    def xs(self, key: Any, axis: Any = 0, level: Any = None, drop_level: bool = True) -> Any:
+        """The rows whose labels hold a key, or one column across, as pandas' `xs`."""
+        return _cross_section(self, key, axis, level, drop_level)
+
+    def value_counts(
+        self,
+        subset: Any = None,
+        normalize: bool = False,
+        sort: bool = True,
+        ascending: bool = False,
+        dropna: bool = True,
+    ) -> Series:
+        """How many rows hold each combination of values, labelled by the combinations.
+
+        This is a group by on the columns and its `size`, as pandas has it. A
+        list of columns, the whole frame included, labels the answer by levels
+        even when it names one column, and one name labels it by that column.
+        Without `sort` the combinations come in the order they first appear.
+        """
+        from ._multi import MultiIndex
+
+        one = subset is not None and _is_scalar(subset)
+        names = list(self.columns) if subset is None else [subset] if one else list(subset)
+        counts = self.groupby(names[0] if one else names, sort=sort, dropna=dropna).size()
+        if sort:
+            counts = counts.sort_values(ascending=ascending, kind="stable")
+        if normalize:
+            counts = counts / counts.sum()
+        if len(names) == 1 and not one:
+            counts = counts.set_axis(MultiIndex.from_arrays([counts.index], names=names))
+        return counts.rename("proportion" if normalize else "count")
+
+    def stack(
+        self,
+        level: Any = -1,
+        dropna: Any = NO_DEFAULT,
+        sort: Any = NO_DEFAULT,
+        future_stack: bool = True,
+    ) -> Series:
+        """The frame as one column, each row's values in turn, labelled by row and column.
+
+        This is pandas' `future_stack` stacking, which keeps missing values and
+        the column order, and takes neither `dropna` nor `sort`.
+
+        Raises:
+            ValueError: For `dropna` or `sort`, which pandas refuses the same way.
+            NotImplementedError: For the older stacking, and for columns of
+                several types, which pandas answers as objects.
+        """
+        from ._frame import Series
+        from ._multi import MultiIndex
+
+        if dropna is not NO_DEFAULT:
+            raise InvalidArgumentError(
+                "dropna must be unspecified as the new implementation does not introduce"
+                " rows of NA values. This argument will be removed in a future version of"
+                " pandas."
+            )
+        if sort is not NO_DEFAULT:
+            raise InvalidArgumentError(
+                "Cannot specify sort, this argument will be removed in a future version of"
+                " pandas. Sort the result using .sort_index instead."
+            )
+        if not future_stack:
+            raise NotImplementedError(
+                "stack with future_stack=False is the older stacking pandas is removing,"
+                " and firepanda has only the new one"
+            )
+        if level not in (-1, 0):
+            raise IndexError(
+                f"Too many levels: Index has only 1 level, not {level + 1 if level > 0 else 2}"
+            )
+        columns = list(self.columns)
+        height, width = len(self), len(columns)
+        if width == 0:
+            return Series([], dtype="float64")
+        joined = concat([self[name] for name in columns], ignore_index=True)
+        order = [c * height + r for r in range(height) for c in range(width)]
+        rows = self.index.tolist()
+        labels = [
+            (*(row if isinstance(row, tuple) else (row,)), name) for row in rows for name in columns
+        ]
+        names = [*(self.index.names), None]
+        stacked = Series(joined.take(order).tolist(), dtype=joined.dtype)
+        return stacked.set_axis(MultiIndex.from_tuples(labels, names=names))
+
     def idxmax(self, axis: Any = 0, skipna: bool = True, numeric_only: bool = False) -> Series:
         """The label of the first largest value in each column, or each row's column."""
         return self._extreme_labels("max", axis, skipna, numeric_only)
@@ -9032,8 +9260,8 @@ class DataFrameMixin(_Carries):
         Raises:
             ValueError: When two rows hold the same pair, with pandas' words.
             NotImplementedError: For `values` left out or given as a list and for
-                several keys, which pandas answers with a MultiIndex, and for a
-                columns key whose values are not text.
+                several columns keys, which pandas answers with columns of several
+                levels, and for a columns key whose values are not text.
         """
         if values is NO_DEFAULT or isinstance(values, list | tuple):
             raise NotImplementedError(
@@ -9045,9 +9273,8 @@ class DataFrameMixin(_Carries):
             keys = self.index.tolist()
             row_name = self.index.name
         else:
-            down = _one_key(index, "index", "pivot")
-            keys = self[down].tolist()
-            row_name = down
+            row_name = _down_key(index, "pivot")
+            keys = _key_values(self, row_name)
         heads = self[across].tolist()
         cells: dict[Any, Any] = {}
         for key, head, value in zip(keys, heads, self[values].tolist(), strict=True):
@@ -9080,10 +9307,10 @@ class DataFrameMixin(_Carries):
         missing or `fill_value`, and whole numbers with a gap become floats.
 
         Raises:
-            NotImplementedError: For margins, several keys or values with a
-                columns key, and a list or dict of functions, which pandas
-                answers with a MultiIndex, and for a columns key whose values
-                are not text.
+            NotImplementedError: For margins, several columns keys or values
+                with a columns key, and a list or dict of functions, which
+                pandas answers with columns of several levels, and for a
+                columns key whose values are not text.
         """
         if margins:
             raise NotImplementedError(
@@ -9095,8 +9322,10 @@ class DataFrameMixin(_Carries):
                 "pivot_table: a list or dict of functions labels the columns with a"
                 " MultiIndex, which firepanda does not have"
             )
-        down = _one_key(index, "index", "pivot_table")
-        taken = {down} if columns is None else {down, _one_key(columns, "columns", "pivot_table")}
+        down = _down_key(index, "pivot_table")
+        taken = set(down) if isinstance(down, list) else {down}
+        if columns is not None:
+            taken.add(_one_key(columns, "columns", "pivot_table"))
         if values is None:
             values = [name for name in self.columns if name not in taken]
         if columns is None:
@@ -9108,7 +9337,9 @@ class DataFrameMixin(_Carries):
                     _grouped_by_hand(self, down, name, aggfunc, sort, dropna, kwargs)
                     for name in names
                 ]
-                grouped = DataFrame(dict(zip(names, pieces, strict=True)))
+                # Every piece is labelled by the same keys, in the same order.
+                values = {name: piece.tolist() for name, piece in zip(names, pieces, strict=True)}
+                grouped = DataFrame(values, index=pieces[0].index)
             else:
                 grouped = self.groupby(down, sort=sort, dropna=dropna)[names].agg(aggfunc, **kwargs)
             if fill_value is not None:
@@ -9116,12 +9347,12 @@ class DataFrameMixin(_Carries):
             return grouped
         across = _one_key(columns, "columns", "pivot_table")
         measured = _one_key(values, "values", "pivot_table")
-        keys = self[down].tolist()
+        keys = _key_values(self, down)
         heads = self[across].tolist()
         pairs = [
             (key, head)
             for key, head in zip(keys, heads, strict=True)
-            if not dropna or not (_missing(key) or _missing(head))
+            if not dropna or not (_missing_key(key) or _missing(head))
         ]
         rows = list(dict.fromkeys(key for key, _ in pairs))
         order = list(dict.fromkeys(head for _, head in pairs))
@@ -11975,8 +12206,8 @@ class DataFrameMixin(_Carries):
         could observe about it.
         """
         from ._frame import DataFrame
+        from ._multi import MultiIndex
 
-        _no_level(level)
         _refuse("key", key, "running a function over the labels before sorting is not written")
         _axis_number(axis, "DataFrame", 0, (0,))
         inplace = _flag("inplace", inplace)
@@ -11986,7 +12217,24 @@ class DataFrameMixin(_Carries):
             "last",
             "where a missing label sits is decided by the sort kernel and it puts them at the end",
         )
-        _held_at("sort_remaining", sort_remaining, True, "there is one level to sort")
+        _held_at(
+            "sort_remaining",
+            sort_remaining,
+            True,
+            "the labels of several levels are held as one label that sorts on every level",
+        )
+        if level is not None:
+            index = self.index
+            if not isinstance(index, MultiIndex):
+                index._only_level(level)
+            elif not isinstance(ascending, (list, tuple)):
+                # The levels asked for go first, the labels sort on every level
+                # in that order, and the levels go back where they were.
+                first = index._level_numbers(level)
+                order = first + [n for n in range(index.nlevels) if n not in first]
+                back = [order.index(n) for n in range(index.nlevels)]
+                moved = self.reorder_levels(order).sort_index(ascending=ascending)
+                return _settled(self, moved.reorder_levels(back), inplace)
         _held_at(
             "ignore_index",
             ignore_index,
@@ -13232,6 +13480,68 @@ class SeriesMixin(_Carries):
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
+
+    def droplevel(self, level: Any, axis: Any = 0) -> Series:
+        """The column without some levels of its labels."""
+        return _relevelled(self, axis, lambda index: index.droplevel(level))
+
+    def swaplevel(self, i: Any = -2, j: Any = -1, copy: Any = NO_DEFAULT) -> Series:
+        """The column with two levels of its labels traded places. `copy` is unused."""
+        return _relevelled(self, 0, lambda index: index.swaplevel(i, j), "swap")
+
+    def reorder_levels(self, order: Any) -> Series:
+        """The column with the levels of its labels in a given order."""
+        return _relevelled(self, 0, lambda index: index.reorder_levels(order), "reorder")
+
+    def xs(self, key: Any, axis: Any = 0, level: Any = None, drop_level: bool = True) -> Any:
+        """The values whose labels hold a key, as pandas' `xs`."""
+        return _cross_section(self, key, axis, level, drop_level)
+
+    def unstack(self, level: Any = -1, fill_value: Any = None, sort: bool = True) -> DataFrame:
+        """The column spread into a frame, one column per value of a level of its labels.
+
+        The other levels label the rows. Rows and columns are sorted, or in the
+        order they first appear with `sort=False`, and a pair no label holds is
+        missing or `fill_value`.
+
+        Raises:
+            ValueError: For flat labels and for a pair held twice, in pandas' words.
+            NotImplementedError: For several levels at once, and for a level
+                whose values are not text, since firepanda names columns with text.
+        """
+        from ._multi import MultiIndex
+
+        index = self.index
+        if not isinstance(index, MultiIndex):
+            kind = "RangeIndex" if index.tolist() == list(range(len(index))) else "Index"
+            raise InvalidArgumentError(
+                f"index must be a MultiIndex to unstack, <class 'pandas.{kind}'> was passed"
+            )
+        if isinstance(level, list | tuple):
+            raise NotImplementedError(
+                "unstack of several levels at once labels the columns with several levels,"
+                " which a firepanda frame does not have"
+            )
+        number = index._level_number(level)
+        kept = [n for n in range(index.nlevels) if n != number]
+        cells: dict[Any, Any] = {}
+        rows: dict[Any, None] = {}
+        heads: dict[Any, None] = {}
+        for label, value in zip(index.tolist(), self.tolist(), strict=True):
+            row = label[kept[0]] if len(kept) == 1 else tuple(label[n] for n in kept)
+            head = label[number]
+            if (row, head) in cells:
+                raise InvalidArgumentError("Index contains duplicate entries, cannot reshape")
+            cells[row, head] = value
+            rows[row] = None
+            heads[head] = None
+        order = sorted(rows) if sort else list(rows)
+        names = _pivot_names(sorted(heads) if sort else list(heads), "unstack")
+        level_names = [index.names[n] for n in kept]
+        row_name = level_names[0] if len(kept) == 1 else level_names
+        return _pivoted(
+            order, names, cells, str(self.dtype), row_name=row_name, fill_value=fill_value
+        )
 
     def infer_objects(self, copy: Any = NO_DEFAULT) -> Series:
         """The column itself, as a copy, since it already has a type."""
@@ -21480,8 +21790,11 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     __slots__ = ()
 
     def __getattr__(self, name: str) -> Any:
-        """A column read as an attribute, `df.groupby("k").v` for `df.groupby("k")["v"]`."""
-        if not name.startswith("_") and name in self._frame.columns:
+        """A column read as an attribute, `df.groupby("k").v` for `df.groupby("k")["v"]`.
+
+        A key column is left out, since selecting a key as a value is not written.
+        """
+        if not name.startswith("_") and name in self._frame.columns and name not in self._by:
             return self[name]
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
@@ -21921,6 +22234,57 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     def _source(self) -> Series:
         """The one column."""
         return self._frame[self._column]
+
+    def value_counts(
+        self,
+        normalize: bool = False,
+        sort: bool = True,
+        ascending: bool = False,
+        bins: Any = None,
+        dropna: bool = True,
+    ) -> DataFrame | Series:
+        """How often each value comes up in each group, labelled by the group and the value.
+
+        The counts are the size of a group by on the keys and the column. Within
+        each group the most common value comes first, or the least common with
+        `ascending`, ties keep the order of the values, and `normalize` divides
+        each count by its group's total.
+
+        Raises:
+            NotImplementedError: For `bins`, and for a `dropna` that differs from
+                the group by's, since one group by drops a missing key and value
+                together.
+        """
+        from ._frame import Series
+
+        _refuse("bins", bins, "cutting the values into bins before counting them is not written")
+        if bool(dropna) != bool(self._dropna):
+            raise NotImplementedError(
+                "value_counts with a dropna that differs from the group by's is not supported"
+                " yet, because the keys and the values are grouped together"
+            )
+        keys = len(self._by)
+        counts = self._frame.groupby(
+            [*self._by, self._column], sort=self._sort, dropna=self._dropna
+        ).size()
+        labels, values = counts.index.tolist(), counts.tolist()
+        rank: dict[Any, int] = {}
+        totals: dict[Any, int] = {}
+        for label, value in zip(labels, values, strict=True):
+            rank.setdefault(label[:keys], len(rank))
+            totals[label[:keys]] = totals.get(label[:keys], 0) + value
+        order = list(range(len(labels)))
+        if sort:
+            order.sort(
+                key=lambda at: (rank[labels[at][:keys]], values[at] if ascending else -values[at])
+            )
+        taken = counts.take(order)
+        if normalize:
+            shares = [values[at] / totals[labels[at][:keys]] for at in order]
+            answer = Series(shares, index=taken.index, name="proportion")
+        else:
+            answer = taken.rename("count")
+        return answer if self._as_index else answer.reset_index()
 
     def _named_group(self, rows: Any, key: tuple[Any, ...]) -> Any:
         """The group's values, named after its key the way iterating spells it."""
@@ -25929,6 +26293,27 @@ def _one_key(key: Any, what: str, caller: str) -> Any:
     return key
 
 
+def _down_key(index: Any, caller: str) -> Any:
+    """The one index key of `pivot` or `pivot_table`, or the list of several."""
+    if isinstance(index, list | tuple) and len(index) > 1:
+        return list(index)
+    return _one_key(index, "index", caller)
+
+
+def _key_values(frame: Any, down: Any) -> list[Any]:
+    """The value of an index key on each row, a tuple each for several keys."""
+    if isinstance(down, list):
+        return list(zip(*[frame[name].tolist() for name in down], strict=True))
+    return frame[down].tolist()
+
+
+def _missing_key(key: Any) -> bool:
+    """Whether a key, or any part of a key of several columns, is missing."""
+    if isinstance(key, tuple):
+        return any(_missing(part) for part in key)
+    return _missing(key)
+
+
 def _pivot_names(labels: list[Any], caller: str) -> list[str]:
     """The column values `pivot` turns into column names, which must be text.
 
@@ -25982,17 +26367,22 @@ def _grouped_by_hand(
     handed each group as a column of its own, in the order of the keys.
     """
     from ._frame import Index, Series
+    from ._multi import MultiIndex
 
     places: dict[Any, list[int]] = {}
-    for place, key in enumerate(frame[down].tolist()):
-        if dropna and _missing(key):
+    for place, key in enumerate(_key_values(frame, down)):
+        if dropna and _missing_key(key):
             continue
         places.setdefault(key, []).append(place)
     keys = sorted(places) if sort else list(places)
     column = frame[measured]
     answers = [func(column.take(places[key]), **kwargs) for key in keys]
     readable = [answer.item() if hasattr(answer, "item") else answer for answer in answers]
-    return Series(_readable(readable), index=Index(keys, name=down), name=measured)
+    if isinstance(down, list):
+        labels = MultiIndex.from_tuples(keys, names=down)
+    else:
+        labels = Index(keys, name=down)
+    return Series(_readable(readable), index=labels, name=measured)
 
 
 def _pivoted(
@@ -26000,9 +26390,18 @@ def _pivoted(
 ) -> Any:
     """The frame with one row per row key and one column per name."""
     from ._frame import DataFrame, Index
+    from ._multi import MultiIndex
 
     fill_value = kw.get("fill_value")
-    labels = Index(rows, name=kw.get("row_name"))
+    row_name = kw.get("row_name")
+    if isinstance(row_name, list):
+        labels = MultiIndex.from_tuples(rows, names=row_name)
+    else:
+        labels = Index(rows, name=row_name)
+    gaps = any(_missing(cells.get((row, name))) for name in names for row in rows)
+    if gaps and fill_value is None and _numeric_kind(printed) == "int64":
+        # pandas spreads the values as one block, so one gap makes every column a float.
+        printed = "float64"
     columns = {
         name: _pivot_column([cells.get((row, name)) for row in rows], printed, fill_value, labels)
         for name in names
@@ -27918,7 +28317,9 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
     blocks = [labels[1:], texts] if kw["index"] else [texts]
     result = _text_adjoin(3, *blocks)
     if kw["header"] and _text_named(column.index):
-        result = labels[0].rstrip() + "\n" + result
+        # A flat name is written as it is and names of several levels keep their widths.
+        head = labels[0] if getattr(column.index, "nlevels", 1) > 1 else labels[0].rstrip()
+        result = head + "\n" + result
     return result + "\n" + footer if footer else result
 
 

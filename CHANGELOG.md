@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: level methods and reshaping on rows labelled by a MultiIndex
+
+`loc` takes a whole tuple, a prefix of one, or a row key and a column together on a frame or a column labelled by levels, and drops the levels a prefix names, as pandas does. `droplevel`, `swaplevel`, `reorder_levels` and `xs` are on frames and columns, `sort_index` takes `level`, `DataFrame.value_counts`, `DataFrame.stack`, `Series.unstack` and `SeriesGroupBy.value_counts` are in, and `pivot` and `pivot_table` take several row keys. Each works by rewriting the labels in Python over what the extension already does. A key column is no longer offered as an attribute of a group by, so `groupby("a").a` is an AttributeError as it is in pandas.
+
 ### Added: rows labelled by a MultiIndex
 
 A frame or a column can now be labelled by a `MultiIndex`. It is built with `index=` given a `MultiIndex`, by `set_index` with several keys or with `append=True`, and by a group by on several keys, whose reductions, `size`, `agg` and `apply` now label their rows by every key as pandas does. `.index` answers the `MultiIndex`, `reset_index` puts all of its levels or the ones named by `level=` back as columns, and the repr prints the levels side by side and sparsified. Alignment, sorting, filtering, `reindex`, `rename_axis` with a name per level, `to_csv`, `items`, `itertuples` and `in` with a tuple all work on the tuples. Each tuple is held by the extension as one text label written to sort as the tuple sorts, which document 93 of the compat notes describes. A column of a group by can now also be read as an attribute, `df.groupby("k").v`.

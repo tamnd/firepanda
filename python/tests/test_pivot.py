@@ -111,7 +111,6 @@ def test_a_repeated_pair_is_pandas_mistake(firepanda: ModuleType) -> None:
     [
         lambda m: base(m).pivot(index="r", columns="c"),
         lambda m: base(m).pivot(index="r", columns="c", values=["v", "w"]),
-        lambda m: base(m).pivot(index=["r", "t"], columns="c", values="v"),
         lambda m: base(m).pivot(index="c", columns="v", values="w"),
         lambda m: base(m).pivot_table(index="r", columns="c", values="v", margins=True),
         lambda m: base(m).pivot_table(index="r", columns="c", values="v", aggfunc=["sum"]),
