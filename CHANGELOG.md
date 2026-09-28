@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: rows labelled by a MultiIndex
+
+A frame or a column can now be labelled by a `MultiIndex`. It is built with `index=` given a `MultiIndex`, by `set_index` with several keys or with `append=True`, and by a group by on several keys, whose reductions, `size`, `agg` and `apply` now label their rows by every key as pandas does. `.index` answers the `MultiIndex`, `reset_index` puts all of its levels or the ones named by `level=` back as columns, and the repr prints the levels side by side and sparsified. Alignment, sorting, filtering, `reindex`, `rename_axis` with a name per level, `to_csv`, `items`, `itertuples` and `in` with a tuple all work on the tuples. Each tuple is held by the extension as one text label written to sort as the tuple sorts, which document 93 of the compat notes describes. A column of a group by can now also be read as an attribute, `df.groupby("k").v`.
+
 ### Added: A zone given as a tzinfo object to tz_localize, and fixed offsets named after UTC
 
 `tz_localize` on a column of instants or on a `DatetimeIndex` takes a `tzinfo` object, a `zoneinfo` zone or a fixed `datetime.timezone`, where it used to take only a zone name. A fixed offset is named after UTC, so a column read against seven hours east of it is `datetime64[us, UTC+07:00]`, as pandas prints it, wherever the zone came from.
