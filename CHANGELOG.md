@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: groupby sample
+
+`groupby(...).sample` draws rows at random from each group, the same rows pandas draws for the same seed. pandas walks the groups in order and asks numpy's `choice` for each one's positions from one random state, and this walks them the same way, so `n`, `frac`, `replace`, `weights` as a list or a column name, `sort=False` and `dropna=False` all give pandas' rows in pandas' order, and a size or weights pandas refuses are refused with its words. The size and weight checks moved out of `DataFrame.sample` into two helpers both now share. 11 calls and 7 mistakes match pandas.
+
 ### Added: json_normalize
 
 `firepanda.json_normalize` flattens nested records into a frame the way `pandas.json_normalize` does. It is a port of pandas' own code: nested dicts become dotted columns, `sep` and `max_level` change how, `record_path` pulls the rows out of lists nested in each object, `meta` repeats outer fields on every row, the two prefixes rename columns, and `errors='ignore'` fills a missing field with NaN. The error messages are pandas' words. A cell left holding a dict or a list needs a column of objects, which firepanda does not have, so that case still raises. 14 calls and 6 mistakes match pandas.
