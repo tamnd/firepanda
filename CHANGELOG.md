@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DatetimeIndex and TimedeltaIndex hold a frequency
+
+An index made by `date_range`, `bdate_range` or `timedelta_range` holds the offset it was made at, as `freq` and `freqstr`, and its repr shows it as pandas does. The constructors take `freq=`, where `infer` takes the frequency the labels keep and any other frequency has to be one they keep, with pandas' error when it is not, and `freq` can be set the same way. A slice keeps the frequency, times its step, and a copy, a new name, `as_unit` and `shift` keep it too, where `shift` now uses the held frequency when none is given. `Index` of an index of instants or spans is now a `DatetimeIndex` or a `TimedeltaIndex`, as in pandas. The index of a series or a frame does not keep its frequency yet, because the core rebuilds it.
+
 ### Added: infer_freq, inferred_freq and dt.freq
 
 `firepanda.infer_freq` names the frequency a run of instants or spans keeps, as pandas' alias for it, by the same rules pandas' frequency inferer uses: years, quarters and months anchored at the calendar or business start or end, weeks anchored on a weekday, business days, business hours, the week of the month, and fixed steps from days down to nanoseconds, read on the wall clock for labels with a zone. It takes a `DatetimeIndex`, a `TimedeltaIndex`, a column of either or a list of dates, and raises pandas' errors for fewer than three labels or labels that are not instants. `DatetimeIndex.inferred_freq`, `TimedeltaIndex.inferred_freq` and `Series.dt.freq` give the same answer, or None where pandas gives None.

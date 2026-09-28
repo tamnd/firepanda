@@ -16,13 +16,15 @@ the same kernel `s.dt.year` calls, and wraps the answer back up. There is no
 second table of field names anywhere and there is no second set of rules about
 what a frequency string means.
 
-What is deliberately absent is `freq` and the three names around it, which need
-frequency inference, and `to_period`, which needs a period type. Neither is
-spelled here, because document 07's rule is that a name must not resolve and
-then refuse. `time`, `timetz` and `to_pydatetime` answer Python lists, the
-convention document 41 set for what an index answers label by label, and
-`shift` and `snap` count along calendar frequencies with the same steps
-`date_range` uses.
+An index holds the frequency `date_range` made it at, or the one its constructor
+was given, as `freq` and `freqstr`, and `inferred_freq` reads one off the labels.
+A slice, a copy, a new name, `as_unit` and `shift` keep it, as they do in pandas,
+and everything else answers an index without one. What is deliberately absent is
+`to_period`, which needs a period type. It is not spelled here, because document
+07's rule is that a name must not resolve and then refuse. `time`, `timetz` and
+`to_pydatetime` answer Python lists, the convention document 41 set for what an
+index answers label by label, and `shift` and `snap` count along calendar
+frequencies with the same steps `date_range` uses.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import zoneinfo
 from typing import Any, cast
 
 from ._frame import Index, Series
+from ._frequency import _conforming, _hold, _offset_of
 from ._pandas import (
     _NONEXISTENT,
     _NONEXISTENT_REFUSAL,
@@ -101,7 +104,9 @@ class DatetimeIndex(Index):
         Args:
             data: The instants. Text, whole numbers, a firepanda series of
                 instants, or another index.
-            freq: Refused. Frequency inference is document 33 section 6.
+            freq: The frequency the index holds. Left out it comes along from
+                another `DatetimeIndex`, `infer` takes the one the labels keep,
+                and anything else has to be one they keep.
             tz: Refused. Attaching a clock as the values are read is
                 `tz_localize` after the fact, which is written.
             ambiguous: Refused away from its default, since it only means
@@ -117,14 +122,9 @@ class DatetimeIndex(Index):
                 the data is a list with nobody to name it.
 
         Raises:
+            ValueError: For a frequency the labels do not keep.
             NotImplementedError: If any of the refused arguments was passed.
         """
-        if freq is not NO_DEFAULT:
-            raise NotImplementedError(
-                "freq= is not supported yet, because holding a frequency means"
-                " inferring one and checking the labels against it, which is"
-                " document 33 section 6"
-            )
         if tz is not NO_DEFAULT:
             raise NotImplementedError(
                 "tz= is not supported yet, because reading the values and"
@@ -158,6 +158,7 @@ class DatetimeIndex(Index):
                 self._inner = data._inner.renamed(label)
             except Exception as error:
                 raise translate(error) from None
+            _hold(self, freq, data)
             return
         values: Any = _held_values(data._inner) if isinstance(data, Index) else data
         if not isinstance(values, Series) or not _is_temporal(values.dtype):
@@ -168,6 +169,25 @@ class DatetimeIndex(Index):
             self._inner = values._inner.to_index(label)
         except Exception as error:
             raise translate(error) from None
+        _hold(self, freq, data)
+
+    @property
+    def freq(self) -> Any:
+        """The frequency the index holds, as an offset, or None."""
+        return getattr(self, "_freq", None)
+
+    @freq.setter
+    def freq(self, value: Any) -> None:
+        held = _offset_of(value)
+        if held is not None:
+            _conforming(self, held)
+        self._freq = held
+
+    @property
+    def freqstr(self) -> str | None:
+        """The frequency the index holds, as text, or None."""
+        held = self.freq
+        return None if held is None else held.freqstr
 
     def _part(self, kind: str, arg: str = "") -> Index:
         """Reads one part of the labels, and hands back a plain index.
@@ -454,7 +474,9 @@ class DatetimeIndex(Index):
             " types only",
         )
         try:
-            return self._moved("as_unit", unit)
+            moved = self._moved("as_unit", unit)
+            moved._freq = self.freq
+            return moved
         except DTypeError:
             if unit == "ns":
                 _beyond_nanoseconds(self.to_series())
@@ -544,24 +566,39 @@ class DatetimeIndex(Index):
     def shift(self, periods: int = 1, freq: Any = None) -> DatetimeIndex:
         """Every label moved `periods` steps of `freq`.
 
+        Left out, `freq` is the one the index holds, and the answer holds it too, as it
+        does after a step of fixed length. Any other step loses it.
+
         Raises:
-            NullFrequencyError: Without a frequency. pandas uses the index's
-                own frequency there, and firepanda does not keep one on an
-                index, so an index made by `date_range` needs `freq` spelled.
+            NullFrequencyError: Without a frequency given or held.
         """
         from ._calendar_steps import calendar_step
         from ._date_range import _UNITS, _frequency
         from ._scalars import Timedelta
         from .errors import NullFrequencyError
+        from .offsets import Tick
 
+        held = self.freq
         if freq is None:
-            raise NullFrequencyError("Cannot shift with no freq")
+            if held is None:
+                raise NullFrequencyError("Cannot shift with no freq")
+            freq = held.freqstr
+        elif not isinstance(_offset_of(freq), Tick) and _offset_of(freq) != held:
+            # pandas adds a calendar step that is not the held one, which loses the frequency.
+            held = None
         if calendar_step(freq) is not None:
-            return self._stepped(freq, periods)
-        step, _, _ = _frequency(freq)
-        nanos, scale = periods * step, _UNITS[self.unit]
-        by = Timedelta(nanos // scale, unit=self.unit) if nanos % scale == 0 else Timedelta(nanos)
-        return DatetimeIndex(self.to_series() + by, name=self.name)
+            moved = self._stepped(freq, periods)
+        else:
+            step, _, _ = _frequency(freq)
+            nanos, scale = periods * step, _UNITS[self.unit]
+            by = (
+                Timedelta(nanos // scale, unit=self.unit)
+                if nanos % scale == 0
+                else Timedelta(nanos)
+            )
+            moved = DatetimeIndex(self.to_series() + by, name=self.name)
+        moved._freq = held
+        return moved
 
     def snap(self, freq: Any = "S") -> DatetimeIndex:
         """Every label moved to the nearer landing date of `freq`, the later one on a tie.
