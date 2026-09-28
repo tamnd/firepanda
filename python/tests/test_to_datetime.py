@@ -261,8 +261,6 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
 @pytest.mark.parametrize(
     ("argument", "value"),
     [
-        ("dayfirst", True),
-        ("yearfirst", True),
         ("origin", "julian"),
         ("exact", False),
     ],
@@ -270,7 +268,7 @@ def test_every_row_is_held_to_the_first_row_format(firepanda: ModuleType) -> Non
 def test_a_declared_argument_that_is_not_implemented_says_so(
     firepanda: ModuleType, argument: str, value: Any
 ) -> None:
-    """Four refusals, each naming the argument the caller passed.
+    """Two refusals, each naming the argument the caller passed.
 
     They are declared rather than left out for the reason document 18 section 4
     gives. A caller who passes one gets a message about that argument instead of

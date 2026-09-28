@@ -99,7 +99,7 @@ _CLOCK = re.compile(
     re.IGNORECASE,
 )
 _HOUR_ONLY = re.compile(r"(?<![\d.:])(\d{1,2})\s*([ap])\.?m\.?(?!\w)", re.IGNORECASE)
-_NUMBERS = re.compile(r"\d+(?:([/.-])\d+(?:\1\d+)?)?")
+_JOINED = re.compile(r"\w+([/.-])\w+(?:\1\w+)?")
 
 
 def missing(value: Any) -> bool:
@@ -155,7 +155,9 @@ def _unreadable(text: str) -> DateParseError:
     return DateParseError(f"Unknown datetime string format, unable to parse: {text}")
 
 
-def _loose_parts(text: str, today: datetime.date) -> tuple[Any, ...]:
+def _loose_parts(
+    text: str, today: datetime.date, dayfirst: bool = False, yearfirst: bool = False
+) -> tuple[Any, ...]:
     """A row's parts the way dateutil reads them, for `format="mixed"`.
 
     Raises:
@@ -175,12 +177,17 @@ def _loose_parts(text: str, today: datetime.date) -> tuple[Any, ...]:
             f'Parsed string "{text}" included an un-recognized timezone "{words[-1]}".'
         )
     if iso is not None:
+        fields = _iso_fields(iso)
+        if dayfirst and (iso.group(3) or iso.group(5)) and fields[2] <= 12:
+            # dateutil reads a year first and two numbers as year, day, month
+            # when asked for the day first, and pandas asks it for every row.
+            fields = (fields[0], fields[2], fields[1], *fields[3:])
         try:
-            parts = _checked(_iso_fields(iso))
+            parts = _checked(fields)
         except ValueError as error:
             raise DateParseError(f"{error}: {text}") from None
         return parts if zone is None else (*parts[:7], zone)
-    return _fielded(text, rest, zone, today)
+    return _fielded(text, rest, zone, today, dayfirst, yearfirst)
 
 
 def _iso_fields(found: re.Match[str]) -> tuple[Any, ...]:
@@ -200,8 +207,15 @@ def _iso_fields(found: re.Match[str]) -> tuple[Any, ...]:
     )
 
 
-def _fielded(text: str, rest: str, zone: int | None, today: datetime.date) -> tuple[Any, ...]:
-    """The parts of a row that is not ISO 8601, read field by field."""
+def _fielded(
+    text: str,
+    rest: str,
+    zone: int | None,
+    today: datetime.date,
+    dayfirst: bool = False,
+    yearfirst: bool = False,
+) -> tuple[Any, ...]:
+    """The parts of a row that is not ISO 8601, read field by field as dateutil does."""
     hour = minute = second = 0
     fraction = ""
     clock = _CLOCK.search(rest) or _HOUR_ONLY.search(rest)
@@ -218,42 +232,47 @@ def _fielded(text: str, rest: str, zone: int | None, today: datetime.date) -> tu
                 raise _unreadable(text)
             hour = hour % 12 + (12 if meridiem.lower() == "p" else 0)
         rest = rest[: clock.start()] + " " + rest[clock.end() :]
-    month_named: int | None = None
-    numbers: list[str] = []
-    separated: list[str] | None = None
+    ymd = _Ymd(text)
     for word in rest.replace(",", " ").split():
         lowered = word.lower().rstrip(".")
-        if lowered in _MONTHS and month_named is None:
-            month_named = _MONTHS[lowered]
+        if lowered in _MONTHS:
+            ymd.add(str(_MONTHS[lowered]), "M")
         elif lowered in _WEEKDAYS:
             continue
         elif clock is not None and zone is None and re.fullmatch(r"[+-]\d{2}:?\d{2}", word):
             zone = _offset(word)
-        elif (number := _NUMBERS.fullmatch(word)) is not None and number.group(1):
-            if separated is not None:
-                raise _unreadable(text)
-            separated = re.split(r"[/.-]", word)
-        elif word.isdigit():
-            numbers.append(word)
+        elif _JOINED.fullmatch(word) is not None:
+            for piece in re.split(r"[/.-]", word):
+                name = piece.lower()
+                if name in _MONTHS:
+                    ymd.add(str(_MONTHS[name]), "M")
+                elif piece.isdigit():
+                    ymd.add(piece)
+                else:
+                    raise _unreadable(text)
+        elif word.isdigit() and len(word) == 8:
+            ymd.add(word[:4], "Y")
+            ymd.add(word[4:6])
+            ymd.add(word[6:])
+        elif word.isdigit() and len(word) == 6 and not ymd.values:
+            ymd.add(word[:2])
+            ymd.add(word[2:4])
+            ymd.add(word[4:])
+        elif word.isdigit() and len(word) <= 4:
+            ymd.add(word)
         else:
             raise _unreadable(text)
-    if separated is not None:
-        if numbers or month_named is not None:
+    if not ymd.values:
+        if clock is None:
             raise _unreadable(text)
-        year, month, day = _dated(separated, today, text)
-    elif month_named is not None:
-        year, month, day = _named(month_named, numbers, today, text)
-    elif len(numbers) == 1 and len(numbers[0]) in (6, 8):
-        digits = numbers[0]
-        cut = len(digits) - 4
-        year = int(digits[:cut]) if cut == 4 else _century(int(digits[:cut]), today)
-        month, day = int(digits[cut : cut + 2]), int(digits[cut + 2 :])
-    elif len(numbers) == 3:
-        year, month, day = _dated(numbers, today, text)
-    elif not numbers and clock is not None:
         year, month, day = today.year, today.month, today.day
     else:
-        raise _unreadable(text)
+        found = ymd.resolved(dayfirst, yearfirst)
+        year = 1 if found[0] is None else found[0]
+        if found[0] is not None and found[0] < 100 and not ymd.century:
+            year = _century(found[0], today)
+        month = 1 if found[1] is None else found[1]
+        day = 1 if found[2] is None else found[2]
     parts = (year, month, day, hour, minute, second, fraction, zone)
     try:
         return _checked(parts)
@@ -261,39 +280,71 @@ def _fielded(text: str, rest: str, zone: int | None, today: datetime.date) -> tu
         raise DateParseError(f"{error}: {text}") from None
 
 
-def _dated(fields: list[str], today: datetime.date, text: str) -> tuple[int, int, int]:
-    """A year, month and day from numbers written with separators, month first."""
-    if len(fields) == 3:
-        if len(fields[0]) == 4:
-            year, month, day = (int(field) for field in fields)
-            return year, month, day
-        first, second, last = (int(field) for field in fields)
-        year = last if len(fields[2]) == 4 else _century(last, today)
-        if first > 12 and second <= 12:
-            first, second = second, first
-        return year, first, second
-    first, second = fields
-    if len(second) == 4 and len(first) <= 2:
-        return int(second), int(first), 1
-    if len(first) == 4 and len(second) <= 2:
-        return int(first), int(second), 1
-    if len(first) <= 2 and len(second) <= 2:
-        return today.year, int(first), int(second)
-    raise _unreadable(text)
+class _Ymd:
+    """The numbers of a date in the order written, as dateutil's `_ymd` holds them."""
 
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.values: list[int] = []
+        self.places: dict[str, int] = {}
+        self.century = False
 
-def _named(month: int, numbers: list[str], today: datetime.date, text: str) -> tuple[int, int, int]:
-    """A year and day from the numbers written beside a month's name."""
-    year: int | None = None
-    day: int | None = None
-    for number in numbers:
-        if len(number) == 4 or int(number) > 31 or day is not None:
-            if year is not None:
-                raise _unreadable(text)
-            year = int(number) if len(number) == 4 else _century(int(number), today)
-        else:
-            day = int(number)
-    return today.year if year is None else year, month, 1 if day is None else day
+    def add(self, written: str, label: str | None = None) -> None:
+        """One number, labelled a year when it has more than two digits."""
+        if len(written) > 2 and label is None:
+            label = "Y"
+        if len(written) > 2:
+            self.century = True
+        if label is not None and label in self.places:
+            raise _unreadable(self.text)
+        self.values.append(int(written))
+        if label is not None:
+            self.places[label] = len(self.values) - 1
+
+    def resolved(self, dayfirst: bool, yearfirst: bool) -> tuple[Any, Any, Any]:
+        """The year, month and day, any of them None, by dateutil's `resolve_ymd`."""
+        values, places = self.values, self.places
+        count = len(values)
+        if count > 3:
+            raise _unreadable(self.text)
+        if count == len(places) or (count == 3 and len(places) == 2):
+            places = dict(places)
+            if count == 3 and len(places) == 2:
+                left = next(i for i in range(3) if i not in places.values())
+                places[next(key for key in "YMD" if key not in places)] = left
+            return tuple(values[places[key]] if key in places else None for key in "YMD")
+        month_at = places.get("M")
+        if count == 1 or (month_at is not None and count == 2):
+            month = values[month_at] if month_at is not None else None
+            other = values[month_at - 1] if month_at is not None else values[0]
+            if count > 1 or month_at is None:
+                return (other, month, None) if other > 31 else (None, month, other)
+            return None, month, None
+        first, second = values[0], values[1]
+        if count == 2:
+            if first > 31:
+                return first, second, None
+            if second > 31:
+                return second, first, None
+            if dayfirst and second <= 12:
+                return None, second, first
+            return None, first, second
+        last = values[2]
+        if month_at == 0:
+            return (second, first, last) if second > 31 else (last, first, second)
+        if month_at == 1:
+            if first > 31 or (yearfirst and last <= 31):
+                return first, second, last
+            return last, second, first
+        if month_at == 2:
+            return (second, last, first) if second > 31 else (first, last, second)
+        if first > 31 or places.get("Y") == 0 or (yearfirst and second <= 12 and last <= 31):
+            if dayfirst and last <= 12:
+                return first, last, second
+            return first, second, last
+        if first > 12 or (dayfirst and second <= 12):
+            return last, second, first
+        return last, first, second
 
 
 def _shift(parts: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -303,7 +354,14 @@ def _shift(parts: tuple[Any, ...]) -> tuple[Any, ...]:
     return (*fields, parts[6], None)
 
 
-def rows_as_text(values: list[Any], mixed: bool, coerce: bool, utc: bool) -> list[str | None]:
+def rows_as_text(
+    values: list[Any],
+    mixed: bool,
+    coerce: bool,
+    utc: bool,
+    dayfirst: bool = False,
+    yearfirst: bool = False,
+) -> list[str | None]:
     """Every row read with its own format, written back in the one shape the core reads.
 
     Args:
@@ -311,6 +369,8 @@ def rows_as_text(values: list[Any], mixed: bool, coerce: bool, utc: bool) -> lis
         mixed: True for `format="mixed"` and False for `format="ISO8601"`.
         coerce: Whether a row that will not read is missing rather than an error.
         utc: Whether rows at different offsets are read against UTC.
+        dayfirst: Whether `format="mixed"` reads two small numbers day first.
+        yearfirst: Whether `format="mixed"` reads three small numbers year first.
 
     Returns:
         One text per row, None where the row is missing, all in one shape: the
@@ -333,7 +393,7 @@ def rows_as_text(values: list[Any], mixed: bool, coerce: bool, utc: bool) -> lis
         if text not in read:
             if mixed:
                 try:
-                    read[text] = _loose_parts(text, today)
+                    read[text] = _loose_parts(text, today, dayfirst, yearfirst)
                 except ValueError:
                     if not coerce:
                         raise
@@ -352,6 +412,8 @@ def written(rows: list[tuple[Any, ...] | None], utc: bool) -> list[str | None]:
     Args:
         rows: The parts of every row, None where the row is missing.
         utc: Whether rows at different offsets are read against UTC.
+        dayfirst: Whether `format="mixed"` reads two small numbers day first.
+        yearfirst: Whether `format="mixed"` reads three small numbers year first.
 
     Returns:
         One text per row, None where the row is missing.

@@ -461,8 +461,6 @@ def test_text_is_read_every_row_with_its_own_format(firepanda: ModuleType) -> No
         {"freq": "D"},
         {"tz": "UTC"},
         {"ambiguous": "NaT"},
-        {"dayfirst": True},
-        {"yearfirst": True},
         {"dtype": "datetime64[ns]"},
         {"copy": True},
     ],

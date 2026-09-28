@@ -22469,8 +22469,12 @@ def to_datetime(
             from, such as a list of strings or a list of whole numbers.
         errors: `raise` to stop on the first row that will not read, or
             `coerce` to turn that row into a missing one.
-        dayfirst: Refused. Only ISO 8601 is guessed and it has one order.
-        yearfirst: Refused, for the same reason.
+        dayfirst: Whether two small numbers are read day first, both when the
+            format is guessed and when each row is read on its own. As in
+            pandas this also turns `2024-01-02` into the first of February,
+            and an explicit format or `ISO8601` ignores it.
+        yearfirst: Whether three small numbers are read year first when each
+            row is read on its own.
         utc: Whether to read every row against UTC, which is the only way a
             column carrying more than one offset can be read at all.
         format: The format the text is written in, None to work it out from
@@ -22522,8 +22526,6 @@ def _instants(
     """`to_datetime` as a column whatever it was handed, which the public name reshapes."""
     from ._frame import Series
 
-    _held_at("dayfirst", dayfirst, False, "firepanda guesses ISO 8601 and nothing else")
-    _held_at("yearfirst", yearfirst, False, "firepanda guesses ISO 8601 and nothing else")
     _held_at("origin", origin, "unix", "an epoch other than 1970 has to move every value")
     if exact is not NO_DEFAULT:
         raise NotImplementedError(
@@ -22543,8 +22545,17 @@ def _instants(
         values = arg.tolist() if hasattr(arg, "tolist") else list(arg)
         blank = all(_row_dates.missing(value) for value in values)
         column = Series(values, dtype="str" if blank else None)
-    if format in ("mixed", "ISO8601"):
-        return _dates_by_row(column, format == "mixed", errors == "coerce", utc)
+    order = (bool(dayfirst), bool(yearfirst))
+    if format == "mixed":
+        return _dates_by_row(column, True, errors == "coerce", utc, *order)
+    if format == "ISO8601":
+        return _dates_by_row(column, False, errors == "coerce", utc)
+    if format is None and dayfirst and unit is None:
+        # The core reads ISO 8601 month first, and pandas reads even that day
+        # first when asked, so the rows go to the reader that knows the order.
+        read = _dates_by_format(column, None, errors == "coerce", utc, *order)
+        if read is not None:
+            return read
     try:
         return Series._wrap(
             column._inner.to_datetime(
@@ -22557,13 +22568,20 @@ def _instants(
     except Exception as error:
         if unit is not None:
             raise translate(error) from None
-        read = _dates_by_format(column, format, errors == "coerce", utc)
+        read = _dates_by_format(column, format, errors == "coerce", utc, *order)
         if read is None:
             raise translate(error) from None
         return read
 
 
-def _dates_by_format(column: Any, format: str | None, coerce: bool, utc: bool) -> Any:
+def _dates_by_format(
+    column: Any,
+    format: str | None,
+    coerce: bool,
+    utc: bool,
+    dayfirst: bool = False,
+    yearfirst: bool = False,
+) -> Any:
     """`to_datetime` of text the core would not read, read against one format the way pandas does.
 
     The core guesses ISO 8601 and nothing else, and it has no month names and
@@ -22586,9 +22604,9 @@ def _dates_by_format(column: Any, format: str | None, coerce: bool, utc: bool) -
         return None
     if format is None:
         first = next((value for value in values if isinstance(value, str)), None)
-        format = None if first is None else _row_formats.guess(first)
+        format = None if first is None else _row_formats.guess(first, dayfirst)
         if format is None:
-            texts = _row_dates.rows_as_text(values, True, coerce, utc)
+            texts = _row_dates.rows_as_text(values, True, coerce, utc, dayfirst, yearfirst)
     if format is not None:
         texts = _row_dates.written(_row_formats.rows_by_format(values, format, coerce), utc)
     read = Series(texts, index=column.index, name=column.name, dtype="str")
@@ -22598,27 +22616,35 @@ def _dates_by_format(column: Any, format: str | None, coerce: bool, utc: bool) -
         raise translate(error) from None
 
 
-def _dates_by_row(column: Any, mixed: bool, coerce: bool, utc: bool) -> Any:
+def _dates_by_row(
+    column: Any,
+    mixed: bool,
+    coerce: bool,
+    utc: bool,
+    dayfirst: bool = False,
+    yearfirst: bool = False,
+) -> Any:
     """`to_datetime` with `format="ISO8601"` or `format="mixed"`, every row read on its own.
 
     A column whose rows all share one shape reads in one pass through the core,
     which is what the first attempt checks. Otherwise the rows are read in
     `_row_dates` and handed back to the core in one shape. A column that is not
     text is read the way it is without a format, since pandas ignores the
-    format for values that are already instants or numbers.
+    format for values that are already instants or numbers. With `dayfirst`
+    text skips the core, which reads ISO 8601 month first.
     """
     from ._frame import Series
 
     values = column.tolist()
     textual = all(isinstance(value, str) or _row_dates.missing(value) for value in values)
     present = any(not _row_dates.missing(value) for value in values)
-    if not textual or present:
+    if not textual or (present and not dayfirst):
         try:
             return Series._wrap(column._inner.to_datetime("", "ns", not textual and coerce, utc))
         except Exception as error:
             if not textual:
                 raise translate(error) from None
-    texts = _row_dates.rows_as_text(values, mixed, coerce, utc)
+    texts = _row_dates.rows_as_text(values, mixed, coerce, utc, dayfirst, yearfirst)
     read = Series(texts, index=column.index, name=column.name, dtype="str")
     try:
         return Series._wrap(read._inner.to_datetime("", "ns", False, utc))
