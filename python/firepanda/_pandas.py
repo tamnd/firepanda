@@ -22805,6 +22805,7 @@ def _instants(
             column = Series([None] * len(arg), index=arg.index, name=arg.name, dtype="str")
     else:
         values = arg.tolist() if hasattr(arg, "tolist") else list(arg)
+        values = _moments_among_text(values, errors, dayfirst, yearfirst, utc, format, unit)
         blank = all(_row_dates.missing(value) for value in values)
         column = Series(values, dtype="str" if blank else None)
     order = (bool(dayfirst), bool(yearfirst))
@@ -22834,6 +22835,45 @@ def _instants(
         if read is None:
             raise translate(error) from None
         return read
+
+
+def _moments_among_text(
+    values: list[Any],
+    errors: str,
+    dayfirst: bool,
+    yearfirst: bool,
+    utc: bool,
+    format: str | None,
+    unit: str | None,
+) -> list[Any]:
+    """A list holding moments and text, with the text read into moments on its own.
+
+    A column holds one kind of value, so a list mixing `Timestamp`, `datetime` or
+    `date` with text cannot go in whole. pandas takes each moment as it is and reads
+    the text with the format it works out from the first piece of text, so the text
+    is read here as a list of its own and put back among the moments. Any other list
+    comes back as it was.
+    """
+    from ._scalars import Timestamp
+
+    texts = [i for i, value in enumerate(values) if isinstance(value, str)]
+    moments = [
+        i for i, value in enumerate(values) if isinstance(value, datetime.date) and value is not NaT
+    ]
+    if not texts or not moments or unit is not None:
+        return values
+    options = (errors, dayfirst, yearfirst, utc, format, NO_DEFAULT, None, "unix")
+    read = _instants([values[i] for i in texts], *options).tolist()
+    out = list(values)
+    for i, value in zip(texts, read, strict=True):
+        out[i] = value
+    for i in moments:
+        moment = Timestamp(out[i])
+        if utc:
+            # The text was read against UTC, so the moments are put on it too.
+            moment = moment.tz_localize("UTC") if moment.tz is None else moment.tz_convert("UTC")
+        out[i] = moment
+    return out
 
 
 def _dates_by_format(
