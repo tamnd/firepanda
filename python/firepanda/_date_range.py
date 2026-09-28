@@ -30,6 +30,7 @@ from typing import Any
 from ._calendar_steps import CalendarStep, calendar_step
 from ._datetime import DatetimeIndex
 from ._frame import Series
+from ._frequency import _held
 from ._pandas import to_datetime
 from ._resample import _CALENDAR, _NANOS
 from ._scalars import Timestamp
@@ -251,7 +252,8 @@ def date_range(
             given, or for an unknown inclusive or unit.
         NotImplementedError: For a semi month, business hour or week of month step.
     """
-    return _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, None)
+    made = _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, None)
+    return _held(made, "D" if freq is None and None in (start, end, periods) else freq)
 
 
 def _ranged(
@@ -414,7 +416,8 @@ def bdate_range(
     if step is not None:
         step.with_calendar(weekmask, holidays)
     unit = kwargs.pop("unit", None)
-    return _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, step)
+    made = _ranged(start, end, periods, freq, tz, normalize, name, inclusive, unit, kwargs, step)
+    return _held(made, freq)
 
 
 def _place(ends: list[_End | None], zone: str) -> None:

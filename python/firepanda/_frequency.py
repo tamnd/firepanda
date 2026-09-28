@@ -234,3 +234,79 @@ def infer_freq(index: Any) -> str | None:
     if not isinstance(index, DatetimeIndex):
         index = DatetimeIndex(index)
     return _inferred(index)
+
+
+def _offset_of(freq: Any) -> Any:
+    """The offset a frequency is written as: text, an offset, a span or None."""
+    from . import offsets
+    from ._scalars import Timedelta
+
+    if freq is None or isinstance(freq, offsets.BaseOffset):
+        return freq
+    if isinstance(freq, str):
+        try:
+            return offsets._parsed(freq)
+        except ValueError as error:
+            # Text like `1.5h` or `2D3h` is a fixed length, which pandas holds as one tick.
+            try:
+                nanos = Timedelta(freq).value
+            except ValueError:
+                raise error from None
+            return offsets._tick_of(nanos)
+    # A span is a fixed step even when it is whole days, so two days is 48 hours.
+    return offsets._tick_of(Timedelta(freq).value)
+
+
+def _conforming(index: Any, offset: Any) -> None:
+    """Refuses a frequency the labels do not keep, in pandas' words.
+
+    The labels keep it when they are the range that starts at the first of them
+    and steps by it, which is how pandas checks, and an empty index keeps any.
+    """
+    from ._date_range import date_range
+    from ._timedelta import TimedeltaIndex, timedelta_range
+
+    if not len(index):
+        return
+    inferred = index.inferred_freq
+    if inferred == offset.freqstr:
+        return
+    spans = isinstance(index, TimedeltaIndex)
+    # timedelta_range reads a step from text, and every offset it can take has one.
+    step = offset.freqstr if spans else offset
+    ranged = timedelta_range if spans else date_range
+    try:
+        made = ranged(start=index[0], periods=len(index), freq=step, unit=index.unit)
+        kept = made.asi8 == index.asi8
+    except (ValueError, TypeError, NotImplementedError):
+        kept = False
+    if not kept:
+        raise ValueError(
+            f"Inferred frequency {inferred} from passed values does not conform to passed"
+            f" frequency {offset.freqstr}"
+        )
+
+
+def _hold(index: Any, freq: Any, data: Any) -> None:
+    """Gives a newly built index the frequency pandas' constructor gives it.
+
+    Left out, the frequency comes along from an index of the same kind. `infer`
+    takes the one the labels keep, and anything else has to be one they keep.
+    """
+    from ._pandas import NO_DEFAULT
+
+    if freq is NO_DEFAULT:
+        held = getattr(data, "_freq", None) if type(data) is type(index) else None
+    elif isinstance(freq, str) and freq == "infer":
+        held = _offset_of(index.inferred_freq)
+    else:
+        held = _offset_of(freq)
+        if held is not None:
+            _conforming(index, held)
+    index._freq = held
+
+
+def _held(index: Any, freq: Any) -> Any:
+    """The index, holding the frequency it was made at."""
+    index._freq = _offset_of(freq)
+    return index

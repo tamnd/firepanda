@@ -451,7 +451,6 @@ def test_text_is_read_every_row_with_its_own_format(firepanda: ModuleType) -> No
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"freq": "D"},
         {"tz": "UTC"},
         {"ambiguous": "NaT"},
         {"dtype": "datetime64[ns]"},

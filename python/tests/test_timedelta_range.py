@@ -118,7 +118,8 @@ def test_mistakes_raise_as_pandas_raises(
         build(firepanda)
 
 
-def test_a_held_frequency_is_refused(firepanda: ModuleType) -> None:
-    """Holding a frequency means inferring one, which is not supported yet."""
-    with pytest.raises(NotImplementedError, match="freq= is not supported"):
-        firepanda.TimedeltaIndex(["1s"], freq="s")
+def test_a_frequency_the_labels_do_not_keep_is_refused(firepanda: ModuleType) -> None:
+    """The labels have to keep a frequency they are given, as in pandas."""
+    assert firepanda.TimedeltaIndex(["1s"], freq="s").freqstr == "s"
+    with pytest.raises(ValueError, match="does not conform to passed frequency s"):
+        firepanda.TimedeltaIndex(["1s", "3s"], freq="s")

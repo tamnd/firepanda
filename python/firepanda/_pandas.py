@@ -21724,11 +21724,22 @@ class IndexStrings:
         return Index(answer.rename(self._index.name))
 
 
+def _keep_freq(source: Any, made: Any) -> None:
+    """Carries the frequency an index holds onto one made from it with the same labels."""
+    held = getattr(source, "_freq", None)
+    if held is not None:
+        made._freq = held
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
-    __slots__ = ("_inner",)
-    """The one piece of state, for the reason `DataFrameMixin` gives."""
+    __slots__ = ("_freq", "_inner")
+    """The labels, for the reason `DataFrameMixin` gives, and the frequency an
+    index of instants or spans holds. The frequency lives here rather than on
+    those two classes so that every index has one shape, which is what lets an
+    index become one of them after it is built. It is unset on every other
+    index, and reading it goes through `getattr` with None beside it."""
 
     _inner: _firepanda.Index
 
@@ -21781,6 +21792,14 @@ class IndexMixin:
         try:
             if isinstance(data, IndexMixin):
                 self._inner = data._inner.renamed(label)
+                if data._temporal and type(self).__name__ == "Index":
+                    # pandas keeps an index of instants or spans one, frequency and all.
+                    from ._datetime import DatetimeIndex
+                    from ._timedelta import TimedeltaIndex
+
+                    spans = str(data.dtype).startswith("timedelta64")
+                    self.__class__ = TimedeltaIndex if spans else DatetimeIndex
+                    _keep_freq(data, self)
             elif isinstance(data, SeriesMixin):
                 self._inner = data._inner.to_index(label)
             elif (moved := _instant_index(data, label)) is not None:
@@ -21823,8 +21842,14 @@ class IndexMixin:
             if isinstance(key, slice):
                 start, stop, step = key.indices(self._inner.length())
                 if step == 1:
-                    return made._wrap(self._inner.slice_rows(start, max(start, stop)))
-                return made._wrap(self._inner.take(list(range(start, stop, step))))
+                    sliced = made._wrap(self._inner.slice_rows(start, max(start, stop)))
+                else:
+                    sliced = made._wrap(self._inner.take(list(range(start, stop, step))))
+                # A slice keeps every step'th label, so it keeps the frequency that many times.
+                held = getattr(self, "_freq", None)
+                if held is not None:
+                    sliced._freq = held if step == 1 else held * step
+                return sliced
             if isinstance(key, (list, tuple)):
                 picks = list(key)
                 if picks and all(isinstance(k, bool) for k in picks):
@@ -21924,6 +21949,7 @@ class IndexMixin:
             copied: Index = made._wrap(self._inner.renamed(wanted))
         except Exception as error:
             raise translate(error) from None
+        _keep_freq(self, copied)
         return copied
 
     def __reduce__(self) -> tuple[Any, ...]:
@@ -23117,6 +23143,7 @@ class IndexMixin:
             raise translate(error) from None
         if not inplace:
             answered: Index = made._wrap(renamed)
+            _keep_freq(self, answered)
             return answered
         self._inner = renamed
         return None
@@ -27099,7 +27126,8 @@ def _index_text(index: Any) -> str:
     if len(values) > most:
         attrs.append(f"length={len(values)}")
     if klass not in ("Index", "CategoricalIndex"):
-        attrs.append("freq=None")
+        held = getattr(index, "_freq", None)
+        attrs.append(f"freq={'None' if held is None else _pprinted(held.freqstr)}")
     return f"{klass}({summary}{', '.join(attrs)})"
 
 

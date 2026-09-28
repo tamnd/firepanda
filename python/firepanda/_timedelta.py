@@ -16,9 +16,11 @@ rules below were measured against pandas 3.0.
   the step's.
 - `closed` keeps both ends, or drops the end it does not name.
 
-`freq`, `freqstr` and `resolution` need a held frequency, `floor`,
-`ceil` and `round` need a rounding kernel for spans, and `to_pytimedelta` needs a
-column of Python objects. None of them is spelled here, so none of them resolves.
+An index holds the frequency `timedelta_range` made it at, or the one its
+constructor was given, as `freq` and `freqstr`. `floor`, `ceil` and `round` need a
+rounding kernel for spans, `resolution` is not written yet, and `to_pytimedelta`
+needs a column of Python objects. None of them is spelled here, so none of them
+resolves.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from typing import Any
 
 from ._date_range import _UNITS, _frequency, _points
 from ._frame import DataFrame, Index, Series
+from ._frequency import _conforming, _held, _hold, _offset_of
 from ._pandas import (
     NO_DEFAULT,
     _held_values,
@@ -70,8 +73,9 @@ class TimedeltaIndex(Index):
 
         Args:
             data: The spans.
-            freq: Refused. Holding a frequency means inferring one and checking
-                the labels against it.
+            freq: The frequency the index holds. Left out it comes along from
+                another `TimedeltaIndex`, `infer` takes the one the labels keep,
+                and anything else has to be one they keep.
             dtype: Refused. The unit comes off the values and `as_unit` changes it.
             copy: Refused. There is one behaviour and it always copies.
             name: The level name, or the name the data carries.
@@ -80,11 +84,6 @@ class TimedeltaIndex(Index):
             TypeError: If nothing was passed, in pandas' words.
             NotImplementedError: If any of the refused arguments was passed.
         """
-        if freq is not NO_DEFAULT:
-            raise NotImplementedError(
-                "freq= is not supported yet, because holding a frequency means inferring"
-                " one and checking the labels against it"
-            )
         if dtype is not None:
             raise NotImplementedError(
                 "dtype= is not supported yet, because the unit is read off the values and"
@@ -105,6 +104,7 @@ class TimedeltaIndex(Index):
                 self._inner = data._inner.renamed(label)
             except Exception as error:
                 raise translate(error) from None
+            _hold(self, freq, data)
             return
         values: Any = _held_values(data._inner) if isinstance(data, Index) else data
         if not isinstance(values, Series):
@@ -115,6 +115,25 @@ class TimedeltaIndex(Index):
             self._inner = values._inner.to_index(label)
         except Exception as error:
             raise translate(error) from None
+        _hold(self, freq, data)
+
+    @property
+    def freq(self) -> Any:
+        """The frequency the index holds, as an offset, or None."""
+        return getattr(self, "_freq", None)
+
+    @freq.setter
+    def freq(self, value: Any) -> None:
+        held = _offset_of(value)
+        if held is not None:
+            _conforming(self, held)
+        self._freq = held
+
+    @property
+    def freqstr(self) -> str | None:
+        """The frequency the index holds, as text, or None."""
+        held = self.freq
+        return None if held is None else held.freqstr
 
     def _field(self, field: str) -> Index:
         """One field of every label, as pandas reads it off a span."""
@@ -179,7 +198,9 @@ class TimedeltaIndex(Index):
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""
-        return TimedeltaIndex(self._column().dt.as_unit(unit), name=self.name)
+        moved = TimedeltaIndex(self._column().dt.as_unit(unit), name=self.name)
+        moved._freq = self.freq
+        return moved
 
     def _column(self) -> Series:
         """The labels as a column of spans."""
@@ -305,4 +326,4 @@ def timedelta_range(
     spans = to_timedelta(Series(counts or [0], dtype="int64"), unit=unit).dt.as_unit(unit)
     if not counts:
         spans = spans.iloc[:0]
-    return TimedeltaIndex(spans, name=name)
+    return _held(TimedeltaIndex(spans, name=name), freq)
