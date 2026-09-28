@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_datetime of moments mixed with text
+
+`to_datetime` of a list mixing `Timestamp`, `datetime` or `date` values with text now reads as pandas reads it, taking each moment as it is and reading the text with the format worked out from the first piece of text, where it refused the list as a column of mixed kinds. `format`, `dayfirst`, `errors="coerce"` and `utc` apply to the text as before, and under `utc` the moments are put on UTC too.
+
 ### Added: Instants and spans among objects in a frame's values
 
 When a frame's `values` or `to_numpy()` is an object array, an instant or a span in it is now a `Timestamp` or a `Timedelta` and a gap is `NaT`, as pandas gives them, where numpy had put a `datetime`, a `timedelta` and None.
