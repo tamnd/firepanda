@@ -252,7 +252,11 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
 
     if node.kind == ExprKind.WINDOW:
         ref frame = node.frame
-        var written = String(agg_kind(node.op)) if frame.function == WINDOW_FOLD else window_function_name(frame.function)
+        var written = String(
+            agg_kind(node.op)
+        ) if frame.function == WINDOW_FOLD else window_function_name(
+            frame.function
+        )
         written += "("
         for i in range(frame.args):
             if i != 0:

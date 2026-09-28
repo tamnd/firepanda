@@ -2801,7 +2801,8 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 "over",
                 memo,
                 reuse=True,
-            ) if first > 0 else -1
+            ) if first
+            > 0 else -1
         )
         seconds.append(
             _lower_expr(
@@ -2812,7 +2813,8 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 "over",
                 memo,
                 reuse=True,
-            ) if first > 1 else -1
+            ) if first
+            > 1 else -1
         )
         kinds.append(agg_kind(node.op))
         marked.append(folds_empty_to_null(node.op))

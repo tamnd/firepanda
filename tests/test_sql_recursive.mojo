@@ -169,9 +169,11 @@ def test_a_filter_above_stays_above() raises:
 def test_text_is_carried_from_round_to_round() raises:
     assert_equal(
         shown(
-            "WITH RECURSIVE t AS (SELECT 1 AS depth, 'a' AS path UNION ALL"
-            " SELECT depth + 1, CASE WHEN path = 'a' THEN 'ab' ELSE 'abb' END"
-            " FROM t WHERE depth < 3) SELECT path FROM t",
+            (
+                "WITH RECURSIVE t AS (SELECT 1 AS depth, 'a' AS path UNION ALL"
+                " SELECT depth + 1, CASE WHEN path = 'a' THEN 'ab' ELSE 'abb'"
+                " END FROM t WHERE depth < 3) SELECT path FROM t"
+            ),
             "path",
         ),
         "a,ab,abb",

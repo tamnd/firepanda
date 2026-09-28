@@ -957,9 +957,9 @@ def _bind_expr(
         and exprs.nodes[root].frame.function != WINDOW_FOLD
     ):
         var function = exprs.nodes[root].frame.function
-        var argument = below[0] if exprs.nodes[
-            root
-        ].frame.args > 0 else LogicalType.NULL
+        var argument = (
+            below[0] if exprs.nodes[root].frame.args > 0 else LogicalType.NULL
+        )
         exprs.nodes[root].type = window_type(function, argument)
     elif kind == ExprKind.AGGREGATE or kind == ExprKind.WINDOW:
         exprs.nodes[root].type = agg_type(

@@ -4135,7 +4135,10 @@ def _lower_over(
         or function == WINDOW_LAST_VALUE
         or function == WINDOW_NTH_VALUE
     )
-    if flags & (CALL_IGNORE_NULLS | CALL_RESPECT_NULLS) != 0 and not reads_a_row:
+    if (
+        flags & (CALL_IGNORE_NULLS | CALL_RESPECT_NULLS) != 0
+        and not reads_a_row
+    ):
         raise Error(
             String(
                 name,
@@ -4191,9 +4194,13 @@ def _lower_over(
                     len(args),
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
         if len(args) > 1:
-            frame.amount = _signed_count(ast, args[1], String("the offset of ", name))
+            frame.amount = _signed_count(
+                ast, args[1], String("the offset of ", name)
+            )
         if len(args) > 2:
             operands.append(
                 _lower_operand(ast, args[2], plan, walk, scope, grouped)
@@ -4206,7 +4213,9 @@ def _lower_over(
                     len(args),
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
         frame.amount = _constant_count(ast, args[1], "the row nth_value reads")
         if frame.amount < 1:
             raise Error("nth_value counts its rows from one")
@@ -4217,7 +4226,9 @@ def _lower_over(
                     name, " takes one argument and this call has ", len(args)
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
     elif len(args) != 0:
         raise Error(
             String(name, " takes no arguments and this call has ", len(args))
@@ -4301,9 +4312,7 @@ def _named_windows(ast: Ast, clauses: UInt32, mut walk: _Walk) raises:
         var name = fold(ast.text(named.payload))
         for seen in walk.window_defs:
             if seen == name:
-                raise Error(
-                    String('window "', name, '" is already defined')
-                )
+                raise Error(String('window "', name, '" is already defined'))
         walk.window_defs.append(name)
         walk.window_specs.append(named.a)
 
@@ -4471,8 +4480,10 @@ def _read_frame(
     if mode == FRAME_RANGE and offset and sorts != 1:
         raise Error(
             String(
-                "a RANGE frame with an offset counts along one ORDER BY key,"
-                " and this window has ",
+                (
+                    "a RANGE frame with an offset counts along one ORDER BY"
+                    " key, and this window has "
+                ),
                 sorts,
             )
         )
@@ -9731,7 +9742,7 @@ def _spelled_out(
             end += 1
             while end < size:
                 if rest[byte=end] == '"':
-                    if end + 1 < size and rest[byte = end + 1] == '"':
+                    if end + 1 < size and rest[byte=end + 1] == '"':
                         name += '"'
                         end += 2
                         continue
