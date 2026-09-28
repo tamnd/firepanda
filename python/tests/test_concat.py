@@ -127,8 +127,7 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(SECOND)], keys=["p", "q"]),
-    lambda m: m.concat({"p": m.DataFrame(FIRST)}),
+    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(SECOND)], keys=["p", "q"], axis=1),
     lambda m: m.concat([m.DataFrame(FIRST)], names=["n"]),
     lambda m: m.concat([m.DataFrame({"a": [1]}), m.DataFrame({"a": ["x"]})]),
     lambda m: m.concat([m.DataFrame({"a": [True]}), m.DataFrame({"b": [1]})]),

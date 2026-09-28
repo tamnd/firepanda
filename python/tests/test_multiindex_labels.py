@@ -33,6 +33,18 @@ def pairs(lib: ModuleType) -> Any:
     return lib.MultiIndex.from_tuples([("b", 2), ("a", 1), ("a", 3), (None, 4)], names=["k", "n"])
 
 
+def gaps(lib: ModuleType) -> Any:
+    return lib.DataFrame(
+        {
+            "k": ["b", "a", "b", "a", "b", None],
+            "v": [1.0, 2.0, 3.0, None, 5.0, 6.0],
+            "w": [1, 2, 3, 4, 5, 6],
+            "c": ["p", "q", "p", "p", "q", "q"],
+        },
+        index=[10, 11, 12, 13, 14, 15],
+    )
+
+
 def pairs_series(lib: ModuleType, names: list[Any] | None = None) -> Any:
     rows = [("b", "y"), ("a", "x"), ("a", "y")]
     return lib.Series([1, 2, 3], index=lib.MultiIndex.from_tuples(rows, names=names), name="n")
@@ -159,6 +171,30 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: frame(lib).groupby("a")[["b", "w"]].cov(ddof=0).round(12),
     lambda lib: frame(lib).groupby("a")["v"].corr(frame(lib)["w"]).round(12),
     lambda lib: frame(lib).groupby("a")["v"].cov(frame(lib)["b"]).round(12),
+    lambda lib: gaps(lib).groupby("k")["v"].rolling(2).sum(),
+    lambda lib: gaps(lib).groupby("k")[["v", "w"]].rolling(2, min_periods=1).mean(),
+    lambda lib: gaps(lib).groupby("k")["w"].expanding().sum(),
+    lambda lib: gaps(lib).groupby("k")["w"].ewm(span=3).mean().round(12),
+    lambda lib: gaps(lib).groupby("k")["w"].rolling(-1),
+    lambda lib: gaps(lib).groupby("k")["w"].rolling(2).nope,
+    lambda lib: gaps(lib).groupby("k").take([0]),
+    lambda lib: gaps(lib).groupby("k")["w"].take([-1]),
+    lambda lib: gaps(lib).groupby("k").value_counts(),
+    lambda lib: gaps(lib).groupby("k").value_counts(["c"], normalize=True),
+    lambda lib: gaps(lib).groupby("k")[["c"]].value_counts(ascending=True),
+    lambda lib: gaps(lib).groupby("k", as_index=False).value_counts(["c"], sort=False),
+    lambda lib: gaps(lib).groupby("k", sort=False)["c"].value_counts(sort=False),
+    lambda lib: gaps(lib).groupby("k")[["v", "w"]].corrwith(gaps(lib)["w"]).round(12),
+    lambda lib: lib.concat([gaps(lib).head(2), gaps(lib).tail(1)], keys=["x", "y"]),
+    lambda lib: lib.concat([gaps(lib)["w"].head(2), gaps(lib)["w"].tail(1)], keys=["x", "y"]),
+    lambda lib: lib.concat({"x": gaps(lib).head(1), "n": None, "y": gaps(lib).tail(1)}),
+    lambda lib: lib.concat(
+        [gaps(lib).head(1), gaps(lib).tail(1)], keys=[("x", 1), ("y", 2)], names=["a", "b"]
+    ),
+    lambda lib: lib.concat([gaps(lib)["w"]], keys=["x"], names=["part"]),
+    lambda lib: lib.concat([keyed(lib).head(2)], keys=["x"]),
+    lambda lib: lib.concat([gaps(lib)], keys=["x", "y"]),
+    lambda lib: lib.concat([gaps(lib)], keys=["x"], ignore_index=True),
     lambda lib: pairs_series(lib).unstack(),
     lambda lib: pairs_series(lib, ["p", "q"]).unstack(0).to_dict(),
     lambda lib: pairs_series(lib, ["p", "q"]).unstack(fill_value=0).to_dict(),
