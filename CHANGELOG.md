@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: frames, columns and indexes pickle, with to_pickle and read_pickle
+
+A frame, a column or an index now pickles. It travels as the bytes of the Arrow C data it already exports, with the row labels as leading columns, so pickling needs neither pyarrow nor a Python object per value. `attrs`, the refusal of repeated labels, names that are numbers or tuples, and the class of an index (a range, instants, spans or pairs) all come back. `DataFrame.to_pickle`, `Series.to_pickle`, `pandas.to_pickle` and `pandas.read_pickle` take pandas' parameters. They write and read gzip, bz2, xz, zip, tar and zstd, chosen by the file's ending or by name, to a path or a handle. An unknown compression, storage options on a local file and a missing file raise what pandas raises. A firepanda pickle names firepanda's classes, so pandas cannot read it, and the other way round. A column name that is a tuple now prints as pandas prints it, as `Name: (a, 1)`.
+
 ### Added: floats print by display.precision and display.float_format
 
 The repr and `to_string` of a frame or a column now read `display.precision` for how many digits a float gets, and `display.float_format` when no `float_format` is given, as pandas does, for float columns and for floats in text columns alike. `set_eng_float_format` sets that option to pandas' engineering formatter, so floats print as `1.23M` or `1.230E+06`, and `show_versions` prints the system and the versions of firepanda and what it reads through, as a table, as JSON or into a file.

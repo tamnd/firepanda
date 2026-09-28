@@ -82,6 +82,7 @@ from ._pandas import (
     to_timedelta,
     unique,
 )
+from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
@@ -144,6 +145,7 @@ __all__ = [
     "qcut",
     "read_csv",
     "read_json",
+    "read_pickle",
     "reset_option",
     "set_eng_float_format",
     "set_option",
@@ -151,6 +153,7 @@ __all__ = [
     "timedelta_range",
     "to_datetime",
     "to_numeric",
+    "to_pickle",
     "to_timedelta",
     "unique",
 ]

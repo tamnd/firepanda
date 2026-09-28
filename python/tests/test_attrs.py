@@ -270,9 +270,10 @@ def test_the_copy_keyword_is_deprecated(firepanda: ModuleType) -> None:
 
 
 def test_a_frame_with_no_attrs_is_not_touched(firepanda: ModuleType) -> None:
-    """The answer of a frame holding nothing holds nothing either, and pickles as before."""
+    """The answer of a frame holding nothing holds nothing either, and pickles with none."""
     frame = firepanda.DataFrame({"a": [1, 2]})
     assert (frame + 1).attrs == {}
     assert frame.flags.allows_duplicate_labels
-    with pytest.raises(TypeError):
-        pickle.dumps(frame)
+    back = pickle.loads(pickle.dumps(frame))
+    assert back.attrs == {}
+    assert back.flags.allows_duplicate_labels
