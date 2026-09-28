@@ -47,9 +47,11 @@ from ._config import (
 )
 from ._date_range import bdate_range, date_range
 from ._datetime import DatetimeIndex
+from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._interval import Interval
 from ._multi import MultiIndex
+from ._na import NA, IndexSlice
 from ._normalize import json_normalize
 from ._pandas import (
     Grouper,
@@ -79,12 +81,14 @@ from ._pandas import (
     to_timedelta,
     unique,
 )
+from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
 from ._timedelta import TimedeltaIndex, timedelta_range
 from .offsets import DateOffset
 
 __all__ = [
+    "NA",
     "Categorical",
     "CategoricalDtype",
     "CategoricalIndex",
@@ -94,6 +98,7 @@ __all__ = [
     "Flags",
     "Grouper",
     "Index",
+    "IndexSlice",
     "Interval",
     "MultiIndex",
     "NaT",
@@ -106,12 +111,14 @@ __all__ = [
     "__version__",
     "api",
     "bdate_range",
+    "col",
     "concat",
     "crosstab",
     "cut",
     "date_range",
     "describe_option",
     "errors",
+    "eval",
     "factorize",
     "from_arrow",
     "from_dummies",
