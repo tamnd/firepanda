@@ -623,7 +623,7 @@ from .catalog import NOT_FOUND, Catalog, KIND_FRAME, fold
 from .generated.functions import KIND_AGGREGATE
 from .registry import Registry
 from .cte import NOT_A_CTE, aliased, read_ctes
-from .printer import print_expr
+from .printer import print_expr, print_window
 from .star import (
     NOT_REPLACED,
     Renaming,
@@ -2622,6 +2622,12 @@ struct _Walk(Movable):
     var grouping_names: List[String]
     """What the column each of those comes out in is called."""
 
+    var window_defs: List[String]
+    """The names the block's `WINDOW` clause gives, folded."""
+
+    var window_specs: List[UInt32]
+    """The `EXPR_WINDOW` each of those names stands for."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -2643,6 +2649,8 @@ struct _Walk(Movable):
         self.sets = False
         self.groupings = List[List[Int]]()
         self.grouping_names = List[String]()
+        self.window_defs = List[String]()
+        self.window_specs = List[UInt32]()
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -4073,17 +4081,7 @@ def _lower_over(
         not one the engine has.
     """
     var node = ast.exprs[Int(at)]
-    var window = ast.exprs[Int(node.b)]
-    if window.payload != 0:
-        raise Error(
-            String(
-                (
-                    "firepanda lowers a window written out in full so far, and"
-                    " this one is written as OVER "
-                ),
-                ast.text(window.payload),
-            )
-        )
+    var window = _spell_window(ast, node.b, walk, 0)
     var function = window_function_named(name)
     if function == -1 and not _is_aggregate(name):
         raise Error(
@@ -4195,7 +4193,7 @@ def _lower_over(
 
     var partition = List[Int]()
     var key = String()
-    for entry in ast.items(window.children):
+    for entry in window.partition:
         partition.append(_lower_operand(ast, entry, plan, walk, scope, grouped))
         key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
 
@@ -4203,7 +4201,7 @@ def _lower_over(
     # an ORDER BY, unless the query says otherwise.
     var order = List[Int]()
     key += "|"
-    for entry in ast.items(window.a):
+    for entry in window.order:
         var sort = ast.stmts[Int(entry)]
         if sort.a == NO_NODE:
             raise Error("a window orders by expressions, and ALL is not one")
@@ -4219,8 +4217,8 @@ def _lower_over(
             ";",
         )
 
-    if window.b != NO_NODE:
-        _read_frame(ast, window.b, len(order), frame)
+    if window.frame != NO_NODE:
+        _read_frame(ast, window.frame, len(order), frame)
 
     var kind = _agg_kind(name, distinct) if function == -1 else AggKind.SUM
     var built = plan.exprs.framed(
@@ -4235,6 +4233,110 @@ def _lower_over(
         built, String("__win_", len(walk.windows)), key^
     )
     return plan.exprs.column(String(walk.window_names[place]))
+
+
+@fieldwise_init
+struct _Spelled(Movable):
+    """A window with every name it starts from filled in."""
+
+    var partition: List[UInt32]
+    """The `PARTITION BY` expressions."""
+
+    var order: List[UInt32]
+    """The `STMT_ORDER` nodes of its `ORDER BY`."""
+
+    var frame: UInt32
+    """The `EXPR_FRAME`, or 0 for none."""
+
+
+def _named_windows(ast: Ast, clauses: UInt32, mut walk: _Walk) raises:
+    """Reads a block's `WINDOW` clause onto the walk.
+
+    Only the names are read here. What each one stands for is put together
+    when a call names it, since `WINDOW a AS (b ORDER BY x), b AS (...)` is
+    allowed to name a window written after it.
+
+    Args:
+        ast: The arenas.
+        clauses: The block's clause run.
+        walk: Where the names go.
+
+    Raises:
+        If one name is given twice.
+    """
+    for entry in ast.items(ast.slot(clauses, CLAUSE_WINDOW)):
+        var named = ast.stmts[Int(entry)]
+        var name = fold(ast.text(named.payload))
+        for seen in walk.window_defs:
+            if seen == name:
+                raise Error(
+                    String('window "', name, '" is already defined')
+                )
+        walk.window_defs.append(name)
+        walk.window_specs.append(named.a)
+
+
+def _spell_window(
+    ast: Ast, at: UInt32, walk: _Walk, depth: Int
+) raises -> _Spelled:
+    """Puts together what an `OVER` means, following the window it names.
+
+    DuckDB's rules. `OVER w` is `w` as it is written, frame and all. A window
+    that starts from `w` and adds to it can add a partition only where `w` has
+    none and an order only where `w` has none, and cannot start from a `w` that
+    has a frame, since the frame is the last thing in a window and there would
+    be nothing left for it to add.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_WINDOW`.
+        walk: The block's named windows.
+        depth: How many names have been followed to get here.
+
+    Returns:
+        The window's parts.
+
+    Raises:
+        If a name is not defined, names itself, or is added to in a way DuckDB
+        turns down.
+    """
+    var window = ast.exprs[Int(at)]
+    var own = _Spelled(
+        ast.items(window.children), ast.items(window.a), window.b
+    )
+    if window.payload == 0:
+        return own^
+    var name = fold(ast.text(window.payload))
+    var place = -1
+    for i in range(len(walk.window_defs)):
+        if walk.window_defs[i] == name:
+            place = i
+    if place == -1:
+        raise Error(String('window "', name, '" does not exist'))
+    if depth > len(walk.window_defs):
+        raise Error(String('window "', name, '" is defined in terms of itself'))
+    var base = _spell_window(ast, walk.window_specs[place], walk, depth + 1)
+    if len(own.partition) == 0 and len(own.order) == 0 and own.frame == NO_NODE:
+        return base^
+    if base.frame != NO_NODE:
+        raise Error(
+            String(
+                'cannot copy window "', name, '" because it has a frame clause'
+            )
+        )
+    if len(own.partition) != 0 and len(base.partition) != 0:
+        raise Error(
+            String('cannot override the PARTITION BY of window "', name, '"')
+        )
+    if len(own.order) != 0 and len(base.order) != 0:
+        raise Error(
+            String('cannot override the ORDER BY of window "', name, '"')
+        )
+    if len(own.partition) == 0:
+        own.partition = base.partition.copy()
+    if len(own.order) == 0:
+        own.order = base.order.copy()
+    return own^
 
 
 def _signed_count(ast: Ast, at: UInt32, what: String) raises -> Int:
@@ -8633,11 +8735,6 @@ def _block(
             " two so far, and a TABLE is a different node"
         )
     var clauses = query.children
-    if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
-        raise Error(
-            "firepanda does not lower a WINDOW clause yet, and the same window"
-            " written out after the OVER of each call does lower"
-        )
     if ast.slot(clauses, CLAUSE_SAMPLE) != NO_NODE:
         raise not_implemented(SELECT_SAMPLE, "", "")
 
@@ -8656,8 +8753,16 @@ def _block(
             if _has_aggregate(ast, ast.stmts[Int(at)].a):
                 grouped = True
                 break
+    # A named window's keys are not under any call, so they are asked here,
+    # and one that folds makes the block fold as one written after OVER does.
+    for entry in ast.items(ast.slot(clauses, CLAUSE_WINDOW)):
+        var named = ast.exprs[Int(ast.stmts[Int(entry)].a)]
+        for key in ast.items(named.children):
+            if _has_aggregate(ast, key):
+                grouped = True
 
     var walk = _Walk()
+    _named_windows(ast, clauses, walk)
     var at: Int
     var schema = Schema()
     var origin = List[Int]()
@@ -9124,7 +9229,11 @@ def _block(
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
-            names.append(_name_of(ast, grammar, item.a, i, scope))
+            names.append(
+                _spelled_out(
+                    ast, grammar, _name_of(ast, grammar, item.a, i, scope), walk
+                )
+            )
         var kind = plan.exprs.nodes[lowered].kind
         if kind != ExprKind.COLUMN and kind != ExprKind.LITERAL:
             item_shapes.append(_agg_shape(plan.exprs, lowered))
@@ -9374,6 +9483,85 @@ def _name_of(
         return print_expr(ast, at, grammar)
     except:
         return String("__expr_", place)
+
+
+def _spelled_out(
+    ast: Ast, grammar: Grammar, text: String, walk: _Walk
+) raises -> String:
+    """Writes every named window in a column's name out in full.
+
+    DuckDB names `sum(x) OVER w` after what `w` stands for, `sum(x) OVER
+    (PARTITION BY g)`, so a query means the same column whether it names its
+    window or writes it out. The printer only has the name, so what follows
+    each `OVER (` is read back as a name and put back as the window.
+
+    Args:
+        ast: The arenas.
+        grammar: A loaded grammar, for the printer.
+        text: The name as printed.
+        walk: The block's named windows.
+
+    Returns:
+        The name with the windows written out.
+
+    Raises:
+        If a window could not be printed.
+    """
+    if len(walk.window_defs) == 0:
+        return text.copy()
+    var mark = "OVER ("
+    var out = String()
+    var rest = text.copy()
+    while True:
+        var at = rest.find(mark)
+        if at == -1:
+            out += rest
+            return out^
+        var start = at + mark.byte_length()
+        out += rest[byte=0:start]
+        var size = rest.byte_length()
+        var end = start
+        var name = String()
+        if end < size and rest[byte=end] == '"':
+            end += 1
+            while end < size:
+                if rest[byte=end] == '"':
+                    if end + 1 < size and rest[byte = end + 1] == '"':
+                        name += '"'
+                        end += 2
+                        continue
+                    end += 1
+                    break
+                name += rest[byte=end]
+                end += 1
+        else:
+            while end < size:
+                var c = rest[byte=end]
+                if not (
+                    c == "_"
+                    or (c >= "a" and c <= "z")
+                    or (c >= "A" and c <= "Z")
+                    or (c >= "0" and c <= "9")
+                ):
+                    break
+                end += 1
+            name = String(rest[byte=start:end])
+        var place = -1
+        if end < size and (rest[byte=end] == ")" or rest[byte=end] == " "):
+            var folded = fold(name)
+            for i in range(len(walk.window_defs)):
+                if walk.window_defs[i] == folded:
+                    place = i
+        if place == -1:
+            var after = String(rest[byte=start:])
+            rest = after^
+            continue
+        var whole = print_window(ast, walk.window_specs[place], grammar)
+        var body = _spelled_out(ast, grammar, String("OVER ", whole), walk)
+        # Past the `OVER (` and short of the `)`.
+        out += body[byte = mark.byte_length() : body.byte_length() - 1]
+        var after = String(rest[byte=end:])
+        rest = after^
 
 
 def _aliased_key(

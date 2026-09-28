@@ -193,6 +193,26 @@ def print_expr(ast: Ast, node: UInt32, grammar: Grammar) raises -> String:
     return out^
 
 
+def print_window(ast: Ast, node: UInt32, grammar: Grammar) raises -> String:
+    """Prints one window specification, parentheses and all.
+
+    Args:
+        ast: The AST the node lives in.
+        node: The `EXPR_WINDOW`.
+        grammar: A loaded grammar, for the keyword table the quoting rule
+            consults.
+
+    Returns:
+        The window as it is written after `OVER`.
+
+    Raises:
+        Error: If the node is not a window, or could not be printed.
+    """
+    var out = String()
+    _write_window(ast, node, grammar, out)
+    return out^
+
+
 def print_stmt(ast: Ast, node: UInt32, grammar: Grammar) raises -> String:
     """Prints one statement.
 

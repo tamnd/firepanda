@@ -270,6 +270,88 @@ def test_two_windows_that_sort_differently_are_two_nodes() raises:
     )
 
 
+def test_a_named_window_is_the_window_it_names() raises:
+    assert_equal(
+        shown(
+            "SELECT sum(qty) OVER w AS x FROM sales WINDOW w AS (PARTITION BY"
+            " shop ORDER BY price)"
+        ),
+        "75,60,70,40,67,83,25,84,55,75",
+    )
+    assert_equal(
+        shown(
+            "SELECT row_number() OVER (w ORDER BY qty DESC) AS x FROM sales"
+            " WINDOW w AS (PARTITION BY shop)"
+        ),
+        "4,2,5,1,3,4,2,5,1,3",
+    )
+    # A name is folded, so `w` finds `W`.
+    assert_equal(
+        shown(
+            "SELECT sum(qty) OVER (w ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+            " AS x FROM sales WINDOW W AS (ORDER BY qty)"
+        ),
+        "8,35,4,70,20,13,45,1,55,27",
+    )
+    # One named window may start from another written after it.
+    assert_equal(
+        shown(
+            "SELECT rank() OVER b AS x FROM sales WINDOW b AS (a ORDER BY"
+            " price), a AS (PARTITION BY shop)"
+        ),
+        "5,2,4,1,3,4,1,5,2,3",
+    )
+
+
+def test_a_named_window_is_written_out_in_the_column_name() raises:
+    var out = run(
+        "SELECT sum(qty) OVER w, rank() OVER (w ORDER BY qty) FROM sales"
+        " WINDOW w AS (PARTITION BY shop)",
+        session(),
+    )
+    assert_equal(out.schema[0].name, "sum(qty) OVER (PARTITION BY shop)")
+    assert_equal(
+        out.schema[1].name, "rank() OVER (PARTITION BY shop ORDER BY qty)"
+    )
+
+
+def test_the_named_windows_that_are_turned_down() raises:
+    with assert_raises(contains='window "v" does not exist'):
+        _ = run(
+            "SELECT sum(qty) OVER v FROM sales WINDOW w AS (ORDER BY qty)",
+            session(),
+        )
+    with assert_raises(contains='window "w" is already defined'):
+        _ = run(
+            "SELECT sum(qty) OVER w FROM sales WINDOW w AS (ORDER BY qty), w"
+            " AS (ORDER BY price)",
+            session(),
+        )
+    with assert_raises(contains="because it has a frame clause"):
+        _ = run(
+            "SELECT sum(qty) OVER (w ORDER BY qty) FROM sales WINDOW w AS"
+            " (PARTITION BY shop ROWS 1 PRECEDING)",
+            session(),
+        )
+    with assert_raises(contains="cannot override the PARTITION BY"):
+        _ = run(
+            "SELECT sum(qty) OVER (w PARTITION BY price) FROM sales WINDOW w"
+            " AS (PARTITION BY shop)",
+            session(),
+        )
+    with assert_raises(contains="cannot override the ORDER BY"):
+        _ = run(
+            "SELECT sum(qty) OVER (w ORDER BY price) FROM sales WINDOW w AS"
+            " (ORDER BY qty)",
+            session(),
+        )
+    with assert_raises(contains="in terms of itself"):
+        _ = run(
+            "SELECT sum(qty) OVER w FROM sales WINDOW w AS (w ORDER BY qty)",
+            session(),
+        )
+
+
 def test_the_shapes_that_are_turned_down() raises:
     with assert_raises(contains="negative"):
         _ = run(
