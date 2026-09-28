@@ -110,6 +110,10 @@ def filter_chunked(
             + " rows and the column has "
             + String(len(col))
         )
+    if col.num_chunks() == 1:
+        # The mask already covers the chunk, and `slice` is a copy of it, so a
+        # frame of one chunk was copying its whole mask once per column.
+        return ChunkedArray(filter_any(col.chunks[0], mask))
     var out = ChunkedArray(col.type)
     for c in range(col.num_chunks()):
         var start = col.starts[c]
