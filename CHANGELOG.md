@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a grown lasting table is zeroed a part at a time on the cores
+
+When a lasting map grows its table for a chunk that could be all new keys, the new table can be tens of megabytes, and it was zeroed on the calling thread with its page faults before the parts were moved in on the cores. Each part now zeroes its own share as it moves. On a six core Linux machine that was heavily loaded by other work, alternating the old and new driver over six rounds, ClickBench q15 went from 72 to 58 ms at best and q34 from 186 to 174, and every answer matched.
+
 ### Changed: a lasting map counts and scatters its buckets through a pointer
 
 The pass that sorts a chunk's rows by part indexed a list of counters on every row, which checked the bound and reloaded the list's length each time. It now keeps its morsel's counters through a pointer. On ClickBench q15 the two passes went from about 15% of the query's CPU to about 8%, and the best time from 31.8 to 29.4 ms on a six core Linux machine busy with other work, with every answer the same.

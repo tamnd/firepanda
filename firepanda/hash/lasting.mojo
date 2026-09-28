@@ -106,7 +106,7 @@ it is a tuple like any other here and does not send the query off this route,
 which the single key maps cannot say.
 """
 
-from std.memory import unsafe_memcpy
+from std.memory import unsafe_memcpy, unsafe_memset_zero
 from std.sys.info import simd_width_of
 from std.sys.intrinsics import PrefetchOptions, prefetch
 
@@ -1060,13 +1060,18 @@ def _rehash(table: Buffer, capacity: Int, grown: Int) raises -> Buffer:
     Returns:
         The new slots.
     """
-    var bigger = Buffer(LASTING_TEXT_PARTS * grown * 2 * 8)
+    # Each part zeroes its own share of the new table before moving into it.
+    # Sized for a whole chunk of new keys this is tens of megabytes, and
+    # zeroing it on the calling thread, page faults and all, was about a tenth
+    # of ClickBench q15.
+    var bigger = Buffer(overwritten=LASTING_TEXT_PARTS * grown * 2 * 8)
 
     def move(p: Int) raises {mut bigger, imm}:
         var into = bigger.mut_bitcast[DType.uint64]()
         var from_ = table.bitcast[DType.uint64]()
         var mask = UInt64(grown - 1)
         var base = p * grown
+        unsafe_memset_zero(into.unsafe_offset(base * 2), grown * 2)
         for s in range(p * capacity, (p + 1) * capacity):
             var ordinal = from_.unsafe_offset(s * 2 + 1).unsafe_load()
             if ordinal == 0:
