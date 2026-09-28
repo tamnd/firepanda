@@ -596,6 +596,7 @@ def _walk(
         ):
             var table = slots.mut_bitcast[DType.uint64]()
             var hash = hashes.bitcast[DType.uint64]()
+            var views = col.views.bitcast[DType.uint64]()
             var rows_of = order.unsafe_ptr()
             var found = codes.unsafe_mut_ptr()
             var kinds = kind.unsafe_mut_ptr()
@@ -605,13 +606,16 @@ def _walk(
             var stop = starts[p + 1]
             var opened = 0
             for k in range(starts[p], stop):
-                # The table and the stored keys are past every cache on the
-                # column this exists for, and a row waits on three loads in a
-                # row: its slot, the stored key's head, and the stored key's
-                # bytes. So each is asked for ahead of the row that wants it,
-                # the slot furthest ahead, and the head and the bytes once
-                # the load before them has had time to land. A row whose
-                # first slot is not its key only has its slot fetched early.
+                # The table and the keys are past every cache on the column
+                # this exists for, and a row waits on three loads in a row:
+                # its slot, the view of the key it is compared against, and
+                # that key's bytes. The key is a stored one, through its head,
+                # or for a slot this chunk opened the row that opened it, which
+                # on a chunk that brings most of its own keys is most rows. So
+                # each load is asked for ahead of the row that wants it, the
+                # slot furthest ahead, and the view and the bytes once the
+                # load before them has had time to land. A row whose first slot
+                # is not its key only has its slot fetched early.
                 if k + 2 * PROBE_LOOKAHEAD < stop:
                     var far = Int(
                         rows_of.unsafe_offset(
@@ -626,10 +630,16 @@ def _walk(
                     var near = Int(
                         rows_of.unsafe_offset(k + PROBE_LOOKAHEAD).unsafe_load()
                     )
-                    var ordinal = _settled(table, hash, near, base, mask)
-                    if ordinal >= 0:
+                    var word = _first_word(table, hash, near, base, mask)
+                    if word & LASTING_TEXT_PENDING != 0:
                         prefetch[PrefetchOptions().for_read().high_locality()](
-                            store.head(ordinal)
+                            views.unsafe_offset(
+                                Int(word & ~LASTING_TEXT_PENDING) * 2
+                            )
+                        )
+                    elif word != 0:
+                        prefetch[PrefetchOptions().for_read().high_locality()](
+                            store.head(Int(word) - 1)
                         )
                 if k + PROBE_LOOKAHEAD // 2 < stop:
                     var close = Int(
@@ -637,14 +647,22 @@ def _walk(
                             k + PROBE_LOOKAHEAD // 2
                         ).unsafe_load()
                     )
-                    var ordinal = _settled(table, hash, close, base, mask)
-                    if (
-                        ordinal >= 0
-                        and Int(store.head(ordinal).unsafe_load() & 0xFFFFFFFF)
+                    var word = _first_word(table, hash, close, base, mask)
+                    if word & LASTING_TEXT_PENDING != 0:
+                        var first = Int(word & ~LASTING_TEXT_PENDING)
+                        if (
+                            Int(views.unsafe_offset(first * 2).unsafe_load())
+                            & 0xFFFFFFFF
+                        ) > INLINE_CAPACITY:
+                            prefetch[
+                                PrefetchOptions().for_read().high_locality()
+                            ](col.unsafe_bytes(first).unsafe_ptr())
+                    elif word != 0 and (
+                        Int(store.head(Int(word) - 1).unsafe_load() & 0xFFFFFFFF)
                         > INLINE_CAPACITY
                     ):
                         prefetch[PrefetchOptions().for_read().high_locality()](
-                            store.bytes_at(ordinal)
+                            store.bytes_at(Int(word) - 1)
                         )
                 var i = Int(rows_of.unsafe_offset(k).unsafe_load())
                 var wanted = hash.unsafe_offset(i).unsafe_load()
@@ -664,7 +682,7 @@ def _walk(
                     if table.unsafe_offset(slot).unsafe_load() == wanted:
                         if word & LASTING_TEXT_PENDING != 0:
                             var first = Int(word & ~LASTING_TEXT_PENDING)
-                            if col.element_equals(i, first):
+                            if _rows_equal(col, views, i, first):
                                 kinds.unsafe_offset(i).unsafe_write(UInt8(2))
                                 leads.unsafe_offset(i).unsafe_write(
                                     UInt32(first)
@@ -684,16 +702,45 @@ def _walk(
 
 
 @always_inline
-def _settled(
+def _rows_equal(
+    col: StringArray, views: UnsafePointer[UInt64, _], i: Int, j: Int
+) -> Bool:
+    """Compares two rows of a key column the way `_TextStore.holds` does.
+
+    The column has no nulls, so the validity checks `element_equals` makes are
+    not needed, and the first words of the two views settle most unequal pairs.
+
+    Args:
+        col: The key column.
+        views: Its views, two words a row.
+        i: One row.
+        j: The other.
+
+    Returns:
+        True if the two are byte-identical.
+    """
+    var first = views.unsafe_offset(i * 2).unsafe_load()
+    if first != views.unsafe_offset(j * 2).unsafe_load():
+        return False
+    if Int(first & 0xFFFFFFFF) <= INLINE_CAPACITY:
+        return views.unsafe_offset(i * 2 + 1).unsafe_load() == views.unsafe_offset(
+            j * 2 + 1
+        ).unsafe_load()
+    return _bytes_equal(col.unsafe_bytes(i), col.unsafe_bytes(j))
+
+
+@always_inline
+def _first_word(
     table: UnsafePointer[UInt64, _],
     hash: UnsafePointer[UInt64, _],
     row: Int,
     base: Int,
     mask: UInt64,
-) -> Int:
-    """Returns the stored ordinal in a row's first slot, if it may be the row's.
+) -> UInt64:
+    """Returns the second word of a row's first slot, if it may be the row's.
 
-    Only a hint for `_walk` to prefetch by: a settled slot whose hash matches.
+    Only a hint for `_walk` to prefetch by: the word of a slot whose hash
+    matches, pending or settled.
 
     Args:
         table: The slots, two words each.
@@ -703,16 +750,13 @@ def _settled(
         mask: The part's capacity less one.
 
     Returns:
-        The ordinal, or -1 when the slot is empty, pending or another hash's.
+        The word, or zero when the slot is empty or another hash's.
     """
     var wanted = hash.unsafe_offset(row).unsafe_load()
     var slot = (base + Int(wanted & mask)) * 2
-    var word = table.unsafe_offset(slot + 1).unsafe_load()
-    if word == 0 or word & LASTING_TEXT_PENDING != 0:
-        return -1
     if table.unsafe_offset(slot).unsafe_load() != wanted:
-        return -1
-    return Int(word) - 1
+        return 0
+    return table.unsafe_offset(slot + 1).unsafe_load()
 
 
 def _walk_exact(
