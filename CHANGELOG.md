@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: asfreq on a frame and a column
+
+`DataFrame.asfreq` and `Series.asfreq` put the rows on a fixed frequency from the first label to the last, as pandas does. A label the rows do not have is filled by `method` from a neighbour or with `fill_value`, `normalize` takes the labels to midnight, and the labels keep their unit, their zone and their name. It is pandas' own recipe, a `date_range` and then a `reindex`, so it fills exactly as `reindex` does.
+
 ### Added: reindex fills from a neighbour and reindexes on instants
 
 `DataFrame.reindex`, `Series.reindex` and both `reindex_like` methods take pandas' `method`, `limit` and `tolerance`. A label the frame does not have reads from the label before it under `ffill` or `pad`, the label after it under `bfill` or `backfill`, and the closer of the two under `nearest`, with pandas' rule for a tie, for a falling index, for how many rows one label may fill, and for how far away it may be. Row labels that are instants or spans reindex too, which they could not before, and a target given as an index keeps its own name, as it does in pandas. `Index` built from a list of instants is a `DatetimeIndex`, and from a list of spans a `TimedeltaIndex`, as in pandas. The mistakes are pandas' mistakes with pandas' words, including an unknown method, a limit that is not a positive whole number, a limit on labels out of order, labels that are neither rising nor falling, duplicate labels and a tolerance of the wrong size.

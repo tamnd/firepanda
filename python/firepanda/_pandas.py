@@ -6918,6 +6918,31 @@ def _aligned_labels(mine: Index, theirs: Index, join: Any) -> Index | None:
     return joined.rename(mine.name)
 
 
+def _asfreq(owner: Any, freq: Any, method: Any, normalize: Any, fill_value: Any) -> Any:
+    """The frame or column reindexed onto a range of instants at `freq`.
+
+    This is pandas' own recipe: a `date_range` from the smallest label to the
+    largest at the unit of the labels, then `reindex` onto it, then the labels
+    taken to midnight when `normalize` asks for that. An empty axis of instants
+    comes back as it is.
+    """
+    from ._date_range import date_range
+    from ._datetime import DatetimeIndex
+
+    labels = owner.index
+    kind = str(labels.dtype)
+    if not len(labels):
+        if not kind.startswith("datetime64"):
+            raise DTypeError(f"{type(labels)}")
+        return owner.copy()
+    unit = kind.removeprefix("datetime64[").split(",")[0].rstrip("]") if "[" in kind else None
+    target = date_range(labels.min(), labels.max(), freq=freq, unit=unit, name=labels.name)
+    moved = owner.reindex(target, method=method, fill_value=fill_value)
+    if normalize:
+        moved = _with_row_labels(moved, DatetimeIndex(moved.index).normalize())
+    return moved
+
+
 def _zoned_axis(
     owner: Any, method: str, tz: Any, axis: Any, level: Any, copy: Any, extra: tuple[Any, ...]
 ) -> Any:
@@ -8235,6 +8260,22 @@ class DataFrameMixin(_Carries):
         if memory_usage is None or memory_usage:
             lines.append("memory usage: " + _info_size(int(self.memory_usage().sum())))
         _info_write(lines, buf)
+
+    def asfreq(
+        self,
+        freq: Any,
+        method: Any = None,
+        how: Any = None,
+        normalize: bool = False,
+        fill_value: Any = None,
+    ) -> Any:
+        """The rows at a fixed frequency, from the first label to the last.
+
+        A label the rows do not have is filled by `method` from a neighbour, or
+        with `fill_value`, as `reindex` fills it. `how` is for a PeriodIndex and
+        is taken and ignored here, as pandas ignores it for instants.
+        """
+        return _asfreq(self, freq, method, normalize, fill_value)
 
     def tz_localize(
         self,
@@ -12632,6 +12673,22 @@ class SeriesMixin(_Carries):
     def repeat(self, repeats: Any, axis: None = None) -> Series:
         """Each value and its label as many times as `repeats` says, in order."""
         return self.take(_repeated_positions(len(self), repeats, axis))
+
+    def asfreq(
+        self,
+        freq: Any,
+        method: Any = None,
+        how: Any = None,
+        normalize: bool = False,
+        fill_value: Any = None,
+    ) -> Any:
+        """The rows at a fixed frequency, from the first label to the last.
+
+        A label the rows do not have is filled by `method` from a neighbour, or
+        with `fill_value`, as `reindex` fills it. `how` is for a PeriodIndex and
+        is taken and ignored here, as pandas ignores it for instants.
+        """
+        return _asfreq(self, freq, method, normalize, fill_value)
 
     def tz_localize(
         self,
