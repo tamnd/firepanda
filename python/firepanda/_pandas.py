@@ -21440,20 +21440,33 @@ class GroupByMixin[Answer]:
         rows = isinstance(answers[0], Series) and self.ndim == 2
         if rows and all(a.index.tolist() == answers[0].index.tolist() for a in answers):
             return self._rows_a_group(answers)
-        if getattr(self, "_group_keys", True):
-            raise NotImplementedError(
-                "apply answering a series or a frame a group is not supported with"
-                " group_keys=True yet, because pandas puts the key in front of each"
-                " row label, which is a MultiIndex. Pass group_keys=False to groupby"
-                " for the rows on their own labels"
-            )
         joined = concat(answers)
+        if getattr(self, "_group_keys", True):
+            # pandas puts each group's key in front of its rows' labels, or with
+            # as_index=False leaves the rows group after group on their own labels.
+            if self._as_index:
+                joined = self._keyed(joined, [key for key, _ in members], answers)
+            return self._renamed(joined)
         if not rows and all(a.index.equals(g.index) for a, g in zip(answers, groups, strict=True)):
             # Answers that keep each group's rows go back into the frame's order,
             # and any others stay group after group, as pandas leaves them.
             order = [place for _, places in members for place in places]
             joined = joined.iloc[sorted(range(len(order)), key=order.__getitem__)]
         return self._renamed(joined)
+
+    def _keyed(self, joined: Any, keys: list[tuple[Any, ...]], answers: list[Any]) -> Any:
+        """The answers put together with each group's key as levels in front of their labels."""
+        from ._multi import MultiIndex
+
+        inner = joined.index
+        depth = getattr(inner, "nlevels", 1)
+        columns: list[list[Any]] = [[] for _ in self._by]
+        for key, answer in zip(keys, answers, strict=True):
+            for column, value in zip(columns, key, strict=True):
+                column.extend([value] * len(answer))
+        columns += [inner.get_level_values(n).tolist() for n in range(depth)]
+        names = [*self._by, *inner.names]
+        return joined.set_axis(MultiIndex.from_arrays(columns, names=names))
 
     @property
     def ngroups(self) -> int:
@@ -21874,6 +21887,21 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             raise InvalidArgumentError("include_groups=True is no longer allowed.")
         return self._applied(func, args, kwargs)
 
+    def corr(
+        self, method: Any = "pearson", min_periods: int = 1, numeric_only: bool = False
+    ) -> Any:
+        """Each group's correlation matrix, labelled by the group and the column."""
+        settings = {"method": method, "min_periods": min_periods, "numeric_only": numeric_only}
+        return self._applied(lambda group: group.corr(**settings), (), {})
+
+    def cov(self, min_periods: Any = None, ddof: Any = 1, numeric_only: bool = False) -> Any:
+        """Each group's covariance matrix, labelled by the group and the column."""
+        return self._applied(
+            lambda group: group.cov(min_periods=min_periods, ddof=ddof, numeric_only=numeric_only),
+            (),
+            {},
+        )
+
     def _source(self) -> DataFrame:
         """The columns that are not keys."""
         return self._frame[self._value_columns()]
@@ -22231,6 +22259,18 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         The group is named after its key, as pandas names it.
         """
         return self._applied(func, args, kwargs)
+
+    def corr(self, other: Any, method: Any = "pearson", min_periods: Any = None) -> Any:
+        """Each group's correlation with `other`, lined up on the labels."""
+        return self._applied(
+            lambda group: group.corr(other, method=method, min_periods=min_periods), (), {}
+        )
+
+    def cov(self, other: Any, min_periods: Any = None, ddof: Any = 1) -> Any:
+        """Each group's covariance with `other`, lined up on the labels."""
+        return self._applied(
+            lambda group: group.cov(other, min_periods=min_periods, ddof=ddof), (), {}
+        )
 
     def _source(self) -> Series:
         """The one column."""

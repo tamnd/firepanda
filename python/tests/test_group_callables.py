@@ -7,7 +7,8 @@ column's group after its key. A row whose key is missing is in no group, so
 `transform` answers missing there. `apply` answers one row a group for one value
 or one series a group, and the rows in the frame's order for answers that keep
 each group's rows when `group_keys=False`, stacking any other answers group
-after group.
+after group. With `group_keys=True` the group's key goes in front of each
+label, which the tests of labels with levels compare.
 """
 
 from __future__ import annotations
@@ -183,15 +184,11 @@ def test_a_mistake_raises_what_pandas_raises(firepanda: ModuleType, name: str) -
 @pytest.mark.parametrize(
     "build",
     [
-        lambda m: data(m).groupby("k")["v"].apply(lambda s: s * 2),
-        lambda m: data(m).groupby("k").apply(lambda d: d * 2),
-        lambda m: data(m).groupby("k")["v"].apply(lambda s: m.Series({"lo": s.min()})),
-        lambda m: two(m).groupby(["a", "b"]).apply(lambda d: d.head(1)),
         lambda m: data(m).groupby("k", as_index=False).apply(lambda d: len(d)),
     ],
 )
-def test_an_answer_on_a_multiindex_is_refused(firepanda: ModuleType, build: Any) -> None:
-    """pandas puts the key in front of each label, which firepanda has no index for."""
+def test_an_answer_in_a_column_named_none_is_refused(firepanda: ModuleType, build: Any) -> None:
+    """pandas puts one value a group in a column named None, and a firepanda name is text."""
     with pytest.raises(NotImplementedError):
         build(firepanda)
 
