@@ -66,6 +66,7 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions, agg_kind
 from firepanda.plan.node import (
     SET_EXCEPT,
     SET_INTERSECT,
+    SET_RECURSIVE,
     SET_UNION,
     NodeKind,
     Plan,
@@ -1597,6 +1598,25 @@ def _bind_union(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
     ref inputs = plan.nodes[at].inputs
     var out = Schema(copy=done[inputs[0]].schema)
     var origin = done[inputs[0]].origin.copy()
+    if op == SET_RECURSIVE:
+        # The anchor decides the types and the step's rows are cast to them,
+        # which is DuckDB's rule: `SELECT 1 UNION ALL SELECT n + 0.75 FROM t`
+        # stays an integer. Every column may be missing, because the step is
+        # bound against a working relation whose columns all may be.
+        ref step = done[inputs[1]]
+        if len(step.schema) != len(out):
+            raise Error(
+                String(
+                    "a recursive CTE's anchor has ",
+                    len(out),
+                    " columns and its recursive part has ",
+                    len(step.schema),
+                )
+            )
+        for j in range(len(out)):
+            out.fields[j].nullable = True
+            origin[j] = UNBOUND
+        return Bound(out^, origin^)
     var word = "a union"
     if op == SET_EXCEPT:
         word = "a difference"

@@ -13,7 +13,13 @@ written by hand rather than by the writer, and the things that are refused.
 """
 
 from std.math import isinf, isnan
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
@@ -38,6 +44,8 @@ from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
     SET_INTERSECT,
+    SET_RECURSIVE,
+    SCAN_WORKING,
     NodeKind,
     Plan,
 )
@@ -300,6 +308,23 @@ def test_a_union_of_more_than_two_arms_keeps_all_of_them() raises:
         4,
         "four arms went out and four came back",
     )
+
+
+def test_a_recursive_union_and_its_working_scan_come_back() raises:
+    var plan = Plan()
+    var anchor = plan.scan("t", List[String](), 0)
+    var step = plan.working("r", 1, 7)
+    var at = plan.recurse(anchor, step, False, 7)
+    var back = _trip(plan, at)
+    ref root = back.plan.nodes[back.root]
+    assert_equal(root.op, SET_RECURSIVE)
+    assert_equal(root.offset, 7, "the recursion's number")
+    assert_false(root.flags[0], "a union that drops duplicates")
+    ref working = back.plan.nodes[root.inputs[1]]
+    assert_equal(working.op, SCAN_WORKING)
+    assert_equal(working.offset, 7, "the working scan reads the same one")
+    assert_equal(working.table, 1)
+    assert_equal(back.plan.nodes[root.inputs[0]].op, 0, "an ordinary scan")
 
 
 def test_a_values_goes_out_as_rows_rather_than_as_one_list() raises:

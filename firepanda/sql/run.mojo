@@ -45,7 +45,7 @@ pipeline will ask for.
 from firepanda.frame import DataFrame
 from firepanda.plan.bind import bind
 from firepanda.plan.lower import lower as lower_plan
-from firepanda.plan.node import NodeKind, Plan
+from firepanda.plan.node import SCAN_WORKING, NodeKind, Plan
 from firepanda.plan.optimize import optimize
 
 from .ast import Ast
@@ -123,6 +123,11 @@ def _frames(plan: Plan, root: Int, catalog: Catalog) raises -> List[DataFrame]:
                     ),
                 )
             )
+        if plan.nodes[scans[rel]].op == SCAN_WORKING:
+            # A recursive CTE's working rows, which the recursion hands to it
+            # round by round. There is nothing in the catalog to read.
+            held.append(DataFrame())
+            continue
         var name = plan.nodes[scans[rel]].source
         var found = catalog.find(name)
         if found < 0:

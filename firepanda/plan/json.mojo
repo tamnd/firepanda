@@ -101,7 +101,9 @@ from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
     SET_INTERSECT,
+    SET_RECURSIVE,
     SET_UNION,
+    SCAN_WORKING,
     NodeKind,
     Plan,
     asof_compare,
@@ -899,15 +901,17 @@ def _node_json(
         naming.next += 1
         out += String('"id": ', naming.given[at], ", ")
     if node.kind == NodeKind.SCAN:
-        return out + String(
+        out += String(
             '"kind": "scan", "source": ',
             _quoted(node.source),
             ', "table": ',
             node.table,
             ', "columns": ',
             _strings_json(node.names),
-            "}",
         )
+        if node.op == SCAN_WORKING:
+            out += String(', "working": ', node.offset)
+        return out + "}"
     if node.kind == NodeKind.VALUES:
         out += String(
             '"kind": "values", "columns": ',
@@ -977,6 +981,9 @@ def _node_json(
             word = "except"
         elif node.op == SET_INTERSECT:
             word = "intersect"
+        elif node.op == SET_RECURSIVE:
+            word = "recursive"
+            out += String('"recursion": ', node.offset, ", ")
         out += String(
             '"kind": "',
             word,
@@ -1663,7 +1670,28 @@ def _node_of(
         bytes, members[_need(bytes, members, "kind", "a plan node")].value
     )
     var at: Int
-    if kind == "scan":
+    if kind == "scan" and _at(bytes, members, "working") != -1:
+        at = plan.working(
+            text_of(
+                bytes, members[_need(bytes, members, "source", "a scan")].value
+            ),
+            _whole(
+                bytes,
+                members[_need(bytes, members, "table", "a scan")].value,
+                "the relation a scan is",
+            ),
+            _whole(
+                bytes,
+                members[_at(bytes, members, "working")].value,
+                "the recursion a working scan reads",
+            ),
+        )
+        plan.nodes[at].names = _names_of(
+            bytes,
+            members[_need(bytes, members, "columns", "a scan")].value,
+            "the columns of a scan",
+        )
+    elif kind == "scan":
         at = plan.scan(
             text_of(
                 bytes, members[_need(bytes, members, "source", "a scan")].value
@@ -1708,12 +1736,19 @@ def _node_of(
         )
     elif kind == "join":
         at = _join_node_of(bytes, members, plan, ids, expr_ids)
-    elif kind == "union" or kind == "except" or kind == "intersect":
+    elif (
+        kind == "union"
+        or kind == "except"
+        or kind == "intersect"
+        or kind == "recursive"
+    ):
         var op = SET_UNION
         if kind == "except":
             op = SET_EXCEPT
         elif kind == "intersect":
             op = SET_INTERSECT
+        elif kind == "recursive":
+            op = SET_RECURSIVE
         var all = _flag(
             bytes,
             members[_need(bytes, members, "all", "a set operation")].value,
@@ -1728,6 +1763,14 @@ def _node_of(
         for i in range(len(arms)):
             inputs.append(_node_of(bytes, arms[i], plan, ids, expr_ids))
         at = plan.setop(inputs^, op, all)
+        if op == SET_RECURSIVE:
+            plan.nodes[at].offset = _whole(
+                bytes,
+                members[
+                    _need(bytes, members, "recursion", "a recursive union")
+                ].value,
+                "the recursion a recursive union is",
+            )
     else:
         at = _over_one_of(bytes, members, kind, plan, ids, expr_ids)
     var id = _at(bytes, members, "id")

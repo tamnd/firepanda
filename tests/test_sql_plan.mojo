@@ -2257,13 +2257,15 @@ def test_a_with_inside_a_subquery_shadows_the_one_outside_it() raises:
     )
 
 
-def test_a_recursive_cte_is_refused_by_name() raises:
-    with assert_raises(contains="recursive CTE"):
-        _ = _plan(
-            "WITH RECURSIVE n(i) AS"
-            " (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 5)"
-            " SELECT i FROM n"
-        )
+def test_a_recursive_cte_is_a_recursive_union_over_a_working_scan() raises:
+    var text = _plan(
+        "WITH RECURSIVE n(i) AS"
+        " (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 5)"
+        " SELECT i FROM n"
+    )
+    assert_true("UNION all" in text, text)
+    assert_true("RECURSIVE #" in text, text)
+    assert_true("WORKING n #" in text, text)
 
 
 def test_a_using_join_is_the_join_the_on_spelling_builds() raises:

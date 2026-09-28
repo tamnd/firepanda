@@ -198,7 +198,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.plan.bind import INDEX_FROM, Bound, bind, bind_all
 from firepanda.plan.cse import shape_of
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
-from firepanda.plan.node import NodeKind, Plan, PlanNode
+from firepanda.plan.node import SET_RECURSIVE, NodeKind, Plan, PlanNode
 from firepanda.plan.transit import derive
 
 
@@ -771,6 +771,15 @@ def _union(
 
     var down = List[Int]()
     var here = List[Int]()
+    if plan.nodes[old].op == SET_RECURSIVE:
+        # A recursive CTE's step reads the rows the round before it kept, so a
+        # predicate pushed into the anchor would starve every later round of
+        # rows it filters only at the end. Nothing goes in, the arms are still
+        # rebuilt so that what their own filters carry can move inside them.
+        for a in range(len(arms)):
+            down.append(_rebuild(plan, arms[a], bound, List[Int](), into))
+        var at = _emit(plan, old, down^, into)
+        return _apply(plan, at, carried^, into)
     for i in range(len(carried)):
         var names = plan.exprs.names(carried[i])
         var ok = True
