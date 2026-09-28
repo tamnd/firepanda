@@ -6022,13 +6022,25 @@ def _spread(value: Any, chosen: list[str], one: bool, single: bool, labelled: bo
             return [grid[:, at] for at in range(len(chosen))]
         return [[row[at] for row in grid] for at in range(len(chosen))]
     if numpy or _list_like(value):
-        values = value.tolist() if numpy else list(value)
+        values = value.tolist() if numpy else _as_array(list(value))
         if len(values) != len(chosen):
             raise InvalidArgumentError(
                 "Must have equal len keys and value when setting with an iterable"
             )
         return values
     return [value] * len(chosen)
+
+
+def _as_array(values: list[Any]) -> list[Any]:
+    """A list of values as numpy reads it, where whole numbers beside a float become floats.
+
+    Any other mix, text or a flag or a gap among them, is an object array in
+    numpy, and each value keeps its own type.
+    """
+    numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
+    if numbers and any(isinstance(v, float) for v in values):
+        return [float(v) for v in values]
+    return values
 
 
 def _shown(value: Any) -> str:
