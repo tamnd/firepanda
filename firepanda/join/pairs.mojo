@@ -167,6 +167,18 @@ The count pass and the emit pass have to agree on the boundaries, since the emit
 starts writing where the count said it would, so both walk the same morsels.
 """
 
+comptime PARALLEL_BUCKET_ROWS = 1 << 18
+"""Below this many rows a side with repeated keys is bucketed on one thread.
+
+The bucketing is a counting sort of the side's rows by ordinal, and on one core
+it is a count, a prefix sum and a scatter at a few nanoseconds a row each. That
+was most of TPC-H q13, whose outer join buckets a million and a half orders by
+customer: 10.6 ms of a join whose alignment took 1.3 and whose pairing took 1.5.
+Split across cores it pays a fork and join three or four times over, so it
+waits for a side tall enough to cover that. See `_bucket_spread` and
+`_bucket_partitioned`.
+"""
+
 comptime MISS_SKIP_LANES = 16
 """Probe rows the pairing checks at once for a run that cannot match.
 
@@ -1097,9 +1109,47 @@ def bucket_side(
     # frames themselves. So it is worth not walking it more times than the three
     # this needs, and the loops below go through the pointer rather than through
     # `List.__setitem__` for the same reason.
-    var starts = List[Int](length=0 if unique else groups + 1, fill=0)
+    var starts = List[Int]()
     var bucket = List[Int]()
-    if not unique:
+    # A count per ordinal for every worker is the cheaper split while those
+    # counts are a small part of the side, and ranges of ordinals are the
+    # cheaper split past that. At 4,194,304 rows over 4,096 ordinals the counts
+    # took 3.8 ms against 8.0 for the ranges on the 13900K, and at 524,288 rows
+    # over 65,536 they took 1.6 to 3.0 against 0.44.
+    var spread = min(worker_count(), rows // LEFT_MORSEL_ROWS)
+    if (
+        not unique
+        and rows >= PARALLEL_BUCKET_ROWS
+        and spread >= 2
+        and groups * spread <= rows // 4
+    ):
+        _bucket_spread(
+            codes,
+            side_at,
+            rows,
+            absent,
+            absent_at,
+            has_nulls,
+            groups,
+            spread,
+            starts,
+            bucket,
+        )
+    elif not unique and rows >= PARALLEL_BUCKET_ROWS and spread >= 2:
+        _bucket_partitioned(
+            codes,
+            side_at,
+            rows,
+            absent,
+            absent_at,
+            has_nulls,
+            groups,
+            spread,
+            starts,
+            bucket,
+        )
+    elif not unique:
+        starts = List[Int](length=groups + 1, fill=0)
         var edge = starts.unsafe_ptr()
         for r in range(rows):
             if has_nulls and absent[absent_at + r]:
@@ -1139,6 +1189,248 @@ def bucket_side(
         edge.unsafe_offset(0).unsafe_write(0)
 
     return ProbeTable(unique, only^, starts^, bucket^, rows)
+
+
+def _bucket_spread(
+    codes: Array[DType.uint32],
+    side_at: Int,
+    rows: Int,
+    absent: List[Bool],
+    absent_at: Int,
+    has_nulls: Bool,
+    groups: Int,
+    runs: Int,
+    mut starts: List[Int],
+    mut bucket: List[Int],
+) raises:
+    """Buckets one side by ordinal on several cores.
+
+    The same counting sort `_by_left_row` does, keyed by ordinal instead of by
+    left row. The rows are cut into one run per worker and each run counts its
+    own ordinals, the prefix sum goes over the ordinals and within an ordinal
+    over the runs in order, and every run then scatters into places nobody else
+    writes. A run's rows come before the next run's and each run scatters in
+    row order, so every bucket comes out in increasing row order, which is what
+    the one thread gives and what fixes the output order within a probe row.
+
+    The counts are a list per run as long as the ordinals, so this is for a
+    side with few ordinals against its rows, and `_bucket_partitioned` takes
+    the rest.
+
+    Args:
+        codes: The ordinals of both sides, as `align_keys` returns them.
+        side_at: Where this side's ordinals start in `codes`.
+        rows: How many rows this side has.
+        absent: The null key flags, or an empty list.
+        absent_at: Where this side's flags start in `absent`.
+        has_nulls: Whether `absent` was filled.
+        groups: How many ordinals there are.
+        runs: How many pieces to cut the rows into.
+        starts: Set to where each ordinal's bucket starts, plus the total.
+        bucket: Set to the row numbers, bucket after bucket.
+
+    Raises:
+        Error: If a worker raises, which it does not.
+    """
+    var step = (rows + runs - 1) // runs
+    var places = List[Int](length=groups * runs, fill=0)
+
+    def count(run: Int) raises {mut places, imm}:
+        var code_at = codes.unsafe_ptr()
+        var seat = places.unsafe_ptr().unsafe_offset(run * groups)
+        for r in range(run * step, min(run * step + step, rows)):
+            if has_nulls and absent[absent_at + r]:
+                continue
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load())
+            seat.unsafe_offset(g).unsafe_write(
+                seat.unsafe_offset(g).unsafe_load() + 1
+            )
+
+    var block = (groups + runs - 1) // runs
+    var totals = List[Int](length=runs + 1, fill=0)
+
+    def total(b: Int) raises {mut totals, imm}:
+        var at = places.unsafe_ptr()
+        var sum = 0
+        for g in range(b * block, min(b * block + block, groups)):
+            for run in range(runs):
+                sum += at.unsafe_offset(run * groups + g).unsafe_load()
+        totals[b + 1] = sum
+
+    starts = List[Int](length=groups + 1, fill=0)
+
+    def settle(b: Int) raises {mut places, mut starts, imm}:
+        var at = places.unsafe_ptr()
+        var edge = starts.unsafe_ptr()
+        var running = totals[b]
+        for g in range(b * block, min(b * block + block, groups)):
+            edge.unsafe_offset(g).unsafe_write(running)
+            for run in range(runs):
+                var seat = at.unsafe_offset(run * groups + g)
+                var here = seat.unsafe_load()
+                seat.unsafe_write(running)
+                running += here
+
+    parallel_for(count, runs)
+    parallel_for(total, runs)
+    for b in range(runs):
+        totals[b + 1] += totals[b]
+    parallel_for(settle, runs)
+    starts[groups] = totals[runs]
+    bucket = List[Int](unsafe_uninit_length=totals[runs])
+
+    def scatter(run: Int) raises {mut places, mut bucket, imm}:
+        var code_at = codes.unsafe_ptr()
+        var seat = places.unsafe_ptr().unsafe_offset(run * groups)
+        var into = bucket.unsafe_ptr()
+        for r in range(run * step, min(run * step + step, rows)):
+            if has_nulls and absent[absent_at + r]:
+                continue
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load())
+            var at = seat.unsafe_offset(g).unsafe_load()
+            into.unsafe_offset(at).unsafe_write(r)
+            seat.unsafe_offset(g).unsafe_write(at + 1)
+
+    parallel_for(scatter, runs)
+
+
+def _bucket_partitioned(
+    codes: Array[DType.uint32],
+    side_at: Int,
+    rows: Int,
+    absent: List[Bool],
+    absent_at: Int,
+    has_nulls: Bool,
+    groups: Int,
+    runs: Int,
+    mut starts: List[Int],
+    mut bucket: List[Int],
+) raises:
+    """Buckets one side by ordinal on several cores when the ordinals are many.
+
+    `_bucket_spread` keeps a count per ordinal for every run, which is right
+    when the ordinals are few and wrong when they are within a factor of ten of
+    the rows: q13's 150,000 customers against 1.5 million orders would want
+    thirty two lists of 150,000 counts, each written at random, and the prefix
+    sum would walk all of them. So this sorts twice. The rows are first moved
+    into one stretch per range of ordinals, each range narrow enough for its
+    counts to stay in a core's cache, and then every range is counted and
+    scattered on its own, by one worker, into the part of the output that is
+    its alone.
+
+    Both moves are stable. The first keeps every run's rows in row order and
+    puts the runs in order, and the second is a counting sort over rows that
+    arrive in row order, so every bucket still comes out in increasing row
+    order.
+
+    On q13's 1.48 million orders by 150,000 customers the bucketing went from
+    10.2 to 2.6 ms on the 13900K, and 4,194,304 rows over a million ordinals
+    from 93 to 9.3.
+
+    Args:
+        codes: The ordinals of both sides, as `align_keys` returns them.
+        side_at: Where this side's ordinals start in `codes`.
+        rows: How many rows this side has.
+        absent: The null key flags, or an empty list.
+        absent_at: Where this side's flags start in `absent`.
+        has_nulls: Whether `absent` was filled.
+        groups: How many ordinals there are.
+        runs: How many pieces to cut the rows into for the first move.
+        starts: Set to where each ordinal's bucket starts, plus the total.
+        bucket: Set to the row numbers, bucket after bucket.
+
+    Raises:
+        Error: If a worker raises, which it does not.
+    """
+    # Ranges of a power of two ordinals, about two for each worker so the
+    # second move has something to balance with, and never wider than 65,536
+    # so that a range's counts fit in a core's own cache.
+    var shift = 0
+    while shift < 16 and ((groups - 1) >> shift) + 1 > 2 * runs:
+        shift += 1
+    var ranges = ((groups - 1) >> shift) + 1
+    var step = (rows + runs - 1) // runs
+    var places = List[Int](length=runs * ranges, fill=0)
+
+    def count(run: Int) raises {mut places, imm}:
+        var code_at = codes.unsafe_ptr()
+        var seat = places.unsafe_ptr().unsafe_offset(run * ranges)
+        for r in range(run * step, min(run * step + step, rows)):
+            if has_nulls and absent[absent_at + r]:
+                continue
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load())
+            var at = seat.unsafe_offset(g >> shift)
+            at.unsafe_write(at.unsafe_load() + 1)
+
+    parallel_for(count, runs)
+    # Where each range begins, and within it where each run's rows go.
+    var begins = List[Int](length=ranges + 1, fill=0)
+    var running = 0
+    for q in range(ranges):
+        begins[q] = running
+        for run in range(runs):
+            var here = places[run * ranges + q]
+            places[run * ranges + q] = running
+            running += here
+    begins[ranges] = running
+
+    var moved_rows = List[Int](unsafe_uninit_length=running)
+    var moved_codes = List[UInt32](unsafe_uninit_length=running)
+
+    def move(run: Int) raises {mut places, mut moved_rows, mut moved_codes, imm}:
+        var code_at = codes.unsafe_ptr()
+        var seat = places.unsafe_ptr().unsafe_offset(run * ranges)
+        var to_row = moved_rows.unsafe_ptr()
+        var to_code = moved_codes.unsafe_ptr()
+        for r in range(run * step, min(run * step + step, rows)):
+            if has_nulls and absent[absent_at + r]:
+                continue
+            var code = code_at.unsafe_offset(side_at + r).unsafe_load()
+            var at = seat.unsafe_offset(Int(code) >> shift)
+            var to = at.unsafe_load()
+            at.unsafe_write(to + 1)
+            to_row.unsafe_offset(to).unsafe_write(r)
+            to_code.unsafe_offset(to).unsafe_write(code)
+
+    parallel_for(move, runs)
+
+    starts = List[Int](length=groups + 1, fill=0)
+    bucket = List[Int](unsafe_uninit_length=running)
+
+    def settle(q: Int) raises {mut starts, mut bucket, imm}:
+        var lo = q << shift
+        var hi = min(lo + (1 << shift), groups)
+        var edge = starts.unsafe_ptr()
+        var from_row = moved_rows.unsafe_ptr()
+        var from_code = moved_codes.unsafe_ptr()
+        var into = bucket.unsafe_ptr()
+        for i in range(begins[q], begins[q + 1]):
+            var g = Int(from_code.unsafe_offset(i).unsafe_load())
+            edge.unsafe_offset(g).unsafe_write(
+                edge.unsafe_offset(g).unsafe_load() + 1
+            )
+        var total = begins[q]
+        for g in range(lo, hi):
+            var here = edge.unsafe_offset(g).unsafe_load()
+            edge.unsafe_offset(g).unsafe_write(total)
+            total += here
+        # The counts are the cursors now, and the scatter leaves each one where
+        # the next ordinal starts, so it is put back afterwards.
+        for i in range(begins[q], begins[q + 1]):
+            var g = Int(from_code.unsafe_offset(i).unsafe_load())
+            var at = edge.unsafe_offset(g).unsafe_load()
+            into.unsafe_offset(at).unsafe_write(
+                from_row.unsafe_offset(i).unsafe_load()
+            )
+            edge.unsafe_offset(g).unsafe_write(at + 1)
+        for g in range(hi - 1, lo, -1):
+            edge.unsafe_offset(g).unsafe_write(
+                edge.unsafe_offset(g - 1).unsafe_load()
+            )
+        edge.unsafe_offset(lo).unsafe_write(begins[q])
+
+    parallel_for(settle, ranges)
+    starts[groups] = running
 
 
 def pair_probe(
