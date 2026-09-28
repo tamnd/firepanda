@@ -22638,7 +22638,12 @@ def _dates_by_row(
     values = column.tolist()
     textual = all(isinstance(value, str) or _row_dates.missing(value) for value in values)
     present = any(not _row_dates.missing(value) for value in values)
-    if not textual or (present and not dayfirst):
+    # The core takes a comma before the fraction, which pandas' ISO 8601 reader
+    # refuses, so a column with one is read in `_row_dates` instead.
+    comma = (
+        not mixed and textual and any("," in value for value in values if isinstance(value, str))
+    )
+    if not textual or (present and not dayfirst and not comma):
         try:
             return Series._wrap(column._inner.to_datetime("", "ns", not textual and coerce, utc))
         except Exception as error:
