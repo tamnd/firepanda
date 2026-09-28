@@ -99,7 +99,13 @@ from firepanda.kernel.group import (
 from firepanda.kernel.nulls import all_valid_mask, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.rank import rank_any
-from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.select import (
+    PARALLEL_FILTER_ROWS,
+    filter_any,
+    filter_counted,
+    filter_offsets,
+    take_any,
+)
 from firepanda.kernel.sort import (
     argsort_any,
     argsort_any_into,
@@ -1084,9 +1090,31 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 + " rows and mask has "
                 + String(len(mask))
             )
+        # Counted once for the frame rather than once per column, as the
+        # lazy `Filter` node does for a chunk. Only a column of one chunk can
+        # read the count, since the offsets are for the whole mask, and only a
+        # fixed width one does, since text sizes its payload as it counts.
+        var offsets = List[Int]()
+        var fixed = 0
+        for i in range(len(self.columns)):
+            if self.columns[i].num_chunks() == 1 and not self.columns[i].chunks[
+                0
+            ].is_string():
+                fixed += 1
+        if fixed > 1 and len(mask) >= PARALLEL_FILTER_ROWS:
+            offsets = filter_offsets(mask)
         var columns = List[ChunkedArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(filter_chunked(self.columns[i], mask))
+            if len(offsets) > 0 and self.columns[i].num_chunks() == 1:
+                columns.append(
+                    ChunkedArray(
+                        filter_counted(
+                            self.columns[i].chunks[0], mask, Span(offsets)
+                        )
+                    )
+                )
+            else:
+                columns.append(filter_chunked(self.columns[i], mask))
         var out = Self(Schema(copy=self.schema), columns^)
         # A frame of no columns cannot read its height off column zero, and a
         # filter that keeps nothing leaves every column with no chunks at all,
