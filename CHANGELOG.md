@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: grouping half a million rows or more into many groups uses every core
+
+A factorize under four million rows stayed on one core whatever its group count, and when the groups outgrow a core's own cache every probe of that table is a trip to memory. Such a column now takes the partitioned route from half a million rows, where each core owns a disjoint share of the groups. On the 13900K a million rows of a hundred and twenty eight thousand groups goes from 25.6 ms to 11.7 ms, three million rows of sixty five thousand from 108 ms to 13 ms, and TPC-H q20's group by of nine hundred thousand lines into half a million part and supplier pairs from about 37 ms to about 24.
+
 ### Fixed: `cat.codes` has no name
 
 `Series.cat.codes` answered an empty name, and pandas answers none. It now has no name, whatever the column is called.

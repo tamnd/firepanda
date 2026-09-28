@@ -183,6 +183,49 @@ same rule applied to a key that costs thirty times as much per row, and it comes
 out thirty times lower, which is the evidence that the ratio is the thing.
 """
 
+comptime PARTITION_ROWS = 1 << 19
+"""Rows from which a column with many groups is partitioned across cores.
+
+`PARALLEL_ROWS` was measured at a thousand and a hundred thousand groups, and
+it is right for those: a serial table that fits in a core's own cache runs at
+well under a nanosecond a row, and only a very long column pays for a split.
+A table that does not fit is another matter. Every probe of it is a trip to
+memory, the serial build settles near thirty nanoseconds a row, and the
+partitioned route, which gives each core a disjoint share of the groups, pays
+for its extra passes much sooner.
+
+TPC-H q20 is the shape: nine hundred thousand lines of one year grouped by part
+and supplier into over half a million groups, which stayed serial because the
+column was under four million rows, and was two thirds of the query. Measured on
+the 13900K with a busy neighbour, best of fifteen, serial against partitioned:
+
+| rows | groups | serial | partitioned |
+| --- | --- | --- | --- |
+| 256K | 16K | 1.04 ms | 1.66 to 2.93 ms |
+| 256K | 128K | 2.54 ms | 3.01 to 4.43 ms |
+| 512K | 16K | 4.04 ms | 4.04 ms |
+| 512K | 64K | 8.27 ms | 3.89 ms |
+| 512K | 512K | 17.2 ms | 7.01 ms |
+| 1M | 128K | 25.6 ms | 11.7 ms |
+| 1M | 1M | 27.5 ms | 13.8 ms |
+| 3M | 64K | 108 ms | 13.2 ms |
+| 3M | 3M | 152 ms | 35.0 ms |
+
+A quarter of a million rows is too short for the move to pay, and half a million
+is where it starts to, so the line is there. `PRIVATE_CACHE_BYTES` is the other
+half of the test.
+"""
+
+comptime PRIVATE_CACHE_BYTES = 2 * 1024 * 1024
+"""Table size past which a serial build stops fitting in one core's cache.
+
+Two megabytes, the 13900K's L2 per performance core, which at
+`TABLE_BYTES_PER_GROUP` is sixty five thousand groups. Below it the serial table
+is served from cache and the partitioned route has nothing to win back, so a
+column of fewer projected groups stays serial whatever its height under
+`PARALLEL_ROWS`.
+"""
+
 comptime PARALLEL_STRING_ROWS = 1 << 18
 """Rows below which a factorize of a text column stays on one thread.
 
@@ -1260,6 +1303,17 @@ def _factorize_hashed[
         The factorization.
     """
     var n = len(col)
+    if n >= PARTITION_ROWS and n < PARALLEL_ROWS and worker_count() > 1:
+        # Below the slice route's line, but tall enough that a serial table
+        # which will not fit in a core's own cache costs more than the move.
+        var groups = _projected_groups[dt](col, seed, n)
+        var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        if (
+            most >= 2
+            and groups * TABLE_BYTES_PER_GROUP > PRIVATE_CACHE_BYTES
+            and n <= Int(UInt32.MAX)
+        ):
+            return _factorize_hashed_partitioned[dt](col, seed, most)
     if n >= PARALLEL_ROWS and worker_count() > 1:
         var groups = _projected_groups[dt](col, seed, n)
         var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
