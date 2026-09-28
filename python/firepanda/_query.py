@@ -56,8 +56,69 @@ _COMPARE = {
     ast.Gt: operator.gt,
     ast.GtE: operator.ge,
 }
-_FUNCTIONS = {"abs": abs}
-"""The functions a query may call by name."""
+
+
+def _math(name: str) -> Any:
+    """numpy's function of this name over numbers, columns or frames, keeping the labels.
+
+    A column's values go through numpy and come back as a column with the same
+    labels, named as the columns given were when they all share a name. A frame
+    goes through column by column.
+    """
+
+    def function(*args: Any) -> Any:
+        import numpy
+
+        from ._frame import DataFrame, Series
+
+        how = getattr(numpy, name)
+        frame = next((each for each in args if isinstance(each, DataFrame)), None)
+        if frame is not None:
+            columns = {
+                column: function(*(each[column] if each is frame else each for each in args))
+                for column in frame.columns
+            }
+            return DataFrame(columns, index=frame.index)
+        columns = [each for each in args if isinstance(each, Series)]
+        if not columns:
+            return how(*args)
+        values = [each.to_numpy() if isinstance(each, Series) else each for each in args]
+        names = {each.name for each in columns}
+        named = names.pop() if len(names) == 1 else None
+        return Series(how(*values), index=columns[0].index, name=named)
+
+    function.__name__ = name
+    return function
+
+
+_FUNCTIONS: dict[str, Any] = {
+    name: _math(name)
+    for name in (
+        "sin",
+        "cos",
+        "tan",
+        "exp",
+        "log",
+        "expm1",
+        "log1p",
+        "sqrt",
+        "sinh",
+        "cosh",
+        "tanh",
+        "arcsin",
+        "arccos",
+        "arctan",
+        "arccosh",
+        "arcsinh",
+        "arctanh",
+        "log10",
+        "floor",
+        "ceil",
+        "arctan2",
+    )
+}
+_FUNCTIONS["abs"] = abs
+"""The functions a query may call by name, which are pandas' list."""
 
 _AT = "__firepanda_at_"
 _QUOTED = "__firepanda_quoted_"
@@ -148,6 +209,12 @@ class _Reader:
             if name in resolver:
                 return resolver[name]
         frame = self._frame
+        if frame is None:
+            if name in self._variables:
+                return self._variables[name]
+            if name in ("True", "False", "None"):
+                return {"True": True, "False": False, "None": None}[name]
+            raise UndefinedVariableError(name)
         if name in list(frame.columns):
             return frame[name]
         labels = frame.index
@@ -340,3 +407,129 @@ def evaluate(
     if target is None:
         return answer
     return frame.assign(**{target: answer})
+
+
+def top_level(
+    expr: Any,
+    parser: str,
+    engine: Any,
+    local_dict: Mapping[str, Any] | None,
+    global_dict: Mapping[str, Any] | None,
+    resolvers: Any,
+    level: int,
+    target: Any,
+    inplace: bool,
+) -> Any:
+    """`pandas.eval`: an expression over the caller's variables rather than a frame's columns.
+
+    A bare name is a variable of the caller, so `@` is refused. `c = ...`
+    assigns into `target`, a copy of it unless `inplace`, and several lines
+    are read in turn, each seeing what the lines before it assigned.
+    """
+    if isinstance(expr, list | tuple):
+        return [
+            top_level(
+                each, parser, engine, local_dict, global_dict, resolvers, level + 1, None, False
+            )
+            for each in expr
+        ]
+    if not isinstance(expr, str):
+        return expr
+    if parser not in ("pandas", "python"):
+        raise KeyError(
+            f"Invalid parser '{parser}' passed, valid parsers are dict_keys(['python', 'pandas'])"
+        )
+    if engine not in (None, "python", "numexpr"):
+        raise KeyError(f"Invalid engine '{engine}' passed, valid engines are ['numexpr', 'python']")
+    lines = [line.strip() for line in expr.strip().splitlines() if line.strip()]
+    if not lines:
+        raise InvalidArgumentError("expr cannot be an empty string")
+    if len(lines) > 1 and target is None:
+        raise InvalidArgumentError(
+            "multi-line expressions are only valid in the context of data, use DataFrame.eval"
+        )
+    # Three frames up is whoever called `pandas.eval`: `_caller_variables`,
+    # this function and the module's `eval` sit in between, one fewer than
+    # the four `_caller_variables` counts for a frame's method.
+    variables = _caller_variables(level - 1, local_dict, global_dict)
+    written = target
+    answer = None
+    assigned = False
+    for line in lines:
+        text, quoted = _rewritten(line, parser == "pandas")
+        if _AT in text:
+            raise SyntaxError(
+                "The '@' prefix is not allowed in top-level eval calls.\n"
+                "please refer to your variables by name without the '@' prefix."
+            )
+        tree = ast.parse(text, mode="exec")
+        statement = tree.body[0]
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            name = statement.targets[0]
+            if not isinstance(name, ast.Name):
+                raise NotImplementedError("an assignment in eval names one column")
+            body: ast.AST = statement.value
+            column: str | None = quoted.get(name.id, name.id)
+        elif isinstance(statement, ast.Expr):
+            body, column = statement.value, None
+        else:
+            raise NotImplementedError(f"'{type(statement).__name__}' nodes are not implemented")
+        reader = _Reader(None, quoted, variables, list(resolvers or []))  # type: ignore[arg-type]
+        answer = reader.read(body)
+        if column is None:
+            continue
+        if written is None:
+            raise InvalidArgumentError("cannot assign without a target object")
+        if not assigned and not inplace:
+            written = written.copy()
+        assigned = True
+        try:
+            written[column] = answer
+        except (TypeError, IndexError) as error:
+            raise InvalidArgumentError("Cannot assign expression output to target") from error
+    if inplace and not assigned:
+        raise InvalidArgumentError("Cannot operate inplace if there is no assignment")
+    if not assigned:
+        return answer
+    return None if inplace else written
+
+
+def eval(
+    expr: Any,
+    parser: str = "pandas",
+    engine: Any = None,
+    local_dict: Mapping[str, Any] | None = None,
+    global_dict: Mapping[str, Any] | None = None,
+    resolvers: Any = (),
+    level: int = 0,
+    target: Any = None,
+    inplace: bool = False,
+) -> Any:
+    """The value of a Python expression over the caller's variables, read as `DataFrame.eval` reads.
+
+    `pd.eval("df.a + df.b")` adds two columns of the caller's `df`. Under
+    pandas' parser `&` and `|` bind looser than a comparison. `c = ...`
+    assigns a column of `target`, which is answered unless `inplace`.
+
+    Args:
+        expr: The expression, several lines of assignments, or a list of expressions.
+        parser: `"pandas"` or `"python"`.
+        engine: Accepted for pandas' sake, since every engine answers the same.
+        local_dict: Variables read before the caller's own.
+        global_dict: Variables read after `local_dict`.
+        resolvers: Mappings read before any variable.
+        level: How many more frames up the caller's variables are.
+        target: What `c = ...` assigns into.
+        inplace: Whether to assign into `target` itself rather than into a copy.
+
+    Returns:
+        The value, or the target with the assignment made, or None when `inplace`.
+
+    Raises:
+        ValueError: For an empty expression, an assignment with nothing to assign
+            into, or several lines with no target.
+        SyntaxError: For a name after `@`, which only a frame's `eval` reads.
+    """
+    return top_level(
+        expr, parser, engine, local_dict, global_dict, resolvers, level, target, inplace
+    )

@@ -44,6 +44,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import _config, _firepanda, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
+from ._expression import applied
+from ._na import NA
 from ._scalars import NaT, _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
@@ -3933,7 +3935,7 @@ def _nothing(value: Any) -> bool:
         Whether it is None or a NaN or one of the other things that stand for a
         value nobody wrote.
     """
-    return value is None or value != value
+    return value is None or value is NA or value != value
 
 
 def _single(value: Any) -> bool:
@@ -4797,6 +4799,23 @@ def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
     return ("gather", _flattened(found))
 
 
+def _called_key(key: Any, owner: Any, labelled: bool) -> Any:
+    """A `loc` or `iloc` key with each function in it called with the frame or column.
+
+    A function, or a `col` expression, stands for what it answers on the
+    object, on either axis. Under `iloc` a function may not answer a tuple,
+    since that would name the columns from inside the rows.
+    """
+    if type(key) is tuple:
+        return tuple(applied(part, owner) for part in key)
+    if not callable(key):
+        return key
+    answer = applied(key, owner)
+    if not labelled and isinstance(answer, tuple):
+        raise InvalidArgumentError("Returning a tuple from a callable with iloc is not allowed.")
+    return answer
+
+
 class _Selection:
     """What `loc` and `iloc` have in common, which is everything after the key.
 
@@ -4843,7 +4862,7 @@ class _Selection:
         """
         from ._frame import DataFrame, Series
 
-        rows, columns = _two_axes(key)
+        rows, columns = _two_axes(_called_key(key, self._owner, isinstance(self, _Labelled)))
         inner = self._owner._inner
         names = inner.names()
         picked = self._columns(columns, names)
@@ -4880,7 +4899,7 @@ class _Selection:
 
         labelled = isinstance(self, _Labelled)
         owner = self._owner
-        rows, columns = _two_axes(key)
+        rows, columns = _two_axes(_called_key(key, owner, labelled))
         names = owner._inner.names()
         height = owner._inner.length()
         fresh: list[str] = []
@@ -5519,6 +5538,7 @@ class _Along:
         """Answers a value or a series, depending on the key's shape."""
         from ._frame import Series
 
+        key = _called_key(key, self._owner, self._labelled)
         if isinstance(key, tuple):
             # A tuple is how a caller names a second axis, and there is not one
             # to name. pandas raises its own IndexingError here, which this
@@ -5551,6 +5571,7 @@ class _Along:
         end, and `iloc` past the end refuses, both as pandas does. The series'
         one slot is rebound to the written column, as `inplace` does.
         """
+        key = _called_key(key, self._owner, self._labelled)
         if isinstance(key, tuple):
             raise IndexingError("Too many indexers")
         owner = self._owner
@@ -6794,7 +6815,7 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
 
 def _missing(value: Any) -> bool:
     """Whether a value read out of a column is a missing one, None or a NaN."""
-    return value is None or value != value
+    return value is None or value is NA or value != value
 
 
 def _label_texts(index: Any) -> list[str]:
@@ -7652,7 +7673,7 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         if callable(key) and not isinstance(key, (SeriesMixin, DataFrameMixin)):
-            return self[key(self)]
+            return self[applied(key, self)]
         if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
             return self.loc[key]
         if _is_numpy(key) and key.ndim == 1 and key.dtype.kind == "b":
@@ -8923,10 +8944,8 @@ class DataFrameMixin(_Carries):
         inplace = _flag("inplace", inplace)
         _no_level(level)
         along = _axis_number(axis, "DataFrame", 0, (0, 1))
-        if callable(cond):
-            cond = cond(self)
-        if callable(other):
-            other = other(self)
+        cond = applied(cond, self)
+        other = applied(other, self)
         names = [str(name) for name in self.columns]
         labels = self._inner.labels().to_list()
         flags = _frame_conditions(cond, names, labels, along)
@@ -9134,7 +9153,7 @@ class DataFrameMixin(_Carries):
 
         out = DataFrame._wrap(self._inner)
         for name, value in kwargs.items():
-            out = out._assigned(name, value(out) if callable(value) else value)
+            out = out._assigned(name, applied(value, out))
         return out
 
     def __setitem__(self, key: Any, value: Any) -> None:
@@ -12292,8 +12311,8 @@ class SeriesMixin(_Carries):
                 )
         pairs = [
             (
-                condition(self) if callable(condition) else condition,
-                replacement(self) if callable(replacement) else replacement,
+                applied(condition, self),
+                applied(replacement, self),
             )
             for condition, replacement in caselist
         ]
@@ -12938,10 +12957,8 @@ class SeriesMixin(_Carries):
         inplace = _flag("inplace", inplace)
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
-        if callable(cond):
-            cond = cond(self)
-        if callable(other):
-            other = other(self)
+        cond = applied(cond, self)
+        other = applied(other, self)
         labels = self._inner.labels().to_list()
         flags = _condition(cond, labels, len(labels))
         kept = _no_gaps(flags.unary("invert") if flip else flags)
@@ -22938,7 +22955,7 @@ def melt(
 def isna(obj: Any) -> Any:
     """Whether a value is missing, or where a column, frame or index is missing.
 
-    A scalar is missing when it is None or a float NaN. A list is refused rather
+    A scalar is missing when it is None, `NaT`, `NA` or a float NaN. A list is refused rather
     than answered, since pandas answers a numpy array for one and numpy is not a
     dependency here, so turn it into a column first.
 
@@ -22958,7 +22975,7 @@ def isna(obj: Any) -> Any:
             "firepanda:unsupported: isna on a list answers a numpy array in pandas and "
             "numpy is not a firepanda dependency, so pass a Series"
         )
-    return obj is None or obj is NaT or (isinstance(obj, float) and obj != obj)
+    return obj is None or obj is NaT or obj is NA or (isinstance(obj, float) and obj != obj)
 
 
 def notna(obj: Any) -> Any:

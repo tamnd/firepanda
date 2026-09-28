@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: NA, IndexSlice, eval, col and functions as loc keys
+
+`firepanda.NA` is pandas' missing value, with its three-valued logic and every operator answering as pandas 3.0 does against numbers, flags, text, bytes, dates, spans and numpy arrays, and `isna` knows it. `IndexSlice` hands back what goes between its brackets. `firepanda.eval` reads an expression over the caller's variables with the reader `DataFrame.eval` uses, assigns into a `target`, reads several lines into one, and refuses `@` in pandas' words. `firepanda.col` makes an expression that `assign`, `loc`, `iloc`, `[]`, `where`, `mask` and `case_when` read on the frame, and it prints as pandas prints it. `loc` and `iloc` on a frame or a column now take a function of the object on either axis, and a query or `eval` can call pandas' math functions such as `sin`, `log10` and `arctan2`.
+
 ### Added: attrs and flags carried as pandas carries them
 
 Frames and columns have `attrs`, `flags` and `set_flags`, and `firepanda.Flags` is exported. Which answers keep `attrs` follows lists measured on pandas 3.0 by calling every method of a frame, a column, a group by, a resample, the windows and the `str`, `dt` and `cat` accessors on an object holding them: most answers keep a deep copy, an operator takes the other side's when it has some, `merge`, `join` and `concat` keep them only when every input holds the same, and the reductions pandas runs in compiled code drop them. `allows_duplicate_labels=False` is carried the same way and raises pandas' `DuplicateLabelError` with its table of positions. Until some object holds `attrs` or flags the wrappers call straight through, so programs that never use them pay nothing measurable. The `@name` lookup in `query` and `eval` skips the wrappers' frames.
