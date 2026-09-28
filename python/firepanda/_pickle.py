@@ -547,27 +547,37 @@ def to_pickle(
         ValueError: For a compression pandas does not know, or storage options
             on a local file.
     """
-    _refuse_storage(storage_options, filepath_or_buffer)
-    method, options = _method(filepath_or_buffer, compression)
-    if method == "tar" and "mode" not in options:
-        name = str(filepath_or_buffer).lower()
-        packing = next((kind for end, kind in _TAR_BY_END.items() if name.endswith(end)), "")
-        options["mode"] = f"w:{packing}"
     if protocol < 0:
         protocol = pickle.HIGHEST_PROTOCOL
+    _bytes_written(
+        pickle.dumps(obj, protocol=protocol), filepath_or_buffer, compression, storage_options
+    )
+
+
+def _bytes_written(data: bytes, target: Any, compression: Any, storage_options: Any) -> None:
+    """Writes bytes to a path or a binary handle, compressed as the name or `compression` says.
+
+    Raises:
+        ValueError: For a compression pandas does not know, or storage options
+            on a local file.
+    """
+    _refuse_storage(storage_options, target)
+    method, options = _method(target, compression)
+    if method == "tar" and "mode" not in options:
+        name = str(target).lower()
+        packing = next((kind for end, kind in _TAR_BY_END.items() if name.endswith(end)), "")
+        options["mode"] = f"w:{packing}"
     data = _packed(
-        pickle.dumps(obj, protocol=protocol),
+        data,
         method,
         options,
-        _inner_name(filepath_or_buffer),
-        ""
-        if hasattr(filepath_or_buffer, "write")
-        else os.path.basename(os.fspath(filepath_or_buffer)),
+        _inner_name(target),
+        "" if hasattr(target, "write") else os.path.basename(os.fspath(target)),
     )
-    if hasattr(filepath_or_buffer, "write"):
-        filepath_or_buffer.write(data)
+    if hasattr(target, "write"):
+        target.write(data)
         return
-    with open(os.path.expanduser(os.fspath(filepath_or_buffer)), "wb") as handle:
+    with open(os.path.expanduser(os.fspath(target)), "wb") as handle:
         handle.write(data)
 
 
