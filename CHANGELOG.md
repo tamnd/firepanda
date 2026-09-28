@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A zone given as a tzinfo object to tz_localize, and fixed offsets named after UTC
+
+`tz_localize` on a column of instants or on a `DatetimeIndex` takes a `tzinfo` object, a `zoneinfo` zone or a fixed `datetime.timezone`, where it used to take only a zone name. A fixed offset is named after UTC, so a column read against seven hours east of it is `datetime64[us, UTC+07:00]`, as pandas prints it, wherever the zone came from.
+
 ### Added: Instants and spans refuse the casts pandas refuses, and elapsed times read from gaps are seconds
 
 `astype` on a column of instants or spans refuses every float type and every whole number type but int64 with pandas' `TypeError` and words, in a series and in a frame, where it used to hand back counts. `to_timedelta` on an empty list or on nothing but missing values answers seconds, as pandas does, or nanoseconds for a column of floats, and an empty list no longer fails.

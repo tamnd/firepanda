@@ -2851,7 +2851,8 @@ def _zone_name(zone: Any) -> str:
         offset = zone.utcoffset(None)
         minutes = int(offset.total_seconds()) // 60
         sign = "-" if minutes < 0 else "+"
-        return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+        # pandas names a fixed offset after UTC, which the kernel reads as well.
+        return f"UTC{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
     raise InvalidArgumentError(f"a column cannot carry the zone {zone!r}, which has no name")
 
 

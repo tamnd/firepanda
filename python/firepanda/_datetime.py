@@ -534,10 +534,7 @@ class DatetimeIndex(HeldFreq, Index):
                 return self.copy()
             return self._moved("tz_localize_none", "")
         if not isinstance(tz, str):
-            raise NotImplementedError(
-                "tz has to be a zone name for now, because a tzinfo object is a"
-                " Python object and the kernel reads the zone out of a string"
-            )
+            tz = _zone_name(tz)
         if not (_is_default(ambiguous) and _is_default(nonexistent)):
             made = self._placed("tz_localize", tz, ambiguous, nonexistent)
         else:
