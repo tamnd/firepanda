@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Timestamp reads a year, a month or a quarter
+
+`Timestamp("2024")`, `Timestamp("2024-3")`, `Timestamp("2024/03")` and `Timestamp("2024Q1")` are the first day of the span they name, as in pandas, where they used to be refused as text that is not ISO 8601.
+
 ### Added: offset anchors by position, and taking no zone off
 
 The month anchored offsets name their anchor in their signature, as pandas' `YearEnd` shows `month`, and take it as the third positional argument. `Series.dt.tz_localize(None)` and `DatetimeIndex.tz_localize(None)` on moments that carry no zone hand back the readings as pandas does, where they used to raise.
