@@ -444,6 +444,29 @@ def test_keys_named_differently_keep_both_columns() raises:
     assert_equal(len(out), 3)
 
 
+def test_a_side_taken_whole_keeps_its_values_and_nulls() raises:
+    # Every left row finds one right row, in order, so the left columns are
+    # handed over rather than gathered, and the right side is gathered as usual.
+    var left = pair_frame(
+        Series("k", ints([3, 1, 2])),
+        Series("a", nulled(ints([30, 10, 20]), 1)),
+    )
+    var right = pair_frame(
+        Series("code", ints([1, 2, 3])), Series("b", ints([100, 200, 300]))
+    )
+    var out = left.join_on(right, on("k"), on("code"))
+    assert_equal(len(out), 3)
+    var a = out.column("a").as_typed[DType.int64]()
+    assert_equal(a[0], 30)
+    assert_equal(a[2], 20)
+    assert_equal(a.null_count(), 1)
+    assert_false(a.is_valid(1))
+    var b = out.column("b").as_typed[DType.int64]()
+    assert_equal(b[0], 300)
+    assert_equal(b[1], 100)
+    assert_equal(b[2], 200)
+
+
 def test_a_missing_key_column_is_refused() raises:
     with assert_raises(contains="nope"):
         _ = left_frame().join(right_frame(), on("nope"))

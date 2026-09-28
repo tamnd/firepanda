@@ -3529,11 +3529,22 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         )
                 wanted.append(found)
 
+        # A side whose every row comes out once and in order is gathered by
+        # the identity, and its columns can be handed over rather than copied.
+        # That is not a rare shape: an inner join of a fact table against a
+        # dimension it always finds is exactly it on the fact side. TPC-H q10's
+        # join of 114,705 lines against nation is 3.1 ms on the 13900K with the
+        # thirteen gathers and 0.8 ms without them.
+        var left_whole = _in_order(pairs.left_at, self.rows)
+        var right_whole = _in_order(pairs.right_at, other.rows)
+
         var kept = List[Field](capacity=len(wanted))
         var built = List[AnyArray](capacity=len(wanted))
         for w in range(len(wanted)):
             var i = wanted[w]
-            if from_right[i]:
+            if from_right[i] and right_whole:
+                built.append(other.columns[source_at[i]].only().copy())
+            elif from_right[i]:
                 built.append(
                     take_any(other.columns[source_at[i]].only(), pairs.right_at)
                 )
@@ -3546,6 +3557,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         pairs.right_at,
                     )
                 )
+            elif left_whole:
+                built.append(self.columns[source_at[i]].only().copy())
             else:
                 built.append(
                     take_any(self.columns[source_at[i]].only(), pairs.left_at)
@@ -6025,6 +6038,25 @@ def _broadcast_positions(
     for i in range(rows):
         out.append(Int(src.unsafe_offset(i).unsafe_load()))
     return out^
+
+
+def _in_order(indices: List[Int], rows: Int) -> Bool:
+    """Reports whether a gather would take every row once and in order.
+
+    Args:
+        indices: The positions a join produced for one side.
+        rows: How tall that side is.
+
+    Returns:
+        True if `indices` is `0, 1, ..., rows - 1`, which is what makes the
+        gather a copy of the column.
+    """
+    if len(indices) != rows:
+        return False
+    for i in range(rows):
+        if indices[i] != i:
+            return False
+    return True
 
 
 def _has_name(fields: List[Field], name: String) -> Bool:
