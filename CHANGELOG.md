@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Names and text read from a DatetimeIndex with a gap
+
+`day_name`, `month_name` and `strftime` on a `DatetimeIndex` with a gap raised since the gap handling for whole number parts, because the text went through the float path. They now answer the text with the gap shown as NaN, as pandas does. `time`, `timetz` and `to_pydatetime` hand out `NaT` for a gap where they handed out None.
+
 ### Added: Numbers among moments in to_datetime, and text among spans in to_timedelta
 
 `to_datetime` of a list mixing a `Timestamp`, `datetime` or `date` with a number now reads the number as pandas does, as nanoseconds since 1970, and holds the column in nanoseconds. A NaN beside a moment is a gap, a flag raises pandas' `TypeError`, and a zoned moment beside a number raises pandas' mixed timezones `ValueError` unless `utc` is set. `to_timedelta` of text mixed with spans now answers microseconds, or the finer unit of the spans, where it answered nanoseconds, and keeps nanoseconds when a number is mixed in.
