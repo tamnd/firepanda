@@ -19,6 +19,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: level methods and reshaping on rows labelled by a MultiIndex
 
 `loc` takes a whole tuple, a prefix of one, or a row key and a column together on a frame or a column labelled by levels, and drops the levels a prefix names, as pandas does. `droplevel`, `swaplevel`, `reorder_levels` and `xs` are on frames and columns, `sort_index` takes `level`, `DataFrame.value_counts`, `DataFrame.stack`, `Series.unstack` and `SeriesGroupBy.value_counts` are in, and `pivot` and `pivot_table` take several row keys. Each works by rewriting the labels in Python over what the extension already does. A key column is no longer offered as an attribute of a group by, so `groupby("a").a` is an AttributeError as it is in pandas.
+### Changed: several comparisons against constants are anded in one pass
+
+`conjoin_compares` in `firepanda.kernel.binary` takes a list of columns, comparisons and constants and answers the rows on which every comparison holds, reading each column once and writing one mask. Five comparisons that went through `binary_value_any` and `conjoin` wrote five masks and read them back, so a filter shaped like TPC-H q6's over six million rows goes from 59 ms to 30 ms on a shared six core box. A comparison it has no loop for, such as one on text or one whose column would need converting, is worked out the ordinary way and folded in. Nulls keep nothing, so the answer has no nulls.
 
 ### Added: rows labelled by a MultiIndex
 

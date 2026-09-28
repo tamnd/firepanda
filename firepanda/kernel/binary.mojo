@@ -72,6 +72,8 @@ the decoded column would do. The six rules pandas has for it are in
 `_dictionary_erased` and `_dictionary_const_erased`.
 """
 
+from std.sys.info import simd_width_of
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
@@ -80,6 +82,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.dtype.temporal import TimeUnit, TimeZone, finer_unit
+from firepanda.exec.morsel import parallel_morsels
 from firepanda.kernel.dictionary import (
     decode_dictionary,
     dictionary_codes,
@@ -123,6 +126,7 @@ from .compare import (
     CMP_LE,
     CMP_LT,
     CMP_NE,
+    _holds,
     compare_const,
     compare_const_positions,
     compare_const_positions_through,
@@ -1298,6 +1302,242 @@ def binary_value_any(
     )
     var flip = value_on_left and not op.is_comparison()
     return _binary_const_erased(column, scalar, applied, common.physical, flip)
+
+
+def conjoin_compares(
+    columns: List[AnyArray], ops: List[BinaryOp], values: List[Value]
+) raises -> Array[DType.bool]:
+    """Finds the rows on which every one of several comparisons holds.
+
+    `binary_value_any` a comparison at a time writes a mask column for each one
+    and `conjoin` reads them all back, so a filter with five comparisons over
+    six million rows writes thirty megabytes of masks to produce six. This reads
+    each column once and writes the answer once. Every morsel's comparisons are
+    folded into its own stretch of the answer, which is a hundred and twenty
+    eight kilobytes and is still in cache when the next comparison reaches it.
+    Polars fuses a conjunction the same way and DuckDB narrows a selection
+    vector, and neither writes the columns in between either.
+
+    A comparison with no loop here, which is text, a category, a null constant,
+    or a column that would have to be converted to meet its constant, is worked
+    out the ordinary way first and its mask is folded in with the others.
+
+    TPC-H q6's five comparisons over three columns of six million rows take 59
+    ms on a shared six core box as five masks and a conjoin, and 30 ms here.
+
+    Args:
+        columns: One column per comparison, all the same length. A column can
+            appear more than once.
+        ops: The comparisons, column on the left.
+        values: The constants, on the right.
+
+    Returns:
+        A mask with no nulls: true where every comparison is true, false where
+        any is false or null. That is the rows a filter keeps, and it is not
+        the three valued `conjoin`, which would say null where no comparison is
+        false and some are null.
+
+    Raises:
+        If the three lists differ in length or are empty, if a column's length
+        differs from the first's, or as `binary_value_any` does.
+    """
+    var count = len(columns)
+    if count == 0 or len(ops) != count or len(values) != count:
+        raise Error(
+            "conjoin_compares: needs one comparison and one constant per column"
+        )
+    var n = len(columns[0])
+    var direct = List[Bool](capacity=count)
+    var scalars = List[Value](capacity=count)
+    var masks = List[Array[DType.bool]](capacity=count)
+    for p in range(count):
+        ref a = columns[p]
+        if len(a) != n:
+            raise Error("conjoin_compares: the columns differ in length")
+        var scalar = Value(copy=values[p])
+        var fits = (
+            ops[p].is_comparison()
+            and a.is_flat()
+            and not a.is_dictionary()
+            and not a.is_coded()
+            and not a.is_string()
+        )
+        if fits:
+            scalar = resolve_constant(a.type, values[p], ops[p])
+            if scalar.is_null():
+                fits = False
+            elif a.type.is_temporal() or scalar.type.is_temporal():
+                fits = a.type == scalar.type
+            else:
+                var common = promote(a.type, scalar.type)
+                fits = (
+                    not common.is_variable_width()
+                    and common.physical == a.type.physical
+                )
+        direct.append(fits)
+        scalars.append(scalar^)
+        if fits:
+            masks.append(Array[DType.bool](0))
+        else:
+            masks.append(
+                binary_value_any(a, values[p], ops[p]).as_typed[DType.bool]()
+            )
+
+    var out = Array[DType.bool](overwritten=n)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        for p in range(count):
+            if direct[p]:
+                _compare_into(
+                    columns[p], scalars[p], ops[p], out, start, stop, p == 0
+                )
+            else:
+                _mask_into(masks[p], out, start, stop, p == 0)
+
+    parallel_morsels(compute, n)
+    return out^
+
+
+def _compare_into(
+    a: AnyArray,
+    b: Value,
+    op: BinaryOp,
+    mut into: Array[DType.bool],
+    start: Int,
+    stop: Int,
+    first: Bool,
+) raises:
+    """Folds one comparison into a stretch of `conjoin_compares`'s answer.
+
+    Args:
+        a: The column, already known to have a loop here.
+        b: The constant, already read at the column's type.
+        op: The comparison.
+        into: The answer.
+        start: The first row.
+        stop: One past the last row.
+        first: Whether this is the first comparison, which writes rather than
+            ands.
+
+    Raises:
+        If the dtype has no physical layout.
+    """
+    comptime for target in ALL:
+        if a.type.physical == target:
+            ref x = a.as_typed_view[target]()
+            var y = b.as_scalar[target]()
+            if op == BinaryOp.EQ:
+                _fold_range[target, CMP_EQ](x, y, into, start, stop, first)
+            elif op == BinaryOp.NE:
+                _fold_range[target, CMP_NE](x, y, into, start, stop, first)
+            elif op == BinaryOp.LT:
+                _fold_range[target, CMP_LT](x, y, into, start, stop, first)
+            elif op == BinaryOp.LE:
+                _fold_range[target, CMP_LE](x, y, into, start, stop, first)
+            elif op == BinaryOp.GT:
+                _fold_range[target, CMP_GT](x, y, into, start, stop, first)
+            else:
+                _fold_range[target, CMP_GE](x, y, into, start, stop, first)
+            if x.null_count() > 0:
+                var dst = into.unsafe_mut_ptr()
+                for i in range(start, stop):
+                    if not x.is_valid(i):
+                        dst.unsafe_offset(i).unsafe_store(False)
+            return
+    raise Error("conjoin_compares: unsupported dtype")
+
+
+def _fold_range[
+    dt: DType, op: Int
+](
+    x: Array[dt],
+    y: Scalar[dt],
+    mut into: Array[DType.bool],
+    start: Int,
+    stop: Int,
+    first: Bool,
+):
+    """Compares a stretch of a column and writes or ands it into the answer.
+
+    Nothing is written past `stop`, unlike `compare_const`, because the rows
+    past it belong to another worker's morsel and that worker may be partway
+    through anding its own comparisons into them.
+
+    Args:
+        x: The column.
+        y: The constant.
+        into: The answer.
+        start: The first row.
+        stop: One past the last row.
+        first: Whether to write rather than and.
+
+    Parameters:
+        dt: The column's dtype.
+        op: One of the `CMP_` codes.
+    """
+    comptime width = simd_width_of[dt]()
+    var src = x.unsafe_ptr()
+    var dst = into.unsafe_mut_ptr()
+    var wide = SIMD[dt, width](y)
+    var i = start
+    while i + width <= stop:
+        var v = src.unsafe_offset(i).unsafe_load[width=width]()
+        var r: SIMD[DType.bool, width]
+        comptime if op == CMP_EQ:
+            r = v.eq(wide)
+        elif op == CMP_NE:
+            # The inverse of equality, as in `compare_const`, so a NaN is
+            # unequal to everything.
+            r = ~v.eq(wide)
+        elif op == CMP_LT:
+            r = v.lt(wide)
+        elif op == CMP_LE:
+            r = v.le(wide)
+        elif op == CMP_GT:
+            r = v.gt(wide)
+        else:
+            r = v.ge(wide)
+        if first:
+            dst.unsafe_offset(i).unsafe_store(r)
+        else:
+            dst.unsafe_offset(i).unsafe_store(
+                dst.unsafe_offset(i).unsafe_load[width=width]() & r
+            )
+        i += width
+    while i < stop:
+        var r = _holds[dt, op](src.unsafe_offset(i).unsafe_load(), y)
+        if not first:
+            r = r and Bool(dst.unsafe_offset(i).unsafe_load())
+        dst.unsafe_offset(i).unsafe_store(r)
+        i += 1
+
+
+def _mask_into(
+    mask: Array[DType.bool],
+    mut into: Array[DType.bool],
+    start: Int,
+    stop: Int,
+    first: Bool,
+):
+    """Folds a comparison worked out the ordinary way into the answer.
+
+    Args:
+        mask: The comparison's answer, null where it is unknown.
+        into: The answer.
+        start: The first row.
+        stop: One past the last row.
+        first: Whether to write rather than and.
+    """
+    var src = mask.unsafe_ptr()
+    var dst = into.unsafe_mut_ptr()
+    var nulls = mask.null_count() > 0
+    for i in range(start, stop):
+        var r = Bool(src.unsafe_offset(i).unsafe_load())
+        if nulls and not mask.is_valid(i):
+            r = False
+        if not first:
+            r = r and Bool(dst.unsafe_offset(i).unsafe_load())
+        dst.unsafe_offset(i).unsafe_store(r)
 
 
 def compare_value_positions(
