@@ -11,6 +11,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: uint64 values past the int64 range
 
 A uint64 value above the int64 range came back from `tolist()`, `to_csv` and every other path through the column's values as a negative number, because the core hands the values out through a signed integer. They are now put back before anyone sees them. `read_csv` on a plain file also read such a value as float64, where pandas reads uint64, and now reads it as pandas does.
+### Changed: a join hands over a side it takes whole
+
+When every row of one side comes out of a join once and in order, which is what an inner join of a fact table against a dimension it always finds looks like, the join now shares that side's columns instead of gathering each of them through the identity. On the 13900K, TPC-H q10's join of 114,705 lines against nation goes from 3.1 to 0.8 ms, and the whole query from 29 to 26 ms. q9 goes from 46 to 40 ms and q11 from 6.4 to 5.6.
+
+### Changed: a filter that keeps few rows reads only those rows
+
+A filter copied every row of a column and advanced its output by the mask, so it read the whole column whatever the mask kept. When a stretch of the mask keeps fewer than one row in eight, the filter now finds the kept rows eight mask bytes at a time and reads only those. On the 13900K, filtering six million doubles down to one row in a hundred goes from 0.80 to 0.33 ms, and TPC-H q6's filter of two columns from 2.2 to 1.2 ms.
 
 ### Added: `read_csv` takes every argument, plus `read_table` and `read_fwf`
 
