@@ -6275,3 +6275,73 @@ def test_a_held_dialect_refuses_what_the_free_function_refuses() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_a_lateral_subquery_reads_the_shop_to_its_left() raises:
+    # Shop 3 has no sale over 20, so the inner join drops it.
+    var out = run(
+        (
+            "SELECT shop, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+            " sales.shop = shops.shop AND qty > 20) s ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 1, 2], "shop")
+    same(read_back(out, "qty"), [25, 30, 40], "qty")
+
+
+def test_a_lateral_select_list_can_read_the_left_side() raises:
+    same(
+        answer(
+            (
+                "SELECT total FROM shops, LATERAL (SELECT floor + qty AS total"
+                " FROM sales WHERE sales.shop = shops.shop AND qty > 20) s"
+                " ORDER BY total"
+            ),
+            "total",
+        ),
+        [36, 41, 62],
+        "total",
+    )
+
+
+def test_a_lateral_condition_can_compare_the_two_sides() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM shops, LATERAL (SELECT qty FROM sales WHERE"
+                " qty > floor AND sales.shop = shops.shop) s ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [12, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_join_lateral_filters_on_its_condition() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM shops JOIN LATERAL (SELECT qty FROM sales"
+                " WHERE sales.shop = shops.shop) s ON qty > floor ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [12, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_lateral_subquery_that_reads_nothing_on_the_left_pairs_every_row() raises:
+    same(
+        answer(
+            (
+                "SELECT count(*) AS n FROM shops, LATERAL (SELECT band FROM"
+                " tiers) b"
+            ),
+            "n",
+        ),
+        [12],
+        "n",
+    )

@@ -2035,9 +2035,57 @@ def test_the_scans_inside_a_derived_table_number_with_the_rest() raises:
     )
 
 
-def test_a_lateral_subquery_is_refused_by_name() raises:
-    with assert_raises(contains="LATERAL subquery"):
-        _ = _plan("SELECT a FROM t, LATERAL (SELECT b FROM u WHERE b = t.a) v")
+def test_a_lateral_subquery_joins_on_the_column_it_reads_from_the_left() raises:
+    # The bare b is u's, since the subquery's own names come first.
+    var got = _plan(
+        "SELECT a, k FROM t, LATERAL (SELECT k FROM u WHERE b = t.a) v"
+    )
+    assert_true(got.find("JOIN inner [a = b]") != -1, got)
+    assert_true(
+        got.startswith("PROJECT [a, k]\n  PROJECT [a, b, g, f, k]"), got
+    )
+
+
+def test_a_lateral_subquery_that_reads_nothing_on_the_left_is_a_cross_join() raises:
+    var got = _plan(
+        "SELECT a, k FROM t, LATERAL (SELECT k FROM u WHERE k > 1) v"
+    )
+    assert_true(got.find("JOIN cross []") != -1, got)
+    assert_true(got.find("FILTER") != -1, got)
+
+
+def test_a_lateral_subquery_first_in_the_from_is_an_ordinary_one() raises:
+    assert_equal(
+        _plan("SELECT k FROM LATERAL (SELECT k FROM u) v"),
+        "PROJECT [k]\n  PROJECT [k]\n    SCAN u []\n",
+    )
+
+
+def test_a_join_lateral_puts_its_condition_over_the_subquery() raises:
+    var got = _plan(
+        "SELECT a, n FROM t JOIN LATERAL (SELECT k FROM u WHERE b = t.a) v(n)"
+        " ON n > a"
+    )
+    assert_true(got.find("JOIN inner [a = b]") != -1, got)
+    assert_true(got.find("FILTER") != -1, got)
+    assert_true(got.find("k as n") != -1, got)
+
+
+def test_what_a_lateral_subquery_does_not_lower_is_refused_by_name() raises:
+    with assert_raises(contains="aggregate inside a LATERAL"):
+        _ = _plan(
+            "SELECT a FROM t, LATERAL (SELECT count(*) FROM u WHERE b = t.a) v"
+        )
+    with assert_raises(contains="LIMIT inside a LATERAL"):
+        _ = _plan("SELECT a FROM t, LATERAL (SELECT k FROM u LIMIT 1) v")
+    with assert_raises(contains="DISTINCT inside a LATERAL"):
+        _ = _plan("SELECT a FROM t, LATERAL (SELECT DISTINCT k FROM u) v")
+    with assert_raises(contains="inner or a cross join to a LATERAL"):
+        _ = _plan(
+            "SELECT a FROM t LEFT JOIN LATERAL (SELECT k FROM u) v ON true"
+        )
+    with assert_raises(contains="2 columns specified"):
+        _ = _plan("SELECT a FROM t, LATERAL (SELECT k FROM u) v(x, y)")
 
 
 def test_the_column_aliases_on_a_derived_table_rename_its_output() raises:

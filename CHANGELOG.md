@@ -30,6 +30,9 @@ A join on an integer key could look its keys up in a table indexed by the key va
 ### Added: describe over a column's groups, and pd.Grouper
 
 `SeriesGroupBy.describe` answers the count, mean, spread, extremes and percentiles of each group as float64 columns on the keys, with the same percentile labels as `Series.describe`. `firepanda.Grouper` groups by a column, and on its own it brings its own `sort` and `dropna` as pandas reads them, so a plain one leaves the groups in the order they are first seen. A grouper with a frequency bins a column of moments as `resample(freq, on=key)` does, and prints as pandas' `TimeGrouper`.
+### Added: LATERAL subqueries
+
+A `LATERAL` subquery written after a comma, or on the right of an inner or a cross join, now runs, as in DuckDB. It is not run once per left row. Its `FROM` is joined to what is on its left, an equality in its `WHERE` between the two sides becomes a join key, and its select list is worked out over each pair, so `FROM shops, LATERAL (SELECT qty FROM sales WHERE sales.shop = shops.shop)` is one hash join. A left row the subquery finds nothing for is dropped. A condition on a `JOIN LATERAL` is a filter over the result. An aggregate, a `DISTINCT`, an `ORDER BY` or a `LIMIT` inside a lateral subquery is refused by name, as is a left join to one. A `LATERAL` with nothing to its left is an ordinary subquery.
 
 ### Added: a Python function over the groups
 
