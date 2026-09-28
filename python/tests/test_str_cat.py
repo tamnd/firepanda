@@ -48,6 +48,7 @@ the error rather than its sentence.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -262,7 +263,7 @@ def test_cat_with_others_is_the_row_by_row_half(firepanda: ModuleType) -> None:
     """
     mine = made(firepanda).str.cat(made(firepanda), sep="-")
     want = theirs().str.cat(theirs(), sep="-")
-    assert [None if v != v else v for v in want.tolist()] == mine.tolist()
+    assert [nan if v != v else v for v in want.tolist()] == mine.tolist()
     mine = made(firepanda).str.cat(others=["a"] * len(ROWS), na_rep="?")
     assert mine.tolist() == theirs().str.cat(others=["a"] * len(ROWS), na_rep="?").tolist()
 

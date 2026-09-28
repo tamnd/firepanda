@@ -13,6 +13,7 @@ None and a NaN.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -58,23 +59,30 @@ def test_each_type_is_inferred(firepanda: ModuleType) -> None:
 
 
 def test_a_none_is_a_hole_rather_than_a_value(firepanda: ModuleType) -> None:
-    """The validity bitmap is what a None becomes, in every type that has one."""
+    """The validity bitmap is what a None becomes, in every type that has one.
+
+    Read back, the hole is spelled as pandas spells a gap of that type, a NaN
+    for numbers and text and None among flags.
+    """
     frame = firepanda.DataFrame(
         {"i": [1, None, 3], "f": [1.5, None, 3.5], "b": [True, None, False], "s": ["a", None, "c"]}
     )
+    for name in ("i", "f", "s"):
+        hole = frame[name].tolist()[1]
+        assert hole != hole
+    assert frame["b"].tolist()[1] is None
     for name in ("i", "f", "b", "s"):
-        assert frame[name].tolist()[1] is None
         assert frame[name].count() == 2
         assert frame[name].hasnans
 
 
 def test_a_nan_is_a_value_and_a_none_is_not(firepanda: ModuleType) -> None:
-    """The divergence document 18 section 3 is about, asserted rather than hidden.
+    """The divergence document 18 section 3 is about, kept in memory only.
 
     Two halves of one answer. The storage keeps them apart, because an Arrow
     column has a validity bitmap and a pandas float column does not, so a NaN
     stays a NaN with its bit set and a None is a cleared bit. Read the values
-    back and they are different things.
+    back and both are NaN, which is what pandas hands out for either.
 
     What counts them agrees with pandas. `null_count` on a float column counts
     the cleared bits and the NaNs, which is the behaviour issue #170 argues for
@@ -85,7 +93,7 @@ def test_a_nan_is_a_value_and_a_none_is_not(firepanda: ModuleType) -> None:
     frame = firepanda.DataFrame({"a": [1.0, float("nan"), None]})
     values = frame["a"].tolist()
     assert values[1] != values[1]
-    assert values[2] is None
+    assert values[2] != values[2]
     assert frame["a"].count() == 1
     assert frame["a"].hasnans
 
@@ -108,7 +116,7 @@ def test_a_column_of_nothing_is_float64_and_all_missing(firepanda: ModuleType) -
     """
     holes = firepanda.DataFrame({"a": [None, None]})
     assert holes["a"].dtype == "float64"
-    assert holes["a"].tolist() == [None, None]
+    assert holes["a"].tolist() == [nan, nan]
     nothing = firepanda.DataFrame({"b": []})
     assert nothing["b"].dtype == "float64"
     assert len(nothing["b"]) == 0

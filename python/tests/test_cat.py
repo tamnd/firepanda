@@ -6,20 +6,13 @@ disagreements a caller can cause is a `ValueError` rather than a quiet answer.
 Every one of those is measured against pandas rather than against a constant,
 for the reason `test_astype.py` gives at more length.
 
-Two differences are asserted rather than worked around, because both are
-decisions somebody made on purpose.
-
-The first is the width of the codes. pandas answers int8 for a column of three
-categories and firepanda answers int32, which document 26 argues for and which a
-caller can see through `Series.cat.codes.dtype`. The values agree, so a program
-comparing codes to codes is fine and a program comparing dtypes is not, and it
-should find that out here rather than in production.
-
-The second is what a missing row reads back as. pandas puts a NaN in the hole
-because a categorical's missing rows come out through numpy, and firepanda says
-None because Arrow has a validity bitmap and a value that is absent is not a
-value that is a float. That is the same difference every other column has and it
-is argued in `firepanda/py/values.mojo`.
+One difference is asserted rather than worked around, because it is a
+decision somebody made on purpose. It is the width of the codes. pandas answers
+int8 for a column of three categories and firepanda answers int32, which
+document 26 argues for and which a caller can see through
+`Series.cat.codes.dtype`. The values agree, so a program comparing codes to
+codes is fine and a program comparing dtypes is not, and it should find that
+out here rather than in production.
 """
 
 from __future__ import annotations
@@ -57,16 +50,15 @@ def theirs(values: list[Any] = WORDS) -> Any:
 
 
 def like(mine: list[Any], them: list[Any]) -> bool:
-    """Compares two columns of values, reading a NaN as a None.
+    """Compares two columns of values, reading a NaN and a None as the same gap.
 
-    The one difference this file allows through without asserting it row by row,
-    since it is the library wide missing value rule rather than anything about
-    categories.
+    A NaN is not equal to itself, so two lists that both hold one are the same
+    answer and still unequal under `==`.
     """
     if len(mine) != len(them):
         return False
     for one, other in zip(mine, them, strict=True):
-        if one is None:
+        if one is None or one != one:
             if other is None or other != other:
                 continue
             return False
@@ -155,7 +147,7 @@ def test_removing_a_category_makes_its_rows_missing(firepanda: ModuleType) -> No
     them = theirs().cat.remove_categories(["bolt"])
     assert like(mine.tolist(), list(them))
     assert mine.cat.categories.tolist() == them.cat.categories.tolist()
-    assert mine.tolist()[1] is None
+    assert mine.tolist()[1] != mine.tolist()[1]
 
 
 @needs_pandas
@@ -317,24 +309,15 @@ def test_a_missing_row_stays_missing_through_every_one_of_them(
 
 
 @needs_pandas
-def test_a_missing_row_has_no_code_rather_than_a_code_of_minus_one(
-    firepanda: ModuleType,
-) -> None:
-    """The third difference on this accessor, and the one worth staring at.
+def test_a_missing_row_has_a_code_of_minus_one(firepanda: ModuleType) -> None:
+    """pandas writes -1 for a row whose category is missing, and so does this.
 
-    pandas writes -1 for a row whose category is missing, because its codes are a
-    numpy integer array and there is nowhere else to record absence. Firepanda's
-    codes are an Arrow column with a validity bitmap, so the code is missing and
-    reads back as None.
-
-    That matters more than it looks. A program that filters on `codes >= 0` is
-    doing the pandas idiom and gets nothing here, and a program that takes the
-    mean of the codes gets a different answer in each library. Both of those are
-    better found by a failing comparison than by a number that is quietly wrong.
+    A program that filters on `codes >= 0` is doing the pandas idiom, and the
+    mean of the codes has to be the same number in each library.
     """
     mine = made(firepanda, ["rivet", None, "bolt"])
     them = theirs(["rivet", None, "bolt"])
-    assert mine.cat.codes.tolist() == [1, None, 0]
+    assert mine.cat.codes.tolist() == [1, -1, 0]
     assert them.cat.codes.tolist() == [1, -1, 0]
 
 

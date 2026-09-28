@@ -38,6 +38,7 @@ describes, and the tests below assert that rather than the measurement.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -95,14 +96,13 @@ def mine_rows(frame: Any) -> list[list[Any]]:
 
 
 def their_rows(frame: Any) -> list[list[Any]]:
-    """The same for pandas, with a missing row read as None.
+    """The same for pandas, with a missing row read as the one `nan`.
 
-    pandas hands a missing row back as a NaN float and this library hands back
-    None, which is `engine/missing-spelling` and is not what any test here is
-    about.
+    A NaN is not equal to itself, so a row holding one is only equal to another
+    that holds the same object, and both sides are made to hold `nan`.
     """
     return [
-        [None if value is None or value != value else value for value in row]
+        [nan if value is None or value != value else value for value in row]
         for row in frame.to_dict("split")["data"]
     ]
 
@@ -175,7 +175,7 @@ def test_a_missing_row_is_missing_in_all_three(firepanda: ModuleType) -> None:
     """There is nothing to cut, so there is no part before the cut either."""
     mine, them = made(firepanda), theirs()
     for name in ("partition", "rpartition"):
-        assert mine_rows(getattr(mine.str, name)(" "))[-1] == [None, None, None], name
+        assert mine_rows(getattr(mine.str, name)(" "))[-1] == [nan, nan, nan], name
         assert getattr(them.str, name)(" ").iloc[-1].isna().tolist() == [True] * 3, name
 
 

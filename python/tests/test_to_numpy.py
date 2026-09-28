@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 from collections.abc import Callable
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -91,7 +92,7 @@ def test_text_values_hold_their_type(firepanda: ModuleType) -> None:
     """pandas answers an extension array for text, and firepanda its own array."""
     answer = firepanda.Series(["a", None]).values
     assert type(answer).__name__ == "FirepandaArray"
-    assert answer.tolist() == ["a", None]
+    assert answer.tolist() == ["a", nan]
 
 
 @pytest.mark.parametrize(

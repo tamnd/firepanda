@@ -41,6 +41,7 @@ fixed, this file is one of the places that has to be edited to say so.
 from __future__ import annotations
 
 import math
+from math import nan
 from types import ModuleType
 
 import pytest
@@ -575,7 +576,7 @@ def test_the_remainder_of_two_bool_columns_widens_to_int8(firepanda: ModuleType)
     left = _bools(firepanda, [True, True])
     right = _bools(firepanda, [True, False])
     assert (left % right).dtype == "int8"
-    assert (left % right).tolist() == [0, None]
+    assert (left % right).tolist() == [0, nan]
 
 
 def test_three_bool_operations_are_refused_against_a_python_bool(

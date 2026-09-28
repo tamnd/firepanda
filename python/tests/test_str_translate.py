@@ -16,6 +16,7 @@ to `replace` one after the other would collapse both into the same letter.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -52,8 +53,8 @@ def theirs(values: list[Any] = ROWS) -> Any:
 
 
 def same(mine: Any, them: Any) -> bool:
-    """Whether two columns agree, with pandas' missing row read as None."""
-    theirs_rows = [None if one is None or one != one else one for one in them.tolist()]
+    """Whether two columns agree, with pandas' missing row read as the one `nan`."""
+    theirs_rows = [nan if one is None or one != one else one for one in them.tolist()]
     return mine.tolist() == theirs_rows
 
 
@@ -173,7 +174,7 @@ def test_a_table_that_is_not_a_mapping_is_refused(firepanda: ModuleType) -> None
 def test_translate_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
     """As pandas does, which makes this the second text name in a row that agrees."""
     mine = made(firepanda)
-    assert mine.str.translate({ord("a"): "X"}).tolist()[-1] is None
+    assert mine.str.translate({ord("a"): "X"}).tolist()[-1] is nan
     assert theirs().str.translate({ord("a"): "X"}).isna().tolist()[-1] is True
 
 

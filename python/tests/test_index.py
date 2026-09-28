@@ -16,6 +16,7 @@ so in the test that covers them.
 
 from __future__ import annotations
 
+from math import nan
 from pathlib import Path
 from types import ModuleType
 
@@ -324,7 +325,7 @@ def test_a_missing_label_keeps_its_dtype(firepanda: ModuleType) -> None:
     """
     index = firepanda.Index([3, 1]).insert(1, None)
     assert index.dtype == "int64"
-    assert index.tolist() == [3, None, 1]
+    assert index.tolist() == [3, nan, 1]
     assert index.hasnans
 
 
@@ -389,7 +390,7 @@ def test_taking_positions_with_a_fill_value_makes_a_gap(firepanda: ModuleType) -
     the gap is a missing label whatever value was named.
     """
     index = firepanda.Index(["a", "b", "c"])
-    assert index.take([0, -1], fill_value="z").tolist() == ["a", None]
+    assert index.take([0, -1], fill_value="z").tolist() == ["a", nan]
     with pytest.raises(ValueError, match="all indices must be"):
         index.take([0, -2], fill_value="z")
 

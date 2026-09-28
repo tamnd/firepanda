@@ -23,6 +23,8 @@ Document 48 argues it out.
 
 from __future__ import annotations
 
+from math import nan
+
 import pandas as pd
 import pytest
 
@@ -75,7 +77,7 @@ def test_a_mask_keeps_the_rows_the_condition_says_are_false(firepanda):
 def test_no_other_side_leaves_those_rows_holding_nothing(firepanda):
     """And holding nothing in int64, which is the whole argument of the slice."""
     answered = firepanda.Series([1, 2, 3, 4]).where([True, False, True, False])
-    assert answered.tolist() == [1, None, 3, None]
+    assert answered.tolist() == [1, nan, 3, nan]
     assert answered.dtype == "int64"
 
 
@@ -135,13 +137,13 @@ def test_the_other_side_is_lined_up_by_label_as_well(firepanda):
 
 def test_a_label_the_other_side_does_not_carry_leaves_the_row_missing(firepanda):
     made = labelled(firepanda, ["a", "b"], [1, 2])
-    assert made.where([True, False], labelled(firepanda, ["a"], [9])).tolist() == [1, None]
+    assert made.where([True, False], labelled(firepanda, ["a"], [9])).tolist() == [1, nan]
 
 
 def test_a_row_of_the_other_side_that_holds_nothing_leaves_the_row_missing(firepanda):
     made = firepanda.Series([1, 2, 3])
     given = firepanda.Series([9, None, 9])
-    assert made.where([True, False, False], given).tolist() == [1, None, 9]
+    assert made.where([True, False, False], given).tolist() == [1, nan, 9]
 
 
 def test_a_value_the_column_cannot_hold_is_refused_rather_than_widened(firepanda):
@@ -187,7 +189,7 @@ def test_a_new_category_is_refused_the_way_setting_one_is(firepanda):
 def test_a_category_column_with_no_other_side_holds_nothing_there(firepanda):
     made = firepanda.Series(["a", "b"]).astype("category")
     answered = made.where([True, False])
-    assert answered.tolist() == ["a", None]
+    assert answered.tolist() == ["a", nan]
     assert answered.dtype == "category"
 
 
@@ -292,7 +294,7 @@ def test_one_column_read_across_them_is_a_value_for_each(firepanda):
 def test_a_frame_as_the_other_side_lines_up_on_both_axes(firepanda):
     given = firepanda.DataFrame({"a": [0, 0, 0]})
     answered = frame(firepanda).where(flags(firepanda), given)
-    assert cells(answered) == {"a": [1, 0, 3], "b": [None, 5, None]}
+    assert cells(answered) == {"a": [1, 0, 3], "b": [nan, 5, nan]}
 
 
 def test_a_mapping_is_one_object_rather_than_a_value_per_column(firepanda):

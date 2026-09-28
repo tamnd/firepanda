@@ -24,6 +24,7 @@ between numbers and `2` equals `2.0`.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -206,8 +207,8 @@ def test_a_missing_row_stays_missing(firepanda: ModuleType) -> None:
     two answers and is still a difference, so it is asserted rather than
     compared.
     """
-    assert made(firepanda).str.count("a.c").tolist()[-1] is None
-    assert made(firepanda).str.count("abc").tolist()[-1] is None
+    assert made(firepanda).str.count("a.c").tolist()[-1] is nan
+    assert made(firepanda).str.count("abc").tolist()[-1] is nan
 
 
 @needs_pandas

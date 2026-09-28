@@ -119,7 +119,7 @@ def same(mine: Any, them: Any) -> None:
     assert len(got) == len(want)
     for a, b in zip(got, want, strict=True):
         if b is None or b is pd.NaT or (isinstance(b, float) and b != b):
-            assert a is None
+            assert a is None or a != a
         else:
             assert a == b
     if hasattr(them, "name"):

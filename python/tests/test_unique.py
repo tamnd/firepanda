@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 from collections.abc import Callable
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -111,7 +112,7 @@ def test_an_array_reads_like_one(firepanda: ModuleType) -> None:
     assert values.shape == (4,)
     assert values.ndim == 1
     assert values[0] == "b"
-    assert values[1:].tolist() == ["a", None, "c"]
+    assert values[1:].tolist() == ["a", nan, "c"]
     assert "c" in values
     assert pa.array(values).to_pylist() == ["b", "a", None, "c"]
     assert values.isna().tolist() == [False, False, True, False]

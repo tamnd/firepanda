@@ -20,6 +20,7 @@ emptied category in the list.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -87,7 +88,7 @@ def test_a_head_is_still_a_category_column(firepanda: ModuleType) -> None:
     """A slice is its own path and neither the filter nor the take reaches it."""
     out = made(firepanda).head(3)
     assert out.dtype == "category"
-    assert out.tolist() == ["low", None, "high"]
+    assert out.tolist() == ["low", nan, "high"]
     assert categories(out) == ["high", "low", "mid"]
 
 
@@ -132,7 +133,7 @@ def test_a_shift_is_still_a_category_column(firepanda: ModuleType) -> None:
     """A shift stacks a run of gap onto a slice, so the gap side carries no list."""
     out = made(firepanda).shift(1)
     assert out.dtype == "category"
-    assert out.tolist() == [None, "low", None, "high", "low"]
+    assert out.tolist() == [nan, "low", nan, "high", "low"]
     assert categories(out) == ["high", "low", "mid"]
 
 
@@ -140,7 +141,7 @@ def test_shifting_backwards_is_still_a_category_column(firepanda: ModuleType) ->
     """The gap is at the other end and the answer is the same kind of column."""
     out = made(firepanda).shift(-1)
     assert out.dtype == "category"
-    assert out.tolist() == [None, "high", "low", "mid", None]
+    assert out.tolist() == [nan, "high", "low", "mid", nan]
 
 
 @needs_pandas

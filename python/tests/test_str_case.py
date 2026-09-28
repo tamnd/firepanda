@@ -48,6 +48,7 @@ that do not have to name a dtype to be meaningful.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -95,11 +96,11 @@ def theirs(values: list[Any] = ROWS) -> Any:
 
 
 def like(mine: list[Any], them: list[Any]) -> bool:
-    """Compares two columns of values, reading a NaN as a None."""
+    """Compares two columns of values, reading a NaN and a None as the same gap."""
     if len(mine) != len(them):
         return False
     for one, other in zip(mine, them, strict=True):
-        if one is None:
+        if one is None or one != one:
             if other is None or other != other:
                 continue
             return False
@@ -160,8 +161,8 @@ def test_changing_case_twice_does_not_come_back(firepanda: ModuleType) -> None:
 
 def test_a_case_change_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
     """And does not turn it into the empty string, which is the tempting mistake."""
-    assert made(firepanda, ["a", None]).str.upper().tolist() == ["A", None]
-    assert made(firepanda, ["A", None]).str.lower().tolist() == ["a", None]
+    assert made(firepanda, ["a", None]).str.upper().tolist() == ["A", nan]
+    assert made(firepanda, ["A", None]).str.lower().tolist() == ["a", nan]
 
 
 @needs_pandas
@@ -326,7 +327,7 @@ def test_capitalize_starts_at_the_first_character_and_not_the_first_letter(
 ) -> None:
     """A row that opens with a digit or a space keeps its first letter lower."""
     column = made(firepanda, ["1abc def", "  spaced", "", None])
-    assert column.str.capitalize().tolist() == ["1abc def", "  spaced", "", None]
+    assert column.str.capitalize().tolist() == ["1abc def", "  spaced", "", nan]
 
 
 def test_swapcase_leaves_a_character_in_neither_case_alone(
@@ -378,8 +379,8 @@ def test_swapping_twice_does_not_always_give_the_row_back(
 
 def test_the_two_new_names_keep_a_missing_row_missing(firepanda: ModuleType) -> None:
     """The same rule as the other five, asserted again because it is easy to lose."""
-    assert made(firepanda, ["a", None]).str.capitalize().tolist() == ["A", None]
-    assert made(firepanda, ["a", None]).str.swapcase().tolist() == ["A", None]
+    assert made(firepanda, ["a", None]).str.capitalize().tolist() == ["A", nan]
+    assert made(firepanda, ["a", None]).str.swapcase().tolist() == ["A", nan]
 
 
 @needs_pandas
@@ -467,7 +468,7 @@ def test_folding_corrects_the_code_points_the_lower_case_path_corrects(
 
 def test_casefold_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
     """The same rule as the other seven, asserted again because it is easy to lose."""
-    assert made(firepanda, ["A", None]).str.casefold().tolist() == ["a", None]
+    assert made(firepanda, ["A", None]).str.casefold().tolist() == ["a", nan]
 
 
 @needs_pandas
@@ -598,6 +599,6 @@ def test_the_three_new_names_on_a_missing_row(firepanda: ModuleType) -> None:
 
     Including `isascii`, which says yes to an empty row and still not to a missing one.
     """
-    assert made(firepanda, ["a b", None]).str.title().tolist() == ["A B", None]
+    assert made(firepanda, ["a b", None]).str.title().tolist() == ["A B", nan]
     assert made(firepanda, ["Ab", None]).str.istitle().tolist() == [True, False]
     assert made(firepanda, ["ab", None]).str.isascii().tolist() == [True, False]

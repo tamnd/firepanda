@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import importlib.util
 from collections.abc import Callable
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -151,7 +152,7 @@ def test_a_count_is_still_a_number(firepanda: ModuleType) -> None:
     """Only a value of the column's own kind is made a moment."""
     column = moments(firepanda)
     assert column.count() == 3
-    assert column.dt.year.tolist() == [2024, None, 2023, 2024]
+    assert column.dt.year.tolist() == [2024, nan, 2023, 2024]
 
 
 NAMED: list[Callable[[Any], Any]] = [

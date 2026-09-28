@@ -25,6 +25,7 @@ this library gives both.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -64,13 +65,12 @@ def theirs(values: list[Any] = ROWS) -> Any:
 
 
 def same(mine: Any, them: Any) -> bool:
-    """Whether two columns agree, with pandas' missing row read as None.
+    """Whether two columns agree, with pandas' missing row read as the one `nan`.
 
-    pandas hands a missing row back as a NaN float and this library hands back
-    None, which is `engine/missing-spelling` and is not what any test here is
-    about.
+    A NaN is not equal to itself, so a list holding one is only equal to
+    another that holds the same object, and both sides are made to hold `nan`.
     """
-    theirs_rows = [None if one is None or one != one else one for one in them.tolist()]
+    theirs_rows = [nan if one is None or one != one else one for one in them.tolist()]
     return mine.tolist() == theirs_rows
 
 
@@ -231,5 +231,5 @@ def test_arguments_of_the_wrong_type_are_type_errors(firepanda: ModuleType) -> N
 def test_replace_keeps_a_missing_row_missing(firepanda: ModuleType) -> None:
     """As pandas does, which makes this the one name of the five that agrees."""
     mine = made(firepanda)
-    assert mine.str.replace("a", "X").tolist()[-1] is None
+    assert mine.str.replace("a", "X").tolist()[-1] is nan
     assert theirs().str.replace("a", "X").isna().tolist()[-1] is True
