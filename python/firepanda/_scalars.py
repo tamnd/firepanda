@@ -741,6 +741,9 @@ class Timestamp(_datetime.datetime):
             return cls._epoch(midnight), "s", None
         if isinstance(ts_input, str):
             return cls._parse(ts_input)
+        if type(ts_input).__module__ == "numpy" and type(ts_input).__name__ == "datetime64":
+            nanos, unit = _numpy_nanos(ts_input, "datetime64[ns]")
+            return nanos, unit, None
         raise DTypeError(
             f"Cannot convert input [{ts_input!r}] of type {type(ts_input)} to Timestamp"
         )
@@ -1892,6 +1895,8 @@ class Timedelta(_datetime.timedelta):
             return value * scale, _COARSEST[scale] if unit is not None else "ns"
         if isinstance(value, str):
             return cls._parse(value)
+        if type(value).__module__ == "numpy" and type(value).__name__ == "timedelta64":
+            return _numpy_nanos(value, "timedelta64[ns]")
         from .offsets import Tick
 
         if isinstance(value, Tick):
@@ -2486,6 +2491,17 @@ _NAT_VALUE = -9_223_372_036_854_775_808
 
 _NAT_TEXT = frozenset({"nat", "", "nan"})
 """Text that `Timestamp` and `Timedelta` read as a missing value, compared lowered."""
+
+
+def _numpy_nanos(value: Any, finest: str) -> tuple[int, str]:
+    """A numpy moment or span as nanoseconds and the unit pandas keeps for it.
+
+    pandas keeps seconds, milliseconds, microseconds and nanoseconds as they are
+    and reads anything coarser, minutes or days, as seconds.
+    """
+    spelled = str(value.dtype)
+    unit = spelled[spelled.find("[") + 1 : -1] if "[" in spelled else "ns"
+    return int(value.astype(finest).astype("int64")), unit if unit in _UNITS else "s"
 
 
 def _nat_input(value: Any) -> bool:

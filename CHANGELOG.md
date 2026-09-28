@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Spans scaled by a number and divided by a span
+
+A column or an index of spans times or over a number, `s * 3`, `s / 7` or `s // 2`, is now spans, truncated toward zero as pandas truncates, with NaT over zero. A span over a span is floats, a floor of spans is whole numbers when nothing is missing, and a remainder of spans is spans in the finer unit, with the sign of the divisor. A number series times a span series lines up by label. A fixed offset such as `Day(1)` or `Hour(2)` added to spans is the span it lasts, and `Timestamp` and `Timedelta` read numpy's `datetime64` and `timedelta64`, so these work on the right of an operator too. `TimedeltaIndex` keeps the scaled frequency, so `timedelta_range("1h", periods=3, freq="h") * 2` holds `2h`.
+
 ### Added: An index of instants or spans passes its frequency on
 
 A DatetimeIndex or a TimedeltaIndex now hands its frequency to the index an operation builds, by pandas' rules. unique, drop_duplicates, fillna, dropna, view and a same type astype keep it. take and sort_values keep it when the positions make a slice, times the slice's step, so a daily index sorted backwards is `-1D`, and a mask keeps it when the labels it keeps are one run. delete and insert keep it at the ends, union and intersection keep it or read it off the labels the way pandas does, append keeps it for pieces that follow on, and reindex takes the target's. normalize reads it off the labels, tz_localize keeps it on UTC, tz_convert keeps a fixed step, and arithmetic keeps, flips or scales it. `Index.sort_values` now takes `key`, and reindex of an index of instants takes a list of them.
