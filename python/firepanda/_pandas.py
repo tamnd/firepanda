@@ -14752,10 +14752,9 @@ def _grouped(
     and the seven arguments have to be read before there is an object to read
     them into, so a generated one line delegation has nothing to delegate to.
 
-    One of the seven is declared and refused. `observed` decides whether a
-    categorical key contributes the groups it has no rows for, and pandas made
-    True the default in version 3, which is the behaviour here, so it is refused
-    only at False. `group_keys` is kept for `apply`, which reads it.
+    `observed` decides whether a category key makes a group of each category
+    that has no rows, and matters only when there is one. `group_keys` is kept
+    for `apply`, which reads it.
 
     Args:
         frame: The frame being grouped.
@@ -14765,7 +14764,7 @@ def _grouped(
         sort: Whether the groups come out in key order.
         group_keys: Whether `apply` puts the key in front of the labels of an
             answer that keeps each group's rows.
-        observed: Declared and held at True.
+        observed: Whether only the categories with rows are groups.
         dropna: Whether a missing key is a group.
 
     Returns:
@@ -14780,26 +14779,50 @@ def _grouped(
         by, sort, dropna = by._column(frame), by.sort, by.dropna
     elif isinstance(by, list) and any(isinstance(key, Grouper) for key in by):
         by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
-    _held_at(
-        "observed",
-        observed,
-        True,
-        "it says whether a categorical key contributes the groups it has no rows"
-        " for, and a group with no rows in it is a row this has nothing to put in",
-    )
     single = not isinstance(by, list) or _values_key(frame, by)
     frame, names, shown = _outside_keys(frame, by, level)
     keys = GroupByMixin._keys(frame, names, None)
+    frame, categories = _category_keys(frame, keys)
     if dropna:
         frame = _gaps_as_nulls(frame, keys)
-    kind = _key_showing(DataFrameGroupBy) if shown else DataFrameGroupBy
+    every = not _flag("observed", observed) and bool(categories)
+    if every and len(keys) > 1:
+        raise NotImplementedError(
+            "observed=False over several keys makes a group of every mix of their"
+            " categories, which is labelled by a MultiIndex"
+        )
+    showing = shown or categories
+    kind = _key_showing(DataFrameGroupBy) if showing else DataFrameGroupBy
     grouped = kind(frame, keys, as_index, sort, dropna)
     grouped._single = single
     grouped._group_keys = bool(group_keys)
-    if shown:
+    if showing:
         grouped._shown = shown
+        grouped._categories = categories
+        grouped._every = every
         grouped._busy = False
     return grouped
+
+
+def _category_keys(frame: DataFrame, keys: list[str]) -> tuple[DataFrame, dict[str, Any]]:
+    """The frame with each category key held as its codes, and each one's categories and order.
+
+    The grouping underneath does not group a category column, and its codes
+    group the same rows. They also sort in the order of the categories, which is
+    the order pandas gives the groups. The codes are held as floats so a missing
+    category is a gap, which `dropna` then reads as it reads any gap. The
+    answers turn the codes back into the category column the caller grouped by.
+    """
+    changed: dict[str, Any] = {}
+    categories: dict[str, Any] = {}
+    for name in keys:
+        column = frame[name]
+        if column.dtype == "category":
+            accessor = column.cat
+            categories[name] = (accessor._held(), accessor._ordered())
+            codes = accessor._codes()
+            changed[name] = codes.astype("float64").where(codes >= 0)
+    return (frame.assign(**changed) if changed else frame), categories
 
 
 def _gaps_as_nulls(frame: DataFrame, keys: list[str]) -> DataFrame:
@@ -14977,7 +15000,7 @@ def _key_showing(base: type) -> Any:
     import inspect
 
     space: dict[str, Any] = {
-        "__slots__": ("_busy", "_shown"),
+        "__slots__": ("_busy", "_categories", "_every", "_shown"),
         "__doc__": base.__doc__,
         "__module__": base.__module__,
         "__qualname__": base.__qualname__,
@@ -15002,23 +15025,35 @@ def _showing(method: Callable[..., Any], name: str) -> Callable[..., Any]:
     def call(self: Any, *args: Any, **kwargs: Any) -> Any:
         if self._busy:
             return method(self, *args, **kwargs)
+        if self._every and name in ("idxmax", "idxmin"):
+            _all_seen(self, name)
+        if name == "get_group" and args:
+            args = (_key_code(self, args[0]), *args[1:])
         self._busy = True
         try:
             answer = method(self, *args, **kwargs)
         finally:
             self._busy = False
         if name == "__iter__":
-            return ((key, _shown_as(self, group, True)) for key, group in answer)
+            return ((_key_back(self, key), _shown_as(self, group, True)) for key, group in answer)
+        if self._every and name not in _KEPT_ROWS and name not in _PER_ROW:
+            answer = _every_category(self, answer, _empty_fills(name, args, kwargs))
         return _shown_as(self, answer, name in _KEPT_ROWS)
 
     return call
 
 
 def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
-    """`answer` with the hidden names `owner` holds put back, or dropped from rows of the frame."""
+    """`answer` with the hidden names `owner` holds put back, or dropped from rows of the frame.
+
+    A category key held as its codes is turned back into the categories first,
+    in a column and on the row labels.
+    """
     shown = owner._shown
     if isinstance(answer, GroupByMixin):
-        return _rekeyed(answer, shown)
+        return _rekeyed(answer, shown, owner._categories, owner._every)
+    if isinstance(answer, DataFrameMixin | SeriesMixin):
+        answer = _categories_back(owner, answer)
     if isinstance(answer, DataFrameMixin):
         hidden = [name for name in answer.columns if name in shown]
         if rows:
@@ -15041,7 +15076,12 @@ def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
     return answer
 
 
-def _rekeyed(grouped: Any, shown: dict[str, Any]) -> Any:
+def _rekeyed(
+    grouped: Any,
+    shown: dict[str, Any],
+    categories: dict[str, Any] | None = None,
+    every: bool = False,
+) -> Any:
     """`grouped` as the class that shows the names in `shown`, holding what it holds."""
     keyed = object.__new__(_key_showing(type(grouped)))
     for kind in type(grouped).__mro__:
@@ -15049,8 +15089,202 @@ def _rekeyed(grouped: Any, shown: dict[str, Any]) -> Any:
             if hasattr(grouped, slot):
                 setattr(keyed, slot, getattr(grouped, slot))
     keyed._shown = shown
+    keyed._categories = categories or {}
+    keyed._every = every
     keyed._busy = False
     return keyed
+
+
+_PER_ROW = frozenset(
+    {
+        "transform",
+        "cumsum",
+        "cumprod",
+        "cummax",
+        "cummin",
+        "cumcount",
+        "rank",
+        "shift",
+        "diff",
+        "pct_change",
+        "ngroup",
+        "fillna",
+        "ffill",
+        "bfill",
+        "__getitem__",
+        "__iter__",
+    }
+)
+"""The methods whose answer is one a row, which a category with no rows adds nothing to."""
+
+_EMPTY_FILL: dict[str, Any] = {
+    "size": 0,
+    "count": 0,
+    "sum": 0,
+    "nunique": 0,
+    "prod": 1,
+    "any": False,
+    "all": True,
+}
+"""What pandas answers for a category with no rows, for the reductions that answer
+something other than a gap."""
+
+
+def _empty_fills(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """What a category with no rows gets from `name`, as one value or one a column.
+
+    A gap is None. `agg` reads its functions: a name is that reduction, a list
+    is one a column, and a dictionary is one for each column it names.
+
+    Raises:
+        NotImplementedError: For a function of the caller's, which pandas calls
+            on an empty group.
+    """
+    if name not in ("agg", "aggregate"):
+        if name == "apply":
+            raise NotImplementedError(
+                "apply with observed=False calls the function on an empty group for"
+                " each category with no rows, which is not written yet"
+            )
+        return _EMPTY_FILL.get(name)
+    func = args[0] if args else kwargs.get("func")
+
+    def one(item: Any) -> Any:
+        if not isinstance(item, str):
+            raise NotImplementedError(
+                "agg with observed=False calls a function on an empty group for each"
+                " category with no rows, which is not written yet"
+            )
+        return _EMPTY_FILL.get(item)
+
+    if isinstance(func, dict):
+        return {column: one(item) for column, item in func.items()}
+    if isinstance(func, list | tuple):
+        return {item: one(item) for item in func}
+    if func is None and kwargs:
+        return {column: one(item[1]) for column, item in kwargs.items()}
+    return one(func)
+
+
+def _all_seen(owner: Any, name: str) -> None:
+    """Refuses `idxmax` and `idxmin` when a category has no rows, in pandas' words."""
+    (key,) = owner._by
+    codes = owner._frame[key]
+    if codes.nunique() < len(owner._categories[key][0]):
+        raise InvalidArgumentError(
+            f"Can't get {name} of an empty group due to unobserved categories."
+            " Specify observed=True in groupby instead."
+        )
+
+
+def _every_category(owner: Any, answer: Any, fill: Any) -> Any:
+    """A reduction's answer with a row for each category that has no rows.
+
+    The new rows come after the others in the order of the categories when the
+    groups are not sorted, and every group goes in category order when they
+    are. A gap group, kept by `dropna=False`, stays last.
+    """
+    if not isinstance(answer, DataFrameMixin | SeriesMixin):
+        return answer
+
+    (key,) = owner._by
+    flat = isinstance(answer, DataFrameMixin) and key in answer.columns
+    if flat:
+        answer = answer.set_index(key)
+    labels = answer.index.tolist()
+    kept = [place for place, code in enumerate(labels) if code == code and code is not None]
+    gaps = [place for place in range(len(labels)) if place not in set(kept)]
+    seen = [float(labels[place]) for place in kept]
+    unseen = [float(code) for code in range(len(owner._categories[key][0])) if code not in seen]
+    if not unseen:
+        return answer.reset_index() if flat else answer
+    order = sorted(seen + unseen) if owner._sort else seen + unseen
+    body = _filled(answer.iloc[kept].reindex(order), answer, fill)
+    answer = concat([body, answer.iloc[gaps]]) if gaps else body
+    return answer.reset_index() if flat else answer
+
+
+def _filled(answer: Any, before: Any, fill: Any) -> Any:
+    """`answer` with its new rows given `fill`, and each column's type as it was `before`.
+
+    A column that is a gap for a category with no rows is left as the
+    reindex made it.
+    """
+
+    def one(column: Any, kind: str, value: Any) -> Any:
+        if value is None:
+            return column
+        if kind in ("str", "string"):
+            return column.fillna("")
+        return column.fillna(value).astype(kind)
+
+    if isinstance(answer, SeriesMixin):
+        return one(answer, str(before.dtype), fill)
+    if not isinstance(fill, dict):
+        fill = dict.fromkeys(answer.columns, fill)
+    return answer.assign(
+        **{
+            str(name): one(answer[name], str(before[name].dtype), fill.get(name))
+            for name in answer.columns
+        }
+    )
+
+
+def _key_back(owner: Any, key: Any) -> Any:
+    """A group's key from iteration, with a category key's code read as its category."""
+    if len(owner._by) != 1 or owner._by[0] not in owner._categories:
+        return key
+    held = owner._categories[owner._by[0]][0]
+    if isinstance(key, tuple):
+        return tuple(held[int(code)] if code == code and code is not None else code for code in key)
+    return held[int(key)] if key == key and key is not None else key
+
+
+def _key_code(owner: Any, key: Any) -> Any:
+    """A group's key as `get_group` is handed it, with a category read as its code.
+
+    Raises:
+        KeyError: For a key that is not one of the categories, as pandas raises.
+    """
+    if len(owner._by) != 1 or owner._by[0] not in owner._categories:
+        return key
+    held = owner._categories[owner._by[0]][0]
+    one = key[0] if isinstance(key, tuple) and len(key) == 1 else key
+    if one not in held:
+        raise KeyError(key)
+    return float(held.index(one))
+
+
+def _categories_back(owner: Any, answer: Any) -> Any:
+    """`answer` with each category key's codes turned back into the categories."""
+    if not owner._categories:
+        return answer
+    if isinstance(answer, DataFrameMixin):
+        changed = {
+            name: _as_categories(answer[name], *owner._categories[name])
+            for name in answer.columns
+            if name in owner._categories
+        }
+        if changed:
+            answer = answer.assign(**changed)
+    label = answer.index.name
+    if isinstance(label, str) and label in owner._categories:
+        column = _as_categories(answer.index.to_series(), *owner._categories[label])
+        answer = _with_row_labels(answer, column)
+    return answer
+
+
+def _as_categories(codes: Any, categories: list[str], ordered: bool) -> Any:
+    """A column of codes as the category column they point into."""
+    from ._frame import Series
+
+    if str(codes.dtype) == "category":
+        return codes
+    kept = codes.notna()
+    at = codes.where(kept, 0).astype("int64")
+    held = Series(categories or [""], dtype="string").take(at.tolist())
+    held = held.set_axis(codes.index).rename(codes.name).where(kept)
+    return _recategorized(held, categories, ordered)
 
 
 def _column_name(name: Any, place: int, keys: int) -> Any:
@@ -20448,6 +20682,34 @@ class IndexMixin:
         return [i in set(found) for i in range(self._inner.length())]
 
     @property
+    def categories(self) -> Index:
+        """The categories of labels that are a category, as `CategoricalIndex.categories`.
+
+        Raises:
+            AttributeError: For labels that are not a category, which pandas'
+                plain `Index` has no such name for.
+        """
+        return self.to_series().cat.categories
+
+    @property
+    def ordered(self) -> bool:
+        """Whether the categories of labels that are a category are in order.
+
+        Raises:
+            AttributeError: For labels that are not a category.
+        """
+        return self.to_series().cat.ordered
+
+    @property
+    def codes(self) -> Any:
+        """The position of each label in the categories, -1 for a gap, as a numpy array.
+
+        Raises:
+            AttributeError: For labels that are not a category.
+        """
+        return self.to_series().cat.codes.to_numpy()
+
+    @property
     def _temporal(self) -> bool:
         """Whether the labels are instants or spans."""
         return str(self.dtype).startswith(("datetime64", "timedelta64"))
@@ -25464,9 +25726,11 @@ def _index_text(index: Any) -> str:
         klass = "TimedeltaIndex"
     elif dtype.startswith(("int", "uint", "float", "bool", "string", "str")):
         klass = "Index"
+    elif dtype == "category":
+        klass = "CategoricalIndex"
     else:
         return repr(index._inner)
-    values = _held_values(index._inner)
+    values = index.tolist() if klass == "CategoricalIndex" else _held_values(index._inner)
     present = [v for v in values if not _missing(v)]
     if klass == "DatetimeIndex":
         dates = "," not in dtype and all(
@@ -25487,7 +25751,7 @@ def _index_text(index: Any) -> str:
             return f"'{v.days} days'" if days else f"'{v}'"
 
     else:
-        gap = "nan" if dtype.startswith(("float", "str")) else "<NA>"
+        gap = "nan" if dtype.startswith(("float", "str", "category")) else "<NA>"
 
         def formatter(v: Any) -> str:
             return gap if _missing(v) else _pprinted(v)
@@ -25497,11 +25761,14 @@ def _index_text(index: Any) -> str:
     text = dtype.startswith("str")
     summary = _summary(values, formatter, not text, klass, width, most)
     attrs = [f"dtype='{'str' if dtype == 'string' else dtype}'"]
+    if klass == "CategoricalIndex":
+        levels = ", ".join(_pprinted(label) for label in index.categories.tolist())
+        attrs[:0] = [f"categories=[{levels}]", f"ordered={index.ordered}"]
     if index.name is not None:
         attrs.append(f"name={_pprinted(index.name)}")
     if len(values) > most:
         attrs.append(f"length={len(values)}")
-    if klass != "Index":
+    if klass not in ("Index", "CategoricalIndex"):
         attrs.append("freq=None")
     return f"{klass}({summary}{', '.join(attrs)})"
 

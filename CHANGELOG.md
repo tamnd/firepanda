@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: grouping by a category column, and observed=False
+
+A frame groups by a category column in the order of its categories, and the key comes back as a category column, or as labels that print as pandas' `CategoricalIndex`, carrying every category. `observed=False` makes a group of each category that has no rows, and each reduction answers for it what pandas answers for an empty group: zero for `size`, `count`, `sum` and `nunique`, one for `prod`, false for `any`, true for `all`, and a gap for the rest, with `agg` reading each function it is given. `idxmax` and `idxmin` raise pandas' error when a category has no rows, and `apply`, a function passed to `agg`, and several keys with `observed=False` are refused. An index of categories now has `categories`, `ordered` and `codes`.
+
 ### Added: grouping by keys from outside the frame, and Series.groupby
 
 `groupby` takes every key pandas takes: a column of values lined up on the row labels, an array, list or Index as long as the frame, a function or a dictionary of the row labels, and the labels themselves by `level` or by their name. Each key is named as pandas names it, including `index` and `level_N` for keys with no name under `as_index=False`, and a key from outside the frame is never reduced or handed back by `head`, `filter` or iteration. `Series.groupby` takes the same keys. Grouping a frame by one of its own columns leaves that column out when the values are the column's, where pandas asks whether it is the same object. A NaN in a key of floats is now left out under `dropna`, a column's `size` carries the column's name, and `pd.Grouper` reads `(*args, **kwargs)` as pandas' does.
