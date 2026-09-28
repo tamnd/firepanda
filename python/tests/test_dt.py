@@ -404,7 +404,6 @@ def test_the_four_unwritten_names_are_absent_rather_than_refusing(
         (lambda s: zoned(s).dt.round("h", ambiguous="infer"), "ambiguous="),
         (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
         (lambda s: s.dt.floor(1), "freq has to be a string"),
-        (lambda s: s.dt.tz_localize(3), "tz has to be a zone name"),
     ],
 )
 def test_a_declared_argument_that_is_not_written_says_so(
