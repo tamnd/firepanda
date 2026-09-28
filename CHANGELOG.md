@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: astype("category") of a column that is not text refuses cleanly
+
+A category of numbers, flags or instants raised a bare `RuntimeError` from inside the core's cast. It now raises `UnsupportedError`, which is a `NotImplementedError`, naming the column's type, on a series and on a frame. pandas keeps such categories in the values' own type, and firepanda holds categories as a text column.
+
 ### Fixed: A row of values written through loc is read as numpy reads it
 
 `df.loc[label] = [1, 2.5]` now reads whole numbers beside a float as floats, as pandas does when it turns the list into a numpy array, so a new row made from them makes whole number columns float64. A list with text, a flag or a gap in it keeps each value's own type, as numpy's object array does.

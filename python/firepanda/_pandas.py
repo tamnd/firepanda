@@ -5931,6 +5931,24 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
         raise translate(error) from None
 
 
+def _category_of(printed: str, wanted: Any) -> None:
+    """Refuses a category of anything but text before the core is asked for one.
+
+    pandas makes a category of any column, keeping the values' own type for the
+    categories. firepanda holds the categories as a text column, so the cast is
+    refused here as something not written yet rather than as a failure.
+
+    Raises:
+        UnsupportedError: For a category of a column that is not text.
+    """
+    if wanted == "category" and printed not in ("str", "string", "category"):
+        raise UnsupportedError(
+            f"astype('category') of a {printed} column is not supported yet, because"
+            " firepanda holds the categories as a text column and pandas keeps them"
+            f" as {printed}"
+        )
+
+
 def _lined_up(value: Any, column: Any) -> Any:
     """A series of values lined up on a column's labels, all gaps where no label is shared.
 
@@ -11496,6 +11514,8 @@ class DataFrameMixin:
         }
         names = [name for name in asked if name not in units]
         dtypes = [_named_dtype(asked[name]) for name in names]
+        for name, wanted in zip(names, dtypes, strict=True):
+            _category_of(str(self[name].dtype), wanted)
         try:
             answer = DataFrame._wrap(self._inner.cast(names, dtypes, True))
         except Exception as error:
@@ -14036,6 +14056,7 @@ class SeriesMixin:
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
             return Series(texts, dtype="str", index=self.index, name=self.name)
+        _category_of(str(self.dtype), wanted)
         try:
             return Series._wrap(self._inner.cast(wanted, True))
         except Exception as error:
