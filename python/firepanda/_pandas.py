@@ -21547,17 +21547,57 @@ class GroupByMixin[Answer]:
             answer = taken.rename("count")
         return answer if self._as_index else answer.reset_index()
 
-    def rolling(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+    def rolling(
+        self,
+        window: Any,
+        min_periods: int | None = None,
+        center: bool = False,
+        win_type: str | None = None,
+        on: str | None = None,
+        closed: str | None = None,
+        method: str = "single",
+    ) -> _GroupedWindow:
         """A rolling window over each group, labelled by the group and the row."""
-        return _GroupedWindow(self, "rolling", args, kwargs)
+        settings = {
+            "min_periods": min_periods,
+            "center": center,
+            "win_type": win_type,
+            "on": on,
+            "closed": closed,
+            "method": method,
+        }
+        return _GroupedWindow(self, "rolling", (window,), settings)
 
-    def expanding(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+    def expanding(self, min_periods: int = 1, method: str = "single") -> _GroupedWindow:
         """An expanding window over each group, labelled by the group and the row."""
-        return _GroupedWindow(self, "expanding", args, kwargs)
+        settings = {"min_periods": min_periods, "method": method}
+        return _GroupedWindow(self, "expanding", (), settings)
 
-    def ewm(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+    def ewm(
+        self,
+        com: float | None = None,
+        span: float | None = None,
+        halflife: Any = None,
+        alpha: float | None = None,
+        min_periods: int | None = 0,
+        adjust: bool = True,
+        ignore_na: bool = False,
+        times: Any = None,
+        method: str = "single",
+    ) -> _GroupedWindow:
         """An exponentially weighted window over each group, labelled by the group and the row."""
-        return _GroupedWindow(self, "ewm", args, kwargs)
+        settings = {
+            "com": com,
+            "span": span,
+            "halflife": halflife,
+            "alpha": alpha,
+            "min_periods": min_periods,
+            "adjust": adjust,
+            "ignore_na": ignore_na,
+            "times": times,
+            "method": method,
+        }
+        return _GroupedWindow(self, "ewm", (), settings)
 
     def take(self, indices: Any, **kwargs: Any) -> Any:
         """The rows at `indices` of each group, counted within it, under the group's key."""

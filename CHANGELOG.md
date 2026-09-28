@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Group by windows take pandas' arguments by name
+
+`GroupBy.rolling`, `GroupBy.expanding` and `GroupBy.ewm` now have the same parameters as pandas, in the same order and with the same defaults, rather than passing any arguments through, so a signature check and a misspelled keyword both behave as they do in pandas.
+
 ### Added: SQL windows with an ORDER BY, a frame and the window functions
 
 A window in SQL can now be ordered and framed. `OVER (PARTITION BY ... ORDER BY ...)` runs the fold up to the row's last peer, and `ROWS`, `RANGE` and `GROUPS` frames take `UNBOUNDED`, `n PRECEDING`, `n FOLLOWING` and `CURRENT ROW` bounds with `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` and `NO OTHERS`. `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value` and `nth_value` are lowered, the five that read another row take `IGNORE NULLS`, and a `QUALIFY` can filter on any of them. Sums, counts, averages, minimums and maximums over a frame are answered from blocks folded once, so a running total costs a logarithm per row rather than the width of the frame. An order key's nulls go last whichever way it sorts, as in DuckDB. A named `WINDOW` clause is still refused by name.
