@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `read_csv` takes every argument, plus `read_table` and `read_fwf`
+
+`read_csv` now reads what pandas reads: a path, a handle, bytes or a URL, compressed or not, in any encoding, with every one of pandas' arguments. A plain file with pandas' defaults still goes to the core reader. Everything else goes to a new Python reader in `_textread.py`, which splits the text the way pandas' C parser does and picks each column's type the way it does. That covers separators, whitespace and patterns, `header`, `names`, `skiprows`, `nrows`, `skipfooter`, `dtype`, `converters`, missing text, `parse_dates`, `thousands`, `decimal`, comments, quoting and escapes, bad lines, and `chunksize` and `iterator` through `TextFileReader`. Blank and repeated names, an extra leading field, padded numbers, an empty file and a byte order mark now come out as in pandas as well. `read_table` and `read_fwf` are new, and a missing file is now `FileNotFoundError`.
+
 ### Added: Parquet, Feather and ORC through pyarrow
 
 `DataFrame.to_parquet`, `to_feather` and `to_orc`, and `read_parquet`, `read_feather` and `read_orc`, take pandas' parameters and read and write through pyarrow, which is imported only when one of them is called, so firepanda still has no runtime dependencies. A frame goes to pyarrow through the Arrow stream it already exports. The `pandas` metadata key is written in the layout pyarrow writes for pandas 3.0.3: the row labels as columns or as a range, each column's pandas type, and `attrs`. A file firepanda writes therefore reads back in pandas with its labels and types, and a file pandas writes reads back in firepanda. `index`, `compression`, `partition_cols`, `columns`, `filters` and `filesystem` are handed to pyarrow. `dtype_backend` keeps Arrow's types, so a missing integer stays an integer. ORC refuses labels other than the default range, as pandas does. An unknown engine, storage options on a local file and a missing file raise what pandas raises.

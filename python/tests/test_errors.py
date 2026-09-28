@@ -218,15 +218,13 @@ def test_a_missing_file_is_an_os_error(firepanda: ModuleType, tmp_path: Path) ->
     """A real path, rather than the test raiser, ending where `open` would end.
 
     `except OSError` around a read is what people write, and `except
-    FileNotFoundError` is what they write when they are being careful. The first
-    works. The second does not yet, and that is recorded in document 14 rather
-    than papered over.
+    FileNotFoundError` is what they write when they are being careful. Both work,
+    because a path the core cannot read is opened by Python, as pandas opens it.
     """
     missing = tmp_path / "nothing.csv"
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(FileNotFoundError) as caught:
         firepanda.read_csv(str(missing))
     assert str(missing) in str(caught.value)
-    assert type(caught.value) is firepanda.errors.ReaderError
 
 
 def test_a_bad_argument_names_the_argument(firepanda: ModuleType, tmp_path: Path) -> None:

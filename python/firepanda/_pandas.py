@@ -27298,10 +27298,6 @@ def read_json(
 _READ_CSV_ENGINES = ("c", "python", "pyarrow")
 """The three parsers pandas can be told to use, all of which give one answer here."""
 
-_UTF8 = ("utf-8", "utf8", "utf_8")
-"""The spellings of the one encoding the reader decodes, compared lowercased."""
-
-
 def read_csv(
     filepath_or_buffer: Any,
     *,
@@ -27351,109 +27347,90 @@ def read_csv(
 ) -> DataFrame:
     """Reads a CSV file into a frame, which is `pandas.read_csv`.
 
-    Hand written for the reason `to_datetime` is: the reader underneath takes a
-    path and nothing else, and pandas declares forty eight more parameters. All
-    of them are declared here with pandas' defaults, so a caller who passes one
-    gets a sentence about that parameter rather than a TypeError about an
-    unexpected keyword. They fall into four groups.
-
-    Two are implemented after the read, because the answer does not depend on
-    when they are applied. `usecols` keeps some columns, and pandas infers each
-    column's type on its own, so dropping the others afterwards changes nothing
-    about the ones kept. `index_col` moves one column into the row labels.
-
-    Six are accepted at every value, because they choose how pandas gets to the
-    answer rather than what the answer is: `engine`, `cache_dates`,
-    `low_memory` and `memory_map`, plus `sep` and `delimiter` at a comma and
-    `encoding` at any spelling of UTF-8.
-
-    The rest are refused at anything but their default, each by name. Some of
-    them look as if they could be applied afterwards and cannot: `nrows` reads
-    fewer rows, and an integer column whose only gap is below the cut is int64
-    in pandas and float64 if the whole file is read first and then cut. `dtype`
-    is the same, since a column of `007` read as text keeps its zeros and one
-    read as numbers and then cast does not.
+    Every one of pandas' parameters is taken, with pandas' defaults. When they are all at
+    a value the core reader answers the way pandas does, and the source is a plain file
+    on disk, the core reads it. Everything else goes to firepanda's text reader, which
+    reads paths, handles, bytes and URLs, compressed or not and in any encoding, and
+    picks each column's type the way pandas' C parser does.
 
     Args:
-        filepath_or_buffer: A path, as a string or anything `os.fspath` takes.
-            A buffer or an open file is refused.
-        sep: The separator. A comma, or left out.
+        filepath_or_buffer: A path, a URL, or a handle open for text or bytes.
+        sep: The separator. `\\s+` is runs of whitespace, anything else longer than
+            one character is a regular expression, and None sniffs it from the first
+            line.
         delimiter: The other name for `sep`. Passing both is an error.
-        header: `infer` or 0, which read the first line as the names.
-        names: Refused.
-        index_col: A column name or position to use as the row labels, or
-            None or False for none.
-        usecols: The columns to keep, as names or as positions. They come back
-            in the order the file has them, whatever order they were listed in.
-        dtype: Refused.
-        engine: Any of pandas' three parsers, or None.
-        converters: Refused.
-        true_values: Refused.
-        false_values: Refused.
-        skipinitialspace: Refused at True.
-        skiprows: Refused.
-        skipfooter: Refused at anything but zero.
-        nrows: Refused.
-        na_values: Refused.
-        keep_default_na: Refused at False.
-        na_filter: Refused at False.
-        skip_blank_lines: Refused at False.
-        parse_dates: Refused.
-        date_format: Refused.
-        dayfirst: Refused at True.
+        header: The row the names are on, None for no names, or `infer`.
+        names: The names to use instead of the file's.
+        index_col: A column name or position for the row labels, or False to stop a
+            leading field with no name becoming them.
+        usecols: The columns to keep, as names, positions or a callable asked with
+            each name.
+        dtype: A type for every column, or a dict of them by name or position.
+        engine: Any of pandas' three parsers, or None. They give one answer here,
+            apart from the messages pandas' python parser words its own way.
+        converters: A dict of functions, by name or position, handed each field's
+            text.
+        true_values: More text to read as True.
+        false_values: More text to read as False.
+        skipinitialspace: Skip spaces after a separator.
+        skiprows: Rows to skip, as a count from the top, a list or a callable.
+        skipfooter: Rows to drop from the bottom.
+        nrows: How many rows to read.
+        na_values: More text to read as missing, or a dict of it by column.
+        keep_default_na: Whether pandas' own missing text counts as well.
+        na_filter: Whether any text is read as missing.
+        skip_blank_lines: Whether blank lines are skipped rather than read as gaps.
+        parse_dates: True for the row labels, or a list of columns to read as
+            dates.
+        date_format: The format for `parse_dates`, or a dict of them.
+        dayfirst: Read ambiguous dates with the day first.
         cache_dates: Accepted and has no effect.
-        iterator: Refused at True.
-        chunksize: Refused.
-        compression: `infer` or None.
-        thousands: Refused.
-        decimal: A full stop.
-        lineterminator: Refused.
-        quotechar: A double quote.
-        quoting: Zero, which is `csv.QUOTE_MINIMAL`.
-        doublequote: True.
-        escapechar: Refused.
-        comment: Refused.
-        encoding: None or UTF-8.
-        encoding_errors: `strict`.
-        dialect: Refused.
-        on_bad_lines: `error`.
+        iterator: Hand back a `TextFileReader`.
+        chunksize: Hand back a `TextFileReader` that reads this many rows at a time.
+        compression: `infer`, None, a codec's name, or a dict with a `method`.
+        thousands: The thousands separator.
+        decimal: The decimal mark.
+        lineterminator: The one character that ends a line.
+        quotechar: The quote character.
+        quoting: One of the `csv.QUOTE_*` constants.
+        doublequote: Whether two quotes inside quotes are one quote.
+        escapechar: The escape character.
+        comment: The character that starts a comment to the end of the line.
+        encoding: The text's encoding.
+        encoding_errors: How decoding errors are handled.
+        dialect: A `csv` dialect or its name, which sets the separator and quoting.
+        on_bad_lines: `error`, `warn`, `skip`, or a callable for the python engine.
         low_memory: Accepted and has no effect.
         memory_map: Accepted and has no effect.
-        float_precision: Refused.
-        storage_options: Refused.
-        dtype_backend: Refused. The pandas facing reader widens a column of
-            integers with a gap to float64, which is pandas' default, and
-            `firepanda.from_arrow` is the door that keeps Arrow's types.
+        float_precision: None, `high`, `legacy` or `round_trip`, which all read a
+            float the same way here.
+        storage_options: Headers for a URL.
+        dtype_backend: Keep Arrow's types, through `firepanda.from_arrow`.
 
     Returns:
-        The frame.
+        The frame, or a `TextFileReader` for `iterator` or `chunksize`.
 
     Raises:
-        NotImplementedError: For a buffer, and for a refused argument at
-            anything but its default.
-        ValueError: For `sep` and `delimiter` both given, an unknown engine, an
-            unknown `dtype_backend`, and a `usecols` naming a column the file
-            does not have, each with pandas' message.
+        ValueError: For `sep` and `delimiter` both given, an unknown engine or
+            `dtype_backend`, and the other mistakes pandas refuses, each with pandas'
+            message.
+        ParserError: For a row with more fields than the header.
+        EmptyDataError: For a file with no columns.
+        NotImplementedError: For a header over more than one row, or more than one
+            column in `index_col`, which would need a MultiIndex.
         OSError: When the file cannot be read.
     """
-    import os
+    from ._textread import read_csv as read
 
-    from ._frame import _read_csv
-
-    if not isinstance(filepath_or_buffer, (str, os.PathLike)):
-        raise NotImplementedError(
-            "reading from a buffer is not supported yet, because the reader maps a"
-            " file by its path and has nothing to map an object in memory with"
-        )
-    path = os.fspath(filepath_or_buffer)
-    if not isinstance(path, str):
-        raise NotImplementedError("a path given as bytes is not supported yet")
-
+    options = dict(locals())
+    source = options.pop("filepath_or_buffer")
+    options.pop("read")
     if sep is not NO_DEFAULT and delimiter is not None:
         raise ValueError("Specified a sep and a delimiter; you can only specify one.")
     if engine is not None and engine not in _READ_CSV_ENGINES:
         raise ValueError(
-            f'Unknown engine: {engine} (valid options are "c", "python", or "pyarrow")'
+            f"Unknown engine: {engine} (valid options are"
+            " dict_keys(['c', 'python', 'pyarrow', 'python-fwf']))"
         )
     if dtype_backend is not NO_DEFAULT and dtype_backend not in ("numpy_nullable", "pyarrow"):
         raise ValueError(
@@ -27461,83 +27438,9 @@ def read_csv(
             " 'pyarrow' are allowed."
         )
     separator = delimiter if sep is NO_DEFAULT else sep
-    if separator is not None and separator != ",":
-        raise NotImplementedError(
-            f"sep={separator!r} is not supported yet, because the reader splits on"
-            " a comma and has no setting for anything else"
-        )
-    if header not in ("infer", 0):
-        raise NotImplementedError(
-            f"header={header!r} is not supported yet, because the reader takes the"
-            " names from the first line and has no setting for any other"
-        )
-    if names is not NO_DEFAULT and names is not None:
-        raise NotImplementedError(
-            "names= is not supported yet, because the reader takes the names from the"
-            " first line and has no way to be handed them instead"
-        )
-    if dtype_backend is not NO_DEFAULT:
-        raise NotImplementedError(
-            f"dtype_backend={dtype_backend!r} is not supported yet, because read_csv"
-            " answers pandas' default types, and firepanda.from_arrow is the door"
-            " that keeps Arrow's"
-        )
-    if compression not in ("infer", None):
-        raise NotImplementedError(
-            f"compression={compression!r} is not supported yet, because the reader"
-            " maps the file as it is on disk"
-        )
-    if encoding is not None and str(encoding).lower() not in _UTF8:
-        raise NotImplementedError(
-            f"encoding={encoding!r} is not supported yet, because the reader decodes"
-            " UTF-8 and nothing else"
-        )
-    fixed = "the reader has one reading of a CSV file and no setting for this"
-    for name, value in (
-        ("dtype", dtype),
-        ("converters", converters),
-        ("true_values", true_values),
-        ("false_values", false_values),
-        ("skiprows", skiprows),
-        ("nrows", nrows),
-        ("na_values", na_values),
-        ("parse_dates", parse_dates),
-        ("date_format", date_format),
-        ("chunksize", chunksize),
-        ("thousands", thousands),
-        ("lineterminator", lineterminator),
-        ("escapechar", escapechar),
-        ("comment", comment),
-        ("dialect", dialect),
-        ("float_precision", float_precision),
-        ("storage_options", storage_options),
-    ):
-        _refuse(name, value, fixed)
-    for name, value, default in (
-        ("skipinitialspace", skipinitialspace, False),
-        ("skipfooter", skipfooter, 0),
-        ("keep_default_na", keep_default_na, True),
-        ("na_filter", na_filter, True),
-        ("skip_blank_lines", skip_blank_lines, True),
-        ("dayfirst", dayfirst, False),
-        ("iterator", iterator, False),
-        ("decimal", decimal, "."),
-        ("quotechar", quotechar, '"'),
-        ("quoting", quoting, 0),
-        ("doublequote", doublequote, True),
-        ("encoding_errors", encoding_errors, "strict"),
-        ("on_bad_lines", on_bad_lines, "error"),
-    ):
-        _held_at(name, value, default, fixed)
-
-    frame = _read_csv(path)
-    if usecols is not None:
-        frame = cast("DataFrame", frame[_usecols(frame.columns, usecols)])
-    if index_col is not None and index_col is not False:
-        if isinstance(index_col, int) and not isinstance(index_col, bool):
-            index_col = list(frame.columns)[index_col]
-        frame = cast("DataFrame", frame.set_index(index_col))
-    return frame
+    if sep is NO_DEFAULT and delimiter is None:
+        separator = ","
+    return read(source, options, separator)
 
 
 def _usecols(columns: Any, usecols: Any) -> list[str]:
@@ -27550,21 +27453,17 @@ def _usecols(columns: Any, usecols: Any) -> list[str]:
 
     Args:
         columns: The names the file has.
-        usecols: The names or the positions to keep.
+        usecols: The names or the positions to keep, or a callable asked with each name.
 
     Returns:
         The names to select, in file order.
 
     Raises:
-        NotImplementedError: For a callable.
         ValueError: For a name the file does not have, a mixed list or a string.
     """
-    if callable(usecols):
-        raise NotImplementedError(
-            "usecols given as a callable is not supported yet, because the columns"
-            " are chosen after the read here and a callable is asked during it"
-        )
     names = list(columns)
+    if callable(usecols):
+        return [name for name in names if usecols(name)]
     wanted: list[Any] = [] if isinstance(usecols, str) else list(usecols)
     if wanted and all(isinstance(one, str) for one in wanted):
         missing = [one for one in wanted if one not in names]
