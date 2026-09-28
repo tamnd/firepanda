@@ -121,6 +121,10 @@ COLUMN: dict[str, Any] = {
     "isin": lambda m: instants(m).isin([m.NaT]).tolist(),
     "get_loc": lambda m: m.DatetimeIndex([m.Timestamp("2020-01-02"), m.NaT]).get_loc(m.NaT),
     "contains": lambda m: m.NaT in m.DatetimeIndex([m.Timestamp("2020-01-02"), m.NaT]),
+    "frame values": lambda m: m.DataFrame({"a": instants(m), "t": spans(m)}).to_numpy().tolist(),
+    "mixed values": lambda m: m.DataFrame(
+        {"a": instants(m), "s": ["x", None, "y"]}
+    ).values.tolist(),
 }
 
 
