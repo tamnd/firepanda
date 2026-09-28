@@ -46,7 +46,7 @@ from . import _config, _firepanda, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
-from ._scalars import NaT, _inward, _outward, _outward_one, _temporal, _zone_name
+from ._scalars import NaT, Timedelta, _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
     DataError,
@@ -918,37 +918,289 @@ def _sequence(value: Any) -> list[Any]:
     return list(value)
 
 
-def _reindex_filling(kind: str, method: Any, limit: Any, tolerance: Any) -> None:
-    """Refuses the three parameters of reindex that are about filling.
+_FILL_METHODS = {"pad": "pad", "ffill": "pad", "backfill": "backfill", "bfill": "backfill"}
+
+
+def _reindex_filling(method: Any, limit: Any, tolerance: Any) -> str | None:
+    """Checks the three parameters of reindex that are about filling.
 
     `method` fills a label the caller does not have from the label beside it,
-    which needs the labels in order to mean anything and is a different
-    operation from putting a value in the row, so it is refused rather than
-    approximated. `limit` and `tolerance` belong to `method`, and passing either
+    and it comes back under pandas' own name for it, `pad`, `backfill` or
+    `nearest`. `limit` and `tolerance` belong to `method`, and passing either
     without it is pandas' own error, given back word for word because the caller
     made pandas' mistake and document 22 says the wording is theirs in that
     case.
 
     Args:
-        kind: The word for what is being reindexed, for the message.
         method: What was passed for `method`.
         limit: What was passed for `limit`.
         tolerance: What was passed for `tolerance`.
 
+    Returns:
+        The method under its pandas name, or None when there is none.
+
     Raises:
-        UnsupportedError: If a `method` was asked for.
-        InvalidArgumentError: If a `limit` or a `tolerance` arrived without one.
+        InvalidArgumentError: For a method pandas does not have, a limit that is
+            not a positive whole number, or a limit or a tolerance with no method.
     """
-    if method is not None:
-        raise UnsupportedError(
-            f"reindex with method= fills a label the {kind} does not have from"
-            " the label beside it, which needs the labels in order and is a"
-            " different operation from putting a value in the row"
-        )
-    if limit is not None or tolerance is not None:
+    if method is None:
+        for name, given in (("limit", limit), ("tolerance", tolerance)):
+            if given is not None:
+                raise InvalidArgumentError(
+                    f"{name} argument only valid if doing pad, backfill or nearest reindexing"
+                )
+        return None
+    picked = "nearest" if method == "nearest" else _FILL_METHODS.get(method)
+    if picked is None:
         raise InvalidArgumentError(
-            "limit argument only valid if doing pad, backfill or nearest reindexing"
+            "Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest."
+            f" Got {method}"
         )
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise InvalidArgumentError("Limit must be an integer")
+        if limit <= 0:
+            raise InvalidArgumentError("Limit must be greater than 0")
+    return picked
+
+
+def _label_key(label: Any) -> Any:
+    """A label as a dictionary key, with every kind of gap the same key."""
+    return _GAP_KEY if _missing(label) else label
+
+
+_GAP_KEY = object()
+
+
+def _monotonic(labels: list[Any], rising: bool) -> bool:
+    """Whether the labels never step down, or never step up."""
+    try:
+        if rising:
+            return all(a <= b for a, b in itertools.pairwise(labels))
+        return all(a >= b for a, b in itertools.pairwise(labels))
+    except TypeError:
+        return False
+
+
+def _fill_places(
+    own: list[Any], target: list[Any], method: str, limit: Any, rising: bool
+) -> list[int]:
+    """Where each target label reads from under `pad` or `backfill`, -1 for nowhere.
+
+    This is pandas' rule in positions. `pad` reads from the last label at or
+    before the target in the order of the index, and `backfill` from the first
+    label at or after it, so on a falling index `pad` reads from the next larger
+    label. A `limit` caps how many targets without an exact match one label may
+    fill, the nearest targets first.
+    """
+    count = len(own)
+    ordered = own if rising else own[::-1]
+    places = []
+    for label in target:
+        if _missing(label):
+            places.append(-1)
+            continue
+        if rising:
+            if method == "pad":
+                places.append(bisect.bisect_right(ordered, label) - 1)
+            else:
+                place = bisect.bisect_left(ordered, label)
+                places.append(-1 if place == count else place)
+        elif method == "pad":
+            places.append(count - bisect.bisect_right(ordered, label) - 1)
+        else:
+            place = count - bisect.bisect_left(ordered, label)
+            places.append(-1 if place == count else place)
+    if limit is not None:
+        used: dict[int, int] = {}
+        steps = range(len(target)) if method == "pad" else range(len(target) - 1, -1, -1)
+        for step in steps:
+            place = places[step]
+            if place < 0 or own[place] == target[step]:
+                continue
+            used[place] = used.get(place, 0) + 1
+            if used[place] > limit:
+                places[step] = -1
+    return places
+
+
+def _distance(one: Any, other: Any, text: bool) -> Any:
+    """How far apart two labels are, which text labels cannot say."""
+    if text:
+        raise DTypeError("operation 'sub' not supported for dtype 'str' with dtype 'str'")
+    return abs(one - other)
+
+
+def _reindex_positions(
+    own: list[Any],
+    target: list[Any],
+    method: str | None,
+    limit: Any,
+    tolerance: Any,
+    dtype: str,
+) -> list[int]:
+    """Where each target label reads from in the labels the owner has, -1 for nowhere.
+
+    An exact match always wins. What is left is filled by `method` when there is
+    one, which needs the labels in order, and then a `tolerance` takes back every
+    fill that reads from a label further away than it allows. This is pandas'
+    `Index.get_indexer`, measured against pandas 3.0.
+    """
+    keys: dict[Any, int] = {}
+    for place, label in enumerate(own):
+        keys.setdefault(_label_key(label), place)
+    if len(keys) != len(own):
+        raise InvalidArgumentError("cannot reindex on an axis with duplicate labels")
+    exact = [keys.get(_label_key(label), -1) for label in target]
+    if method is None:
+        return exact
+    rising = _monotonic(own, True)
+    if limit is not None and not (rising and _monotonic(target, True)):
+        name = "pad" if method == "nearest" else method
+        raise InvalidArgumentError(
+            f"limit argument for '{name}' method only well-defined if index and target"
+            " are monotonic"
+        )
+    if not rising and not _monotonic(own, False):
+        raise InvalidArgumentError("index must be monotonic increasing or decreasing")
+    text = dtype in ("str", "string", "object")
+    if method == "nearest":
+        left = _fill_places(own, target, "pad", limit, rising)
+        right = _fill_places(own, target, "backfill", limit, rising)
+        places = []
+        for label, one, other in zip(target, left, right, strict=True):
+            if other < 0 or one < 0:
+                places.append(one if other < 0 else other)
+                continue
+            near = _distance(own[one], label, text)
+            far = _distance(own[other], label, text)
+            places.append(one if (near < far if rising else near <= far) else other)
+    else:
+        places = _fill_places(own, target, method, limit, rising)
+    places = [hit if hit >= 0 else place for hit, place in zip(exact, places, strict=True)]
+    if tolerance is not None and own:
+        allowed = _tolerances(tolerance, len(target), dtype)
+        places = [
+            place if place < 0 or _distance(own[place], label, text) <= most else -1
+            for place, label, most in zip(places, target, allowed, strict=True)
+        ]
+    return places
+
+
+def _tolerances(tolerance: Any, count: int, dtype: str) -> list[Any]:
+    """The tolerance for each target label, read as pandas reads it for the dtype."""
+    instants = dtype.startswith(("datetime64", "timedelta64"))
+    given = _sequence(tolerance) if _list_like(tolerance) else None
+    if given is not None and len(given) not in (1, count):
+        raise InvalidArgumentError("list-like tolerance size must match target index size")
+    values = given if given is not None else [tolerance]
+    read = []
+    for value in values:
+        if instants:
+            read.append(Timedelta(value))
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise InvalidArgumentError(
+                f"tolerance argument for Index with dtype {dtype} must be numeric if it is"
+                f" a scalar: {_numpy_text(value)}"
+            )
+        else:
+            read.append(value)
+    return read * count if len(read) == 1 else read
+
+
+def _numpy_text(value: Any) -> str:
+    """A value as numpy prints it once it is an array of one, which pandas' message shows."""
+    if isinstance(value, str):
+        return f"array({value!r}, dtype='<U{len(value)}')"
+    return repr(value)
+
+
+def _instant_index(data: Any, label: Any) -> Any:
+    """A list of instants as a DatetimeIndex and of spans as a TimedeltaIndex.
+
+    Anything else, including a list with no instant in it at all, is None, and
+    goes on to the ordinary reader.
+    """
+    if not isinstance(data, (list, tuple)):
+        return None
+    kinds = set()
+    for value in data:
+        if _missing(value):
+            continue
+        if isinstance(value, datetime.datetime):
+            kinds.add("instant")
+        elif isinstance(value, datetime.timedelta):
+            kinds.add("span")
+        else:
+            return None
+    if kinds == {"instant"}:
+        from ._datetime import DatetimeIndex
+
+        return DatetimeIndex(list(data), name=label)
+    if kinds == {"span"}:
+        from ._timedelta import TimedeltaIndex
+
+        return TimedeltaIndex(list(data), name=label)
+    return None
+
+
+def _reindex_target(owner: Any, target: Any) -> Any:
+    """The labels asked for as an index, named as pandas names them.
+
+    A target that is an index keeps its own name, and one that is a plain list
+    takes the name of the labels it replaces.
+    """
+    from ._frame import Index
+
+    labels = target if isinstance(target, IndexMixin) else Index(_sequence(target))
+    if not hasattr(target, "name"):
+        labels = labels.rename(owner.index.name)
+    return labels
+
+
+def _reindex_by_position(
+    owner: Any, target: Any, method: str | None, value: Any, limit: Any, tolerance: Any
+) -> Any:
+    """The owner on new row labels, found by position here rather than by the core.
+
+    The core matches labels it can hold in a column and fills nothing. This path
+    works out where each new label reads from in Python, so it can fill from a
+    neighbour and can match instants, and then hands the core a count from zero
+    to reindex on, with the one past the end standing for a label not found. The
+    core still decides what a missing row holds and how a column widens for it.
+    """
+    from ._frame import DataFrame, Series
+
+    labels = _reindex_target(owner, target)
+    own = owner.index.tolist()
+    places = _reindex_positions(
+        own, labels.tolist(), method, limit, tolerance, str(owner.index.dtype)
+    )
+    count = len(own)
+    counted = owner.reset_index(drop=True)._inner
+    wanted = [place if place >= 0 else count for place in places]
+    try:
+        if isinstance(owner, DataFrameMixin):
+            moved: Any = DataFrame._wrap(counted.reindex(wanted, value))
+        else:
+            moved = Series._wrap(counted.reindex(wanted, value, True))
+    except Exception as error:
+        raise translate(error) from None
+    return _with_row_labels(moved, labels).rename_axis(labels.name)
+
+
+def _reindex_here(owner: Any, target: Any, method: str | None) -> bool:
+    """Whether a reindex has to find its rows here rather than in the core."""
+    if method is not None:
+        return True
+    kinds = [str(owner.index.dtype)]
+    if isinstance(target, IndexMixin):
+        kinds.append(str(target.dtype))
+    elif _list_like(target):
+        first = next((one for one in _sequence(target) if not _missing(one)), None)
+        if isinstance(first, (datetime.datetime, datetime.timedelta)):
+            return True
+    return any(kind.startswith(("datetime64", "timedelta64")) for kind in kinds)
 
 
 def _axis_number(axis: Any, owner: str, default: int, allowed: tuple[int, ...]) -> int:
@@ -11711,7 +11963,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _reindex_filling("frame", method, limit, tolerance)
+        method = _reindex_filling(method, limit, tolerance)
 
         if index is not None or columns is not None:
             if axis is not None:
@@ -11740,8 +11992,14 @@ class DataFrameMixin(_Carries):
                         f" kind, {columns!r} was passed"
                     )
                 inner = inner.reindex_columns([str(one) for one in columns], value)
+            if index is not None and _reindex_here(self, index, method):
+                return _reindex_by_position(
+                    DataFrame._wrap(inner), index, method, value, limit, tolerance
+                )
             if index is not None:
                 inner = inner.reindex(index, value)
+                if isinstance(index, IndexMixin):
+                    inner = inner.renamed_axis(None if index.name is None else str(index.name))
             return DataFrame._wrap(inner)
         except Exception as error:
             raise translate(error) from None
@@ -11779,10 +12037,20 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _reindex_filling("frame", method, limit, tolerance)
         if not isinstance(other, DataFrameMixin):
+            _reindex_filling(method, limit, tolerance)
             raise InvalidArgumentError(
                 f"No axis named columns for object type {type(other).__name__}"
+            )
+        if _reindex_filling(method, limit, tolerance) is not None or _reindex_here(
+            self, other.index, None
+        ):
+            return self.reindex(
+                index=other.index,
+                columns=other.columns,
+                method=method,
+                limit=limit,
+                tolerance=tolerance,
             )
         try:
             return DataFrame._wrap(self._inner.reindex_like(other._inner))
@@ -14685,13 +14953,18 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
-        _reindex_filling("series", method, limit, tolerance)
+        method = _reindex_filling(method, limit, tolerance)
         if index is None:
             return Series._wrap(self._inner)
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+        if _reindex_here(self, index, method):
+            return _reindex_by_position(self, index, method, value, limit, tolerance)
         try:
-            return Series._wrap(self._inner.reindex(index, value, True))
+            inner = self._inner.reindex(index, value, True)
+            if isinstance(index, IndexMixin):
+                inner = inner.renamed_axis(None if index.name is None else str(index.name))
+            return Series._wrap(inner)
         except Exception as error:
             raise translate(error) from None
 
@@ -14721,13 +14994,15 @@ class SeriesMixin(_Carries):
         """
         from ._frame import Series
 
-        _reindex_filling("series", method, limit, tolerance)
+        method = _reindex_filling(method, limit, tolerance)
         if not isinstance(other, (DataFrameMixin, SeriesMixin)):
             raise DTypeError(
                 "reindex_like takes a frame or a series, since it reads the"
                 f" labels off one, and {type(other).__name__} has none"
             )
         shape: Any = other
+        if _reindex_here(self, shape.index, method):
+            return _reindex_by_position(self, shape.index, method, None, limit, tolerance)
         try:
             return Series._wrap(self._inner.reindex_like(shape.index._inner))
         except Exception as error:
@@ -21435,6 +21710,11 @@ class IndexMixin:
                 self._inner = data._inner.renamed(label)
             elif isinstance(data, SeriesMixin):
                 self._inner = data._inner.to_index(label)
+            elif (moved := _instant_index(data, label)) is not None:
+                # pandas answers a list of instants with a DatetimeIndex, and of
+                # spans with a TimedeltaIndex, so this becomes one.
+                self._inner = moved._inner
+                self.__class__ = type(moved)
             else:
                 self._inner = _firepanda.Index(data, label)
         except Exception as error:

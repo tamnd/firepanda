@@ -205,9 +205,12 @@ def test_an_axis_the_frame_does_not_have_is_refused(firepanda):
         made(firepanda).reindex([10], axis=2)
 
 
-def test_filling_from_the_row_beside_it_is_not_done_here(firepanda):
-    with pytest.raises(NotImplementedError, match="method"):
-        made(firepanda).reindex([10, 99], method="ffill")
+def test_filling_from_the_row_beside_it_is_pandas_filling(firepanda):
+    for method in ("ffill", "bfill", "nearest"):
+        same_frame(
+            made(firepanda).reindex([10, 15, 99], method=method),
+            theirs().reindex([10, 15, 99], method=method),
+        )
 
 
 def test_a_limit_without_a_method_is_refused_in_pandas_words(firepanda):

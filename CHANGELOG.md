@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: reindex fills from a neighbour and reindexes on instants
+
+`DataFrame.reindex`, `Series.reindex` and both `reindex_like` methods take pandas' `method`, `limit` and `tolerance`. A label the frame does not have reads from the label before it under `ffill` or `pad`, the label after it under `bfill` or `backfill`, and the closer of the two under `nearest`, with pandas' rule for a tie, for a falling index, for how many rows one label may fill, and for how far away it may be. Row labels that are instants or spans reindex too, which they could not before, and a target given as an index keeps its own name, as it does in pandas. `Index` built from a list of instants is a `DatetimeIndex`, and from a list of spans a `TimedeltaIndex`, as in pandas. The mistakes are pandas' mistakes with pandas' words, including an unknown method, a limit that is not a positive whole number, a limit on labels out of order, labels that are neither rising nor falling, duplicate labels and a tolerance of the wrong size.
+
 ### Added: tz_localize and tz_convert on a frame and a column
 
 `DataFrame.tz_localize`, `DataFrame.tz_convert`, `Series.tz_localize` and `Series.tz_convert` move the row labels between time zones and leave the values alone, as pandas does. They take pandas' `axis`, `level`, `copy`, `ambiguous` and `nonexistent` arguments, warn about `copy` as pandas does, and raise pandas' errors for labels that are not instants, a level that is not there, and an axis a column does not have. An empty axis of any kind comes back as an empty axis of instants in the zone asked for.

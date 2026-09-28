@@ -131,11 +131,15 @@ def test_a_series_keeps_its_own_name_and_takes_the_other_index_name(firepanda):
     assert want.index.name == "other"
 
 
-def test_filling_from_the_row_beside_it_is_not_done_here(firepanda):
-    with pytest.raises(NotImplementedError, match="method"):
-        mine(firepanda).reindex_like(shape(firepanda), method="ffill")
-    with pytest.raises(NotImplementedError, match="method"):
-        mine(firepanda)["count"].reindex_like(shape(firepanda), method="ffill")
+def test_filling_from_the_row_beside_it_is_pandas_filling(firepanda):
+    first, second = theirs()
+    got = mine(firepanda).reindex_like(shape(firepanda), method="ffill")
+    want = first.reindex_like(second, method="ffill")
+    assert list(got.columns) == list(want.columns)
+    assert list(got.index) == list(want.index)
+    assert got["count"].tolist() == want["count"].tolist()
+    got = mine(firepanda)["count"].reindex_like(shape(firepanda), method="ffill")
+    assert got.tolist() == first["count"].reindex_like(second, method="ffill").tolist()
 
 
 def test_a_limit_without_a_method_is_refused_in_pandas_words(firepanda):
