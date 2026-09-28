@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: group keys in front of what apply answers, and GroupBy corr and cov
+
+`apply` answering a series or a frame a group with `group_keys=True`, the default, now puts each group's key in front of the answer's labels as levels of a `MultiIndex`, as pandas does, rather than refusing. With `as_index=False` the answers stay group after group on their own labels. `DataFrameGroupBy.corr` and `cov` answer each group's matrix labelled by the group and the column, and `SeriesGroupBy.corr` and `cov` answer each group's value against another column.
+
 ### Added: DataFrame.value_counts keeps pandas' order among equal counts
 
 `DataFrame.value_counts` takes the combinations in the order they first appear and sorts them stably by count, as pandas does, so combinations with the same count come in the order pandas gives them rather than in label order.
