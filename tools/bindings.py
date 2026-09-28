@@ -3673,9 +3673,9 @@ SERIES = Exposed(
         Member(
             name="dtype",
             kind="property",
-            body="self._inner.dtype()",
-            doc="The type of the values, as a string rather than a numpy dtype.",
-            returns="str",
+            body="self._shown_dtype()",
+            doc="The type of the values, as a string rather than a numpy dtype, or a `CategoricalDtype` for categories.",
+            returns="Any",
         ),
         Member(
             name="size",
@@ -4364,9 +4364,9 @@ INDEX = Exposed(
         Member(
             name="dtype",
             kind="property",
-            body="self._inner.dtype()",
-            doc="The type of the labels, as a string rather than a numpy dtype.",
-            returns="str",
+            body="self._shown_dtype()",
+            doc="The type of the labels, as a string rather than a numpy dtype, or a `CategoricalDtype` for categories.",
+            returns="Any",
         ),
         Member(
             name="inferred_type",

@@ -3415,10 +3415,12 @@ class Series(SeriesMixin):
             raise translate(error) from None
 
     @property
-    def dtype(self) -> str:
-        """The type of the values, as a string rather than a numpy dtype."""
+    def dtype(self) -> Any:
+        """The type of the values, as a string rather than a numpy dtype, or a
+        `CategoricalDtype` for categories.
+        """
         try:
-            return self._inner.dtype()
+            return self._shown_dtype()
         except Exception as error:
             raise translate(error) from None
 
@@ -4528,10 +4530,12 @@ class Index(IndexMixin):
             raise translate(error) from None
 
     @property
-    def dtype(self) -> str:
-        """The type of the labels, as a string rather than a numpy dtype."""
+    def dtype(self) -> Any:
+        """The type of the labels, as a string rather than a numpy dtype, or a
+        `CategoricalDtype` for categories.
+        """
         try:
-            return self._inner.dtype()
+            return self._shown_dtype()
         except Exception as error:
             raise translate(error) from None
 

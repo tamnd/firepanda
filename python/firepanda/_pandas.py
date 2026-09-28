@@ -5946,6 +5946,20 @@ def _written(column: Any, where: tuple[Any, ...], value: Any, by_position: bool 
         raise translate(error) from None
 
 
+def _decided_categories(dtype: Any) -> bool:
+    """Whether `dtype` is a `CategoricalDtype` that names its categories or orders them."""
+    from ._categorical import CategoricalDtype
+
+    return isinstance(dtype, CategoricalDtype) and dtype._decided
+
+
+def _as_decided(column: Series, dtype: Any) -> Series:
+    """A category column under the categories and order flag `dtype` decides."""
+    categories = dtype.categories
+    held = column.cat.categories.tolist() if categories is None else categories.tolist()
+    return column.cat.set_categories(held, ordered=bool(dtype.ordered))
+
+
 def _category_of(printed: str, wanted: Any) -> None:
     """Refuses a category of anything but text before the core is asked for one.
 
@@ -11521,6 +11535,14 @@ class DataFrameMixin:
             asked = {str(one): wanted for one, wanted in dtype.items()}
         else:
             asked = dict.fromkeys(self._inner.names(), dtype)
+        decided = {name: wanted for name, wanted in asked.items() if _decided_categories(wanted)}
+        if decided:
+            rest = {name: wanted for name, wanted in asked.items() if name not in decided}
+            out = self._astype(rest, copy, errors) if rest else self
+            changed = {
+                name: self[name]._astype(wanted, copy, errors) for name, wanted in decided.items()
+            }
+            return out.assign(**changed)
         # A change of unit alone is `as_unit`, as in the series' `_astype`.
         units = {
             name: unit
@@ -11655,6 +11677,11 @@ class SeriesMixin:
     @staticmethod
     def _made(data: Any, name: Any) -> Any:
         """The extension series for a sequence, with a numpy scalar in it read as its value."""
+        from ._array import FirepandaArray
+
+        if isinstance(data, FirepandaArray):
+            # The column the array holds, so a category keeps its categories.
+            data = data._column
         source = data._inner if isinstance(data, SeriesMixin) else data
         label = None if name is None else str(name)
         try:
@@ -12283,6 +12310,13 @@ class SeriesMixin:
             return iter(zip(labels, values, strict=True))
         except Exception as error:
             raise translate(error) from None
+
+    def _shown_dtype(self) -> Any:
+        """The type of the values as a word, or a `CategoricalDtype` for categories."""
+        from ._categorical import CategoricalDtype
+
+        kind = self._inner.dtype()
+        return CategoricalDtype._of(self) if kind == "category" else kind
 
     def groupby(
         self,
@@ -14101,6 +14135,8 @@ class SeriesMixin:
         from ._frame import Series
 
         strictly = _cast_keywords(copy, errors)
+        if _decided_categories(dtype):
+            return _as_decided(self._astype("category", copy, errors), dtype)
         unit = _unit_change(str(self.dtype), dtype)
         if unit:
             return self.dt.as_unit(unit)
@@ -20707,7 +20743,16 @@ class IndexMixin:
         Raises:
             AttributeError: For labels that are not a category.
         """
-        return self.to_series().cat.codes.to_numpy()
+        from ._categorical import _codes_array
+
+        return _codes_array(self.to_series())
+
+    def _shown_dtype(self) -> Any:
+        """The type of the labels as a word, or a `CategoricalDtype` for categories."""
+        from ._categorical import CategoricalDtype
+
+        kind = self._inner.dtype()
+        return CategoricalDtype._of(self.to_series()) if kind == "category" else kind
 
     @property
     def _temporal(self) -> bool:
