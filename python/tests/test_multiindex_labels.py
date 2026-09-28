@@ -33,11 +33,18 @@ def pairs(lib: ModuleType) -> Any:
     return lib.MultiIndex.from_tuples([("b", 2), ("a", 1), ("a", 3), (None, 4)], names=["k", "n"])
 
 
+def pairs_series(lib: ModuleType, names: list[Any] | None = None) -> Any:
+    rows = [("b", "y"), ("a", "x"), ("a", "y")]
+    return lib.Series([1, 2, 3], index=lib.MultiIndex.from_tuples(rows, names=names), name="n")
+
+
 def outcome(call: Callable[[ModuleType], Any], lib: ModuleType) -> Any:
     try:
         got = call(lib)
     except Exception as error:
-        return type(error).__name__, str(error)
+        # firepanda's own mistakes are subclasses of the builtin pandas raises.
+        kind = next(k for k in type(error).__mro__ if k.__module__ == "builtins")
+        return kind.__name__, str(error)
     if isinstance(got, (fp.DataFrame, pd.DataFrame)):
         return str(got), str(got.index.tolist()), list(got.index.names), str(got.to_dict("list"))
     if isinstance(got, (fp.Series, pd.Series)):
@@ -91,6 +98,76 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: frame(lib).groupby(["a", "b"]).v.quantile(0.5),
     lambda lib: frame(lib).groupby(["a", "b"], as_index=False).sum(),
     lambda lib: frame(lib).groupby("a").zz,
+    lambda lib: keyed(lib).loc[("y", 2)],
+    lambda lib: keyed(lib).loc[("x", 3)],
+    lambda lib: keyed(lib).iloc[:3].loc[("y", 2)],
+    lambda lib: keyed(lib).loc["x"],
+    lambda lib: keyed(lib).loc[["y"]],
+    lambda lib: keyed(lib).loc["x", "v"],
+    lambda lib: keyed(lib).loc[("y", 2), "v"],
+    lambda lib: keyed(lib).loc[("z", 1)],
+    lambda lib: keyed(lib)["v"].loc[("y", 2)],
+    lambda lib: keyed(lib)["v"].loc["x"],
+    lambda lib: keyed(lib)["v"]["x"],
+    lambda lib: keyed(lib).xs("x"),
+    lambda lib: keyed(lib).xs(3, level="b"),
+    lambda lib: keyed(lib).xs(3, level="b", drop_level=False),
+    lambda lib: keyed(lib).xs(("y", 2)),
+    lambda lib: keyed(lib).xs("q"),
+    lambda lib: keyed(lib).xs("v", axis=1),
+    lambda lib: keyed(lib)["v"].xs("x"),
+    lambda lib: keyed(lib)["v"].xs(3, level=1),
+    lambda lib: keyed(lib).droplevel(0),
+    lambda lib: keyed(lib).droplevel("b"),
+    lambda lib: keyed(lib).droplevel([0, 1]),
+    lambda lib: keyed(lib)["v"].droplevel("a"),
+    lambda lib: frame(lib).droplevel(0),
+    lambda lib: keyed(lib).swaplevel(),
+    lambda lib: keyed(lib)["v"].swaplevel(0, 1),
+    lambda lib: frame(lib).swaplevel(),
+    lambda lib: keyed(lib).reorder_levels(["b", "a"]),
+    lambda lib: keyed(lib).reorder_levels(["b"]),
+    lambda lib: keyed(lib)["v"].reorder_levels([1, 0]),
+    lambda lib: frame(lib).reorder_levels([0]),
+    lambda lib: keyed(lib).sort_index(level="b"),
+    lambda lib: keyed(lib).sort_index(level=1, ascending=False),
+    lambda lib: keyed(lib)["v"].sort_index(level=1),
+    lambda lib: frame(lib).value_counts(["a", "b"]),
+    lambda lib: frame(lib)[["a", "b"]].value_counts(),
+    lambda lib: frame(lib)[["a", "b"]].value_counts(normalize=True),
+    lambda lib: frame(lib)[["a", "b"]].value_counts(ascending=True),
+    lambda lib: frame(lib)[["a", "b"]].value_counts(sort=False),
+    lambda lib: frame(lib).value_counts("a"),
+    lambda lib: frame(lib).value_counts(["b"]),
+    lambda lib: frame(lib).groupby("a")["b"].value_counts(),
+    lambda lib: frame(lib).groupby("a")["b"].value_counts(normalize=True),
+    lambda lib: frame(lib).groupby("a")["b"].value_counts(ascending=True, sort=False),
+    lambda lib: frame(lib).groupby("a", as_index=False)["b"].value_counts(),
+    lambda lib: frame(lib).groupby(["a", "b"])["w"].value_counts(),
+    lambda lib: pairs_series(lib).unstack(),
+    lambda lib: pairs_series(lib, ["p", "q"]).unstack(0).to_dict(),
+    lambda lib: pairs_series(lib, ["p", "q"]).unstack(fill_value=0).to_dict(),
+    lambda lib: pairs_series(lib).unstack(sort=False),
+    lambda lib: lib.Series([1, 2]).unstack(),
+    lambda lib: lib.Series([1, 2], index=lib.MultiIndex.from_tuples([("a", "x")] * 2)).unstack(),
+    lambda lib: lib.DataFrame({"a": [1, 2], "b": [3.5, 4]}, index=["r", "s"]).stack(),
+    lambda lib: lib.DataFrame({"a": [1, 2], "b": [3, 4]}).stack(),
+    lambda lib: lib.DataFrame({"a": [1, 2], "b": [3, 4]}).rename_axis("k").stack(),
+    lambda lib: lib.DataFrame({"a": [1, 2]}).stack(dropna=True),
+    lambda lib: frame(lib).pivot_table(index=["a", "b"], values="v", aggfunc="sum"),
+    lambda lib: frame(lib).pivot_table(index=["a", "b"], values="v", aggfunc=lambda s: s.max()),
+    lambda lib: (
+        frame(lib)
+        .assign(c=["p", "q", "q", "p"])
+        .pivot_table(index=["a", "b"], columns="c", values="v")
+        .to_dict()
+    ),
+    lambda lib: (
+        frame(lib)
+        .assign(c=["p", "q", "q", "r"])
+        .pivot(index=["a", "b"], columns="c", values="v")
+        .to_dict()
+    ),
 ]
 
 

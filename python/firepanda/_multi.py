@@ -941,7 +941,7 @@ class MultiIndex:
 
     def _answer(self, rows: list[int], whole: bool) -> Any:
         """A position, a slice or a mask, the way pandas answers a lookup."""
-        if whole and len(rows) == 1:
+        if whole and len(rows) == 1 and self.is_unique:
             return rows[0]
         if self._sorted() and rows == list(range(rows[0], rows[-1] + 1)):
             return slice(rows[0], rows[-1] + 1, None)
