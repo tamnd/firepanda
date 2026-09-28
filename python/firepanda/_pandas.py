@@ -14617,6 +14617,20 @@ class CategoricalMixin:
             raise translate(error) from None
         return codes.fillna(-1) if codes.hasnans else codes
 
+    def _shown_codes(self) -> Series:
+        """The codes as pandas answers them, in the narrowest integer that holds them.
+
+        The column stores int32 codes for the reason document 26 gives, and
+        pandas answers int8 for fewer than 128 categories, int16 for fewer than
+        32768, and so on up. The cast is to that width, so the storage stays
+        as it is and the answer matches pandas.
+        """
+        from ._categorical import _code_width
+
+        codes = self._codes()
+        width = _code_width(len(self.categories))
+        return codes if width == "int32" else codes.astype(width)
+
     def _with_order(self, ordered: bool) -> Series:
         """The same column under a type that says whether the order matters."""
         from ._frame import Series
