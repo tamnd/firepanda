@@ -264,11 +264,11 @@ def test_a_difference_and_an_intersection_are_between_two_inputs() raises:
     )
 
 
-def test_a_set_operation_is_one_of_three() raises:
+def test_a_set_operation_is_one_of_four() raises:
     var plan = Plan()
     var a = plan.scan("a", ["k"], 0)
     var b = plan.scan("b", ["k"], 1)
-    with assert_raises(contains="set operation 7 is not one of three"):
+    with assert_raises(contains="set operation 7 is not one of four"):
         _ = plan.setop([a, b], 7, all=False)
 
 

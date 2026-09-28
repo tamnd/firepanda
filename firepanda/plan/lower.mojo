@@ -245,6 +245,8 @@ change with a query that starts working attached to it. That is the same
 argument `Materialize` makes for the physical layer, one level up.
 """
 
+from std.collections import Set
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
@@ -318,7 +320,9 @@ from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
     SET_INTERSECT,
+    SET_RECURSIVE,
     SET_UNION,
+    SCAN_WORKING,
     NodeKind,
     Plan,
 )
@@ -2797,7 +2801,8 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 "over",
                 memo,
                 reuse=True,
-            ) if first > 0 else -1
+            ) if first
+            > 0 else -1
         )
         seconds.append(
             _lower_expr(
@@ -2808,7 +2813,8 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 "over",
                 memo,
                 reuse=True,
-            ) if first > 1 else -1
+            ) if first
+            > 1 else -1
         )
         kinds.append(agg_kind(node.op))
         marked.append(folds_empty_to_null(node.op))
@@ -3318,6 +3324,210 @@ def _stacked(
     return DataFrame(Schema(fields^), columns^)
 
 
+def _row_keys(frame: DataFrame) raises -> List[String]:
+    """One string per row that two rows share when they hold the same values.
+
+    Each value is written with its length in front of it, so no two different
+    rows run together into the same key, and a null is a marker no value
+    writes.
+
+    Args:
+        frame: The rows.
+
+    Returns:
+        The keys, in row order.
+    """
+    var keys = List[String](capacity=len(frame))
+    for _ in range(len(frame)):
+        keys.append(String())
+    for c in range(len(frame.columns)):
+        var row = 0
+        for k in range(frame.columns[c].num_chunks()):
+            ref chunk = frame.columns[c].chunks[k]
+            for i in range(len(chunk)):
+                var value = value_at(chunk, i)
+                if not value.present:
+                    keys[row] += "N;"
+                else:
+                    var text = String(value)
+                    keys[row] += String("V", text.byte_length(), ":", text)
+                row += 1
+    return keys^
+
+
+def _scans_under(plan: Plan, root: Int, recursion: Int) -> List[Int]:
+    """The relations the scans under a node read.
+
+    Args:
+        plan: The plan.
+        root: Where to start.
+        recursion: Which working scans to answer with, or -1 for every scan
+            that is not a working scan.
+
+    Returns:
+        The relation ids, in no particular order.
+    """
+    var found = List[Int]()
+    var stack = List[Int]()
+    stack.append(root)
+    while len(stack) > 0:
+        var at = stack.pop()
+        ref node = plan.nodes[at]
+        if node.kind == NodeKind.SCAN:
+            if recursion == -1:
+                if node.op != SCAN_WORKING:
+                    found.append(node.table)
+            elif node.op == SCAN_WORKING and node.offset == recursion:
+                found.append(node.table)
+        for i in range(len(node.inputs)):
+            stack.append(node.inputs[i])
+    return found^
+
+
+def _recursed(
+    plan: Plan,
+    at: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+) raises -> DataFrame:
+    """Runs a recursive CTE to its fixed point and stacks every round.
+
+    The anchor runs once. Then the step runs over the rows the last round kept,
+    handed to it as the frame of every working scan that belongs to this node,
+    and whatever it produces is the next round. It stops on the round that
+    keeps nothing, which is the round that produced nothing under `UNION ALL`
+    and the round that produced nothing new under `UNION`.
+
+    Every round lowers the step again, over a fresh copy of the frames the step
+    reads, because a pipeline is run once and the frames it takes are gone
+    afterwards. The step's rows are cast to the anchor's types, which is what
+    DuckDB does and what the binding promised the node above.
+
+    A step that never stops producing new rows never stops here either, the
+    same as it never stops in DuckDB.
+
+    Args:
+        plan: The plan, bound.
+        at: The recursive union.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+
+    Returns:
+        Every row of every round, the anchor's first.
+
+    Raises:
+        Error: If the step's width is not the anchor's, or if a column of it
+            does not cast to the anchor's type.
+    """
+    var anchor_at = plan.nodes[at].inputs[0]
+    var step_at = plan.nodes[at].inputs[1]
+    var all = plan.nodes[at].flags[0]
+    var working = _scans_under(plan, step_at, plan.nodes[at].offset)
+    var read = _scans_under(plan, step_at, -1)
+
+    var anchor = _lower_from(plan, anchor_at, frames, taken).run()
+    var fields = List[Field]()
+    for c in range(len(anchor.schema)):
+        ref field = anchor.schema.fields[c]
+        fields.append(Field(field.name, field.dtype, True))
+    var seen = Set[String]()
+    var last = _kept(anchor^, fields, all, seen)
+    var columns = List[ChunkedArray]()
+    for c in range(len(fields)):
+        columns.append(last.columns[c].copy())
+
+    # The frames the step reads, held back so that every round starts from the
+    # same ones. Only those, since copying a frame the step never reads would
+    # be copying for nothing.
+    var held = List[DataFrame]()
+    for i in range(len(read)):
+        held.append(frames[read[i]].copy())
+
+    while len(last) > 0:
+        for i in range(len(read)):
+            frames[read[i]] = held[i].copy()
+            taken[read[i]] = False
+        for i in range(len(working)):
+            frames[working[i]] = last.copy()
+            taken[working[i]] = False
+        var out = _lower_from(plan, step_at, frames, taken).run()
+        if len(out.schema) != len(fields):
+            raise Error(
+                String(
+                    "lower: the anchor of this recursive CTE has ",
+                    len(fields),
+                    " columns and a round of it produced ",
+                    len(out.schema),
+                )
+            )
+        var cast = List[ChunkedArray]()
+        var from_step = out^.into_columns()
+        for c in range(len(fields)):
+            var column = ChunkedArray(fields[c].dtype)
+            for k in range(from_step[c].num_chunks()):
+                ref chunk = from_step[c].chunks[k]
+                if chunk.type == fields[c].dtype:
+                    column.append(chunk.copy())
+                else:
+                    # Rounded rather than truncated, the way a SQL cast is,
+                    # so `x + 0.75` over an integer anchor moves on to the next
+                    # whole number instead of falling back to the one it had.
+                    column.append(
+                        cast_any(
+                            chunk, fields[c].dtype, strict=False, nearest=True
+                        )
+                    )
+            cast.append(column^)
+        var round = DataFrame(Schema(fields.copy()), cast^)
+        last = _kept(round^, fields, all, seen)
+        for c in range(len(fields)):
+            for k in range(last.columns[c].num_chunks()):
+                columns[c].append(last.columns[c].chunks[k].copy())
+
+    for i in range(len(read)):
+        frames[read[i]] = DataFrame()
+        taken[read[i]] = True
+    for i in range(len(working)):
+        frames[working[i]] = DataFrame()
+        taken[working[i]] = True
+    return DataFrame(Schema(fields^), columns^)
+
+
+def _kept(
+    var round: DataFrame,
+    fields: List[Field],
+    all: Bool,
+    mut seen: Set[String],
+) raises -> DataFrame:
+    """The rows of one round that go on, named and typed as the anchor.
+
+    Under `UNION ALL` that is every row. Under `UNION` it is the rows no round
+    before this one kept, and the first copy of each row this round has twice.
+
+    Args:
+        round: What one round produced, already cast to the anchor's types.
+        fields: The anchor's columns.
+        all: Whether duplicate rows survive.
+        seen: The rows kept so far, added to.
+
+    Returns:
+        The rows kept.
+    """
+    var columns = round^.into_columns()
+    var named = DataFrame(Schema(fields.copy()), columns^)
+    if all:
+        return named^
+    var keys = _row_keys(named)
+    var rows = List[Int]()
+    for i in range(len(keys)):
+        if keys[i] not in seen:
+            seen.add(keys[i])
+            rows.append(i)
+    if len(rows) == len(keys):
+        return named^
+    return named.take(rows)
+
+
 def _lower_cross(
     plan: Plan,
     right: Int,
@@ -3688,13 +3898,21 @@ def _lower_from(
         source = _literals(plan, first)
     elif plan.nodes[first].kind == NodeKind.TABLE_FUNCTION:
         source = _series(plan, first)
+    elif (
+        plan.nodes[first].kind == NodeKind.UNION
+        and plan.nodes[first].op == SET_RECURSIVE
+    ):
+        source = _recursed(plan, first, frames, taken)
     elif plan.nodes[first].kind == NodeKind.UNION:
         source = _stacked(plan, first, frames, taken)
     else:
         source = _take(frames, taken, plan, first)
     var pipe = Pipeline(source^)
 
-    if plan.nodes[first].kind == NodeKind.UNION:
+    if (
+        plan.nodes[first].kind == NodeKind.UNION
+        and plan.nodes[first].op != SET_RECURSIVE
+    ):
         if plan.nodes[first].op == SET_UNION:
             if not plan.nodes[first].flags[0]:
                 # A `UNION` without `ALL` is the stack with the duplicates

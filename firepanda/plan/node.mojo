@@ -191,6 +191,22 @@ comptime SET_EXCEPT = 1
 comptime SET_INTERSECT = 2
 """The rows the first input and the second both have."""
 
+comptime SET_RECURSIVE = 3
+"""The fixed point a recursive CTE asks for. The first input is the anchor and
+the second is the step, which reads the rows the last round produced through
+the working scans that carry the same number in `offset` as this node does. The
+step runs again over what it produced until it produces nothing new, and every
+round's rows are stacked under the anchor's."""
+
+comptime SCAN_READS = 0
+"""A scan that reads the relation its source names, which every scan did before
+a recursive CTE arrived."""
+
+comptime SCAN_WORKING = 1
+"""A scan of the rows a recursive CTE's last round produced. It has a relation
+of its own, so that the step may read the working rows twice under two names,
+and `offset` says which recursive union it belongs to."""
+
 
 def asof_compare(backward: Bool, strict: Bool) -> String:
     """Writes an ASOF join's inequality as SQL spells it, left side first.
@@ -460,6 +476,56 @@ struct Plan(Movable, Sized):
                 source^,
             )
         )
+
+    def working(
+        mut self, var source: String, table: Int, recursion: Int
+    ) -> Int:
+        """Builds a scan of the rows a recursive CTE's last round produced.
+
+        Args:
+            source: The CTE's name, which is what the plan prints.
+            table: Which relation this reference is.
+            recursion: The `offset` of the recursive union it reads.
+
+        Returns:
+            The index of the new node.
+        """
+        return self._add(
+            PlanNode(
+                NodeKind.SCAN,
+                List[Int](),
+                List[Int](),
+                0,
+                List[String](),
+                List[Bool](),
+                SCAN_WORKING,
+                recursion,
+                0,
+                table,
+                source^,
+            )
+        )
+
+    def recurse(
+        mut self, anchor: Int, step: Int, all: Bool, recursion: Int
+    ) raises -> Int:
+        """Builds the fixed point of a recursive CTE.
+
+        Args:
+            anchor: The rows the recursion starts from.
+            step: The rows one round makes out of the last round's.
+            all: Whether duplicate rows survive, `UNION ALL` against `UNION`.
+            recursion: The number the step's working scans carry.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If either input is not in the plan.
+        """
+        var at = self.setop([anchor, step], SET_RECURSIVE, all)
+        self.nodes[at].offset = recursion
+        return at
 
     def filter(mut self, input: Int, predicate: Int) raises -> Int:
         """Builds a filter.
@@ -1063,12 +1129,21 @@ struct Plan(Movable, Sized):
             or an intersection does not have exactly two, or if the operation is
             not one of the three.
         """
-        if op != SET_UNION and op != SET_EXCEPT and op != SET_INTERSECT:
-            raise Error(String("set operation ", op, " is not one of three"))
+        if (
+            op != SET_UNION
+            and op != SET_EXCEPT
+            and op != SET_INTERSECT
+            and op != SET_RECURSIVE
+        ):
+            raise Error(String("set operation ", op, " is not one of four"))
         if len(inputs) == 0:
             raise Error("a union needs something to stack")
         if op != SET_UNION and len(inputs) != 2:
-            var word = "a difference" if op == SET_EXCEPT else "an intersection"
+            var word = "a difference"
+            if op == SET_INTERSECT:
+                word = "an intersection"
+            elif op == SET_RECURSIVE:
+                word = "a recursive union"
             raise Error(
                 String(
                     word, " is between two inputs, and this has ", len(inputs)

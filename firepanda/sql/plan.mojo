@@ -1942,14 +1942,35 @@ struct _Bindings(Copyable, Movable):
     var columns: List[List[String]]
     """The column alias list each was written with, empty when none was."""
 
+    var recursive: List[Bool]
+    """Whether each names itself, which makes it a fixed point to run rather
+    than a statement to lower in place."""
+
+    var working: List[Int]
+    """For a recursive entry's name as its own step sees it, the number of the
+    recursion whose last round it reads, and -1 for every other name."""
+
+    var shapes: List[Schema]
+    """What a working name produces, which is the anchor's columns. Empty for
+    every other name, since those are lowered to find out."""
+
     def __init__(out self):
         """Nothing bound, which is what a query with no WITH in it has."""
         self.keys = List[String]()
         self.stmts = List[UInt32]()
         self.columns = List[List[String]]()
+        self.recursive = List[Bool]()
+        self.working = List[Int]()
+        self.shapes = List[Schema]()
 
     def bind(
-        mut self, var key: String, stmt: UInt32, var columns: List[String]
+        mut self,
+        var key: String,
+        stmt: UInt32,
+        var columns: List[String],
+        recursive: Bool = False,
+        working: Int = -1,
+        var shape: Schema = Schema(),
     ):
         """Binds one name.
 
@@ -1957,10 +1978,16 @@ struct _Bindings(Copyable, Movable):
             key: The folded name.
             stmt: The statement it stands for.
             columns: Its column alias list.
+            recursive: Whether the statement names the entry itself.
+            working: The recursion whose working rows the name reads, or -1.
+            shape: What a working name produces.
         """
         self.keys.append(key^)
         self.stmts.append(stmt)
         self.columns.append(columns^)
+        self.recursive.append(recursive)
+        self.working.append(working)
+        self.shapes.append(shape^)
 
     def find(self, name: StringSlice) -> Int:
         """Which entry a name is, latest first.
@@ -1989,7 +2016,12 @@ struct _Bindings(Copyable, Movable):
         var out = Self()
         for at in range(before):
             out.bind(
-                String(self.keys[at]), self.stmts[at], self.columns[at].copy()
+                String(self.keys[at]),
+                self.stmts[at],
+                self.columns[at].copy(),
+                self.recursive[at],
+                self.working[at],
+                Schema(copy=self.shapes[at]),
             )
         return out^
 
@@ -4103,7 +4135,10 @@ def _lower_over(
         or function == WINDOW_LAST_VALUE
         or function == WINDOW_NTH_VALUE
     )
-    if flags & (CALL_IGNORE_NULLS | CALL_RESPECT_NULLS) != 0 and not reads_a_row:
+    if (
+        flags & (CALL_IGNORE_NULLS | CALL_RESPECT_NULLS) != 0
+        and not reads_a_row
+    ):
         raise Error(
             String(
                 name,
@@ -4159,9 +4194,13 @@ def _lower_over(
                     len(args),
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
         if len(args) > 1:
-            frame.amount = _signed_count(ast, args[1], String("the offset of ", name))
+            frame.amount = _signed_count(
+                ast, args[1], String("the offset of ", name)
+            )
         if len(args) > 2:
             operands.append(
                 _lower_operand(ast, args[2], plan, walk, scope, grouped)
@@ -4174,7 +4213,9 @@ def _lower_over(
                     len(args),
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
         frame.amount = _constant_count(ast, args[1], "the row nth_value reads")
         if frame.amount < 1:
             raise Error("nth_value counts its rows from one")
@@ -4185,7 +4226,9 @@ def _lower_over(
                     name, " takes one argument and this call has ", len(args)
                 )
             )
-        operands.append(_lower_operand(ast, args[0], plan, walk, scope, grouped))
+        operands.append(
+            _lower_operand(ast, args[0], plan, walk, scope, grouped)
+        )
     elif len(args) != 0:
         raise Error(
             String(name, " takes no arguments and this call has ", len(args))
@@ -4269,9 +4312,7 @@ def _named_windows(ast: Ast, clauses: UInt32, mut walk: _Walk) raises:
         var name = fold(ast.text(named.payload))
         for seen in walk.window_defs:
             if seen == name:
-                raise Error(
-                    String('window "', name, '" is already defined')
-                )
+                raise Error(String('window "', name, '" is already defined'))
         walk.window_defs.append(name)
         walk.window_specs.append(named.a)
 
@@ -4439,8 +4480,10 @@ def _read_frame(
     if mode == FRAME_RANGE and offset and sorts != 1:
         raise Error(
             String(
-                "a RANGE frame with an offset counts along one ORDER BY key,"
-                " and this window has ",
+                (
+                    "a RANGE frame with an offset counts along one ORDER BY"
+                    " key, and this window has "
+                ),
                 sorts,
             )
         )
@@ -5743,6 +5786,13 @@ def _cte(
     Raises:
         If the statement the name stands for is one this does not lower.
     """
+    if ctes.working[at] != -1:
+        return _working(ctes, at, called^, plan, sources, scope)
+    if ctes.recursive[at]:
+        return _recursive_cte(
+            ast, at, called^, catalog, grammar, plan, sources, scope, ctes
+        )
+
     # An entry sees the names bound before it and not itself or the ones after
     # it, which is the rule that makes a forward reference a missing table.
     var inner = _Scope()
@@ -5766,6 +5816,173 @@ def _cte(
         for i in range(len(produced)):
             outputs.append(plan.exprs.column(String(produced[i])))
         root = plan.project(root, outputs^, aliased(produced, ctes.columns[at]))
+    return _derived(plan, root, called^, scope)
+
+
+def _renamed(mut plan: Plan, root: Int, columns: List[String]) raises -> Int:
+    """Puts a CTE's column alias list on what its statement produced.
+
+    Args:
+        plan: Where the projection goes.
+        root: The statement's root.
+        columns: The alias list, empty when none was written.
+
+    Returns:
+        The projection, or the root when there is nothing to rename.
+    """
+    if len(columns) == 0:
+        return root
+    var produced = _produces(plan, root)
+    var outputs = List[Int](capacity=len(produced))
+    for i in range(len(produced)):
+        outputs.append(plan.exprs.column(String(produced[i])))
+    return plan.project(root, outputs^, aliased(produced, columns))
+
+
+def _working(
+    ctes: _Bindings,
+    at: Int,
+    var called: String,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers a recursive CTE's name as its own step reads it.
+
+    What the step reads is the rows the last round kept, so the name is a scan
+    of a relation of its own rather than the statement again. Every reference
+    is a relation of its own too, which is what lets a step join the working
+    rows to themselves under two names.
+
+    Args:
+        ctes: The CTE names in reach.
+        at: Which binding it is.
+        called: The name the reference is known by, its alias when it has one.
+        plan: Where the scan goes.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The scan and what it produces.
+    """
+    var schema = Schema(copy=ctes.shapes[at])
+    var table = len(sources)
+    sources.append(Schema(copy=schema))
+    scope.add(called^, table)
+    var spelling = List[String](capacity=len(schema))
+    for i in range(len(schema)):
+        spelling.append(String(schema[i].name))
+    scope.spells(spelling^)
+    var origin = List[Int](length=len(schema), fill=table)
+    var scan = plan.working(String(ctes.keys[at]), table, ctes.working[at])
+    return _From(scan, schema^, origin^)
+
+
+def _recursive_cte(
+    ast: Ast,
+    at: Int,
+    var called: String,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+) raises -> _From:
+    """Lowers one reference to a recursive CTE, as the fixed point it asks for.
+
+    `read_ctes` has already checked the shape: a union whose left side does not
+    name the entry, which is the anchor, and whose right side does, which is
+    the step. The anchor is lowered and bound first, because the step reads its
+    columns through the working name and a scan has to know its schema. Then
+    the step is lowered with the entry's own name bound to the working rows.
+
+    Args:
+        ast: The arenas.
+        at: Which binding it is.
+        called: The name the reference is known by, its alias when it has one.
+        catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach.
+
+    Returns:
+        The recursion and what it produces.
+
+    Raises:
+        If the statement carries a `WITH` of its own, if it is a union by name,
+        or if either side is a statement this does not lower.
+    """
+    var statement = ctes.stmts[at]
+    if len(read_ctes(ast, statement)) != 0:
+        raise Error(
+            "firepanda does not lower a WITH inside a recursive CTE yet, which"
+            " would bind names the anchor and the step both see"
+        )
+    var body = ast.stmts[Int(statement)].a
+    while ast.stmts[Int(body)].kind == STMT_SELECT:
+        body = ast.stmts[Int(body)].a
+    var node = ast.stmts[Int(body)]
+    var read = _set_operation(ast.text(node.payload))
+    if read[2]:
+        raise Error(
+            "firepanda does not lower a recursive CTE whose union lines its"
+            " sides up by name yet"
+        )
+
+    var seen = ctes.upto(at)
+    var none = List[UInt32]()
+    var untouched = List[Int]()
+    var arm = _Scope()
+    var anchor = _combine(
+        ast,
+        node.a,
+        catalog,
+        grammar,
+        plan,
+        sources,
+        arm,
+        seen,
+        False,
+        none,
+        untouched,
+    )
+    anchor = _renamed(plan, anchor, ctes.columns[at])
+    var produced = bind(plan, anchor, sources)
+    var shape = Schema()
+    for i in range(len(produced)):
+        shape.append(Field(String(produced[i].name), produced[i].dtype, True))
+
+    # The anchor's root is a node no other recursion has, which makes it a
+    # number that tells this recursion's working scans from any other's.
+    var recursion = anchor
+    seen.bind(
+        String(ctes.keys[at]),
+        statement,
+        ctes.columns[at].copy(),
+        False,
+        recursion,
+        shape^,
+    )
+    arm = _Scope()
+    untouched = List[Int]()
+    var step = _combine(
+        ast,
+        node.b,
+        catalog,
+        grammar,
+        plan,
+        sources,
+        arm,
+        seen,
+        False,
+        none,
+        untouched,
+    )
+    var root = plan.recurse(anchor, step, read[1], recursion)
     return _derived(plan, root, called^, scope)
 
 
@@ -6456,13 +6673,12 @@ def _statement(
         ref entry = clause.entries[i]
         if cte_keys(ast.stmts[Int(entry.node)].b) != 0:
             raise not_implemented(WITH_USING_KEY, "", "")
-        if entry.recursive:
-            raise Error(
-                "firepanda does not lower a recursive CTE yet, because the"
-                " fixed point it asks for is a node that runs its own input"
-                " until no new rows come out, and the plan has no such node"
-            )
-        visible.bind(String(entry.key), entry.statement, entry.columns.copy())
+        visible.bind(
+            String(entry.key),
+            entry.statement,
+            entry.columns.copy(),
+            entry.recursive,
+        )
 
     # A DISTINCT ON written on a single block is applied here rather than in the
     # block, because the ORDER BY chooses which row of each group survives as
@@ -9526,7 +9742,7 @@ def _spelled_out(
             end += 1
             while end < size:
                 if rest[byte=end] == '"':
-                    if end + 1 < size and rest[byte = end + 1] == '"':
+                    if end + 1 < size and rest[byte=end + 1] == '"':
                         name += '"'
                         end += 2
                         continue

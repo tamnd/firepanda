@@ -3083,15 +3083,15 @@ def test_a_cte_may_be_joined_to_a_table() raises:
     same(read_back(out, "total"), [21, 40, 40], "total")
 
 
-def test_a_recursive_cte_is_refused_by_name() raises:
-    with assert_raises(contains="recursive CTE"):
-        _ = run(
-            (
-                "WITH RECURSIVE n(i) AS (SELECT 1 AS i UNION ALL"
-                " SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n"
-            ),
-            session(),
-        )
+def test_a_recursive_cte_runs_to_its_fixed_point() raises:
+    var out = run(
+        (
+            "WITH RECURSIVE n(i) AS (SELECT CAST(1 AS BIGINT) AS i UNION ALL"
+            " SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n"
+        ),
+        session(),
+    )
+    same(read_back(out, "i"), [1, 2, 3, 4, 5], "i")
 
 
 def test_two_tables_that_share_a_name_join_on_that_name() raises:

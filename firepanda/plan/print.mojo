@@ -56,6 +56,8 @@ from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
     SET_INTERSECT,
+    SET_RECURSIVE,
+    SCAN_WORKING,
     NodeKind,
     Plan,
     asof_compare,
@@ -250,7 +252,11 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
 
     if node.kind == ExprKind.WINDOW:
         ref frame = node.frame
-        var written = String(agg_kind(node.op)) if frame.function == WINDOW_FOLD else window_function_name(frame.function)
+        var written = String(
+            agg_kind(node.op)
+        ) if frame.function == WINDOW_FOLD else window_function_name(
+            frame.function
+        )
         written += "("
         for i in range(frame.args):
             if i != 0:
@@ -322,6 +328,8 @@ def _line(plan: Plan, at: Int) raises -> String:
 
     if node.kind == NodeKind.SCAN:
         var written = String("SCAN ", node.source, " [")
+        if node.op == SCAN_WORKING:
+            written = String("WORKING ", node.source, " #", node.offset, " [")
         for i in range(len(node.names)):
             if i != 0:
                 written += ", "
@@ -451,6 +459,8 @@ def _line(plan: Plan, at: Int) raises -> String:
         word = "EXCEPT"
     elif node.op == SET_INTERSECT:
         word = "INTERSECT"
+    elif node.op == SET_RECURSIVE:
+        word = String("RECURSIVE #", node.offset, " UNION")
     return String(word, " all") if node.flags[0] else String(word)
 
 

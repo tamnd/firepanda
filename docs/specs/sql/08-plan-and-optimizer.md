@@ -62,6 +62,8 @@ Fourteen, which is the number that covers the whole `SELECT` surface without inv
 | `Unnest` | list expansion, row multiplying |
 | `RecursiveCTE` | fixed point over an anchor and a recursive term |
 
+The plan in `plan/node.mojo` writes `RecursiveCTE` as the union node with the `SET_RECURSIVE` operation, the anchor as its first input and the recursive term as its second. The term reads the last round's rows through scans marked `SCAN_WORKING`, which carry the union's number in `offset`. Each of those scans has its own relation, so a term can join the working rows to themselves. The fixed point runs in `plan/lower.mojo`, and pushdown does not move a predicate into either input.
+
 Everything in the dialect lowers to these. `QUALIFY` is a `Filter` above a `Window`. `GROUPING SETS`, `CUBE` and `ROLLUP` are masks on one `Aggregate` and not a `SetOp` of several. `PIVOT` is an `Aggregate` with a generated grouping set and conditional aggregates. `DISTINCT ON` is `Distinct` with a key list under an `Order`. Semi, anti and mark joins are join types rather than subquery nodes, which is the whole point of decorrelation.
 
 Two node types exist for the optimizer rather than for the binder. `Mark` join produces a boolean column rather than filtering, and is what `IN` and `EXISTS` become. `DependentJoin` is the temporary node a correlated subquery binds to before decorrelation removes it.
