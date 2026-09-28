@@ -6080,38 +6080,58 @@ def _sampled(
         _align_axis(0 if axis is None else axis, "Series", (0,))
     length = len(owner) if over_rows else len(owner.columns)
     state = _random_state(random_state)
+    n = _sample_count(n, frac, replace)
+    size = int(n) if n is not None else round(frac * length)
+    read = None if weights is None else _sample_weights(owner, weights, over_rows)
+    positions = _drawn(state, length, size, replace, read)
+    answer = owner.take(positions, axis=0 if over_rows else 1) if frame else owner.take(positions)
+    return answer.reset_index(drop=True) if ignore_index else answer
+
+
+def _sample_count(n: Any, frac: Any, replace: bool) -> Any:
+    """How many to draw, or None when `frac` decides it, checked the way pandas checks it.
+
+    Raises:
+        ValueError: With pandas' words for a size it refuses.
+    """
     if n is None and frac is None:
-        n = 1
-    elif n is not None and frac is not None:
+        return 1
+    if n is not None and frac is not None:
         raise ValueError("Please enter a value for `frac` OR `n`, not both")
-    elif n is not None:
+    if n is not None:
         if n < 0:
             raise ValueError("A negative number of rows requested. Please provide `n` >= 0.")
         if n % 1 != 0:
             raise ValueError("Only integers accepted as `n` values")
-    else:
-        if frac > 1 and not replace:
-            raise ValueError(
-                "Replace has to be set to `True` when upsampling the population `frac` > 1."
-            )
-        if frac < 0:
-            raise ValueError("A negative number of rows requested. Please provide `frac` >= 0.")
-    size = int(n) if n is not None else round(frac * length)
+        return n
+    if frac > 1 and not replace:
+        raise ValueError(
+            "Replace has to be set to `True` when upsampling the population `frac` > 1."
+        )
+    if frac < 0:
+        raise ValueError("A negative number of rows requested. Please provide `frac` >= 0.")
+    return None
+
+
+def _drawn(state: Any, length: int, size: int, replace: bool, weights: Any) -> list[int]:
+    """The positions numpy's `choice` draws from `length`, weighted when weights are given.
+
+    Raises:
+        ValueError: With pandas' words for weights that sum to nothing, or that cannot
+            be honoured without replacement.
+    """
     chances = None
     if weights is not None:
-        read = _sample_weights(owner, weights, over_rows)
-        total = math.fsum(read)
+        total = math.fsum(weights)
         if total == 0:
             raise ValueError("Invalid weights: weights sum to zero")
-        chances = _numpy().array(read, dtype="float64") / total
+        chances = _numpy().array(weights, dtype="float64") / total
         if not replace and size * chances.max() > 1:
             raise ValueError(
                 "Weighted sampling cannot be achieved with replace=False. Either set "
                 "replace=True or use smaller weights. See the docstring of sample for details."
             )
-    positions = state.choice(length, size=size, replace=replace, p=chances).tolist()
-    answer = owner.take(positions, axis=0 if over_rows else 1) if frame else owner.take(positions)
-    return answer.reset_index(drop=True) if ignore_index else answer
+    return state.choice(length, size=size, replace=replace, p=chances).tolist()
 
 
 def _numeric_kind(printed: str) -> str | None:
@@ -17610,6 +17630,57 @@ class GroupByMixin[Answer]:
             if self._keeps(func(self._as_answer(self._frame.iloc[places]), *args, **kwargs))
         ]
         return self._kept(numbers.isin(kept))
+
+    def sample(
+        self,
+        n: int | None = None,
+        frac: float | None = None,
+        replace: bool = False,
+        weights: Any = None,
+        random_state: Any = None,
+    ) -> Any:
+        """Rows drawn at random from each group, the same ones pandas draws for the same seed.
+
+        pandas walks the groups in their order and asks numpy's `choice` for each
+        one's positions from one random state, so this walks them the same way.
+        The rows come back group after group, with the frame's labels, and a row
+        whose key is not a group is never drawn.
+
+        Args:
+            n: How many rows to draw from each group, and one when neither is given.
+            frac: The share of each group to draw, rounded, instead of `n`.
+            replace: Draw a row more than once.
+            weights: One weight a row, lined up on the frame, with a gap as nothing.
+            random_state: A seed, a numpy random state or generator, or None.
+
+        Returns:
+            The rows drawn.
+
+        Raises:
+            ValueError: With pandas' words for a size or weights it refuses.
+        """
+        from ._frame import DataFrameGroupBy
+
+        whole = self._as_answer(self._frame)
+        if len(whole) == 0:
+            return whole
+        count = _sample_count(n, frac, replace)
+        read = None if weights is None else _sample_weights(whole, weights, True)
+        state = _random_state(random_state)
+        numbers = DataFrameGroupBy(self._frame, self._by, True, self._sort, self._dropna).ngroup()
+        rows: dict[int, list[int]] = {}
+        for place, number in enumerate(numbers.tolist()):
+            if number is not None and number == number:
+                rows.setdefault(int(number), []).append(place)
+        positions: list[int] = []
+        for number in sorted(rows):
+            places = rows[number]
+            size = int(count) if count is not None else round(frac * len(places))  # type: ignore[operator]
+            chances = None if read is None else [read[place] for place in places]
+            positions.extend(
+                places[at] for at in _drawn(state, len(places), size, replace, chances)
+            )
+        return whole.take(positions)
 
     def _keeps(self, answer: Any) -> bool:
         """Whether a group's answer from `filter` keeps it, read as pandas reads a frame's.
