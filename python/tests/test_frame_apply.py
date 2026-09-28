@@ -113,10 +113,14 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
     assert str(mine.value) == str(theirs.value)
 
 
-def test_a_transpose_needs_text_row_labels(firepanda: ModuleType) -> None:
-    """The row labels become column names, and a column here is named by text."""
-    with pytest.raises(NotImplementedError, match="text labels"):
-        firepanda.DataFrame({"a": [1, 2]}).transpose()
+def test_a_transpose_of_numbered_rows_names_its_columns_by_number(firepanda: ModuleType) -> None:
+    """The row labels become column names, whole numbers included."""
+    import pandas as pd
+
+    mine = firepanda.DataFrame({"a": [1, 2]}).transpose()
+    theirs = pd.DataFrame({"a": [1, 2]}).transpose()
+    assert repr(mine) == repr(theirs)
+    assert mine.columns.tolist() == [0, 1]
 
 
 @pytest.mark.parametrize(

@@ -171,8 +171,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: m.DataFrame([[1, 2]]),
-    lambda m: m.DataFrame(np().zeros((2, 2))),
     lambda m: m.DataFrame({"a": [1]}, columns=["a", "b"]),
     lambda m: m.Series(np().array([1], dtype="timedelta64[s]")),
     lambda m: m.DataFrame({"a": [1]}, copy=True),
@@ -183,6 +181,6 @@ REFUSED: list[Callable[[Any], Any]] = [
 def test_a_shape_firepanda_cannot_hold_is_refused(
     firepanda: ModuleType, build: Callable[[Any], Any]
 ) -> None:
-    """Integer column names, object columns and spans are refused by name."""
+    """Object columns and spans are refused by name."""
     with pytest.raises(NotImplementedError):
         build(firepanda)

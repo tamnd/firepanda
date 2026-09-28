@@ -59,6 +59,7 @@ def agrees(got: Any, want: Any) -> None:
 
 
 BUILDS: list[Callable[[Any], Any]] = [
+    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(OTHER)], axis=1, ignore_index=True),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(SECOND)]),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(SECOND)], ignore_index=True),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(OTHER)]),
@@ -133,7 +134,6 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.concat([m.DataFrame({"a": [True]}), m.DataFrame({"b": [1]})]),
     lambda m: m.concat([m.Series([True]), m.Series([1])]),
     lambda m: m.concat([m.DataFrame(FIRST), m.Series([1])]),
-    lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(OTHER)], axis=1, ignore_index=True),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST).set_index("b")]),
 ]
 

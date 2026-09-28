@@ -131,15 +131,12 @@ def test_a_name_that_is_not_there_raises_key_error(firepanda: ModuleType, tmp_pa
         _frame(firepanda, tmp_path)[["region", "nope"]]
 
 
-def test_a_key_that_is_not_read_yet_says_so(firepanda: ModuleType, tmp_path: Path) -> None:
-    """pandas reads masks, slices and callables here and firepanda does not.
-
-    Refused rather than approximated. A key that quietly means something else is
-    worse than one that does not work, because the second is found immediately.
-    """
-    with pytest.raises(TypeError) as caught:
+def test_a_number_that_names_no_column_is_a_missing_key(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """A number is a column name like any other, so one the frame lacks is a `KeyError`."""
+    with pytest.raises(KeyError):
         _frame(firepanda, tmp_path)[3]
-    assert "column name" in str(caught.value)
 
 
 def test_an_empty_constructor_gives_an_empty_one(firepanda: ModuleType) -> None:

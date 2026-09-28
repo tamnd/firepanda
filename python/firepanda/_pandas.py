@@ -42,7 +42,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda, _row_dates, _row_formats
+from . import _config, _firepanda, _names, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
@@ -548,7 +548,7 @@ def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
     listed = isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
     if not listed:
         return other
-    labels = frame.columns if axis == 1 else frame.index
+    labels = _shown_names(frame) if axis == 1 else frame.index
     if len(other) != len(labels):
         raise InvalidArgumentError(
             f"Unable to coerce to Series, length must be {len(labels)}: given {len(other)}"
@@ -695,6 +695,14 @@ def _has_levels(owner: Any) -> bool:
     return is_written(labels.label()) or (labels.length() > 0 and is_written(labels.at(0)))
 
 
+def _has_names(owner: Any) -> bool:
+    """Whether a frame or column's row labels are written names, read without decoding them."""
+    labels = owner._inner.labels()
+    if str(labels.dtype()) not in ("string", "str"):
+        return False
+    return labels.length() > 0 and _names.is_held(labels.at(0))
+
+
 def _raw_labels(owner: Any) -> Any:
     """The row labels as the extension holds them, written tuples left written."""
     from ._frame import Index
@@ -763,13 +771,8 @@ def _frame_columns(data: Any, columns: Any) -> tuple[dict[Any, Any], bool]:
 
     Raises:
         InvalidArgumentError: For rows of the wrong width.
-        UnsupportedError: For a shape that needs integer column names or a
-            column of objects.
+        UnsupportedError: For a shape that needs a column of objects.
     """
-    unnamed = (
-        "names the columns 0, 1 and on, and a column name in firepanda is a string,"
-        " so pass columns="
-    )
     wanted = None if columns is None else list(columns)
     if _is_numpy(data):
         if data.ndim == 1:
@@ -777,7 +780,7 @@ def _frame_columns(data: Any, columns: Any) -> tuple[dict[Any, Any], bool]:
         if data.ndim != 2:
             raise InvalidArgumentError("Must pass 2-d input. shape=" + str(data.shape))
         if wanted is None:
-            raise UnsupportedError(f"DataFrame(array) {unnamed}")
+            wanted = list(range(data.shape[1]))
         if len(wanted) != data.shape[1]:
             raise InvalidArgumentError(
                 f"Shape of passed values is {data.shape}, indices imply"
@@ -807,7 +810,7 @@ def _frame_columns(data: Any, columns: Any) -> tuple[dict[Any, Any], bool]:
         rows = [list(row) for row in rows]
         width = max(len(row) for row in rows)
         if wanted is None:
-            raise UnsupportedError(f"DataFrame(rows) {unnamed}")
+            wanted = list(range(width))
         if len(wanted) != width:
             raise InvalidArgumentError(
                 f"{len(wanted)} columns passed, passed data had {width} columns"
@@ -816,7 +819,11 @@ def _frame_columns(data: Any, columns: Any) -> tuple[dict[Any, Any], bool]:
             name: [row[at] if at < len(row) else None for row in rows]
             for at, name in enumerate(wanted)
         }, True
-    raise UnsupportedError(f"DataFrame(list of values) {unnamed}")
+    if not rows:
+        return {name: [] for name in wanted or ()}, False
+    if wanted is not None and len(wanted) != 1:
+        raise InvalidArgumentError(f"{len(wanted)} columns passed, passed data had 1 columns")
+    return {0 if wanted is None else wanted[0]: rows}, True
 
 
 def _refuse(name: str, value: object, why: str) -> None:
@@ -1057,8 +1064,9 @@ def _renamings(names: Any, mapping: Any, errors: str) -> tuple[list[str], list[s
     if errors not in ("ignore", "raise"):
         raise InvalidArgumentError(f"expected 'ignore' or 'raise', got {errors!r} for errors")
     if callable(mapping):
-        changed = [name for name in names if str(mapping(name)) != name]
-        return changed, [str(mapping(name)) for name in changed]
+        pairs = [(name, _names.held(mapping(_names.shown(name)))) for name in names]
+        changed = [(name, new) for name, new in pairs if new != name]
+        return [name for name, _ in changed], [new for _, new in changed]
     try:
         items = list(mapping.items())
     except AttributeError:
@@ -1066,12 +1074,13 @@ def _renamings(names: Any, mapping: Any, errors: str) -> tuple[list[str], list[s
             f"columns= takes a mapping or a callable, and {type(mapping).__name__} is neither"
         ) from None
     held = set(names)
-    missing = [str(old) for old, _ in items if str(old) not in held]
+    written = [(old, _names.held(old), _names.held(new)) for old, new in items]
+    missing = [old for old, text, _ in written if text not in held]
     if missing and errors == "raise":
         raise KeyError(f"{missing} not found in axis")
     return (
-        [str(old) for old, _ in items if str(old) in held],
-        [str(new) for old, new in items if str(old) in held],
+        [text for _, text, _ in written if text in held],
+        [new for _, text, new in written if text in held],
     )
 
 
@@ -1227,12 +1236,12 @@ def _dropped(wanted: Any, held: Any, errors: str) -> list[str]:
     Raises:
         KeyError: If `errors` is `"raise"` and a name is not a column.
     """
-    names = [str(one) for one in _sequence(wanted)]
+    names = [(one, _names.held(one)) for one in _sequence(wanted)]
     there = set(held)
-    missing = [name for name in names if name not in there]
+    missing = [one for one, text in names if text not in there]
     if missing and errors == "raise":
         raise KeyError(f"{missing} not found in axis")
-    return [name for name in names if name in there]
+    return [text for _, text in names if text in there]
 
 
 def _sequence(value: Any) -> list[Any]:
@@ -3430,7 +3439,7 @@ def _keyed_series(data: Any, index: Any, name: Any) -> Any:
         The extension object, unwrapped.
     """
     made = _labelled(list(data.keys()), list(data.values()))
-    inner = made._inner.relabel(None if name is None else str(name)).renamed_axis(None)
+    inner = made._inner.relabel(_names.held(name)).renamed_axis(None)
     if index is None:
         return inner
     from ._frame import Series
@@ -3686,7 +3695,7 @@ def _fill_values(value: Any, held: Any) -> dict[str, Any]:
         there = set(names)
         return {str(key): what for key, what in value.items() if str(key) in there}
     if _is_frame(value):
-        there = {str(name) for name in value.columns}
+        there = set(_held_names(value))
         return {name: value[name] for name in names if name in there}
     if _is_object(value):
         pairs = zip(list(value.index), list(value.tolist()), strict=True)
@@ -3846,9 +3855,9 @@ def _labels_differ(left: Any, right: Any, axis: int) -> bool:
         the same order.
     """
     if isinstance(right, DataFrameMixin):
-        return not left.index.equals(right.index) or list(left.columns) != list(right.columns)
+        return not left.index.equals(right.index) or _shown_names(left) != _shown_names(right)
     if isinstance(left, DataFrameMixin) and axis == 1:
-        return list(left.columns) != [str(label) for label in right.index.to_list()]
+        return _shown_names(left) != [str(label) for label in right.index.to_list()]
     return not left.index.equals(right.index)
 
 
@@ -3928,7 +3937,7 @@ def _power_realigned(inner: Any, op: str, left: Any, right: Any, flip: bool) -> 
             if not any(inner.null_counts()):
                 return inner
             answer = DataFrame._wrap(inner)
-            rows, columns = answer.index.to_list(), list(answer.columns)
+            rows, columns = answer.index.to_list(), _shown_names(answer)
             lined = [side.reindex(index=rows, columns=columns) for side in (left, right)]
             return lined[0]._inner.binary_frame(lined[1]._inner, op, flip, None)
         if inner.null_count() == 0:
@@ -4071,8 +4080,8 @@ def _logical_frame(left: Any, right: Any, op: str) -> Any:
     shape = DataFrame._wrap(answer)
     rows, index = shape.index.to_list(), shape.index
     columns: dict[Any, Any] = {}
-    for name in shape.columns:
-        if name in left.columns and name in right.columns:
+    for name in _shown_names(shape):
+        if name in _shown_names(left) and name in _shown_names(right):
             inner = _logical_series(left[name], right[name], op)
             columns[name] = Series._wrap(inner).reindex(rows).tolist()
         else:
@@ -4118,7 +4127,7 @@ def _logical_broadcast(frame: Any, series: Any, op: str, flip: bool) -> Any:
     from ._frame import Series
 
     labels = series.index.to_list()
-    if list(frame.columns) == [str(label) for label in labels]:
+    if _shown_names(frame) == [str(label) for label in labels]:
         return frame._inner.binary_series(series._inner, LOGICAL[op], 1, flip)
     if flip:
         raise UnsupportedError(
@@ -4128,11 +4137,11 @@ def _logical_broadcast(frame: Any, series: Any, op: str, flip: bool) -> Any:
     values = dict(zip([str(label) for label in labels], series.tolist(), strict=True))
     # pandas sorts the union of two sets of labels that are not the same, even
     # when one of them holds every label the other has.
-    order = sorted(set(frame.columns) | set(values))
+    order = sorted(set(_shown_names(frame)) | set(values))
     rows = len(frame)
     columns: dict[Any, Any] = {}
     for name in order:
-        if name not in frame.columns:
+        if name not in _shown_names(frame):
             columns[name] = [False] * rows
             continue
         constant = bool(values.get(name, False))
@@ -4344,7 +4353,7 @@ def _frame_conditions(cond: Any, names: list[str], labels: list[Any], along: int
     """
     height = len(labels)
     if _is_frame(cond):
-        carried = {str(name) for name in cond.columns}
+        carried = set(_held_names(cond))
         return {
             name: _condition(cond[name], labels, height)
             if name in carried
@@ -4432,7 +4441,7 @@ def _frame_others(
     if other is NO_DEFAULT:
         return dict.fromkeys(names, NO_DEFAULT)
     if _is_frame(other):
-        carried = {str(name) for name in other.columns}
+        carried = set(_held_names(other))
         return {name: other[name] if name in carried else NO_DEFAULT for name in names}
     if _is_object(other):
         if not told:
@@ -4774,7 +4783,7 @@ def _frame_thresholds(
     if bound is None:
         return dict.fromkeys(names, None)
     if _is_frame(bound):
-        carried = {str(name) for name in bound.columns}
+        carried = set(_held_names(bound))
         return {name: bound[name] if name in carried else NO_DEFAULT for name in names}
     if _is_object(bound):
         if not told:
@@ -6090,21 +6099,22 @@ class _Labelled(_Selection):
         """
         if key is EVERY:
             return EVERY
-        if isinstance(key, str):
-            if key not in names:
+        if isinstance(key, (str, int, float)):
+            if _names.held(key) not in names:
                 raise KeyError(key)
-            return key
+            return _names.held(key)
         if isinstance(key, slice):
-            first = 0 if key.start is None else names.index(key.start)
-            last = len(names) if key.stop is None else names.index(key.stop) + 1
+            start, stop = _names.held(key.start), _names.held(key.stop)
+            first = 0 if start is None else names.index(start)
+            last = len(names) if stop is None else names.index(stop) + 1
             return names[first:last]
         if isinstance(key, (list, tuple)):
             if _is_mask(key):
                 return _named_at(names, _column_positions(names, key))
-            missing = [one for one in key if one not in names]
+            missing = [one for one in key if _names.held(one) not in names]
             if missing:
                 raise KeyError(f"{missing} not in index")
-            return [str(one) for one in key]
+            return [one if isinstance(one, str) else _names.held(one) for one in key]
         raise InvalidArgumentError(f"cannot select columns with a {type(key).__name__}")
 
 
@@ -6152,8 +6162,9 @@ class _Cell:
             except Exception as error:
                 raise translate(error) from None
         names = inner.names()
-        if column not in names:
+        if not isinstance(column, (str, int, float)) or _names.held(column) not in names:
             raise KeyError(column)
+        column = _names.held(column)
         found = self._owner.index.get_loc(row)
         if not isinstance(found, int):
             raise NotImplementedError(
@@ -6721,12 +6732,13 @@ def _written_names(selection: Any, key: Any, names: list[str]) -> tuple[Any, lis
     One name or a list of names the frame does not have is new columns, which
     the write makes. Every other key is read as `loc` reads it.
     """
-    if isinstance(key, str) and key not in names:
-        return key, [key]
+    if isinstance(key, (str, int, float)) and _names.held(key) not in names:
+        return _names.held(key), [_names.held(key)]
     if isinstance(key, list) and key and not _is_mask(key):
-        fresh = [one for one in dict.fromkeys(key) if isinstance(one, str) and one not in names]
+        held = _names.held_all(key)
+        fresh = [one for one in dict.fromkeys(held) if isinstance(one, str) and one not in names]
         if fresh:
-            return [str(one) for one in key], fresh
+            return held, fresh
     return selection._columns(key, names), []
 
 
@@ -6751,7 +6763,7 @@ def _spread(value: Any, chosen: list[str], one: bool, single: bool, labelled: bo
                 " its columns up in a way that follows how it stores them"
             )
         gaps = Series([None] * len(value), index=value.index, dtype="float64")
-        return [value[name] if name in list(value.columns) else gaps for name in chosen]
+        return [value[name] if name in _shown_names(value) else gaps for name in chosen]
     if one:
         return [value]
     if isinstance(value, Series):
@@ -6931,7 +6943,7 @@ def _time_rows(owner: Any, axis: Any, pick: Callable[[Any], list[int]]) -> Any:
 
     kind = type(owner).__name__
     number = _axis_number(axis, kind, 0, (0,) if kind == "Series" else (0, 1))
-    labels = owner.index if number == 0 else Index(list(owner.columns))
+    labels = owner.index if number == 0 else Index(_shown_names(owner))
     if not str(labels.dtype).startswith("datetime64"):
         raise TypeError("Index must be DatetimeIndex")
     return owner.take(pick(DatetimeIndex._wrap(labels._inner)), axis=number)
@@ -6984,7 +6996,8 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
         if where < labels[0]:
             if column:
                 return math.nan
-            return Series([math.nan] * len(owner.columns), index=list(owner.columns), name=where)
+            names = _shown_names(owner)
+            return Series([math.nan] * len(names), index=names, name=where)
     if column:
         nulls = [missing(value) for value in owner.tolist()]
         if not several:
@@ -6994,9 +7007,9 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
                 at -= 1
             return math.nan if values[at] is None else values[at]
     else:
-        names = list(owner.columns) if subset is None else subset
+        names = _shown_names(owner) if subset is None else subset
         names = [names] if isinstance(names, str) else list(names)
-        absent = [name for name in names if name not in owner.columns]
+        absent = [name for name in names if name not in _shown_names(owner)]
         if absent:
             raise KeyError(f"None of [Index({absent!r}, dtype='str')] are in the [columns]")
         nulls = [False] * len(owner)
@@ -7009,9 +7022,9 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
             return Series([math.nan] * len(targets), index=targets, name=owner.name)
         if several:
             return DataFrame(
-                {name: [math.nan] * len(targets) for name in owner.columns}, index=targets
+                {name: [math.nan] * len(targets) for name in _shown_names(owner)}, index=targets
             )
-        return Series([math.nan] * len(owner.columns), index=list(owner.columns), name=where)
+        return Series([math.nan] * len(_shown_names(owner)), index=_shown_names(owner), name=where)
     try:
         found = owner.index.asof_locs(targets, [not gap for gap in nulls])
     except TypeError:
@@ -7031,7 +7044,7 @@ def _asof(owner: Any, where: Any, subset: Any) -> Any:
 
     if column:
         return Series(picked(owner), index=targets, name=owner.name)
-    return DataFrame({name: picked(owner[name]) for name in owner.columns}, index=targets)
+    return DataFrame({name: picked(owner[name]) for name in _shown_names(owner)}, index=targets)
 
 
 _NAN_WHEN_MISSING = ("float", "int", "uint", "string")
@@ -7402,7 +7415,7 @@ def _zoned_axis(
         # Column labels are text in firepanda, so they are never instants.
         if level not in (None, 0):
             raise ValueError(f"The level {level} is not valid")
-        if len(owner.columns):
+        if len(_shown_names(owner)):
             raise TypeError("columns is not a valid DatetimeIndex or PeriodIndex")
         return owner.copy()
     labels = owner.index
@@ -7467,11 +7480,72 @@ def _column_labels(frame: DataFrame) -> Index:
 
     A frame without columns answers an empty `RangeIndex`, as pandas' does.
     """
-    from ._frame import Index
     from ._range_index import RangeIndex
 
-    names = frame._inner.names()
-    return Index(names) if names else RangeIndex(0)
+    names = _names.shown_all(frame._inner.names())
+    return _names_index(names, None) if names else RangeIndex(0)
+
+
+def _shown_names(frame: Any) -> list[Any]:
+    """A frame's column names as a list of what they stand for, for the code in this module.
+
+    Unlike `columns` this has no index to build, so a mix of text and numbers is fine.
+    """
+    if not hasattr(getattr(frame, "_inner", None), "names"):
+        return list(frame.columns)
+    return _names.shown_all(frame._inner.names())
+
+
+def _arrow_inner(frame: Any) -> Any:
+    """The inner frame to export to Arrow, with each name that is not text as its text.
+
+    Arrow names a field with text, and pandas exports a name that is not text as `str`
+    of it, so a written name is renamed on the way out and every other frame goes as it is.
+    """
+    inner = frame._inner
+    held = inner.names()
+    if not any(_names.is_held(name) for name in held):
+        return inner
+    return inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
+
+
+def _held_names(frame: Any) -> list[str]:
+    """A frame's column names as the text the extension holds, for keying columns by text."""
+    if not hasattr(getattr(frame, "_inner", None), "names"):
+        return _names.held_all(frame.columns)
+    return frame._inner.names()
+
+
+def _names_index(names: list[Any], name: Any) -> Any:
+    """Names read back out of the extension as the index pandas would hold them in."""
+    from ._frame import Index
+
+    kinds = {type(one) for one in names}
+    if len(kinds) > 1 and not kinds <= {int, float}:
+        raise NotImplementedError(
+            "names that mix text and other values are not supported yet as an index,"
+            " because pandas holds them in an index of objects and firepanda has no"
+            " object index"
+        )
+    ranged = _name_range(names)
+    return Index(names, name=name) if ranged is None else ranged
+
+
+def _name_range(names: list[Any]) -> Any:
+    """Whole number names that go up or down by one step, as the `RangeIndex` pandas makes.
+
+    pandas makes one for the names a frame gets from rows, from a mapping and from
+    `transpose`, and keeps it through a selection, so two or more whole numbers
+    an even step apart are answered as one. A single name is a plain index.
+    """
+    from ._range_index import RangeIndex
+
+    if len(names) < 2 or not all(type(name) is int for name in names):
+        return None
+    step = names[1] - names[0]
+    if step == 0 or any(b - a != step for a, b in itertools.pairwise(names)):
+        return None
+    return RangeIndex(names[0], names[-1] + step, step)
 
 
 def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value: Any) -> tuple:
@@ -7564,7 +7638,7 @@ def _relevelled(owner: Any, axis: Any, change: Any, verb: str | None = None) -> 
     frame = isinstance(owner, DataFrame)
     owner_type = "DataFrame" if frame else "Series"
     number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
-    index = owner.index if number == 0 else owner.columns
+    index = owner.index if number == 0 else _shown_names(owner)
     if verb is not None and not isinstance(index, MultiIndex):
         raise TypeError(f"Can only {verb} levels on a hierarchical axis.")
     return _with_axis(owner, change(index), number)
@@ -7637,7 +7711,7 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
     number = _align_axis(axis, owner_type, (0, 1) if frame else (0,)) or 0
     name = labels.name if isinstance(labels, Index) else None
     values = labels.tolist() if hasattr(labels, "tolist") else list(labels)
-    current = list(owner.columns) if number == 1 else owner.index.tolist()
+    current = _shown_names(owner) if number == 1 else owner.index.tolist()
     if len(values) != len(current):
         raise InvalidArgumentError(
             f"Length mismatch: Expected axis has {len(current)} elements, new values have"
@@ -7714,7 +7788,7 @@ def _sample_weights(owner: Any, weights: Any, over_rows: bool) -> list[float]:
 
     frame = hasattr(owner, "columns")
     if hasattr(weights, "reindex") and hasattr(weights, "index"):
-        labels = owner.index if over_rows else owner.columns
+        labels = owner.index if over_rows else _shown_names(owner)
         weights = weights.reindex(labels)
     if isinstance(weights, str):
         if not frame:
@@ -7723,13 +7797,13 @@ def _sample_weights(owner: Any, weights: Any, over_rows: bool) -> list[float]:
             raise ValueError(
                 "Strings can only be passed to weights when sampling from rows on a DataFrame"
             )
-        if weights not in list(owner.columns):
+        if weights not in _shown_names(owner):
             raise KeyError("String passed to weights not a valid column")
         weights = owner[weights]
     if hasattr(weights, "tolist"):
         weights = weights.tolist()
     read = Series(list(weights), dtype="float64").tolist()
-    if len(read) != (len(owner) if over_rows else len(owner.columns)):
+    if len(read) != (len(owner) if over_rows else len(_shown_names(owner))):
         raise ValueError("Weights and axis to be sampled must be of same length")
     if any(value in (math.inf, -math.inf) for value in read if value is not None):
         raise ValueError("weight vector may not include `inf` values")
@@ -7762,7 +7836,7 @@ def _sampled(
         over_rows = _axis_number(0 if axis is None else axis, "DataFrame", 1, (0, 1)) == 0
     else:
         _align_axis(0 if axis is None else axis, "Series", (0,))
-    length = len(owner) if over_rows else len(owner.columns)
+    length = len(owner) if over_rows else len(_shown_names(owner))
     state = _random_state(random_state)
     n = _sample_count(n, frac, replace)
     size = int(n) if n is not None else round(frac * length)
@@ -8173,7 +8247,7 @@ def _frame_to_numpy(frame: Any, dtype: Any, na_value: Any) -> Any:
     and spans among objects are `Timestamp` and `Timedelta`, with `NaT` for a gap.
     """
     np = _numpy()
-    columns = [_column_to_numpy(frame[name], None, na_value) for name in frame.columns]
+    columns = [_column_to_numpy(frame[name], None, na_value) for name in _shown_names(frame)]
     if not columns:
         return np.empty((len(frame), 0), dtype=dtype or "float64")
     kinds = {column.dtype for column in columns}
@@ -8245,7 +8319,15 @@ class _Carries:
         from ._levels import multi_of
 
         labels = Index._wrap(self._inner.labels())  # type: ignore[attr-defined]
-        return multi_of(labels) if _has_levels(self) else labels
+        if _has_levels(self):
+            return multi_of(labels)
+        if _has_names(self):
+            # Row labels that were column names, as a reduction over the rows makes.
+            return _names_index(_names.shown_all(labels.tolist()), labels.name)
+        if isinstance(labels.name, str) and labels.name.startswith(_names.MARK):
+            # Labels that were a column whose name is not text, as `set_index` makes.
+            return labels.rename(_names.shown(labels.name))
+        return labels
 
     def set_flags(
         self, *, copy: Any = NO_DEFAULT, allows_duplicate_labels: bool | None = None
@@ -8375,6 +8457,9 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame, Series
 
+        if data and any(not isinstance(name, str) for name in data):
+            # A name that is not text is written into text, as `_names` explains.
+            data = {_names.held(name): values for name, values in data.items()}
         try:
             return _firepanda.DataFrame(data)
         except Exception as error:
@@ -8423,6 +8508,7 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         found, widen = _frame_columns(data, columns)
+        found = {_names.held(name): values for name, values in found.items()}
         typed: dict[Any, str] = {}
         for name, values in list(found.items()):
             if _is_numpy(values):
@@ -8535,6 +8621,12 @@ class DataFrameMixin(_Carries):
         if isinstance(key, (IndexMixin, SeriesMixin)) or _is_numpy(key):
             # An index, a column or an array of names, such as `df[df.columns[:2]]`.
             key = list(key.tolist())
+        if isinstance(key, list):
+            key = _names.held_all(key)
+        elif not isinstance(key, (str, tuple, slice)) and _is_scalar(key):
+            if _names.held(key) not in self._inner.names():
+                raise KeyError(key)
+            key = _names.held(key)
         try:
             if isinstance(key, str):
                 return Series._wrap(self._inner.column(key))
@@ -8557,7 +8649,7 @@ class DataFrameMixin(_Carries):
         mapping of name to column and a column is a sequence of values, and each
         one iterates the way its own kind does.
         """
-        return iter(self._inner.names())
+        return iter(_names.shown_all(self._inner.names()))
 
     def __contains__(self, key: Any) -> bool:
         """Whether a column name is in the frame.
@@ -8570,7 +8662,10 @@ class DataFrameMixin(_Carries):
         the same thing since it was written and the sentence there is the same
         sentence.
         """
-        return isinstance(key, str) and key in self._inner.names()
+        try:
+            return _names.held(key) in self._inner.names()
+        except (NotImplementedError, TypeError):
+            return False
 
     def __bool__(self) -> bool:
         """Refuses, in the same words pandas refuses in.
@@ -8588,14 +8683,9 @@ class DataFrameMixin(_Carries):
             " a.item(), a.any() or a.all()."
         )
 
-    def keys(self) -> list[str]:
-        """The column names, which is what `columns` answers.
-
-        pandas gives back an `Index` here and this gives back a list, which is
-        the divergence `columns` already has rather than a new one, and the two
-        answer the same thing so they answer it the same way.
-        """
-        return self._inner.names()
+    def keys(self) -> Index:
+        """The column names, which is what `columns` answers, and as an index too."""
+        return _column_labels(self)
 
     @property
     def axes(self) -> list[Any]:
@@ -8745,7 +8835,7 @@ class DataFrameMixin(_Carries):
             None. The report is written rather than answered, which is pandas'
             choice and is why a caller who wants it as a value passes a buffer.
         """
-        names = list(self._inner.names())
+        names = list(_shown_names(self))
         labels = self.index
         lines = [
             "<class 'firepanda.DataFrame'>",
@@ -8858,7 +8948,7 @@ class DataFrameMixin(_Carries):
         from ._multi import MultiIndex
 
         one = subset is not None and _is_scalar(subset)
-        names = list(self.columns) if subset is None else [subset] if one else list(subset)
+        names = _shown_names(self) if subset is None else [subset] if one else list(subset)
         counts = self.groupby(names[0] if one else names, sort=False, dropna=dropna).size()
         if sort:
             counts = counts.sort_values(ascending=ascending, kind="stable")
@@ -8908,7 +8998,7 @@ class DataFrameMixin(_Carries):
             raise IndexError(
                 f"Too many levels: Index has only 1 level, not {level + 1 if level > 0 else 2}"
             )
-        columns = list(self.columns)
+        columns = _shown_names(self)
         height, width = len(self), len(columns)
         if width == 0:
             return Series([], dtype="float64")
@@ -8945,7 +9035,7 @@ class DataFrameMixin(_Carries):
 
         number = _align_axis(axis, "DataFrame", (0, 1)) or 0
         read = self._numeric_part() if numeric_only else self
-        names = list(read.columns)
+        names = _shown_names(read)
         if number == 0:
             found = [getattr(read[name], f"idx{which}")(skipna=skipna) for name in names]
             return Series(found, index=names)
@@ -9010,7 +9100,7 @@ class DataFrameMixin(_Carries):
         if number == 1:
             from ._frame import Series
 
-            names = list(self.columns)
+            names = _shown_names(self)
             columns = [self[name].tolist() for name in names]
             labels = self.index.tolist()
             results = [
@@ -9018,7 +9108,7 @@ class DataFrameMixin(_Carries):
                 for label, row in zip(labels, zip(*columns, strict=True), strict=True)
             ]
             return _gathered(results, labels, names)
-        names = list(self.columns)
+        names = _shown_names(self)
         return _gathered([func(self[name], *args, **kwargs) for name in names], names, None)
 
     def agg(self, func: Any = None, axis: Any = 0, *args: Any, **kwargs: Any) -> Any:
@@ -9045,7 +9135,9 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         if isinstance(func, list):
-            answers = {name: self[name].agg(func, 0, *args, **kwargs) for name in self.columns}
+            answers = {
+                name: self[name].agg(func, 0, *args, **kwargs) for name in _shown_names(self)
+            }
             labels = [_function_name(one) for one in func]
             return DataFrame(
                 {name: answer.tolist() for name, answer in answers.items()}, index=labels
@@ -9078,7 +9170,9 @@ class DataFrameMixin(_Carries):
         """
         if _align_axis(axis, "DataFrame", (0, 1)) == 1:
             raise NotImplementedError("transform: axis=1 is the transform of the transpose")
-        pieces = {name: self[name].transform(func, 0, *args, **kwargs) for name in self.columns}
+        pieces = {
+            name: self[name].transform(func, 0, *args, **kwargs) for name in _shown_names(self)
+        }
         return type(self)(pieces, index=self.index)
 
     def mode(self, axis: Any = 0, numeric_only: bool = False, dropna: bool = True) -> DataFrame:
@@ -9086,7 +9180,7 @@ class DataFrameMixin(_Carries):
         if _align_axis(axis, "DataFrame", (0, 1)) == 1:
             raise NotImplementedError("mode: axis=1 is the mode of each row, not done yet")
         frame = self.select_dtypes("number") if numeric_only else self
-        pieces = {name: frame[name].mode(dropna=dropna).tolist() for name in frame.columns}
+        pieces = {name: frame[name].mode(dropna=dropna).tolist() for name in _shown_names(frame)}
         return type(self)(_padded(pieces))
 
     @property
@@ -9100,27 +9194,23 @@ class DataFrameMixin(_Carries):
         The columns keep one type when they all had it, and otherwise take the
         type their values share, the wider number when they are all numbers.
 
+        Row labels that are not text become names written as `_names` writes them.
+
         Raises:
-            NotImplementedError: When the row labels are not text, since a
-                column here is named by text, or when the columns mix text and
-                numbers, which pandas answers with a column of objects.
+            NotImplementedError: When the columns mix text and numbers, which
+                pandas answers with a column of objects.
         """
         from .errors import DTypeError
 
         labels = self.index.tolist()
-        if not all(isinstance(label, str) for label in labels):
-            raise NotImplementedError(
-                "transpose: the row labels become column names, and a firepanda column is"
-                " named by text, so the rows need text labels"
-            )
-        names = list(self.columns)
+        names = _shown_names(self)
         types = {str(self[name].dtype) for name in names}
         columns = [self[name].tolist() for name in names]
         rows = list(zip(*columns, strict=True)) if columns else [() for _ in labels]
         try:
             answer = type(self)(
                 {label: _readable(list(row)) for label, row in zip(labels, rows, strict=True)},
-                index=names,
+                index=self._inner.names(),
             )
         except DTypeError:
             raise NotImplementedError(
@@ -9161,8 +9251,8 @@ class DataFrameMixin(_Carries):
             raise InvalidArgumentError("The parameter errors must be either 'ignore' or 'raise'")
         if not isinstance(other, DataFrame):
             other = DataFrame(other) if not hasattr(other, "to_frame") else other.to_frame()
-        mine = set(self.columns)
-        for name in other.columns:
+        mine = set(_shown_names(self))
+        for name in _shown_names(other):
             if name not in mine:
                 continue
             this = self[name].tolist()
@@ -9226,7 +9316,7 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame, Series
 
         numpy = _numpy()
-        names = list(self.columns)
+        names = _shown_names(self)
         left = self.to_numpy()
         if hasattr(other, "index") and hasattr(other, "reindex"):
             labels = other.index.tolist()
@@ -9237,7 +9327,7 @@ class DataFrameMixin(_Carries):
                 return DataFrame(
                     {
                         str(name): answer[:, place].tolist()
-                        for place, name in enumerate(other.columns)
+                        for place, name in enumerate(_shown_names(other))
                     },
                     index=self.index,
                 )
@@ -9332,7 +9422,7 @@ class DataFrameMixin(_Carries):
         if columns is not None:
             taken.add(_one_key(columns, "columns", "pivot_table"))
         if values is None:
-            values = [name for name in self.columns if name not in taken]
+            values = [name for name in _shown_names(self) if name not in taken]
         if columns is None:
             names = [values] if not isinstance(values, list | tuple) else list(values)
             if callable(aggfunc):
@@ -9389,7 +9479,7 @@ class DataFrameMixin(_Carries):
         Raises:
             IndexError: For a position the frame does not have.
         """
-        names = list(self.columns)
+        names = _shown_names(self)
         places = loc if isinstance(loc, (list, tuple)) else [loc]
         for place in places:
             if not -len(names) <= place < len(names):
@@ -9397,7 +9487,7 @@ class DataFrameMixin(_Carries):
                     f"index {place} is out of bounds for axis 0 with size {len(names)}"
                 )
         if isinstance(loc, (list, tuple)):
-            pieces = [value[name] for name in value.columns]
+            pieces = [value[name] for name in _shown_names(value)]
             wanted = {names[place]: one for place, one in zip(places, pieces, strict=True)}
         else:
             wanted = {names[loc]: value}
@@ -9505,7 +9595,7 @@ class DataFrameMixin(_Carries):
         if not callable(func):
             raise TypeError("the first argument must be callable")
         pieces = {
-            name: self[name].map(func, na_action=na_action, **kwargs) for name in self.columns
+            name: self[name].map(func, na_action=na_action, **kwargs) for name in _shown_names(self)
         }
         return type(self)(pieces, index=self.index)
 
@@ -9528,7 +9618,7 @@ class DataFrameMixin(_Carries):
         from ._frame import Series
 
         for name in self._inner.names():
-            yield name, Series._wrap(self._inner.column(name))
+            yield _names.shown(name), Series._wrap(self._inner.column(name))
 
     def itertuples(self, index: bool = True, name: str | None = "Pandas") -> Iterator[Any]:
         """Each row as a named tuple of its values.
@@ -9683,7 +9773,7 @@ class DataFrameMixin(_Carries):
             )
         if names is None:
             return _settled(self, answer, inplace)
-        going = _dropped(names, list(answer.columns), errors)
+        going = _dropped(names, answer._inner.names(), errors)
         try:
             return _settled(self, DataFrame._wrap(answer._inner.drop(going)), inplace)
         except Exception as error:
@@ -9748,7 +9838,7 @@ class DataFrameMixin(_Carries):
         _axis_number(axis, "DataFrame", 0, (0, 1))
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
-        held = list(self.columns)
+        held = _shown_names(self)
         wanted = _fill_values(value, held)
         # The two facts each column is judged on, its type and whether it has a
         # gap, are read off the schema and the validity bits rather than through
@@ -9950,7 +10040,7 @@ class DataFrameMixin(_Carries):
         along = _axis_number(axis, "DataFrame", 0, (0, 1))
         cond = applied(cond, self)
         other = applied(other, self)
-        names = [str(name) for name in self.columns]
+        names = _held_names(self)
         labels = self._inner.labels().to_list()
         flags = _frame_conditions(cond, names, labels, along)
         wanted = _frame_others(other, names, labels, along, axis is not None)
@@ -10029,7 +10119,7 @@ class DataFrameMixin(_Carries):
         low, high = _thresholds(lower, upper)
         if low is None and high is None:
             return _kept(self, self.copy(), inplace)
-        names = [str(name) for name in self.columns]
+        names = _held_names(self)
         labels = self._inner.labels().to_list()
         told = axis is not None
         floors = _frame_thresholds(low, names, labels, along, told)
@@ -10082,7 +10172,7 @@ class DataFrameMixin(_Carries):
         from ._frame import DataFrame
 
         _numpy_round(args, kwargs)
-        names = list(self.columns)
+        names = _shown_names(self)
         if isinstance(decimals, SeriesMixin):
             if not decimals.index.is_unique:
                 raise InvalidArgumentError("Index of decimals must be unique")
@@ -10199,9 +10289,9 @@ class DataFrameMixin(_Carries):
             return
         out = DataFrame._wrap(self._inner)
         if isinstance(value, DataFrame):
-            if len(value.columns) != len(key):
+            if len(_shown_names(value)) != len(key):
                 raise InvalidArgumentError("Columns must be same length as key")
-            for name, source in zip(key, value.columns, strict=True):
+            for name, source in zip(key, _shown_names(value), strict=True):
                 out = out._assigned(name, value[source])
         elif _list_like(value) and not isinstance(value, Series):
             rows = [list(row) if _list_like(row) else row for row in value]
@@ -10226,7 +10316,7 @@ class DataFrameMixin(_Carries):
         Raises:
             KeyError: When there is no such column.
         """
-        if key not in list(self.columns):
+        if key not in _shown_names(self):
             raise KeyError(key)
         self.drop(columns=[key], inplace=True)
 
@@ -10245,7 +10335,7 @@ class DataFrameMixin(_Carries):
                 )
             marks = Series(marks, index=self.index)
         out = DataFrame._wrap(self._inner)
-        for name in list(self.columns):
+        for name in _shown_names(self):
             out = out._assigned(name, self[name].mask(marks, value))
         return out
 
@@ -10269,11 +10359,12 @@ class DataFrameMixin(_Carries):
 
         rows = len(self)
         if isinstance(value, DataFrame):
-            if len(value.columns) != 1:
+            if len(_shown_names(value)) != 1:
                 raise InvalidArgumentError(
                     f"Cannot set a DataFrame with multiple columns to the single column {name}"
                 )
-            value = value[value.columns[0]]
+            value = value[_shown_names(value)[0]]
+        name = _names.held(name)
         if isinstance(value, (set, frozenset)):
             raise TypeError("'set' type is unordered")
         if value is None:
@@ -10293,7 +10384,7 @@ class DataFrameMixin(_Carries):
             column = Series([value]).head(rows) if rows <= 1 else Series([value] * rows)
         else:
             values = list(value)
-            if not len(self.columns) and not rows:
+            if not len(_shown_names(self)) and not rows:
                 return DataFrame({name: values})
             if len(values) != rows:
                 raise InvalidArgumentError(
@@ -10302,9 +10393,9 @@ class DataFrameMixin(_Carries):
             column = Series(values)
         piece = _series_to_frame(column._inner, name)._inner
         try:
-            if name not in self.columns:
+            if name not in self._inner.names():
                 return DataFrame._wrap(self._inner.stack_columns([piece]))
-            order = list(self.columns)
+            order = self._inner.names()
             rest = self._inner.drop([name])
             return DataFrame._wrap(rest.stack_columns([piece]).select(order))
         except Exception as error:
@@ -10391,7 +10482,7 @@ class DataFrameMixin(_Carries):
 
         inplace = _flag("inplace", inplace)
         _held_at("regex", regex, False, _NO_REGEX)
-        names = [str(name) for name in self.columns]
+        names = _held_names(self)
         wanted = _frame_replacements(to_replace, value, names, "DataFrame")
         labels = self._inner.labels().to_list()
         types = dict(zip(names, self._inner.dtypes(), strict=True))
@@ -10456,12 +10547,12 @@ class DataFrameMixin(_Carries):
         where, mapping = _renaming(mapper, axis, index, columns)
         if where == "index":
             raise NotImplementedError(f"index= is not supported yet, because {_NO_LABEL_MAP}")
-        held = list(self.columns)
+        held = self._inner.names()
         olds, news = _renamings(held, mapping, errors)
         changed = dict(zip(olds, news, strict=True))
         after = [changed.get(name, name) for name in held]
         if len(set(after)) != len(after):
-            taken = sorted({name for name in after if after.count(name) > 1})
+            taken = sorted({str(_names.shown(name)) for name in after if after.count(name) > 1})
             raise InvalidArgumentError(
                 f"this rename would give the frame two columns called {taken}."
                 " pandas allows that and then answers a frame where a column is"
@@ -10711,7 +10802,7 @@ class DataFrameMixin(_Carries):
         """Where a row holds at least one value."""
         from ._frame import Series
 
-        names = list(self.columns)
+        names = _shown_names(self)
         if not names:
             return Series([False] * len(self), index=self.index)
         present = self[names[0]].notna()
@@ -10731,7 +10822,7 @@ class DataFrameMixin(_Carries):
         Raises:
             KeyError: When there is no such column.
         """
-        if item not in list(self.columns):
+        if item not in _shown_names(self):
             raise KeyError(item)
         column = self[item]
         self.drop(columns=[item], inplace=True)
@@ -10760,7 +10851,7 @@ class DataFrameMixin(_Carries):
             )
         if isinstance(loc, bool) or not isinstance(loc, int):
             raise DTypeError("loc must be int")
-        names = list(self.columns)
+        names = _shown_names(self)
         if not -len(names) <= loc <= len(names):
             raise IndexError(f"loc must be an integer between -{len(names)} and {len(names)}")
         if loc < 0:
@@ -10771,7 +10862,7 @@ class DataFrameMixin(_Carries):
             raise InvalidArgumentError(
                 f"Length of values ({len(value)}) does not match length of index ({len(self)})"
             )
-        grown = self.assign(**{column: value})
+        grown = self._assigned(column, value)
         order = [*names[:loc], column, *names[loc:]]
         _settled(self, grown[order], True)
 
@@ -10789,11 +10880,11 @@ class DataFrameMixin(_Carries):
         """
         if not isinstance(other, type(self)):
             return False
-        if list(self.columns) != list(other.columns):
+        if _shown_names(self) != _shown_names(other):
             return False
         if not _same_values(_raw_labels(self).to_series(), _raw_labels(other).to_series()):
             return False
-        return all(_same_values(self[name], other[name]) for name in self.columns)
+        return all(_same_values(self[name], other[name]) for name in _shown_names(self))
 
     def to_pickle(
         self,
@@ -10956,7 +11047,7 @@ class DataFrameMixin(_Carries):
         chosen = (
             self if columns is None else self[list(columns) if _list_like(columns) else [columns]]
         )
-        names = list(chosen.columns)
+        names = _shown_names(chosen)
         found = [chosen.iloc[:, place] for place in range(len(names))]
         return _write_csv(names, found, chosen.index, path_or_buf, **options)
 
@@ -11251,7 +11342,7 @@ class DataFrameMixin(_Carries):
             raise InvalidArgumentError(
                 "'index=False' is only valid when 'orient' is 'split' or 'tight'"
             )
-        names = list(self.columns)
+        names = _shown_names(self)
         labels = self.index.tolist()
         columns = [_python_values(self[name]) for name in names]
 
@@ -11528,7 +11619,7 @@ class DataFrameMixin(_Carries):
         _reducing_axis(axis, "DataFrame")
         skipna = _flag("skipna", skipna)
         read = self._numeric_part() if _flag("numeric_only", numeric_only) else self
-        names = list(read.columns)
+        names = _shown_names(read)
         for printed in read._inner.dtypes():
             _kurt_refusal(printed)
         answers = [column.kurt(skipna=skipna) for _, column in read.items()]
@@ -11547,7 +11638,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        if not len(self.columns):
+        if not len(_shown_names(self)):
             raise InvalidArgumentError("Cannot describe a DataFrame without columns")
         asked = _percentiles_asked(percentiles)
         if include == "all" and exclude is not None:
@@ -11817,13 +11908,13 @@ class DataFrameMixin(_Carries):
         labels = _combining_labels(frame.index, other.index)
         this = frame if labels is None else frame.reindex(labels)
         that = other if labels is None else other.reindex(labels)
-        mine = list(frame.columns)
-        names = mine + [name for name in other.columns if name not in mine]
+        mine = _shown_names(frame)
+        names = mine + [name for name in _shown_names(other) if name not in mine]
         columns: dict[Any, Series] = {}
         for name in names:
             if name not in mine:
                 columns[name] = that[name].reset_index(drop=True)
-            elif name not in other.columns:
+            elif name not in _shown_names(other):
                 columns[name] = this[name].reset_index(drop=True)
             else:
                 kind = _combined_type(str(frame[name].dtype), str(other[name].dtype))
@@ -11849,14 +11940,14 @@ class DataFrameMixin(_Carries):
 
         frame = cast("DataFrame", self)
         other.index  # noqa: B018 - pandas reads the labels first, which names the error
-        theirs_names = list(other.columns)
-        if len(frame.index) == 0 or len(frame.columns) == 0:
+        theirs_names = _shown_names(other)
+        if len(frame.index) == 0 or len(_shown_names(frame)) == 0:
             return other.copy()
         labels = _combining_labels(frame.index, other.index)
         this = frame if labels is None else frame.reindex(labels)
         that = other if labels is None else other.reindex(labels)
         index = frame.index if labels is None else labels
-        mine = list(frame.columns)
+        mine = _shown_names(frame)
         names = mine + [name for name in theirs_names if name not in mine]
         columns: dict[Any, Series] = {}
         for name in names:
@@ -11911,9 +12002,9 @@ class DataFrameMixin(_Carries):
         frame = cast("DataFrame", self._numeric_part() if numeric_only else self)
         if isinstance(other, Series):
             if axis == 0:
-                parts = [(name, frame[name]) for name in frame.columns]
+                parts = [(name, frame[name]) for name in _shown_names(frame)]
             else:
-                names = list(frame.columns)
+                names = _shown_names(frame)
                 rows = list(zip(*(frame[name].tolist() for name in names), strict=True))
                 labels = frame.index.tolist()
                 parts = [
@@ -11926,7 +12017,7 @@ class DataFrameMixin(_Carries):
             raise TypeError(f"unsupported type: {type(other)}")
         rows_theirs = set(other.index.tolist())
         rows = [label for label in frame.index.tolist() if label in rows_theirs]
-        names = [name for name in frame.columns if name in set(other.columns)]
+        names = [name for name in _shown_names(frame) if name in set(_shown_names(other))]
         left = _as_floats([frame[name].loc[rows] for name in names]) if rows else []
         right = _as_floats([other[name].loc[rows] for name in names]) if rows else []
         if method not in _CORRELATIONS[:2] and method != "kendall" and not callable(method):
@@ -11949,8 +12040,8 @@ class DataFrameMixin(_Carries):
             ] or [(Series([], dtype="float64"),) * 2 for _ in rows]
         values = [_pair_correlation(x, y, method) for x, y in pairs]
         if not drop:
-            ours = list(frame.columns) if axis == 0 else frame.index.tolist()
-            everything = list(other.columns) if axis == 0 else other.index.tolist()
+            ours = _shown_names(frame) if axis == 0 else frame.index.tolist()
+            everything = _shown_names(other) if axis == 0 else other.index.tolist()
             found = set(labels)
             rest = {label for label in [*ours, *everything] if label not in found}
             try:
@@ -11985,7 +12076,7 @@ class DataFrameMixin(_Carries):
 
         _backend(dtype_backend)
         frame = cast("DataFrame", self)
-        columns = {name: _converted(frame[name], convert_integer) for name in frame.columns}
+        columns = {name: _converted(frame[name], convert_integer) for name in _shown_names(frame)}
         if not columns:
             return frame.copy()
         return _with_row_labels(
@@ -12035,7 +12126,7 @@ class DataFrameMixin(_Carries):
         index = frame.index
         work = frame if index.is_unique else frame.reset_index(drop=True)
         changed = {}
-        for name in work.columns:
+        for name in _shown_names(work):
             column = work[name]
             answer = _interpolated(
                 column, "DataFrame", method, index, limit, direction, limit_area, kwargs
@@ -12089,9 +12180,8 @@ class DataFrameMixin(_Carries):
         if len(wanted) != 1 or _flag("append", append):
             return _settled(self, self._set_levels(wanted, bool(drop), bool(append)), inplace)
         try:
-            return _settled(
-                self, DataFrame._wrap(self._inner.set_index(str(wanted[0]), bool(drop))), inplace
-            )
+            made = self._inner.set_index(_names.held(wanted[0]), bool(drop))
+            return _settled(self, DataFrame._wrap(made), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -12100,7 +12190,9 @@ class DataFrameMixin(_Carries):
         from ._levels import rows_of
         from ._multi import MultiIndex
 
-        missing = [key for key in wanted if key not in self.columns]
+        # A group by hands over the names the extension holds, and a caller the names themselves.
+        wanted = [_names.shown(key) for key in wanted]
+        missing = [key for key in wanted if key not in _shown_names(self)]
         if missing:
             raise KeyError(f"None of {missing} are in the columns")
         columns, names = [], []
@@ -12366,7 +12458,7 @@ class DataFrameMixin(_Carries):
         _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "DataFrame", 0, (0,))
         inplace = _flag("inplace", inplace)
-        keys = [str(one) for one in _as_keys(by)]
+        keys = _names.held_all(_as_keys(by))
         directions = _directions(ascending, len(keys))
         front = [_na_first(na_position)] * len(keys)
         try:
@@ -12436,7 +12528,7 @@ class DataFrameMixin(_Carries):
         over_rows = _axis_number(axis, "DataFrame", 1, (0, 1)) == 0
         labels = _label_texts(self.index) if over_rows else self._inner.names()
         if items is not None:
-            wanted = [str(one) for one in items]
+            wanted = [str(one) for one in items] if over_rows else _names.held_all(items)
             held = set(labels)
             kept = [one for one in wanted if one in held]
         elif like is not None:
@@ -12581,10 +12673,7 @@ class DataFrameMixin(_Carries):
             written = [subset]
         else:
             written = list(subset)
-        seen: dict[str, None] = {}
-        for one in written:
-            seen[str(one)] = None
-        return list(seen)
+        return list(dict.fromkeys(_names.held_all(written)))
 
     def _duplicated(self, subset: Any, keep: Any) -> Series:
         """Marks the rows that repeat a key another row already carries.
@@ -12681,7 +12770,7 @@ class DataFrameMixin(_Carries):
             written = [columns]
         else:
             written = list(columns)
-        names = list(dict.fromkeys(str(one) for one in written))
+        names = list(dict.fromkeys(_names.held_all(written)))
 
         try:
             if not names:
@@ -12787,7 +12876,7 @@ class DataFrameMixin(_Carries):
                         "Index(...) must be called with a collection of some"
                         f" kind, {columns!r} was passed"
                     )
-                inner = inner.reindex_columns([str(one) for one in columns], value)
+                inner = inner.reindex_columns(_names.held_all(columns), value)
             index = _written_index(index)
             if index is not None and _reindex_here(self, index, method):
                 return _reindex_by_position(
@@ -12844,7 +12933,7 @@ class DataFrameMixin(_Carries):
         ):
             return self.reindex(
                 index=other.index,
-                columns=other.columns,
+                columns=_shown_names(other),
                 method=method,
                 limit=limit,
                 tolerance=tolerance,
@@ -12988,7 +13077,7 @@ class DataFrameMixin(_Carries):
         )
         names: list[str] = []
         if subset is not None:
-            names = [subset] if isinstance(subset, str) else [str(one) for one in subset]
+            names = _names.held_all([subset] if isinstance(subset, str) else subset)
         try:
             if how == "all":
                 return _settled(self, self._dropped_when_all_missing(names), inplace)
@@ -13030,12 +13119,12 @@ class DataFrameMixin(_Carries):
         if isinstance(dtype, dict):
             present = set(self._inner.names())
             for one in dtype:
-                if one not in present:
+                if not isinstance(one, (str, int, float)) or _names.held(one) not in present:
                     raise ColumnNotFoundError(
                         "Only a column name can be used for the key in a dtype"
                         f" mappings argument. '{one}' not found in columns."
                     )
-            asked = {str(one): wanted for one, wanted in dtype.items()}
+            asked = {_names.held(one): wanted for one, wanted in dtype.items()}
         else:
             asked = dict.fromkeys(self._inner.names(), dtype)
         decided = {
@@ -13100,7 +13189,7 @@ class SeriesMixin(_Carries):
         typed = getattr(self, "_typed_name", None)
         if typed is not None and label == str(typed):
             return typed
-        return label
+        return _names.shown(label)
 
     if TYPE_CHECKING:
 
@@ -13160,7 +13249,7 @@ class SeriesMixin(_Carries):
                 # pandas reads a series and an index together as a reindex,
                 # and the labels are the index given, name and all.
                 out = data.reindex(index).rename_axis(_labels_of(index)[1])
-                self._inner = out._inner if name is None else out._inner.relabel(str(name))
+                self._inner = out._inner if name is None else out._inner.relabel(_names.held(name))
             else:
                 if _is_numpy(data):
                     data, typed = _numpy_values(data, "Series")
@@ -13176,7 +13265,7 @@ class SeriesMixin(_Carries):
                         raise _mismatched(rows, len(labels))
                     frame = _series_to_frame_inner(self._inner, "values")
                     held = _put_labels(frame, labels, level).column("values")
-                    self._inner = held.relabel(None if name is None else str(name))
+                    self._inner = held.relabel(_names.held(name))
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:
@@ -13196,7 +13285,7 @@ class SeriesMixin(_Carries):
             # The column the array holds, so a category keeps its categories.
             data = data._column
         source = data._inner if isinstance(data, SeriesMixin) else data
-        label = None if name is None else str(name)
+        label = _names.held(name)
         try:
             return _firepanda.Series(source, label)
         except Exception:
@@ -13829,7 +13918,7 @@ class SeriesMixin(_Carries):
             right = other.reindex(self.index).to_numpy()
             answer = numpy.dot(self.to_numpy(), right)
             if hasattr(other, "columns"):
-                return Series(answer.tolist(), index=list(other.columns))
+                return Series(answer.tolist(), index=_shown_names(other))
             return answer
         right = numpy.asarray(other)
         left = self.to_numpy()
@@ -14696,7 +14785,7 @@ class SeriesMixin(_Carries):
         if callable(index) or hasattr(index, "items"):
             raise NotImplementedError(f"a mapping is not supported yet, because {_NO_LABEL_MAP}")
         try:
-            renamed = Series._wrap(self._inner.relabel(None if index is None else str(index)))
+            renamed = Series._wrap(self._inner.relabel(_names.held(index)))
             return _kept(self, _named_as(renamed, index), inplace)
         except Exception as error:
             raise translate(error) from None
@@ -16654,8 +16743,9 @@ def _outside_keys(frame: DataFrame, by: Any, level: Any) -> tuple[DataFrame, Any
     shown: dict[str, Any] = {}
     added: dict[str, Any] = {}
     for key in keys:
-        if isinstance(key, str) and key in frame.columns:
-            names.append(key)
+        column = _column_named(frame, key)
+        if column is not None:
+            names.append(column)
             continue
         read = _key_read(frame, key)
         if isinstance(read, str):
@@ -16695,7 +16785,7 @@ def _values_key(frame: DataFrame, by: list[Any]) -> bool:
     A list of plain values as long as the frame is one key, unless every value
     in it is a column's name.
     """
-    if len(by) != len(frame) or all(isinstance(key, str) and key in frame.columns for key in by):
+    if len(by) != len(frame) or all(_column_named(frame, key) is not None for key in by):
         return False
     return not any(
         callable(key)
@@ -16703,6 +16793,14 @@ def _values_key(frame: DataFrame, by: list[Any]) -> bool:
         or hasattr(key, "__array__")
         for key in by
     )
+
+
+def _column_named(frame: DataFrame, key: Any) -> str | None:
+    """The held name of the column a key names, or None when the key names no column."""
+    if not isinstance(key, (str, int, float)):
+        return None
+    held = _names.held(key)
+    return held if held in frame._inner.names() else None
 
 
 def _key_read(frame: DataFrame, key: Any) -> str | tuple[Any, Any]:
@@ -16719,7 +16817,7 @@ def _key_read(frame: DataFrame, key: Any) -> str | tuple[Any, Any]:
         name = key.name
         if (
             isinstance(name, str)
-            and name in frame.columns
+            and name in _shown_names(frame)
             and key.index.equals(labels)
             and frame[name].equals(key)
         ):
@@ -16818,7 +16916,7 @@ def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
     if isinstance(answer, DataFrameMixin | SeriesMixin):
         answer = _categories_back(owner, answer)
     if isinstance(answer, DataFrameMixin):
-        hidden = [name for name in answer.columns if name in shown]
+        hidden = [name for name in _shown_names(answer) if name in shown]
         if rows:
             answer = answer.drop(columns=hidden) if hidden else answer
         elif hidden:
@@ -16951,7 +17049,7 @@ def _every_category(owner: Any, answer: Any, fill: Any) -> Any:
         return answer
 
     (key,) = owner._by
-    flat = isinstance(answer, DataFrameMixin) and key in answer.columns
+    flat = isinstance(answer, DataFrameMixin) and key in _shown_names(answer)
     if flat:
         answer = answer.set_index(key)
     labels = answer.index.tolist()
@@ -16984,11 +17082,11 @@ def _filled(answer: Any, before: Any, fill: Any) -> Any:
     if isinstance(answer, SeriesMixin):
         return one(answer, str(before.dtype), fill)
     if not isinstance(fill, dict):
-        fill = dict.fromkeys(answer.columns, fill)
+        fill = dict.fromkeys(_shown_names(answer), fill)
     return answer.assign(
         **{
             str(name): one(answer[name], str(before[name].dtype), fill.get(name))
-            for name in answer.columns
+            for name in _shown_names(answer)
         }
     )
 
@@ -17025,7 +17123,7 @@ def _categories_back(owner: Any, answer: Any) -> Any:
     if isinstance(answer, DataFrameMixin):
         changed = {
             name: _as_categories(answer[name], *owner._categories[name])
-            for name in answer.columns
+            for name in _shown_names(answer)
             if name in owner._categories
         }
         if changed:
@@ -17190,7 +17288,7 @@ class _ReadingMixin:
             return found(*args, **kwargs)
         if isinstance(func, dict):
             if isinstance(data, DataFrame):
-                lost = [key for key in func if key not in data.columns]
+                lost = [key for key in func if key not in _shown_names(data)]
                 if lost:
                     raise KeyError(f"Label(s) {lost} do not exist")
                 if any(isinstance(how, (list, tuple, dict)) for how in func.values()):
@@ -17254,12 +17352,13 @@ class _ReadingMixin:
         if isinstance(other, Series):
             parts = {
                 label: self._moment(data[label], other, *settings).reindex(data.index)
-                for label in data.columns
+                for label in _shown_names(data)
             }
             return _float_frame(parts, data)
         left, right = data.align(other, join="outer")
         parts = {
-            label: self._moment(left[label], right[label], *settings) for label in left.columns
+            label: self._moment(left[label], right[label], *settings)
+            for label in _shown_names(left)
         }
         return _float_frame(parts, left)
 
@@ -17626,7 +17725,7 @@ class WindowMixin(_ReadingMixin):
             try:
                 if isinstance(data, DataFrame):
                     answer = DataFrame._wrap(data._inner.window_agg(*plan))
-                    parts = [floats(answer[label]) for label in answer.columns]
+                    parts = [floats(answer[label]) for label in _shown_names(answer)]
                     stacked = numpy.column_stack(parts) if parts else numpy.empty((len(answer), 0))
                     return answer, stacked
                 answer = Series._wrap(data._inner.window_agg(*plan))
@@ -17635,7 +17734,7 @@ class WindowMixin(_ReadingMixin):
                 raise translate(error) from None
 
         wide = isinstance(data, DataFrame)
-        shape = (len(heights), len(data.columns)) if wide else (len(heights),)
+        shape = (len(heights), len(_shown_names(data))) if wide else (len(heights),)
         answers = numpy.full(shape, numpy.nan)
         like = None
         for height in (int(height) for height in numpy.unique(heights)):
@@ -17653,7 +17752,7 @@ class WindowMixin(_ReadingMixin):
         # keeps its labels and name rather than building the labels again.
         if wide:
             inner = like._inner
-            for at, label in enumerate(like.columns):
+            for at, label in enumerate(_shown_names(like)):
                 built = _firepanda.Series(answers[:, at].tolist(), None)
                 inner = inner.pick(label, built.is_in(built.head(0)), built)
             return DataFrame._wrap(inner)
@@ -17709,13 +17808,13 @@ class WindowMixin(_ReadingMixin):
         if self._on is None or not isinstance(answer, DataFrame):
             return answer
         carried = self._whole[self._on]
-        if self._on in answer.columns:
+        if self._on in _shown_names(answer):
             answer[self._on] = carried
             return answer
-        picked = list(self._shown.columns) if isinstance(self._shown, DataFrame) else []
+        picked = _shown_names(self._shown) if isinstance(self._shown, DataFrame) else []
         if self._on in picked:
             before = set(picked[: picked.index(self._on)])
-            answer.insert(sum(label in before for label in answer.columns), self._on, carried)
+            answer.insert(sum(label in before for label in _shown_names(answer)), self._on, carried)
         else:
             answer[self._on] = carried
         return answer
@@ -17732,7 +17831,7 @@ class WindowMixin(_ReadingMixin):
         if self._selection is not None:
             raise IndexError(f"Column(s) {self._selection} already selected")
         whole = self._whole
-        labels = list(whole.columns) if isinstance(whole, DataFrame) else []
+        labels = _shown_names(whole) if isinstance(whole, DataFrame) else []
         if isinstance(key, list | tuple):
             missing = [label for label in key if label not in labels]
             if missing:
@@ -17743,7 +17842,7 @@ class WindowMixin(_ReadingMixin):
                 raise KeyError(f"Column not found: {key}")
             shown = whole[key]
         data = shown
-        if isinstance(shown, DataFrame) and self._on in shown.columns:
+        if isinstance(shown, DataFrame) and self._on in _shown_names(shown):
             data = shown.drop(columns=[self._on])
         window = self._over(data)
         window._selection = key
@@ -17841,10 +17940,10 @@ class WindowMixin(_ReadingMixin):
 
         if isinstance(self._data, DataFrame):
             frame = self._data
-            for label in frame.columns:
+            for label in _shown_names(frame):
                 self._numbers(frame[label])
             return self._carry(
-                _float_frame({label: one(frame[label]) for label in frame.columns}, frame)
+                _float_frame({label: one(frame[label]) for label in _shown_names(frame)}, frame)
             )
         return one(self._data)
 
@@ -18136,7 +18235,7 @@ def _rolling(
 
     whole = data
     if on is not None:
-        if not isinstance(data, DataFrame) or on not in list(data.columns):
+        if not isinstance(data, DataFrame) or on not in _shown_names(data):
             raise InvalidArgumentError(
                 f"invalid on specified as {on}, must be a column (of DataFrame), an Index or None"
             )
@@ -18890,7 +18989,7 @@ def _cat_columns(others: Any, data: Any, series: Any, frame: Any, array: Any) ->
     if isinstance(others, series):
         return [others]
     if isinstance(others, frame):
-        return [others[name] for name in others.columns]
+        return [others[name] for name in _shown_names(others)]
     if _is_numpy(others) and others.ndim == 2:
         return [_cat_column(list(others[:, at]), data, series) for at in range(others.shape[1])]
     if isinstance(others, array) or (_is_numpy(others) and others.ndim == 1):
@@ -20263,7 +20362,7 @@ class Grouper:
                 "a Grouper with no key, or with a level, groups by the row labels,"
                 " which is not supported yet"
             )
-        if self.key not in frame.columns:
+        if self.key not in _shown_names(frame):
             raise KeyError(f"The grouper name {self.key} is not found")
         return self.key
 
@@ -20274,7 +20373,7 @@ class Grouper:
                 "a Grouper with a frequency and no key bins the row labels, which is"
                 " not supported yet"
             )
-        if self.key not in frame.columns:
+        if self.key not in _shown_names(frame):
             raise KeyError(f"The grouper name {self.key} is not found")
         return frame.resample(self.freq, on=self.key, **self._binned)
 
@@ -20500,10 +20599,10 @@ class GroupByMixin[Answer]:
             # of the generated method. The class here is a `ValueError` too, so a
             # caller who catches the pandas one still catches this.
             raise InvalidArgumentError("No group keys passed!")
-        known = frame.columns
+        known = frame._inner.names()
         for name in wanted:
             if name not in known:
-                raise KeyError(name)
+                raise KeyError(_names.shown(name))
         return list(wanted)
 
     def _reduced(self, kind: str, param: float, columns: list[str] | None = None) -> DataFrame:
@@ -20581,7 +20680,7 @@ class GroupByMixin[Answer]:
         if columns is not None:
             source = source.select(self._by + columns)
         frame = DataFrame._wrap(source)
-        names = [name for name in frame.columns if name not in self._by]
+        names = [name for name in _shown_names(frame) if name not in self._by]
         for name in names:
             dtype = str(frame[name].dtype)
             if dtype.startswith(("datetime64", "timedelta64")):
@@ -20912,7 +21011,7 @@ class GroupByMixin[Answer]:
             " has asked for it yet",
         )
         out = self._transform(kind)
-        return _relabelled(out, out.columns[0], None)
+        return _relabelled(out, _held_names(out)[0], None)
 
     def _shifted(self, periods: Any, freq: Any, fill_value: Any, suffix: Any) -> Answer:
         """Moves each group's rows along within the group, leaving the gap missing.
@@ -21136,7 +21235,7 @@ class GroupByMixin[Answer]:
         for name, column, how in plan:
             answer = self._one(how, column)
             if not self._as_index:
-                last = answer.columns[-1]
+                last = _shown_names(answer)[-1]
                 if out is None:
                     out = answer.rename(columns={last: name})
                 else:
@@ -21200,7 +21299,7 @@ class GroupByMixin[Answer]:
 
         Overridden by `SeriesGroupBy`, which has the one column.
         """
-        return [name for name in self._frame.columns if name not in self._by]
+        return [name for name in _shown_names(self._frame) if name not in self._by]
 
     def _as_answer(self, out: DataFrame) -> Any:
         """A frame of the columns a transform answered, as this group by hands it out.
@@ -21947,7 +22046,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
 
         A key column is left out, since selecting a key as a value is not written.
         """
-        if not name.startswith("_") and name in self._frame.columns and name not in self._by:
+        if not name.startswith("_") and name in _shown_names(self._frame) and name not in self._by:
             return self[name]
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
@@ -21969,12 +22068,16 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         """
         from ._frame import DataFrame, DataFrameGroupBy, SeriesGroupBy
 
-        names = [key] if isinstance(key, str) else list(key)
-        for name in names:
-            if name not in self._frame.columns:
+        one = isinstance(key, (str, int, float))
+        asked = [key] if one else list(key)
+        held = self._frame._inner.names()
+        for name in asked:
+            if not isinstance(name, (str, int, float)) or _names.held(name) not in held:
                 raise KeyError(name)
+        names = _names.held_all(asked)
         narrowed = DataFrame._wrap(self._frame._inner.select(self._by + names))
-        if isinstance(key, str):
+        if one:
+            key = _names.held(key)
             out: Any = SeriesGroupBy(
                 narrowed, self._by, self._as_index, self._sort, self._dropna, key
             )
@@ -22090,7 +22193,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             if not answer.index.equals(group.index):
                 answer = answer.reindex(group.index)
             return answer.reset_index(drop=True)
-        names = list(group.columns)
+        names = _shown_names(group)
         size = len(group)
         if isinstance(answer, Series):
             if answer.index.equals(group.index):
@@ -22157,7 +22260,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
                 "agg with a list over a frame is not supported yet, because pandas"
                 " answers it with two levels of column labels"
             )
-        missing = [name for name in func if name not in self._frame.columns]
+        missing = [name for name in func if name not in _shown_names(self._frame)]
         if missing:
             raise KeyError(f"Label(s) {missing!r} do not exist")
         for how in func.values():
@@ -22188,7 +22291,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             if not isinstance(pair, tuple) or len(pair) != 2:
                 raise TypeError("Must provide 'func' or tuples of '(column, aggfunc).")
             plan.append((name, pair[0], pair[1]))
-        missing = [column for _, column, _ in plan if column not in self._frame.columns]
+        missing = [column for _, column, _ in plan if column not in _shown_names(self._frame)]
         if missing:
             raise KeyError(f"Label(s) {missing!r} do not exist")
         return plan
@@ -22232,7 +22335,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
                 " keys have to come back as columns beside the labels"
             )
         out: Any = None
-        for name in self._frame.columns:
+        for name in _shown_names(self._frame):
             if name in self._by:
                 continue
             picked = self._picked(how, name, skipna)
@@ -22261,7 +22364,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         # The name goes because a pandas `size` has none, and the frame's one
         # column is called `size` here only because a column has to be called
         # something.
-        return _relabelled(out, out.columns[0], None)
+        return _relabelled(out, _held_names(out)[0], None)
 
 
 class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
@@ -22342,7 +22445,7 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         # column it counted, because it did not read that column. Either way
         # there is exactly one column left once the keys have gone into the
         # labels, so the answer is the column that is there.
-        return _relabelled(out, out.columns[-1], self._column)
+        return _relabelled(out, _held_names(out)[-1], self._column)
 
     def _shape_rows(self, kind: str, periods: int) -> Series:
         """One transform over the one column.
@@ -24718,7 +24821,7 @@ def _merge_keys(
             )
         lefts = rights = _sequence(on)
     elif left_on is None and right_on is None:
-        lefts = rights = [name for name in left.columns if name in right.columns]
+        lefts = rights = [name for name in _shown_names(left) if name in _shown_names(right)]
         if not lefts:
             raise MergeError(
                 "No common columns to perform merge on. Merge options: left_on=None,"
@@ -24732,11 +24835,12 @@ def _merge_keys(
         lefts, rights = _sequence(left_on), _sequence(right_on)
     if len(lefts) != len(rights):
         raise InvalidArgumentError("len(right_on) must equal len(left_on)")
+    lefts, rights = _names.keys_held(lefts), _names.keys_held(rights)
     for names, frame in ((lefts, left), (rights, right)):
         for name in names:
-            if name not in frame.columns:
-                raise KeyError(name)
-    return list(lefts), list(rights)
+            if name not in frame._inner.names():
+                raise KeyError(_names.shown(name))
+    return lefts, rights
 
 
 def _merge_validated(
@@ -24785,7 +24889,8 @@ def _merge_suffixed(
         InvalidArgumentError: If columns overlap and neither suffix is given.
     """
     shared = {lk for lk, rk in zip(lefts, rights, strict=True) if lk == rk}
-    overlap = [name for name in left.columns if name in right.columns and name not in shared]
+    theirs = right._inner.names()
+    overlap = [name for name in left._inner.names() if name in theirs and name not in shared]
     left_inner, right_inner = left._inner, right._inner
     if not overlap:
         return left_inner, right_inner, lefts, rights
@@ -24800,11 +24905,11 @@ def _merge_suffixed(
             f"columns overlap but no suffix specified: Index({overlap!r}, dtype='str')"
         )
     if left_suffix:
-        news = [f"{name}{left_suffix}" for name in overlap]
+        news = [f"{_names.shown(name)}{left_suffix}" for name in overlap]
         left_inner = left_inner.renamed_columns(overlap, news)
         lefts = [f"{name}{left_suffix}" if name in overlap else name for name in lefts]
     if right_suffix:
-        news = [f"{name}{right_suffix}" for name in overlap]
+        news = [f"{_names.shown(name)}{right_suffix}" for name in overlap]
         right_inner = right_inner.renamed_columns(overlap, news)
         rights = [f"{name}{right_suffix}" if name in overlap else name for name in rights]
     return left_inner, right_inner, lefts, rights
@@ -24884,7 +24989,7 @@ def _merge_sorted(out: Any, lefts: list[str], rights: list[str], how: str) -> An
         # The join answers the default index, so resetting it is a column of
         # positions, and it goes in first whatever it ends up called.
         positions = DataFrame._wrap(filled.select(lefts)).reset_index()
-        first = positions.columns[0]
+        first = _shown_names(positions)[0]
         return out.take(positions.sort_values(lefts)[first].tolist())
     if how == "right":
         by = list(rights)
@@ -25030,7 +25135,7 @@ def _indicator_name(left: DataFrame, right: DataFrame, indicator: Any) -> str | 
         named = "_merge"
     else:
         raise InvalidArgumentError("indicator option can only accept boolean or string arguments")
-    columns = set(left.columns) | set(right.columns)
+    columns = set(_shown_names(left)) | set(_shown_names(right))
     for marker in (MERGE_LEFT, MERGE_RIGHT):
         if marker in columns:
             raise InvalidArgumentError(
@@ -25045,7 +25150,7 @@ def _marked(frame: DataFrame, marker: str, side: str) -> DataFrame:
     """The frame with a last column that says `side` on every row."""
     from ._frame import DataFrame
 
-    return DataFrame._wrap(frame._inner.reindex_columns([*frame.columns, marker], side))
+    return DataFrame._wrap(frame._inner.reindex_columns([*_held_names(frame), marker], side))
 
 
 def _indicated(out: Any, named: str) -> Any:
@@ -25286,7 +25391,7 @@ def get_dummies(
         start = data.to_frame().iloc[:, :0]
         flags = _dummies(data, prefix, prefix_sep, dummy_na, drop_first, dtype)
         return start.assign(**flags)
-    names = list(data.columns)
+    names = _shown_names(data)
     if columns is None:
         encoded = [
             name for name in names if str(data[name]._inner.dtype()) in ("string", "category")
@@ -25386,7 +25491,7 @@ def _melt(
         None if col_level == 0 else col_level,
         "firepanda's columns have one level, so there is no other level to melt",
     )
-    columns = list(frame.columns)
+    columns = _shown_names(frame)
     ids = _listed(id_vars)
     values = _listed(value_vars)
     missing = [name for name in ids + values if name not in columns]
@@ -25405,7 +25510,7 @@ def _melt(
     else:
         values = [name for name in values if name not in ids]
     if var_name is None:
-        var_name = getattr(frame.columns, "name", None) or "variable"
+        var_name = getattr(_shown_names(frame), "name", None) or "variable"
     label = "__firepanda_label__"
     keep = ids if ignore_index else [label, *ids]
     if len({*keep, var_name, value_name}) < len(keep) + 2:
@@ -25524,7 +25629,7 @@ def _merge_on_index(
         lefted, righted = _with_labels(left, MERGE_KEY), _with_labels(right, MERGE_LABELS)
         lefts, rights = [MERGE_KEY], [column]
     for names, frame in ((lefts, lefted), (rights, righted)):
-        if names[0] not in frame.columns:
+        if names[0] not in _shown_names(frame):
             raise KeyError(names[0])
     out, lefts, rights = _merged(lefted, righted, how, lefts, rights, sort, suffixes, validate)
     column = lefts[0] if right_index else rights[0]
@@ -25748,7 +25853,7 @@ def _concat_categories(frames: list[DataFrame], name: str) -> bool:
     """Whether every part that has a category column holds the same categories."""
     first = None
     for frame in frames:
-        if name in frame.columns:
+        if name in _shown_names(frame):
             categories = frame[name].cat.categories.tolist()
             if first is None:
                 first = categories
@@ -25837,18 +25942,18 @@ def _concat_rows(
     names: list[str] = []
     seen: set[str] = set()
     for frame in frames:
-        for name in frame.columns:
+        for name in _shown_names(frame):
             if name not in seen:
                 seen.add(name)
                 names.append(name)
     if join == "inner":
-        names = [n for n in names if all(n in frame.columns for frame in frames)]
+        names = [n for n in names if all(n in _shown_names(frame) for frame in frames)]
     if sort:
         names = sorted(names)
     wanted: dict[str, str] = {}
     for name in names:
-        types = [str(frame.dtypes[name]) for frame in frames if name in frame.columns]
-        gap = any(name not in frame.columns for frame in frames)
+        types = [str(frame[name].dtype) for frame in frames if name in _shown_names(frame)]
+        gap = any(name not in _shown_names(frame) for frame in frames)
         if set(types) == {"category"} and not _concat_categories(frames, name):
             types = ["string"]
         wanted[name] = _concat_type(types, gap, f"column '{name}'")
@@ -25856,7 +25961,7 @@ def _concat_rows(
         frames = _concat_index_units(frames)
     parts = []
     for frame in frames:
-        mine = [n for n in names if n in frame.columns and str(frame.dtypes[n]) != wanted[n]]
+        mine = [n for n in names if n in _shown_names(frame) and str(frame[n].dtype) != wanted[n]]
         # The cast underneath does not change the unit of instants or spans, so those
         # columns are moved to the unit they meet at with `as_unit` first.
         moved = {n: frame[n].dt.as_unit(_unit_of(wanted[n])) for n in mine if _unit_of(wanted[n])}
@@ -25866,7 +25971,7 @@ def _concat_rows(
         inner = frame._inner
         if mine:
             try:
-                inner = inner.cast(mine, [wanted[n] for n in mine], True)
+                inner = inner.cast(_names.held_all(mine), [wanted[n] for n in mine], True)
             except Exception as error:
                 raise translate(error) from None
         parts.append(inner)
@@ -25881,7 +25986,7 @@ def _concat_rows(
             labels = [label for frame in frames for label in frame.index.tolist()]
             _concat_overlap(labels, next(iter(kinds)))
     try:
-        return parts[0].stack_rows(parts[1:], names, not ignore_index)
+        return parts[0].stack_rows(parts[1:], _names.held_all(names), not ignore_index)
     except Exception as error:
         raise translate(error) from None
 
@@ -25890,12 +25995,18 @@ def _concat_columns(
     frames: list[DataFrame], join: str, ignore_index: bool, verify: bool, sort: bool
 ) -> Any:
     """The inner frame of frames put side by side, aligned on their row labels."""
+    from ._frame import DataFrame
+
     if ignore_index:
-        raise UnsupportedError(
-            "concat(axis=1, ignore_index=True) names the columns by position, and a column"
-            " name in firepanda is a string"
-        )
-    names = [name for frame in frames for name in frame.columns]
+        # The columns are named by position, 0 and up, across every frame.
+        numbered, count = [], 0
+        for frame in frames:
+            old = frame._inner.names()
+            new = _names.held_all(range(count, count + len(old)))
+            numbered.append(DataFrame._wrap(frame._inner.renamed_columns(old, new)))
+            count += len(old)
+        frames = numbered
+    names = [name for frame in frames for name in _shown_names(frame)]
     if verify:
         _concat_overlap(names, "string")
     if len(set(names)) != len(names):
@@ -26069,7 +26180,7 @@ def merge_asof(
     labels = bool(left_index)
     if not labels:
         if on is None and left_on is None and right_on is None:
-            on = [c for c in left.columns if c in right.columns]
+            on = [c for c in _shown_names(left) if c in _shown_names(right)]
             if not on:
                 raise MergeError(
                     "No common columns to perform merge on. Merge options: left_on=None, "
@@ -26135,9 +26246,9 @@ def merge_asof(
     if not labels and left_key == right_key:
         dropped.add(right_key)
     marker = "__asof_row__"
-    while marker in left.columns or marker in right.columns:
+    while marker in _shown_names(left) or marker in _shown_names(right):
         marker += "_"
-    kept = [c for c in right.columns if c not in dropped]
+    kept = [c for c in _shown_names(right) if c not in dropped]
     joined = merge(
         left.assign(**{marker: matched}).reset_index(drop=True),
         right[kept].reset_index(drop=True).assign(**{marker: list(range(len(rkeys)))}),
@@ -26160,7 +26271,7 @@ def _ordered_filled(joined: DataFrame, frame: Any, names: list[Any], rows: list[
     """
     filled = list(itertools.accumulate(rows, lambda last, row: last if row is None else row))
     head = filled.count(None)
-    for name, source in zip(names, frame.columns, strict=True):
+    for name, source in zip(names, _shown_names(frame), strict=True):
         if name is None:
             continue
         taken = frame[source].iloc[filled[head:]]
@@ -26193,7 +26304,7 @@ def _ordered_pair(
             suffixes=suffixes,
         )
     marker = "__ordered_row__"
-    while marker in left.columns or marker in right.columns:
+    while marker in _shown_names(left) or marker in _shown_names(right):
         marker += "_"
     lmark, rmark = marker + "l", marker + "r"
     joined = merge(
@@ -26211,7 +26322,7 @@ def _ordered_pair(
     lrows = [None if _missing(v) else int(v) for v in joined[lmark].tolist()]
     rrows = [None if _missing(v) else int(v) for v in joined[rmark].tolist()]
     joined = joined.drop(columns=[lmark, rmark])
-    columns = list(joined.columns)
+    columns = _shown_names(joined)
     if on is not None:
         shared = set(on) if _list_like(on) else {on}
     elif left_on is not None and right_on is not None:
@@ -26219,16 +26330,16 @@ def _ordered_pair(
         rkeys = list(right_on) if _list_like(right_on) else [right_on]
         shared = {a for a, b in zip(lkeys, rkeys, strict=False) if a == b}
     else:
-        shared = {c for c in left.columns if c in right.columns}
-    kept = [c for c in right.columns if c not in shared]
-    if len(columns) != len(left.columns) + len(kept):
+        shared = {c for c in _shown_names(left) if c in _shown_names(right)}
+    kept = [c for c in _shown_names(right) if c not in shared]
+    if len(columns) != len(_shown_names(left)) + len(kept):
         raise NotImplementedError(
             "merge_ordered with fill_method='ffill' could not line up the joined columns"
         )
-    lnames = [None if c in shared else n for c, n in zip(left.columns, columns, strict=False)]
-    rnames = iter(columns[len(left.columns) :])
+    lnames = [None if c in shared else n for c, n in zip(_shown_names(left), columns, strict=False)]
+    rnames = iter(columns[len(_shown_names(left)) :])
     joined = _ordered_filled(joined, left, lnames, lrows)
-    names = [None if c in shared else next(rnames) for c in right.columns]
+    names = [None if c in shared else next(rnames) for c in _shown_names(right)]
     return _ordered_filled(joined, right, names, rrows)
 
 
@@ -26277,7 +26388,7 @@ def merge_ordered(
     grouped, other = (right, left) if swapped else (left, right)
     by = right_by if swapped else left_by
     by = list(by) if isinstance(by, (list, tuple)) else [by]
-    missing = {c for c in by if c not in grouped.columns}
+    missing = {c for c in by if c not in _shown_names(grouped)}
     if missing:
         raise KeyError(f"{missing} not found in {'right' if swapped else 'left'} columns")
     groups: dict[tuple[Any, ...], list[int]] = {}
@@ -26285,7 +26396,7 @@ def merge_ordered(
         if not any(_missing(v) for v in key):
             groups.setdefault(key, []).append(row)
     matches: dict[tuple[Any, ...], list[int]] | None = None
-    if all(c in other.columns for c in by):
+    if all(c in _shown_names(other) for c in by):
         matches = {}
         for row, key in enumerate(zip(*(other[c].tolist() for c in by), strict=True)):
             matches.setdefault(key, []).append(row)
@@ -26293,7 +26404,8 @@ def merge_ordered(
     for key, rows in groups.items():
         piece = grouped.iloc[rows].reset_index(drop=True)
         if matches is not None and key not in matches:
-            gaps = {c: [None] * len(piece) for c in other.columns if c not in piece.columns}
+            have = _shown_names(piece)
+            gaps = {c: [None] * len(piece) for c in _shown_names(other) if c not in have}
             pieces.append(piece.assign(**gaps))
             continue
         against = other if matches is None else other.iloc[matches[key]]
@@ -26950,11 +27062,11 @@ def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> An
         raise TypeError(
             f"Expected 'data' to be a 'DataFrame'; Received 'data' of type: {type(data).__name__}"
         )
-    for name in data.columns:
+    for name in _shown_names(data):
         if data[name].isna().any():
             raise ValueError(f"Dummy DataFrame contains NA value in column: '{name}'")
     flags: dict[str, list[bool]] = {}
-    for name in data.columns:
+    for name in _shown_names(data):
         printed = str(data[name].dtype)
         found = data[name].tolist()
         if printed != "bool" and (
@@ -26964,9 +27076,9 @@ def from_dummies(data: Any, sep: Any = None, default_category: Any = None) -> An
         flags[name] = [bool(value) for value in found]
     groups: dict[str, list[str]] = {}
     if sep is None:
-        groups[""] = list(data.columns)
+        groups[""] = _shown_names(data)
     elif isinstance(sep, str):
-        for name in data.columns:
+        for name in _shown_names(data):
             prefix = name.split(sep)[0]
             if len(prefix) == len(name):
                 raise ValueError(f"Separator not specified for column: {name}")
@@ -27035,7 +27147,7 @@ def lreshape(data: Any, groups: dict[Any, Any], dropna: bool = True) -> Any:
             raise ValueError("All column lists must be same length")
         stacked[target] = concat([data[name] for name in names], ignore_index=True)
         taken.update(names)
-    kept = sorted(name for name in data.columns if name not in taken)
+    kept = sorted(name for name in _shown_names(data) if name not in taken)
     repeated = {name: concat([data[name]] * width, ignore_index=True) for name in kept}
     frame = DataFrame({**repeated, **stacked})
     if dropna:
@@ -28225,6 +28337,23 @@ def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) 
     return header + texts
 
 
+def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
+    """The column names as the header prints them.
+
+    Names that are instants or spans print as their index prints them, so a
+    run of midnights prints as dates, as pandas does after a transpose.
+    """
+    if all(isinstance(label, str) for label in labels):
+        return [_text_plain(label) for label in labels]
+    try:
+        index = frame.columns
+    except NotImplementedError:
+        return [_text_plain(label) for label in labels]
+    if str(index.dtype).startswith(("datetime", "timedelta")):
+        return [text.strip() for text in _text_labels(index, False, None)]
+    return [_text_plain(label) for label in labels]
+
+
 def _text_sequence(values: list[Any]) -> str:
     """A list of labels as pandas prints one in brackets, stopping after a hundred."""
     shown = [_text_plain(v) for v in values[:_TEXT_SEQUENCE_ITEMS]]
@@ -28291,7 +28420,7 @@ def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
     """The frame as text, which is the body of `DataFrame.to_string`."""
     if kw["columns"] is not None:
         frame = frame[list(kw["columns"])]
-    labels = list(frame.columns)
+    labels = _shown_names(frame)
     formatters = kw["formatters"]
     if formatters is None:
         formatters = {}
@@ -28349,7 +28478,7 @@ def _text_table(
     Answers the columns and whether anything was cut, or the whole text when
     the frame is empty.
     """
-    labels = list(frame.columns)
+    labels = _shown_names(frame)
     rows = len(frame)
     kept_rows, dots_row = _text_cut(rows, fitted_rows, kw["max_rows"])
     kept_cols, dots_col = _text_cut(len(labels), fitted_cols, kw["max_cols"])
@@ -28379,10 +28508,11 @@ def _text_table(
             raise ValueError(f"Writing {len(labels)} cols but got {len(header)} aliases")
         heads = [[str(h)] for h in header]
     elif header:
+        written = _text_heads(frame, labels)
         heads = [
             [
                 (" " if picked(p, c) is None and _text_numeric(str(frame.iloc[:, p].dtype)) else "")
-                + _text_plain(c)
+                + written[p]
             ]
             for p, c in enumerate(labels)
         ]
@@ -28555,7 +28685,8 @@ def _printed(shown: Any) -> str:
     from ._config import get_option
 
     max_rows = get_option("display.max_rows")
-    if hasattr(shown, "columns"):
+    # The class is asked, since a frame whose names mix kinds refuses its `columns`.
+    if hasattr(type(shown), "columns"):
         wide = get_option("display.expand_frame_repr")
         return shown.to_string(
             max_rows=max_rows,
@@ -28954,7 +29085,7 @@ def _json_frame(frame: Any, orient: str, labelled: bool, kw: dict[str, Any]) -> 
         ValueError: For repeated labels or names where the orient makes them
             keys, and an orient pandas does not know, with pandas' words.
     """
-    names = list(frame.columns)
+    names = _shown_names(frame)
     labels = frame.index.tolist()
     if orient in ("index", "columns") and len(set(labels)) != len(labels):
         raise ValueError(f"DataFrame index must be unique for orient='{orient}'.")
