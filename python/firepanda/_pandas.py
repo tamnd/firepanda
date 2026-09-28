@@ -10703,17 +10703,27 @@ class DataFrameMixin:
                         "Only a column name can be used for the key in a dtype"
                         f" mappings argument. '{one}' not found in columns."
                     )
-            names = [str(one) for one in dtype]
-            dtypes = [_named_dtype(one) for one in dtype.values()]
+            asked = {str(one): wanted for one, wanted in dtype.items()}
         else:
-            names = self._inner.names()
-            dtypes = [_named_dtype(dtype)] * len(names)
+            asked = dict.fromkeys(self._inner.names(), dtype)
+        # A change of unit alone is `as_unit`, as in the series' `_astype`.
+        units = {
+            name: unit
+            for name, wanted in asked.items()
+            if (unit := _unit_change(str(self[name].dtype), wanted))
+        }
+        names = [name for name in asked if name not in units]
+        dtypes = [_named_dtype(asked[name]) for name in names]
         try:
             answer = DataFrame._wrap(self._inner.cast(names, dtypes, True))
         except Exception as error:
             if strictly:
                 raise translate(error) from None
             return DataFrame._wrap(self._inner)
+        if units:
+            answer = answer.assign(
+                **{name: self[name].dt.as_unit(unit) for name, unit in units.items()}
+            )
         for name, wanted in zip(names, dtypes, strict=True):
             texts = _temporal_texts(self[name]) if wanted == "string" else None
             if texts is not None:
@@ -13205,6 +13215,9 @@ class SeriesMixin:
         from ._frame import Series
 
         strictly = _cast_keywords(copy, errors)
+        unit = _unit_change(str(self.dtype), dtype)
+        if unit:
+            return self.dt.as_unit(unit)
         wanted = _named_dtype(dtype)
         texts = _temporal_texts(self) if wanted == "string" else None
         if texts is not None:
@@ -20949,6 +20962,33 @@ def _numeric_type(types: set[str]) -> str | None:
     return f"float{max(floating, 32 if whole <= 16 else 64)}"
 
 
+_UNIT_ORDER = ("s", "ms", "us", "ns")
+"""The four units of an instant or a span, coarsest first."""
+
+
+def _temporal_unit_type(types: set[str]) -> str | None:
+    """The type instants or spans in several units meet at, or None if they do not meet.
+
+    pandas keeps the finest unit, so seconds and microseconds make microseconds. The
+    parts have to be the same kind, instants or spans, and instants have to be on the
+    same clock, since a mix of zones is pandas' object column.
+    """
+    shapes: set[tuple[str, str]] = set()
+    units: list[str] = []
+    for name in types:
+        head, _, rest = name.partition("[")
+        unit, _, zone = rest.rstrip("]").partition(", ")
+        if head not in ("datetime64", "timedelta64") or unit not in _UNIT_ORDER:
+            return None
+        shapes.add((head, zone))
+        units.append(unit)
+    if len(shapes) != 1:
+        return None
+    ((head, zone),) = shapes
+    unit = max(units, key=_UNIT_ORDER.index)
+    return f"{head}[{unit}, {zone}]" if zone else f"{head}[{unit}]"
+
+
 def _concat_type(types: list[str], gap: bool, what: str) -> str:
     """The one type a column of several parts ends up with, as pandas decides it.
 
@@ -20963,7 +21003,7 @@ def _concat_type(types: list[str], gap: bool, what: str) -> str:
     if len(kinds) == 1:
         (only,) = kinds
     else:
-        only = _numeric_type(kinds) or ""
+        only = _numeric_type(kinds) or _temporal_unit_type(kinds) or ""
         if not only:
             raise UnsupportedError(
                 f"concat of {what} as {' and '.join(sorted(kinds))} gives pandas' object"
@@ -21068,6 +21108,46 @@ def _concat_categories(frames: list[DataFrame], name: str) -> bool:
     return True
 
 
+def _unit_of(printed: str) -> str:
+    """The unit of an instant or span type, or empty text for any other type."""
+    if not printed.startswith(("datetime64[", "timedelta64[")):
+        return ""
+    return printed.partition("[")[2].rstrip("]").partition(", ")[0]
+
+
+def _unit_change(printed: str, dtype: Any) -> str:
+    """The unit an `astype` asks for, when all it changes is the unit of instants or spans.
+
+    The cast underneath does not change a unit, and `as_unit` does, so pandas'
+    `astype("datetime64[ms]")` on a column of instants is read as that. The zone has
+    to stay the same, which is also what pandas requires.
+    """
+    unit = _unit_of(printed)
+    wanted = str(dtype) if isinstance(dtype, str) or type(dtype).__name__ == "dtype" else ""
+    target = _unit_of(wanted)
+    if not unit or not target or target not in _UNIT_ORDER:
+        return ""
+    if ", " in printed and wanted.startswith("datetime64") and ", " not in wanted:
+        raise DTypeError(
+            "Cannot use .astype to convert from timezone-aware dtype to timezone-naive dtype."
+            " Use obj.tz_localize(None) or obj.tz_convert('UTC').tz_localize(None) instead."
+        )
+    same = printed.replace(f"[{unit}", f"[{target}", 1)
+    return target if same == wanted else ""
+
+
+def _concat_index_units(frames: list[DataFrame]) -> list[DataFrame]:
+    """The frames with instant or span labels moved to the finest unit among them."""
+    kinds = {str(frame.index.dtype) for frame in frames}
+    wanted = _temporal_unit_type(kinds) if len(kinds) > 1 else None
+    if wanted is None:
+        return frames
+    from ._frame import Index, Series
+
+    unit = _unit_of(wanted)
+    return [frame.set_axis(Index(Series(frame.index).dt.as_unit(unit))) for frame in frames]
+
+
 def _concat_rows(
     frames: list[DataFrame], join: str, ignore_index: bool, verify: bool, sort: bool
 ) -> Any:
@@ -21090,10 +21170,18 @@ def _concat_rows(
         if set(types) == {"category"} and not _concat_categories(frames, name):
             types = ["string"]
         wanted[name] = _concat_type(types, gap, f"column '{name}'")
+    if not ignore_index:
+        frames = _concat_index_units(frames)
     parts = []
     for frame in frames:
-        inner = frame._inner
         mine = [n for n in names if n in frame.columns and str(frame.dtypes[n]) != wanted[n]]
+        # The cast underneath does not change the unit of instants or spans, so those
+        # columns are moved to the unit they meet at with `as_unit` first.
+        moved = {n: frame[n].dt.as_unit(_unit_of(wanted[n])) for n in mine if _unit_of(wanted[n])}
+        if moved:
+            frame = frame.assign(**moved)
+            mine = [n for n in mine if n not in moved]
+        inner = frame._inner
         if mine:
             try:
                 inner = inner.cast(mine, [wanted[n] for n in mine], True)
@@ -21101,7 +21189,7 @@ def _concat_rows(
                 raise translate(error) from None
         parts.append(inner)
     if not ignore_index:
-        kinds = {frame.index.dtype for frame in frames}
+        kinds = {str(frame.index.dtype) for frame in frames}
         if len(kinds) > 1:
             raise UnsupportedError(
                 f"concat of row labels as {' and '.join(sorted(kinds))} gives pandas' object"
