@@ -133,7 +133,6 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.concat([m.DataFrame({"a": [1]}), m.DataFrame({"a": ["x"]})]),
     lambda m: m.concat([m.DataFrame({"a": [True]}), m.DataFrame({"b": [1]})]),
     lambda m: m.concat([m.Series([True]), m.Series([1])]),
-    lambda m: m.concat([m.DataFrame(FIRST), m.Series([1])]),
     lambda m: m.concat([m.DataFrame(FIRST), m.DataFrame(FIRST).set_index("b")]),
 ]
 

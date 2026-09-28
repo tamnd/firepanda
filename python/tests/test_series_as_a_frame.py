@@ -46,10 +46,8 @@ def test_to_frame_takes_a_name_of_the_callers_choosing(firepanda):
 
 def test_an_unnamed_column_is_called_zero(firepanda):
     got = firepanda.Series([1, 2]).to_frame()
-    # pandas calls it the integer zero and a column name here is a string, so
-    # it is the text of it. That is the only difference between the two.
-    assert list(got.columns) == ["0"]
-    assert [str(one) for one in pd.Series([1, 2]).to_frame().columns] == ["0"]
+    # The integer zero, as pandas names it.
+    assert list(got.columns) == list(pd.Series([1, 2]).to_frame().columns) == [0]
 
 
 def test_to_frame_keeps_labels_that_are_not_a_range(firepanda):

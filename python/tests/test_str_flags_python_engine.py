@@ -427,7 +427,7 @@ def test_every_name_takes_a_flag_now(firepanda: ModuleType) -> None:
     what upstream lets it keep rather than about what is written here."""
     mine = made(firepanda)
     assert mine.str.extract("(a)", flags=re.MULTILINE).shape[1] == 1
-    assert mine.str.extract("(A)", flags=re.IGNORECASE)["0"].tolist()[0] == "a"
+    assert mine.str.extract("(A)", flags=re.IGNORECASE)[0].tolist()[0] == "a"
 
 
 def test_a_bit_that_re_never_named_is_refused_like_any_other(firepanda: ModuleType) -> None:

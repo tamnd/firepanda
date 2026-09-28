@@ -354,7 +354,7 @@ def test_a_scope_is_not_a_group_anybody_can_refer_to(firepanda: ModuleType) -> N
     a capturing group whose number happens to be zero. A scope around a capture
     leaves the capture where it was, and `extract` is where that shows."""
     mine = made(firepanda, ["abc", "ABC"])
-    assert mine.str.extract("(?i:(a))")["0"].tolist() == ["a", "A"]
+    assert mine.str.extract("(?i:(a))")[0].tolist() == ["a", "A"]
     assert mine.str.extract("(?i:(a))(b)").shape[1] == 2
 
 

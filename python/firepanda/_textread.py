@@ -558,6 +558,8 @@ class _Layout:
         self.names = names
         self.rows = rows
         self.leading = leading
+        # Names counted from 0 because the file gave none, which pandas holds as numbers.
+        self.numbered = False
 
 
 def _laid_out(records: list[Record], o: _Options) -> _Layout:
@@ -619,7 +621,9 @@ def _laid_out(records: list[Record], o: _Options) -> _Layout:
             ParserWarning,
             stacklevel=4,
         )
-    return _Layout(names, kept, leading)
+    layout = _Layout(names, kept, leading)
+    layout.numbered = o.names is None and file_names is None
+    return layout
 
 
 def _bad(line: int, fields: list[str], expected: int, o: _Options) -> list[str] | None:
@@ -1004,6 +1008,7 @@ class _Plan:
             layout.leading + names.index(name) for name in used
         ]
         self.names = implicit + used
+        self.numbered = layout.numbered
         self.original = list(range(layout.leading)) + [names.index(name) for name in used]
         if implicit:
             self.index = list(implicit)
@@ -1098,6 +1103,16 @@ def _built(layout_rows: list[list[str]], plan: _Plan, o: _Options, start: int) -
             frame = frame.rename_axis(None)
     elif start and plan.names:
         frame = frame.set_axis(RangeIndex(start, start + length))
+    if plan.numbered:
+        frame = _numbered_names(frame, plan)
+    return frame
+
+
+def _numbered_names(frame: Any, plan: _Plan) -> Any:
+    """The frame with the names the file did not give turned from text into numbers."""
+    frame = frame.rename(columns={name: int(name) for name in plan.names if name.isdigit()})
+    if plan.index and plan.index[0].isdigit():
+        frame = frame.rename_axis(int(plan.index[0]))
     return frame
 
 
