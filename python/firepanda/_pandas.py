@@ -19173,6 +19173,8 @@ class GroupByMixin[Answer]:
         """
         from ._frame import DataFrame
 
+        if kind == "kurt":
+            return self._kurtosis(columns)
         try:
             source = self._frame._inner
             if columns is not None:
@@ -19182,6 +19184,73 @@ class GroupByMixin[Answer]:
             )
         except Exception as error:
             raise translate(error) from None
+
+    def _grouped(self, source: Any, kind: str, as_index: bool) -> DataFrame:
+        """One core reduction over the groups of `source`, which carries the keys."""
+        from ._frame import DataFrame
+
+        try:
+            return DataFrame._wrap(
+                source.group_agg(self._by, kind, 0.0, self._dropna, self._sort, as_index)
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def _broadcast_mean(self, source: Any) -> DataFrame:
+        """Each row's group mean, for every column of `source` that is not a key."""
+        from ._frame import DataFrame
+
+        try:
+            return DataFrame._wrap(source.group_broadcast(self._by, "mean", 0.0, self._dropna))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _kurtosis(self, columns: list[str] | None) -> DataFrame:
+        """The excess kurtosis of each group, built from sums the core already makes.
+
+        The core has no grouped kurtosis, so each value is centred on its
+        group's mean, and the squares, the fourth powers and the counts are
+        summed by group. pandas' formula turns them into the answer, with its
+        rules kept: fewer than four values is NaN, a group with no spread is
+        zero, and a sum within 1e-14 of zero is taken as zero, which is how
+        pandas hides the rounding left over from the centring.
+        """
+        from ._frame import DataFrame
+
+        source = self._frame._inner
+        if columns is not None:
+            source = source.select(self._by + columns)
+        frame = DataFrame._wrap(source)
+        names = [name for name in frame.columns if name not in self._by]
+        for name in names:
+            dtype = str(frame[name].dtype)
+            if dtype.startswith(("datetime64", "timedelta64")):
+                raise TypeError(f"{dtype.split('[')[0]} type does not support operation 'kurt'")
+            if not _text_numeric(dtype):
+                shown = "str" if dtype == "string" else dtype
+                raise TypeError(f"dtype '{shown}' does not support operation 'kurt'")
+        keys = frame[self._by]._inner
+        values = frame[names].astype("float64")
+        floated = keys.stack_columns([values._inner])
+        centred = values - self._broadcast_mean(floated)[names]
+        # The mean is rounded, so the centred values are off by the rounding.
+        # Centring them again on their own mean takes most of it out, which
+        # matters for a group far from zero with little spread.
+        centred = centred - self._broadcast_mean(keys.stack_columns([centred._inner]))[names]
+        squares = centred * centred
+        count = self._grouped(floated, "count", True)[names]
+        m2 = self._grouped(keys.stack_columns([squares._inner]), "sum", True)[names]
+        m4 = self._grouped(keys.stack_columns([(squares * squares)._inner]), "sum", True)[names]
+        numerator = count * (count + 1) * (count - 1) * m4
+        denominator = (count - 2) * (count - 3) * m2 * m2
+        numerator = numerator.mask(numerator.abs() < 1e-14, 0.0)
+        denominator = denominator.mask(denominator.abs() < 1e-14, 0.0)
+        answer = numerator / denominator - 3 * (count - 1) ** 2 / ((count - 2) * (count - 3))
+        answer = answer.mask(denominator == 0, 0.0).mask(count < 4, float("nan"))
+        if self._as_index:
+            return answer
+        labels = self._grouped(floated, "count", False)[self._by]
+        return DataFrame._wrap(labels._inner.stack_columns([answer.reset_index(drop=True)._inner]))
 
     def _reduce(
         self,
@@ -20707,6 +20776,29 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         """
         super().__init__(frame, by, as_index, sort, dropna)
         self._column = column
+
+    def ohlc(self) -> DataFrame:
+        """The first, highest, lowest and last value of each group, as four columns.
+
+        The four are the grouped `first`, `max`, `min` and `last`, which skip
+        gaps, set side by side and named `open`, `high`, `low` and `close`.
+        pandas labels the rows by the key even under `as_index=False`, and so
+        does this.
+
+        Raises:
+            DataError: When the column is not numbers, in pandas' words.
+        """
+        from ._frame import DataFrame
+
+        if not _text_numeric(str(self._frame[self._column].dtype)):
+            raise DataError("No numeric types to aggregate")
+        source = self._frame._inner.select([*self._by, self._column])
+        named = (("first", "open"), ("max", "high"), ("min", "low"), ("last", "close"))
+        parts = [
+            self._grouped(source, kind, True).rename(columns={self._column: name})._inner
+            for kind, name in named
+        ]
+        return DataFrame._wrap(parts[0].stack_columns(parts[1:]))
 
     def _shape(self, kind: str, param: float) -> DataFrame | Series:
         """One reduction over the one column.

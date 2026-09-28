@@ -1582,18 +1582,19 @@ GROUPED: tuple[tuple[str, str, str], ...] = (
     ("var", "The variance within each group.", "spread"),
     ("sem", "The standard error of the mean within each group.", "sem"),
     ("skew", "The skewness within each group.", "skew"),
+    ("kurt", "The excess kurtosis within each group.", "skew"),
     ("quantile", "The value at one quantile within each group.", "quantile"),
     ("prod", "The product of the values in each group.", "product"),
     ("any", "Whether any value in each group is true.", "truth"),
     ("all", "Whether every value in each group is true.", "truth"),
 )
-"""The eighteen grouped reductions, with the shape of each one's parameter list.
+"""The nineteen grouped reductions, with the shape of each one's parameter list.
 
-Twelve shapes rather than eighteen signatures written out, because pandas gives
+Twelve shapes rather than nineteen signatures written out, because pandas gives
 the same list to several of them and the difference between the lists is what
 the parity test compares. Every signature below was measured against a running
 pandas rather than copied out of the documentation, and the shapes exist to make
-a mismatch a one line change instead of a hunt through eighteen strings.
+a mismatch a one line change instead of a hunt through nineteen strings.
 
 `min` and `max` are `extreme` and `first` and `last` are `pick`, which are the
 same three parameters except that the first pair also takes an engine and the
@@ -2042,7 +2043,7 @@ classes in pandas, so there is one table.
 
 
 def _group_members(py: str) -> tuple[Member, ...]:
-    """Writes the eighteen reduction members for one group by class.
+    """Writes the nineteen reduction members for one group by class.
 
     Same restriction as `_reductions`, which is that nothing here decides what a
     reduction does. The word crosses the boundary and
@@ -2095,7 +2096,7 @@ def _group_members(py: str) -> tuple[Member, ...]:
         "nunique": "self._nunique(dropna)",
         "spread": 'self._spread("{name}", ddof, numeric_only, skipna, engine, engine_kwargs)',
         "sem": 'self._reduce("sem", float(ddof), numeric_only, skipna)',
-        "skew": 'self._reduce("skew", 0.0, numeric_only, skipna)',
+        "skew": 'self._reduce("{name}", 0.0, numeric_only, skipna)',
         "quantile": "self._quantile(q, interpolation, numeric_only)",
         "product": 'self._reduce("prod", 0.0, numeric_only, skipna, min_count)',
         "truth": 'self._reduce("{name}", 0.0, False, skipna)',
@@ -4766,7 +4767,7 @@ ACCESSORS: tuple[Accessor, ...] = (
         owner="DataFrameGroupBy",
         doc=(
             "One column of a grouped frame, waiting for a reduction.\n\n"
-            "Reached from `df.groupby(...)[name]`. The same eighteen reductions over"
+            "Reached from `df.groupby(...)[name]`. The same nineteen reductions over"
             " one column instead of all of them, answering a column rather than a"
             " frame, which is the whole difference between the two classes."
         ),

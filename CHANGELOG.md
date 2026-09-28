@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The grouped kurt and SeriesGroupBy.ohlc
+
+`DataFrameGroupBy.kurt` and `SeriesGroupBy.kurt` give pandas' excess kurtosis for each group, including NaN for a group with fewer than four values and zero for one with no spread, and `agg("kurt")` reaches them. The core has no grouped kurtosis, so the answer is built from grouped sums of centred powers, centred twice so that a group far from zero keeps its digits. `SeriesGroupBy.ohlc` gives the first, highest, lowest and last value of each group as `open`, `high`, `low` and `close`.
+
 ### Added: DataFrame.to_html and the notebook repr
 
 `DataFrame.to_html` takes every one of pandas' arguments and writes the same markup, character for character, and `DataFrame._repr_html_` gives a notebook the table pandas shows, under the same display options. The cells are the text `to_string` writes, so floats, dates, spans, gaps and cut rows and columns look as they do in pandas. `sparsify` is accepted and has nothing to do, because firepanda has no MultiIndex.
