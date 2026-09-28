@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.8.36] - 2026-09-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A patch release. On the pandas side, `df[key] = value` writes columns into a frame, `groupby(...).sample` and `json_normalize` arrive, an index, a frame and a column print what pandas prints, `NaT` and missing values read out the way pandas spells them, and `to_datetime` takes `dayfirst`, `yearfirst`, the separators `ISO8601` allows, numbers among moments and moments mixed with text. The ClickBench group by got faster again: the text walk prefetches the row a pending slot names, and a tuple of keys is read back from the map once at the end rather than gathered from every chunk, which together take about a tenth off q34, a quarter off q39 and more than a quarter off q18 at 1M rows.
+
 ### Added: Writing a column into a frame with df[key] = value
 
 `DataFrame.__setitem__` and `DataFrame.__delitem__` now exist. A name puts one column, lined up on the row labels when it is a series, a list of names puts several from a frame, from rows or from one value, and a column or frame of true and false puts the value in the rows or cells it marks. The write rebinds the frame's one slot to what `assign` or `mask` would answer, as `inplace` does, so a copy or a column taken before the write keeps what it had, which is pandas' copy on write. None and a function are refused, since pandas holds them in an object column.
@@ -62,6 +68,7 @@ A group by on several keys with text among them writes each row's keys out as by
 ### Added: An index prints what pandas prints
 
 `repr` and `str` of an `Index`, a `DatetimeIndex` and a `TimedeltaIndex` used to print the core's summary, so a zoned index printed the counts behind its instants. They now go through a port of pandas' `format_object_summary`: the labels in brackets, wrapped at `display.width`, cut to ten from each end past `display.max_seq_items` with dots between, then the type, the name, the length when cut, and `freq` for instants and spans. Labels that are still a range print as a `RangeIndex`. Dates at midnight print as dates, whole days as days, text is quoted with its tabs and newlines escaped, and a gap prints as pandas prints it for each kind. 24 shapes and 16 option combinations match pandas.
+
 ### Changed: the text walk prefetches the row a pending slot names
 
 A chunk that brings most of its own keys compares most of its rows against the row of the same chunk that first opened the key's slot, not against a stored key, and that comparison was the one the walk did not prefetch. The walk now asks for that row's view and then its bytes ahead of time, as it does for a stored key, and compares the two rows by their view words without the validity checks a key column with no nulls does not need. On a six core Linux machine that was busy with other work, alternating the old and new driver over eight rounds, ClickBench q18 went from 108 to 96 ms at best, q34 from 88 to 79 and q39 from 169 to 131, and every answer matched.
