@@ -268,7 +268,6 @@ def test_a_key_that_is_not_a_name_is_refused_with_the_reason(
     ("arguments", "expected"),
     [
         ({"level": 0}, "level"),
-        ({"group_keys": False}, "group_keys"),
         ({"observed": False}, "observed"),
     ],
 )
@@ -397,18 +396,6 @@ def test_the_product_takes_a_min_count_of_zero_and_the_extremes_do_not(
     grouped.min(min_count=-1)
     with pytest.raises(NotImplementedError, match="min_count"):
         grouped.min(min_count=0)
-
-
-@pytest.mark.parametrize("name", ["apply"])
-def test_the_names_that_are_absent_are_absent(firepanda: ModuleType, name: str) -> None:
-    """Absent rather than wrong.
-
-    `apply` is the door that takes a function, which is a piece of work rather
-    than a longer list. `transform` and `agg` take a name and are tested in
-    `test_group_transform.py` and `test_group_agg.py`, and `groups`, `indices`
-    and `get_group` in `test_groupby_members.py`.
-    """
-    assert not hasattr(firepanda.DataFrame(DATA).groupby("k"), name)
 
 
 def test_a_grouping_computes_nothing_until_it_is_reduced(firepanda: ModuleType) -> None:

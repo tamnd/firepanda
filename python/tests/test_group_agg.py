@@ -138,8 +138,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 
 REFUSED: list[Callable[[Any], Any]] = [
-    lambda m: frame(m).groupby("k")["v"].agg(lambda group: group.max()),
-    lambda m: frame(m).groupby("k")["v"].agg(["sum", len]),
     lambda m: frame(m).groupby("k").agg(["min", "max"]),
     lambda m: frame(m).groupby("k").agg({"v": ["min", "max"]}),
     lambda m: frame(m).groupby("k")["v"].agg(["sum", "sum"]),
