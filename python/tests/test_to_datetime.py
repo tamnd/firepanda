@@ -359,9 +359,9 @@ def test_nothing_to_read_is_seconds(firepanda: ModuleType) -> None:
         assert str(build(firepanda).dtype) == str(build(pd).dtype) == "datetime64[s]"
 
 
-def test_one_missing_value_is_none(firepanda: ModuleType) -> None:
-    """pandas answers `NaT` and firepanda, which has no missing instant of its own, None."""
-    assert firepanda.to_datetime(None) is None
+def test_one_missing_value_is_nat(firepanda: ModuleType) -> None:
+    """One missing value is `NaT`, as pandas answers it."""
+    assert firepanda.to_datetime(None) is firepanda.NaT
 
 
 def test_it_is_exported_from_the_package(firepanda: ModuleType) -> None:

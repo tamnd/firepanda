@@ -21,6 +21,8 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
+from ._scalars import NaT
+
 __all__ = ["increasing", "keyed", "merged", "missing", "ordered", "unique"]
 
 _GAP = object()
@@ -28,8 +30,8 @@ _GAP = object()
 
 
 def missing(value: Any) -> bool:
-    """Whether a label is a gap, which is None or a NaN."""
-    return value is None or (isinstance(value, float) and value != value)
+    """Whether a label is a gap, which is None, a NaN or `NaT`."""
+    return value is None or value is NaT or (isinstance(value, float) and value != value)
 
 
 def keyed(value: Any) -> Any:

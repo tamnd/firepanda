@@ -77,7 +77,7 @@ from ._pandas import (
     unique,
 )
 from ._range_index import RangeIndex
-from ._scalars import Timedelta, Timestamp
+from ._scalars import NaT, Timedelta, Timestamp
 from ._timedelta import TimedeltaIndex, timedelta_range
 
 __all__ = [
@@ -86,6 +86,7 @@ __all__ = [
     "Index",
     "Interval",
     "MultiIndex",
+    "NaT",
     "NamedAgg",
     "RangeIndex",
     "Series",

@@ -62,10 +62,10 @@ def test_the_two_ends_restate(firepanda: ModuleType) -> None:
     build = column_of(["2262-04-11 23:47:16.854775", "1677-09-21 00:12:43.145225", None])
     answer = build(firepanda)
     assert str(answer.dtype) == "datetime64[ns]"
-    assert [None if value is None else str(value) for value in answer.tolist()] == [
+    assert [str(value) for value in answer.tolist()] == [
         "2262-04-11 23:47:16.854775",
         "1677-09-21 00:12:43.145225",
-        None,
+        "NaT",
     ]
 
 

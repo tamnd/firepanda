@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: NaT, the missing moment and span
+
+`firepanda.NaT` is pandas' missing moment and span: one value, a `datetime` that never equals anything, sorts against nothing and turns the arithmetic it meets into itself, with its fields NaN and the methods pandas refuses refused with pandas' words. A gap in a column of instants or spans now reads out as `NaT` through `tolist`, iteration, `iat`, a frame cell and an index, `Timestamp(None)`, `Timedelta(None)`, `to_datetime(None)` and `to_timedelta(None)` answer it, and a reduction over only gaps answers it where it answered NaN. `NaT` goes back in wherever pandas takes it, so a column built from it, `fillna`, `where`, `replace`, `isin`, `get_loc`, `in` and adding it to a span column all match pandas. Replacing a moment or a span, which never matched a row before, now does.
+
 ### Added: Read a missing value out the way pandas spells it
 
 A gap read out of a column through `tolist`, iteration, `iloc`, `iat`, `loc`, `at` or `items` now comes back as pandas hands it out for the column's type. A float column, an integer column with a gap, a text column and a category column hand out `nan`, and a column of flags hands out None, as an object column does in pandas. A frame cell and an index read the same way, a category's missing row has a code of -1, and a NaN given back among text or asked for by `get_indexer` finds the gap. A missing instant or span still reads as None, since firepanda has no `NaT` yet.
