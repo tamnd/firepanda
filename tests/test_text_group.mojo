@@ -360,6 +360,66 @@ def test_a_text_key_combines_with_a_number_key() raises:
     assert_equal(out.column("v_sum").as_typed[DType.int64]()[0], 50)
 
 
+def test_text_keys_a_number_key_decides_group_by_that_key() raises:
+    # Every text key repeats what `n` says, nulls included, so the grouping is
+    # the one `n` makes on its own and its groups come out in first-seen order.
+    var series = List[Series]()
+    series.append(
+        Series(
+            "name",
+            with_nulls(
+                ["a long name past twelve", "b", "a long name past twelve", "x"],
+                [True, True, True, False],
+            ),
+        )
+    )
+    series.append(Series("n", ints([7, 3, 7, 5])))
+    series.append(Series("city", text(["oslo", "lima", "oslo", "kyiv"])))
+    var frame = DataFrame.from_series(series^)
+    var at: List[Int] = [0, 1, 2]
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
+
+    assert_equal(grouping.groups, 3)
+    var expected: List[Int] = [0, 1, 0, 2]
+    for i in range(len(expected)):
+        assert_equal(Int(grouping.codes[i]), expected[i])
+    var rows: List[Int] = [0, 1, 3]
+    for g in range(len(rows)):
+        assert_equal(grouping.rows_at[g], rows[g])
+
+
+def test_a_text_key_that_splits_a_number_key_group_is_not_dropped() raises:
+    # The two long names share their first twelve bytes and differ after, so
+    # `n` alone would put rows 0 and 2 together and the tuple must not.
+    var series = List[Series]()
+    series.append(Series("n", ints([7, 3, 7, 3])))
+    series.append(
+        Series(
+            "name",
+            text(
+                [
+                    "a long name past twelve",
+                    "b",
+                    "a long name past twelvE",
+                    "b",
+                ]
+            ),
+        )
+    )
+    series.append(Series("v", ints([1, 2, 4, 8])))
+    var frame = DataFrame.from_series(series^)
+    var at: List[Int] = [0, 1]
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
+    assert_equal(grouping.groups, 3)
+    assert_equal(Int(grouping.codes[1]), Int(grouping.codes[3]))
+    assert_true(Int(grouping.codes[0]) != Int(grouping.codes[2]))
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var out = frame.group_by(["n", "name"], specs)
+    assert_equal(len(out), 3)
+
+
 def test_two_text_keys_tall_enough_to_fork_agree_with_one_that_is_not() raises:
     """The same tuples, once over the line that forks the keys and once under it.
 
