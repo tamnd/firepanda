@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: A frame and a column print what pandas prints
+
+`repr` and `str` of a `DataFrame` printed a summary of its columns, and a column of instants with a zone printed their counts. Both now go through the text formatter under pandas' display options, so a frame prints its rows, a long one loses its middle to dots, a wide one is cut to fit the terminal or wrapped at `display.width`, and a zoned instant prints as a time with its offset. `to_string` takes `max_rows`, `min_rows`, `max_cols` and `line_width` instead of refusing them, and cuts and wraps the way pandas does.
+
 ### Added: format="ISO8601" reads the separators pandas reads
 
 `to_datetime` with `format="ISO8601"` now reads a date split by a slash, a dot, a space or a backslash, such as `2024/01/02 10:00`, as long as both splits are the same, which is what pandas' own ISO 8601 reader accepts. It also refuses a comma before the fraction, as pandas does under `ISO8601`, while `format="mixed"` still reads one.

@@ -177,8 +177,26 @@ def test_mistakes_raise_as_pandas_raises(
         build(firepanda)
 
 
-@pytest.mark.parametrize("keyword", ["max_rows", "max_cols", "line_width", "min_rows"])
-def test_the_limits_are_refused_by_name(firepanda: ModuleType, keyword: str) -> None:
-    """A limit would leave rows or columns out, which is not supported yet."""
-    with pytest.raises(NotImplementedError, match=keyword):
-        mixed(firepanda).to_string(**{keyword: 2})
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_rows": 2},
+        {"max_rows": 1},
+        {"max_rows": 3, "min_rows": 2},
+        {"max_cols": 2},
+        {"max_cols": 1},
+        {"max_cols": 3, "max_rows": 2, "show_dimensions": True},
+        {"line_width": 20},
+        {"line_width": 20, "max_cols": 3},
+        {"max_cols": 0, "line_width": 30},
+        {"max_rows": 2, "show_dimensions": "truncate"},
+        {"max_rows": 9, "show_dimensions": "truncate"},
+    ],
+)
+def test_the_limits_cut_and_wrap_as_pandas_does(
+    firepanda: ModuleType, limits: dict[str, Any]
+) -> None:
+    """Rows and columns lost from the middle to dots, and a wide frame wrapped into blocks."""
+    import pandas as pd
+
+    assert mixed(firepanda).to_string(**limits) == mixed(pd).to_string(**limits)

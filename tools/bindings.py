@@ -2800,14 +2800,14 @@ FRAME = Exposed(
         Member(
             name="__repr__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_printed(self)",
             doc="The frame, rendered.",
             returns="str",
         ),
         Member(
             name="__str__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_printed(self)",
             doc="The frame, rendered. Same as repr, which is what pandas does.",
             returns="str",
         ),
@@ -3652,14 +3652,14 @@ SERIES = Exposed(
         Member(
             name="__repr__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_printed(self)",
             doc="The series, rendered.",
             returns="str",
         ),
         Member(
             name="__str__",
             kind="dunder",
-            body="repr(self._inner)",
+            body="_printed(self)",
             doc="The series, rendered. Same as repr, which is what pandas does.",
             returns="str",
         ),
@@ -5141,6 +5141,10 @@ def wrapper() -> str:
     # values have to be made moments on the way, which is hand written too.
     if any("_values_of(" in m.body for m in every):
         mixins.add("_values_of")
+    # A frame and a column print through the text formatter, since the core
+    # writes a frame as a summary and a zoned instant as its count.
+    if any("_printed(" in m.body for m in every):
+        mixins.add("_printed")
     # `df.iloc` and the three properties beside it are the same case a third
     # time. Each answers a small object that holds the frame and reads a key,
     # and the key is the whole of what they do, so the class is hand written
