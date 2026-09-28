@@ -453,6 +453,109 @@ def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
     return _counts_as_spans(_truncated(got), unit)
 
 
+def _is_text(value: Any) -> bool:
+    """Whether a value is a series of text."""
+    return isinstance(value, SeriesMixin) and str(value.dtype) in ("string", "str")
+
+
+def _text_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
+    """Text joined by `+` or repeated by `*`, the way pandas answers it.
+
+    Two columns of text are aligned first and joined row by row, and a missing
+    row on either side is missing in the answer. A whole number repeats every
+    row, a column of whole numbers repeats each row its own count, and a count
+    below one is the empty text, as Python's own `*` on a string gives. Any
+    other arithmetic on text is refused with pandas' words. A number is never
+    equal to text, and ordering one against text is refused. The answer is
+    None for any other comparison or a missing value, so the operator goes on.
+    """
+    from ._frame import Series
+
+    if not _is_text(owner):
+        return None
+    if op == "mul":
+        return _text_repeated(owner, other)
+    if op in _COMPARISONS and isinstance(other, numbers.Number):
+        if op in ("eq", "ne"):
+            return Series([op == "ne"] * len(owner), index=owner.index, name=owner.name)
+        raise TypeError(f"Invalid comparison between dtype=str and {type(other).__name__}")
+    if op not in ("add", "sub", "truediv", "floordiv", "mod", "pow") or other is None:
+        return None
+    if op == "add" and isinstance(other, str):
+        other = Series([other] * len(owner), index=owner.index, name=owner.name)
+    if op != "add" or not _is_text(other):
+        if isinstance(other, SeriesMixin):
+            kind = "dtype 'str'" if _is_text(other) else f"dtype '{other.dtype}'"
+        else:
+            kind = f"object of type {type(other)!r}"
+        named = "r" + op if flip else op
+        raise TypeError(f"operation '{named}' not supported for dtype 'str' with {kind}")
+    left, right = (other, owner) if flip else (owner, other)
+    name = left.name if left.name == right.name else None
+    if not left.index.equals(right.index):
+        left, right = left.align(right)
+    return left.str.cat(right).rename(name)
+
+
+def _text_repeated(text: Any, counts: Any) -> Any:
+    """Every row of text repeated by a whole number or by a column of them."""
+    if isinstance(counts, SeriesMixin):
+        if not str(counts.dtype).lower().startswith(("int", "uint")):
+            return None
+        name = text.name if text.name == counts.name else None
+        if not text.index.equals(counts.index):
+            text, counts = text.align(counts)
+        answer = text.str.repeat(0)
+        for count in counts.dropna().unique().tolist():
+            answer = answer.where(counts != count, text.str.repeat(max(int(count), 0)))
+        return answer.where(counts.notna()).rename(name)
+    if isinstance(counts, numbers.Integral) and type(counts).__name__ not in ("bool", "bool_"):
+        return text.str.repeat(max(int(counts), 0))
+    raise TypeError("Can only string multiply by an integer.")
+
+
+_SCALING_SYMBOLS = {"mul": "*", "truediv": "/", "floordiv": "//", "mod": "//"}
+
+
+def _no_scaling_by_nat(owner: Any, other: Any, op: str, flip: bool) -> None:
+    """Refuses spans scaled by `NaT`, which pandas reads as a missing moment, not a span.
+
+    Raises:
+        TypeError: With pandas' words, which name numpy's array for spans on the
+            left and the spans for a division with `NaT` on the left.
+    """
+    if other is not NaT or not _is_spans(owner):
+        return
+    if op == "pow":
+        raise TypeError("cannot perform __pow__ with this index type: TimedeltaArray")
+    if flip and op in ("truediv", "floordiv"):
+        raise TypeError("Cannot divide NaTType by TimedeltaArray")
+    if op in _SCALING_SYMBOLS:
+        raise TypeError(
+            f"unsupported operand type(s) for {_SCALING_SYMBOLS[op]}: 'numpy.ndarray' and 'NaTType'"
+        )
+
+
+def _listed_frame_operand(frame: Any, other: Any, axis: int) -> Any:
+    """A list, a tuple or a numpy array beside a frame, as a series along the axis.
+
+    pandas lines the values up with the columns, or with the rows for the
+    named form on the rows, and refuses a length that does not match with its
+    own message.
+    """
+    from ._frame import Series
+
+    listed = isinstance(other, (list, tuple)) or (_is_numpy(other) and other.ndim == 1)
+    if not listed:
+        return other
+    labels = frame.columns if axis == 1 else frame.index
+    if len(other) != len(labels):
+        raise InvalidArgumentError(
+            f"Unable to coerce to Series, length must be {len(labels)}: given {len(other)}"
+        )
+    return Series(other if _is_numpy(other) else list(other), index=labels)
+
+
 def _offset_operand(owner: Any, offset: Any, op: str, flip: bool) -> Any:
     """A column of moments moved by a date offset, which pandas allows as `+` and `-` only.
 
@@ -10998,6 +11101,7 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
+        other = _listed_frame_operand(self, other, 1)
         try:
             if isinstance(other, DataFrameMixin):
                 if strict:
@@ -11038,6 +11142,7 @@ class DataFrameMixin(_Carries):
 
         _no_level(level)
         number = _axis_number(axis, "DataFrame", 1, (0, 1))
+        other = _listed_frame_operand(self, other, number)
         try:
             if isinstance(other, DataFrameMixin):
                 answer = self._inner.binary_frame(other._inner, op, flip, fill_value)
@@ -14584,8 +14689,11 @@ class SeriesMixin(_Carries):
             return NotImplemented
         if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
+        _no_scaling_by_nat(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
-        scaled = _span_arithmetic(self, other, op, flip)
+        scaled = _text_arithmetic(self, other, op, flip)
+        if scaled is None:
+            scaled = _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
         try:
@@ -14618,8 +14726,13 @@ class SeriesMixin(_Carries):
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        _no_scaling_by_nat(self, other, op, flip)
         other = _temporal_operand(self, _listed_operand(self, other, op))
-        scaled = None if fill_value is not None else _span_arithmetic(self, other, op, flip)
+        scaled = None
+        if fill_value is None:
+            scaled = _text_arithmetic(self, other, op, flip)
+            if scaled is None:
+                scaled = _span_arithmetic(self, other, op, flip)
         if scaled is not None:
             return scaled
         try:
