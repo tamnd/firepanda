@@ -34,7 +34,7 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _firepanda, api, errors
+from . import _firepanda, api, errors, offsets
 from ._config import (
     describe_option,
     get_option,
@@ -79,9 +79,11 @@ from ._pandas import (
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
 from ._timedelta import TimedeltaIndex, timedelta_range
+from .offsets import DateOffset
 
 __all__ = [
     "DataFrame",
+    "DateOffset",
     "DatetimeIndex",
     "Index",
     "Interval",
@@ -117,6 +119,7 @@ __all__ = [
     "merge_ordered",
     "notna",
     "notnull",
+    "offsets",
     "option_context",
     "options",
     "pivot",

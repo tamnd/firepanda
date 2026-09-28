@@ -34,6 +34,7 @@ from ._pandas import to_datetime
 from ._resample import _CALENDAR, _NANOS
 from ._scalars import Timestamp
 from .errors import InvalidArgumentError
+from .offsets import BaseOffset, Day, Tick, _range_points, _stamp
 
 __all__ = ["bdate_range", "date_range"]
 
@@ -290,6 +291,10 @@ def _ranged(
         )
     if unit is not None and unit not in _UNITS:
         raise InvalidArgumentError("'unit' must be one of 's', 'ms', 'us', 'ns'")
+    if isinstance(freq, Tick | Day):
+        freq = freq.freqstr
+    elif isinstance(freq, BaseOffset):
+        return _offset_range(start, end, periods, freq, tz, normalize, name, inclusive, unit)
     steps = calendar_step(freq) if calendar is None else calendar
     step, in_days, offset = (
         _frequency(freq) if freq is not None and steps is None else (None, steps is not None, "")
@@ -339,6 +344,37 @@ def _ranged(
             stamps = _localized(stamps, zone)
         else:
             stamps = stamps.dt.tz_localize("UTC").dt.tz_convert(zone)
+    return DatetimeIndex(stamps, name=name)
+
+
+def _offset_range(
+    start: Any,
+    end: Any,
+    periods: int | None,
+    offset: BaseOffset,
+    tz: Any,
+    normalize: bool,
+    name: Any,
+    inclusive: str,
+    unit: Any,
+) -> DatetimeIndex:
+    """`date_range` with a calendar offset as its step, stepped by the offset itself."""
+    ends = []
+    for value in (start, end):
+        stamp = None if value is None else _stamp(value)
+        if stamp is not None and tz is not None:
+            stamp = stamp.tz_localize(tz) if stamp.tzinfo is None else stamp.tz_convert(tz)
+        if stamp is not None and normalize:
+            stamp = stamp.normalize()
+        ends.append(stamp)
+    points = _range_points(offset, ends[0], ends[1], periods)
+    if points and inclusive in ("neither", "right") and points[0] == ends[0]:
+        points = points[1:]
+    if points and inclusive in ("neither", "left") and points[-1] == ends[1]:
+        points = points[:-1]
+    stamps = to_datetime(Series(points)) if points else to_datetime(Series([], dtype="int64"))
+    if unit is not None:
+        stamps = stamps.dt.as_unit(unit)
     return DatetimeIndex(stamps, name=name)
 
 

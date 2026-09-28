@@ -58,6 +58,7 @@ from .errors import (
     UnsupportedError,
     translate,
 )
+from .offsets import BaseOffset
 
 if TYPE_CHECKING:
     from ._array import FirepandaArray
@@ -263,6 +264,20 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
         # pandas reads `NaT` beside a span as a missing span, so the answer stays a span.
         return owner.where(Series([False] * len(owner), index=owner.index))
     return Series([other] * len(owner), index=owner.index, name=owner.name)
+
+
+def _offset_operand(owner: Any, offset: Any, op: str, flip: bool) -> Any:
+    """A column of moments moved by a date offset, which pandas allows as `+` and `-` only.
+
+    The offset moves each moment the way it moves one `Timestamp`, and taking a
+    column away from an offset has no meaning, so that and every other operator
+    raise pandas' `TypeError`.
+    """
+    if op == "add":
+        return offset + owner
+    if op == "sub" and not flip:
+        return offset.__rsub__(owner)
+    raise TypeError(f"unsupported operand type(s) for {op}: {type(offset).__name__} and Series")
 
 
 def _is_numpy(value: Any) -> bool:
@@ -13416,6 +13431,8 @@ class SeriesMixin:
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if isinstance(other, BaseOffset):
+            return _offset_operand(self, other, op, flip)
         other = _temporal_operand(self, other)
         try:
             if isinstance(other, SeriesMixin):
