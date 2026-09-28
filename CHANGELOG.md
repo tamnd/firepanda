@@ -19,6 +19,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: An index prints what pandas prints
 
 `repr` and `str` of an `Index`, a `DatetimeIndex` and a `TimedeltaIndex` used to print the core's summary, so a zoned index printed the counts behind its instants. They now go through a port of pandas' `format_object_summary`: the labels in brackets, wrapped at `display.width`, cut to ten from each end past `display.max_seq_items` with dots between, then the type, the name, the length when cut, and `freq` for instants and spans. Labels that are still a range print as a `RangeIndex`. Dates at midnight print as dates, whole days as days, text is quoted with its tabs and newlines escaped, and a gap prints as pandas prints it for each kind. 24 shapes and 16 option combinations match pandas.
+### Changed: the text walk prefetches the row a pending slot names
+
+A chunk that brings most of its own keys compares most of its rows against the row of the same chunk that first opened the key's slot, not against a stored key, and that comparison was the one the walk did not prefetch. The walk now asks for that row's view and then its bytes ahead of time, as it does for a stored key, and compares the two rows by their view words without the validity checks a key column with no nulls does not need. On a six core Linux machine that was busy with other work, alternating the old and new driver over eight rounds, ClickBench q18 went from 108 to 96 ms at best, q34 from 88 to 79 and q39 from 169 to 131, and every answer matched.
 
 ### Added: A frame and a column print what pandas prints
 
