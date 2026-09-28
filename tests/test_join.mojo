@@ -1156,6 +1156,72 @@ def test_pairing_on_one_core_gives_what_pairing_on_all_of_them_gives() raises:
     assert_equal(bad, -1, String("pair ", bad))
 
 
+def bucketed_in_row_order(rows: Int, keys_apart: Int) raises:
+    """Buckets a tall side and checks every bucket against one walk of it.
+
+    Past `PARALLEL_BUCKET_ROWS` the build is cut across cores, by rows when the
+    ordinals are few and by ranges of ordinals when they are many, and either
+    way every bucket has to come out holding its rows in increasing order,
+    since that is what fixes the output order within a probe row. One pass over
+    the side in row order, taking each row's next seat in its bucket, says
+    whether it did. Every hundred and first key is null so that the skip is
+    walked on every worker.
+    """
+    var values = List[Scalar[DType.int64]](capacity=rows)
+    var x = UInt64(88172645463325252)
+    for _ in range(rows):
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        values.append(Int64(Int(x % UInt64(keys_apart))))
+    var column = ints(values)
+    for r in range(0, rows, 101):
+        column.set_null(r)
+    var built = one_column(Series("k", column^))
+    var probe = one_column(Series("k", ints([0, 1])))
+
+    var aligned = align_keys(
+        probe.column_refs(), keys(0), 2, built.column_refs(), keys(0), rows
+    )
+    var table = bucket_side(
+        aligned.codes,
+        2,
+        rows,
+        aligned.absent,
+        2,
+        aligned.has_nulls,
+        aligned.groups,
+    )
+    assert_false(table.unique, "the side repeats its keys")
+    assert_equal(len(table.starts), aligned.groups + 1, "a start per ordinal")
+    var seat = List[Int](capacity=aligned.groups)
+    for g in range(aligned.groups):
+        seat.append(table.starts[g])
+    var placed = 0
+    var bad = -1
+    for r in range(rows):
+        if aligned.absent[2 + r]:
+            continue
+        var g = Int(aligned.codes[2 + r])
+        if table.bucket[seat[g]] != r:
+            bad = r
+            break
+        seat[g] += 1
+        placed += 1
+    assert_equal(bad, -1, String("row ", bad, " is out of place"))
+    assert_equal(table.starts[aligned.groups], placed, "every kept row placed")
+    for g in range(aligned.groups):
+        assert_equal(seat[g], table.starts[g + 1], String("bucket ", g))
+
+
+def test_a_tall_side_with_few_keys_buckets_in_row_order() raises:
+    bucketed_in_row_order((1 << 18) + 5, 7)
+
+
+def test_a_tall_side_with_many_keys_buckets_in_row_order() raises:
+    bucketed_in_row_order((1 << 18) + 5, 100_000)
+
+
 def test_an_outer_join_marks_the_same_built_rows_however_many_cores_it_used() raises:
     """The parallel emit and the serial one mark the same built side rows.
 

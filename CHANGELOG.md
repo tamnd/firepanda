@@ -27,6 +27,11 @@ Frames and columns have `attrs`, `flags` and `set_flags`, and `firepanda.Flags` 
 ### Added: Rolling windows measured as a span of time
 
 `rolling` takes a window given as text such as `"30s"`, a `Timedelta`, a `timedelta` or a fixed offset, and reaches back that far along the row labels or along the column named by `on`, which may hold dates or durations. Each window starts and stops where pandas' own bounds put it, under every `closed` and with `center`, over times that rise or fall. `on` works for a window of rows too, leaves its column out of the reduction and puts it back into the answer where pandas does. Picking columns out of a window with `[]` keeps the window, `obj`, `on` and `window` answer what pandas answers, and the window prints pandas' repr. The mistakes are pandas' own words: a month, which is not a fixed span, times out of order or with a gap, a `step`, and an `on` that is not a column of dates.
+
+### Changed: a join onto a tall side with repeated keys builds on every core
+
+The side of a join that is bucketed by key, when its keys repeat, was bucketed on one thread, and on TPC-H q13 that was 10.6 of the outer join's 13 ms. From 262,144 rows the bucketing now runs on every core, keeping a count per key for each core when the keys are few and moving the rows into ranges of keys first when they are many, and every bucket still holds its rows in order. On the 13900K q13's 1.48 million orders by 150,000 customers go from 10.2 ms to 2.6 ms, and 4.2 million rows over a million keys from 93 ms to about 10.
+
 ### Changed: grouping half a million rows or more into many groups uses every core
 
 A factorize under four million rows stayed on one core whatever its group count, and when the groups outgrow a core's own cache every probe of that table is a trip to memory. Such a column now takes the partitioned route from half a million rows, where each core owns a disjoint share of the groups. On the 13900K a million rows of a hundred and twenty eight thousand groups goes from 25.6 ms to 11.7 ms, three million rows of sixty five thousand from 108 ms to 13 ms, and TPC-H q20's group by of nine hundred thousand lines into half a million part and supplier pairs from about 37 ms to about 24.
