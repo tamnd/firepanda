@@ -1992,6 +1992,54 @@ def _kurtosis(values: Any) -> float:
     return numerator / denominator - 3 * (count - 1) ** 2 / ((count - 2) * (count - 3))
 
 
+def _kurtosis_in_numpy_order(column: Any) -> float | None:
+    """pandas' `nankurt` of a float column step by step in numpy, or None without numpy.
+
+    Far from zero the fourth moment is sensitive to the order of adding: at
+    values near 4.6e18 with a spread of 4e9, two orders move the answer by
+    2e-7, more than pandas' own distance from the exact answer. numpy adds in
+    eight lanes, and a gap kept in place as a zero shifts which lane each value
+    lands in, so the column is read whole with its gaps as zeros, as pandas
+    reads it, and the same sums are taken in the same order.
+
+    Args:
+        column: A float series, whose gaps are skipped.
+
+    Returns:
+        The kurtosis, NaN under four values, or None when numpy is not there.
+    """
+    try:
+        import numpy
+    except ImportError:
+        return None
+    values = numpy.array(column.to_numpy(), copy=True)
+    mask = numpy.isnan(values)
+    count = values.size - int(mask.sum())
+    numpy.putmask(values, mask, 0)
+    with numpy.errstate(invalid="ignore", divide="ignore"):
+        mean = values.sum(dtype=numpy.float64) / count
+    adjusted = values - mean
+    numpy.putmask(adjusted, mask, 0)
+    squared = adjusted**2
+    m2 = squared.sum(dtype=numpy.float64)
+    m4 = (squared**2).sum(dtype=numpy.float64)
+    largest = numpy.abs(values).max(initial=0.0)
+    eps = numpy.finfo(m2.dtype).eps
+    if abs(m2) < (eps * largest) ** 2 * count:
+        m2 = 0.0
+    if abs(m4) < (eps * largest) ** 4 * count:
+        m4 = 0.0
+    if count < 4:
+        return math.nan
+    denominator = (count - 2) * (count - 3) * m2**2
+    if denominator == 0:
+        return 0.0
+    with numpy.errstate(invalid="ignore", divide="ignore"):
+        numerator = count * (count + 1) * (count - 1) * m4
+        answer = numerator / denominator - 3 * (count - 1) ** 2 / ((count - 2) * (count - 3))
+    return float(values.dtype.type(answer))
+
+
 def _percentiles_asked(percentiles: Any) -> list[float]:
     """The percentiles `describe` reports, checked and sorted the way pandas does.
 
@@ -12991,6 +13039,10 @@ class SeriesMixin:
         _kurt_refusal(self.dtype)
         if not skipna and self.hasnans:
             return math.nan
+        if str(self.dtype) in _FLOATING:
+            answer = _kurtosis_in_numpy_order(self)
+            if answer is not None:
+                return answer
         values = self.dropna()
         if str(values.dtype) in _SIGNED and len(values):
             # A kurtosis does not move when a constant is added, so whole numbers
