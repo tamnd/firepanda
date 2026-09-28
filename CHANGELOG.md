@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Index arithmetic and comparisons
+
+An index now takes the arithmetic operators, `+`, `-`, `*`, `/`, `//`, `%` and `**` on either side, and `-`, `+` and `abs`, against a number, a scalar instant or span, a list, another index or a series, and gives back an index, or a series for a series, the way pandas does. `<`, `<=`, `>` and `>=` join `==` and `!=`, and an index of instants or spans compares with a scalar, text or another index. An index of instants or spans stays a DatetimeIndex or a TimedeltaIndex through unique, delete, take, the set operations, append, diff and `Index(series)`, `to_timedelta` of a list gives a TimedeltaIndex, and drop, insert, putmask and isin work on both. A column of spans takes a span in where, mask and fillna. Inserting a number into an index of instants, which pandas turns into an index of objects, is refused.
+
 ### Added: DataFrame.to_xml
 
 `DataFrame.to_xml` writes the frame as an XML document the way pandas does, with one element per row and each column as an element inside it, or as an attribute through `attr_cols`. It takes pandas' `index`, `root_name`, `row_name`, `na_rep`, `elem_cols`, `namespaces`, `prefix`, `encoding`, `xml_declaration`, `pretty_print` and `compression`. `parser="etree"` uses the standard library, and the default `lxml` parser, along with an XSLT `stylesheet`, needs lxml installed, as in pandas. The document is answered as text, or written as bytes to a path or a binary handle. `to_pickle` and `to_xml` now share one writer for compressed bytes.

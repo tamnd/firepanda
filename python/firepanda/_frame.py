@@ -4514,7 +4514,7 @@ class Index(IndexMixin):
         __init__ because __init__ is the pandas constructor, which takes
         data rather than an extension object.
         """
-        self = object.__new__(cls)
+        self = object.__new__(cls._class_of(inner))
         self._inner = inner
         return self
 

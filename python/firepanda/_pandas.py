@@ -2613,6 +2613,9 @@ def _holds(printed: str, value: Any) -> bool:
         return isinstance(value, str) or (
             isinstance(value, datetime.datetime) and value.tzinfo is None
         )
+    if _SPAN_TYPES.fullmatch(printed):
+        # pandas reads text as a span here too, and takes a span of any kind.
+        return isinstance(value, (str, datetime.timedelta))
     if isinstance(value, str):
         return printed == "string"
     return False
@@ -2620,6 +2623,9 @@ def _holds(printed: str, value: Any) -> bool:
 
 _NAIVE_INSTANTS = re.compile(r"datetime64\[(s|ms|us|ns)\]")
 """The types of a column of instants with no zone."""
+
+_SPAN_TYPES = re.compile(r"timedelta64\[(s|ms|us|ns)\]")
+"""The types of a column of spans."""
 
 
 _ISIN_SERIES = "only list-like objects are allowed to be passed to isin(), you passed a `{}`"
@@ -2873,6 +2879,11 @@ def _fallback(printed: str, value: Any, column: Any = None) -> Any:
 
             read = to_datetime(Series([str(Timestamp(value))]))
             return read.dt.as_unit(instants.group(1))._inner
+        spans = _SPAN_TYPES.fullmatch(printed)
+        if spans:
+            from ._timedelta import to_timedelta
+
+            return to_timedelta(Series([str(Timedelta(value))])).dt.as_unit(spans.group(1))._inner
         return Series([value])._inner.cast(printed, True)
     except Exception as error:
         raise translate(error) from None
@@ -21791,6 +21802,32 @@ def _keep_freq(source: Any, made: Any) -> None:
         made._freq = held
 
 
+def _temporal_insert(index: Any, loc: int, item: Any) -> Any:
+    """`insert` on an index of instants or spans, with the label read the way pandas reads it.
+
+    The label becomes an index of one, at the index's unit, and the three pieces
+    are put back together, which is the core's `append` on columns of one type.
+    """
+    import datetime
+
+    spans = str(index.dtype).startswith("timedelta64")
+    kinds: tuple[type, ...] = (datetime.timedelta,) if spans else (datetime.datetime,)
+    if not (item is None or item is NaT or isinstance(item, (str, *kinds))):
+        # pandas falls back to an index of objects, which firepanda does not hold.
+        raise NotImplementedError(
+            f"insert: a {type(item).__name__} in an index of {index.dtype} makes an index of"
+            " objects in pandas, which firepanda does not hold"
+        )
+    one = type(index)([item], name=index.name)
+    if len(index):
+        one = one.as_unit(index.unit)
+    size = len(index)
+    at = loc + size if loc < 0 else loc
+    if not 0 <= at <= size:
+        raise IndexError(f"index {loc} is out of bounds for axis 0 with size {size}")
+    return index[:at].append([one, index[at:]])
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 
@@ -21862,6 +21899,8 @@ class IndexMixin:
                     _keep_freq(data, self)
             elif isinstance(data, SeriesMixin):
                 self._inner = data._inner.to_index(label)
+                if type(self).__name__ == "Index":
+                    self.__class__ = self._class_of(self._inner)
             elif (moved := _instant_index(data, label)) is not None:
                 # pandas answers a list of instants with a DatetimeIndex, and of
                 # spans with a TimedeltaIndex, so this becomes one.
@@ -21976,6 +22015,9 @@ class IndexMixin:
         Defining this makes the class unhashable, which is what Python does when
         a class defines `__eq__` and not `__hash__`, and is what pandas does too.
         """
+        if self._temporal:
+            # The core holds instants and spans as counts, so a column compares them.
+            return self._compared("__eq__", other)
         mine = self._inner.to_list()
         if isinstance(other, IndexMixin):
             other = other._inner.to_list()
@@ -21988,6 +22030,143 @@ class IndexMixin:
     def __ne__(self, other: Any) -> Any:
         """Elementwise inequality, which is `__eq__` turned over."""
         return [not answer for answer in self.__eq__(other)]
+
+    def _positional(self) -> Series:
+        """The labels as a column on the positions, so two of them line up by place."""
+        from ._frame import _index_to_series
+
+        return _index_to_series(self._inner, None, self._inner.label()).reset_index(drop=True)
+
+    def _operand(self, other: Any, compared: bool = True) -> Any:
+        """The other side of an operator, as a column on the positions when it is an index.
+
+        A comparison needs the lengths to match. Arithmetic broadcasts a list of
+        one, as numpy does under pandas, and names the shapes when it cannot.
+        """
+        from ._frame import Series
+
+        if isinstance(other, (list, tuple)) and not compared and len(other) == 1:
+            return other[0]
+        if isinstance(other, (IndexMixin, list, tuple)) and len(other) != len(self):
+            if compared:
+                raise ValueError("Lengths must match to compare", (len(self),), (len(other),))
+            raise ValueError(
+                "operands could not be broadcast together with shapes"
+                f" ({len(self)},) ({len(other)},) "
+            )
+        if isinstance(other, IndexMixin):
+            return other._positional()
+        if isinstance(other, (list, tuple)):
+            return Series(list(other), name=self._inner.label())
+        return other
+
+    def _compared(self, op: str, other: Any) -> Any:
+        """An elementwise comparison, as the list of bools `__eq__` answers."""
+        answer = getattr(self._positional(), op)(self._operand(other))
+        return answer.tolist()
+
+    def __lt__(self, other: Any) -> Any:
+        """Whether each label is less than the other side, as a list of bools."""
+        return self._compared("__lt__", other)
+
+    def __le__(self, other: Any) -> Any:
+        """Whether each label is at most the other side, as a list of bools."""
+        return self._compared("__le__", other)
+
+    def __gt__(self, other: Any) -> Any:
+        """Whether each label is more than the other side, as a list of bools."""
+        return self._compared("__gt__", other)
+
+    def __ge__(self, other: Any) -> Any:
+        """Whether each label is at least the other side, as a list of bools."""
+        return self._compared("__ge__", other)
+
+    def _arithmetic(self, op: str, other: Any) -> Any:
+        """An elementwise operator, answered as an index, the way pandas answers it.
+
+        The labels go through a column on the positions, which has the operator
+        for every type, and the answer comes back as an index of the column's
+        type, so instants less instants are a TimedeltaIndex. A series on the
+        other side answers a series, which is pandas' rule, so this steps aside.
+        The name is the column's name, which is kept when both sides share it.
+        """
+        from ._frame import Index
+
+        mine = self._positional()
+        if isinstance(other, SeriesMixin):
+            # The labels take the series' labels by position, and the answer is a series.
+            if len(other) != len(self):
+                raise ValueError(
+                    "operands could not be broadcast together with shapes"
+                    f" ({len(self)},) ({len(other)},) "
+                )
+            mine = mine.set_axis(other.index)
+            if other.name != self.name:
+                mine = mine.rename(None)
+            return getattr(mine, op)(other)
+        if isinstance(other, IndexMixin) and other.name != self.name:
+            mine = mine.rename(None)
+        answer = getattr(mine, op)(self._operand(other, compared=False))
+        if answer is NotImplemented:
+            return answer
+        return Index(answer)
+
+    def __add__(self, other: Any) -> Any:
+        return self._arithmetic("__add__", other)
+
+    def __radd__(self, other: Any) -> Any:
+        return self._arithmetic("__radd__", other)
+
+    def __sub__(self, other: Any) -> Any:
+        return self._arithmetic("__sub__", other)
+
+    def __rsub__(self, other: Any) -> Any:
+        return self._arithmetic("__rsub__", other)
+
+    def __mul__(self, other: Any) -> Any:
+        return self._arithmetic("__mul__", other)
+
+    def __rmul__(self, other: Any) -> Any:
+        return self._arithmetic("__rmul__", other)
+
+    def __truediv__(self, other: Any) -> Any:
+        return self._arithmetic("__truediv__", other)
+
+    def __rtruediv__(self, other: Any) -> Any:
+        return self._arithmetic("__rtruediv__", other)
+
+    def __floordiv__(self, other: Any) -> Any:
+        return self._arithmetic("__floordiv__", other)
+
+    def __rfloordiv__(self, other: Any) -> Any:
+        return self._arithmetic("__rfloordiv__", other)
+
+    def __mod__(self, other: Any) -> Any:
+        return self._arithmetic("__mod__", other)
+
+    def __rmod__(self, other: Any) -> Any:
+        return self._arithmetic("__rmod__", other)
+
+    def __pow__(self, other: Any) -> Any:
+        return self._arithmetic("__pow__", other)
+
+    def __rpow__(self, other: Any) -> Any:
+        return self._arithmetic("__rpow__", other)
+
+    def __neg__(self) -> Any:
+        from ._frame import Index
+
+        return Index(-self._positional())
+
+    def __pos__(self) -> Any:
+        from ._frame import Index
+
+        return Index(+self._positional())
+
+    def __abs__(self) -> Any:
+        from ._frame import Index
+
+        return Index(abs(self._positional()))
 
     def copy(self, name: Any = None, deep: bool = False) -> Index:
         """The index again, under a new name if one is given.
@@ -22099,6 +22278,27 @@ class IndexMixin:
 
         kind = self._inner.dtype()
         return CategoricalDtype._of(self.to_series()) if kind == "category" else kind
+
+    @classmethod
+    def _class_of(cls, inner: Any) -> Any:
+        """The class an index made by the core becomes, which is pandas' class for its labels.
+
+        pandas answers labels of instants with a DatetimeIndex and labels of spans
+        with a TimedeltaIndex whatever made them, so a plain `Index` of either
+        becomes one. Any other class stays as asked.
+        """
+        if cls.__name__ != "Index":
+            return cls
+        kind = inner.dtype()
+        if kind.startswith("datetime64"):
+            from ._datetime import DatetimeIndex
+
+            return DatetimeIndex
+        if kind.startswith("timedelta64"):
+            from ._timedelta import TimedeltaIndex
+
+            return TimedeltaIndex
+        return cls
 
     @property
     def _temporal(self) -> bool:
@@ -22743,8 +22943,16 @@ class IndexMixin:
         """
         _no_level(level)
         if isinstance(values, IndexMixin):
-            values = values._inner.to_list()
+            values = values.tolist() if values._temporal else values._inner.to_list()
         wanted = list(values)
+        if self._temporal:
+            # The core holds instants and spans as counts, so they are compared as
+            # labels. pandas finds no text, and finds a missing label only for NaT.
+            missing = any(type(one).__name__ == "NaTType" for one in wanted)
+            return [
+                missing if label is NaT else any(label == one for one in wanted)
+                for label in self.tolist()
+            ]
         if wanted:
             try:
                 return list(self._inner.isin(wanted))
@@ -22825,7 +23033,13 @@ class IndexMixin:
 
         wanted = labels if isinstance(labels, (list, tuple)) else [labels]
         if isinstance(labels, IndexMixin):
-            wanted = labels._inner.to_list()
+            wanted = labels.tolist() if labels._temporal else labels._inner.to_list()
+        if self._temporal:
+            # The core looks up counts, so instants and spans are found by position here.
+            found, missing = self.get_indexer_non_unique(list(wanted))
+            if missing and errors == "raise":
+                raise KeyError(f"{[wanted[at] for at in missing]} not found in axis")
+            return self.delete([at for at in found if at != -1])
         try:
             return Index._wrap(self._inner.drop(list(wanted), errors))
         except Exception as error:
@@ -22841,6 +23055,9 @@ class IndexMixin:
         """
         from ._frame import Index
 
+        if self._temporal:
+            # `where` reads instants and spans, and keeps the labels the mask leaves.
+            return self.where([not m for m in mask], value)
         replacement = value if isinstance(value, (list, tuple)) else [value]
         try:
             return Index._wrap(self._inner.putmask([bool(m) for m in mask], list(replacement)))
@@ -23153,7 +23370,11 @@ class IndexMixin:
         instants, and the mixin cannot see `_wrap`, which the generated half
         writes, so the class goes through a name the checker leaves alone.
         """
-        made: Any = type(self)
+        from ._frame import Index
+
+        # An index of instants whose values became spans is a TimedeltaIndex, so
+        # the class of those comes from what the values are.
+        made: Any = Index if self._temporal else type(self)
         try:
             kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
         except Exception as error:
@@ -25875,9 +26096,8 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     """Reads text or numbers as elapsed times, which is `pandas.to_timedelta`.
 
     One value answers a `Timedelta`, or `NaT` for a missing one, as pandas
-    does. A column answers a column with the same labels and name.
-    A list answers a column too, where pandas answers a `TimedeltaIndex`, for
-    the reason `to_datetime` gives.
+    does. A column answers a column with the same labels and name, and a list,
+    a tuple or an index answers a `TimedeltaIndex`, named after the index.
 
     The unit of the answer follows pandas: text is microseconds, or finer when
     a value needs it, whole numbers are in `unit` or the coarsest of the four
@@ -25885,7 +26105,7 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     takes the finer of microseconds and their units.
 
     Returns:
-        A `Timedelta`, `NaT`, or a column of elapsed times.
+        A `Timedelta`, `NaT`, a column of elapsed times or a `TimedeltaIndex`.
 
     Raises:
         TypeError: For a frame, and for a flag, with pandas' words.
@@ -25944,7 +26164,9 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     built = to_datetime(Series(counts, dtype="int64" if None not in counts else None), unit="ns")
     built = (built - Timestamp(0)).dt.as_unit(target)
     if column is None:
-        return built
+        from ._timedelta import TimedeltaIndex
+
+        return TimedeltaIndex(built, name=arg.name if isinstance(arg, IndexMixin) else None)
     return built.set_axis(column.index).rename(column.name)
 
 

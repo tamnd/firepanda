@@ -255,6 +255,12 @@ class Exposed:
     emits `_wrap` for the internal one and stays out of the way of the public
     one. Document 18 section 5."""
 
+    wrapped_by: str | None = None
+    """A classmethod on the mixin that picks the class `_wrap` makes, from the
+    extension object, or None to make the class `_wrap` is called on. An index
+    of instants is a DatetimeIndex in pandas whichever call made it, and this is
+    how every method that answers an index gets that right in one place."""
+
     bindings: tuple[Binding, ...] = ()
     """The methods on the extension side."""
 
@@ -4035,6 +4041,7 @@ INDEX = Exposed(
     module="firepanda.py.index",
     mixin="IndexMixin",
     constructed=True,
+    wrapped_by="_class_of",
     init_params=(("data", "object"), ("name", "object")),
     bindings=(
         Binding(
@@ -5200,7 +5207,8 @@ def wrapper() -> str:
         out.append("        __init__ because __init__ is the pandas constructor, which takes")
         out.append("        data rather than an extension object.")
         out.append('        """')
-        out.append("        self = object.__new__(cls)")
+        made = f"cls.{t.wrapped_by}(inner)" if t.wrapped_by else "cls"
+        out.append(f"        self = object.__new__({made})")
         out.append("        self._inner = inner")
         out.append("        return self")
         if not t.constructed:
