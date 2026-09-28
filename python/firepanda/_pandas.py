@@ -6666,6 +6666,54 @@ def _aligned_labels(mine: Index, theirs: Index, join: Any) -> Index | None:
     return joined.rename(mine.name)
 
 
+def _zoned_axis(
+    owner: Any, method: str, tz: Any, axis: Any, level: Any, copy: Any, extra: tuple[Any, ...]
+) -> Any:
+    """`tz_localize` or `tz_convert` on a frame's or a series' labels, as pandas does it.
+
+    The labels have to be instants, and the work is the index's own method, so
+    the rules for ambiguous and missing wall times are the index's rules. An
+    empty axis that is not instants becomes an empty index on the clock, which
+    is what pandas does rather than refuse it. `level` can only name the one
+    level there is, because firepanda has no MultiIndex here.
+    """
+    from ._datetime import DatetimeIndex
+
+    if copy is not NO_DEFAULT:
+        warnings.warn(
+            "The copy keyword is deprecated and will be removed in a future"
+            " version. Copy-on-Write is active in pandas since 3.0 which utilizes"
+            " a lazy copy mechanism that defers copies until necessary. Use .copy()"
+            " to make an eager copy if necessary.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    kind = "DataFrame" if hasattr(owner, "columns") else "Series"
+    number = _align_axis(axis, kind, (0, 1) if kind == "DataFrame" else (0,))
+    if number == 1:
+        # Column labels are text in firepanda, so they are never instants.
+        if level not in (None, 0):
+            raise ValueError(f"The level {level} is not valid")
+        if len(owner.columns):
+            raise TypeError("columns is not a valid DatetimeIndex or PeriodIndex")
+        return owner.copy()
+    labels = owner.index
+    if level is not None and level not in (0, labels.name):
+        raise ValueError(f"The level {level} is not valid")
+    if not str(labels.dtype).startswith("datetime64"):
+        if len(labels):
+            raise TypeError("index is not a valid DatetimeIndex or PeriodIndex")
+        # An empty axis of any kind becomes an empty one of instants. The label
+        # column is typed through to_datetime, since an empty list carries no type.
+        from ._frame import Series
+
+        instants = to_datetime(Series([], dtype="str")).dt.tz_localize(tz)
+        return _with_row_labels(owner, instants)
+    else:
+        moved = getattr(DatetimeIndex(labels, name=labels.name), method)(tz, *extra)
+    return _with_row_labels(owner, moved)
+
+
 def _align_axis(axis: Any, owner: str, allowed: tuple[int, ...]) -> int | None:
     """The axis number an `align` was asked for, None for both.
 
@@ -7935,6 +7983,30 @@ class DataFrameMixin(_Carries):
         if memory_usage is None or memory_usage:
             lines.append("memory usage: " + _info_size(int(self.memory_usage().sum())))
         _info_write(lines, buf)
+
+    def tz_localize(
+        self,
+        tz: Any,
+        axis: Any = 0,
+        level: Any = None,
+        copy: Any = NO_DEFAULT,
+        ambiguous: Any = "raise",
+        nonexistent: Any = "raise",
+    ) -> Any:
+        """The same values with the labels on a clock, or taken off one.
+
+        The labels along `axis` have to be instants. `ambiguous` and
+        `nonexistent` are read as `DatetimeIndex.tz_localize` reads them.
+        """
+        return _zoned_axis(self, "tz_localize", tz, axis, level, copy, (ambiguous, nonexistent))
+
+    def tz_convert(self, tz: Any, axis: Any = 0, level: Any = None, copy: Any = NO_DEFAULT) -> Any:
+        """The same values with the labels read against another clock.
+
+        The labels along `axis` have to be instants that are already on a
+        clock, and `tz=None` takes them to UTC and off the clock.
+        """
+        return _zoned_axis(self, "tz_convert", tz, axis, level, copy, ())
 
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> DataFrame:
         """The frame with new row or column labels. `copy` is accepted and unused."""
@@ -12292,6 +12364,30 @@ class SeriesMixin(_Carries):
     def repeat(self, repeats: Any, axis: None = None) -> Series:
         """Each value and its label as many times as `repeats` says, in order."""
         return self.take(_repeated_positions(len(self), repeats, axis))
+
+    def tz_localize(
+        self,
+        tz: Any,
+        axis: Any = 0,
+        level: Any = None,
+        copy: Any = NO_DEFAULT,
+        ambiguous: Any = "raise",
+        nonexistent: Any = "raise",
+    ) -> Any:
+        """The same values with the labels on a clock, or taken off one.
+
+        The labels along `axis` have to be instants. `ambiguous` and
+        `nonexistent` are read as `DatetimeIndex.tz_localize` reads them.
+        """
+        return _zoned_axis(self, "tz_localize", tz, axis, level, copy, (ambiguous, nonexistent))
+
+    def tz_convert(self, tz: Any, axis: Any = 0, level: Any = None, copy: Any = NO_DEFAULT) -> Any:
+        """The same values with the labels read against another clock.
+
+        The labels along `axis` have to be instants that are already on a
+        clock, and `tz=None` takes them to UTC and off the clock.
+        """
+        return _zoned_axis(self, "tz_convert", tz, axis, level, copy, ())
 
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
