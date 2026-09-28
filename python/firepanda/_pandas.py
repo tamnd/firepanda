@@ -8477,7 +8477,6 @@ class DataFrameMixin(_Carries):
         which is the divergence `columns` carries rather than a new one, and
         this is one more place it shows.
         """
-        from ._frame import Index
 
         return [self.index, self._inner.names()]
 
@@ -13074,7 +13073,6 @@ class SeriesMixin(_Carries):
         two are the same member because a frame and a column are both mappings,
         differing in what they are a mapping of.
         """
-        from ._frame import Index
 
         return self.index
 
@@ -13087,7 +13085,6 @@ class SeriesMixin(_Carries):
         which is the only reason this member exists on a class that has exactly
         one axis and a member called `index` that answers it.
         """
-        from ._frame import Index
 
         return [self.index]
 

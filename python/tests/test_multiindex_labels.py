@@ -12,9 +12,9 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from firepanda._levels import read, written
 
 import firepanda as fp
-from firepanda._levels import read, written
 
 pd = pytest.importorskip("pandas")
 
