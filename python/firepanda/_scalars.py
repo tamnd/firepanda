@@ -64,18 +64,12 @@ scalar unless numpy is already imported. That does not work here. `to_numpy`,
 produce one out of an install that has no numpy in it. So those three import it
 when called and say plainly what is missing when the import fails.
 
-### Where these stop short of pandas, which is four places and no more
+### Where these stop short of pandas, which is three places and no more
 
 Every other answer in this file was compared against a running pandas 3.0.3 and
-matches it, including which exception class comes out. Four do not, and they are
+matches it, including which exception class comes out. Three do not, and they are
 written down here because a list of known differences is worth more than a
 promise of none.
-
-`NaT` does not exist. pandas turns `Timestamp(None)` and `Timedelta(None)` into
-a missing value singleton that is equal to nothing including itself, and there
-is no such object here yet, so both of those inputs are refused. A missing
-temporal value inside a column is an Arrow null and works; a missing one on its
-own has nowhere to go.
 
 A moment past the year 9999 is out of range. pandas will build one, because its
 `Timestamp` says it is a `datetime` and is not really one, so `Timestamp(1600000000,
@@ -633,6 +627,8 @@ class Timestamp(_datetime.datetime):
             TypeError: If the two forms are mixed, or the input names no moment.
             ValueError: If the text does not parse.
         """
+        if year is None and _nat_input(ts_input) and type(ts_input).__name__ != "timedelta64":
+            return NaT  # type: ignore[return-value]
         zone = _zone(tz if tz is not _KEEP else tzinfo)
         if ts_input is _KEEP or (isinstance(ts_input, int) and year is not None):
             return cls._from_fields(
@@ -1672,6 +1668,33 @@ class Timestamp(_datetime.datetime):
                     base += f"{gap}{seconds:02d}"
         return base
 
+    # The comparisons are `datetime`'s own, except against `NaT`, which is a
+    # `datetime` too and would otherwise be read as the first moment of year 1.
+
+    def __eq__(self, other: object) -> bool:
+        """Equality, which is False against `NaT`."""
+        return other is not NaT and _datetime.datetime.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        """Inequality, which is True against `NaT`."""
+        return other is NaT or _datetime.datetime.__ne__(self, other)
+
+    def __lt__(self, other: Any) -> Any:
+        """Before, which is False against `NaT`."""
+        return False if other is NaT else _datetime.datetime.__lt__(self, other)
+
+    def __le__(self, other: Any) -> Any:
+        """At or before, which is False against `NaT`."""
+        return False if other is NaT else _datetime.datetime.__le__(self, other)
+
+    def __gt__(self, other: Any) -> Any:
+        """After, which is False against `NaT`."""
+        return False if other is NaT else _datetime.datetime.__gt__(self, other)
+
+    def __ge__(self, other: Any) -> Any:
+        """At or after, which is False against `NaT`."""
+        return False if other is NaT else _datetime.datetime.__ge__(self, other)
+
     def __hash__(self) -> int:
         """The hash, which agrees with equality on both sides of the nanosecond.
 
@@ -1716,6 +1739,8 @@ class Timestamp(_datetime.datetime):
         Returns:
             The difference, or NotImplemented.
         """
+        if other is NaT:
+            return NaT
         if isinstance(other, _datetime.datetime):
             mine = self._total
             theirs = other._total if isinstance(other, Timestamp) else self._epoch(other)
@@ -1783,6 +1808,8 @@ class Timedelta(_datetime.timedelta):
         """
         if value is _KEEP:
             return cls._from_nanos(*cls._from_fields(kwargs))
+        if _nat_input(value) and type(value).__name__ != "datetime64":
+            return NaT  # type: ignore[return-value]
         # The named fields are dropped rather than refused when a value is given
         # too, because that is what pandas does with them: `Timedelta(1, "s",
         # days=1)` is one second there and the day goes nowhere. Refusing would
@@ -2432,6 +2459,245 @@ Timedelta.max = Timedelta._from_nanos(9_223_372_036_854_775_807, "ns")
 """The largest span a nanosecond count reaches, about 106751 days."""
 
 
+_NAT_VALUE = -9_223_372_036_854_775_808
+"""The count pandas keeps for a missing moment, the smallest 64 bit integer."""
+
+_NAT_TEXT = frozenset({"nat", "", "nan"})
+"""Text that `Timestamp` and `Timedelta` read as a missing value, compared lowered."""
+
+
+def _nat_input(value: Any) -> bool:
+    """Whether a value handed to `Timestamp` or `Timedelta` names a missing one.
+
+    That is None, a float NaN, `NaT` itself, the text `NaT`, `nan` or nothing
+    in any case, and numpy's own missing moment and span.
+    """
+    if value is None or value is NaT:
+        return True
+    if isinstance(value, float):
+        return value != value
+    if isinstance(value, str):
+        return value.lower() in _NAT_TEXT
+    if type(value).__module__ == "numpy" and type(value).__name__ in ("datetime64", "timedelta64"):
+        return str(value) == "NaT"
+    return type(value).__name__ == "NAType"
+
+
+def _unsupported(name: str) -> Any:
+    """A method of `datetime` that `NaT` refuses, in pandas' words."""
+
+    def refused(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise ValueError(f"NaTType does not support {name}")
+
+    refused.__name__ = name
+    refused.__doc__ = f"Refused, since a missing moment has no {name}."
+    return refused
+
+
+def _nat_answer(self: Any, *args: Any, **kwargs: Any) -> Any:
+    """`NaT` again, since a missing moment moved or converted is still missing."""
+    return NaT
+
+
+def _nan_answer(self: Any, *args: Any, **kwargs: Any) -> float:
+    """A NaN, since a missing moment has no field to read."""
+    return float("nan")
+
+
+class NaTType(_datetime.datetime):
+    """The missing moment and the missing span, which is `pandas.NaT`.
+
+    There is one of it, as there is one None. It is a `datetime`, as pandas'
+    is, so code that asks `isinstance(value, datetime)` of a cell read out of a
+    column of moments gets the same answer for a gap. It is equal to nothing,
+    itself included, and it orders before and after nothing, so every
+    comparison with a moment or a span is False. Adding, subtracting,
+    multiplying or dividing it answers it again, except dividing it by a span,
+    which is a NaN. Its fields are NaN, its flags are False, and the methods
+    that would need a real moment refuse with pandas' words.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls) -> NaTType:
+        """The one missing value, which is `NaT`."""
+        return NaT
+
+    def __reduce_ex__(self, protocol: Any) -> tuple[Any, tuple[()]]:
+        """Pickles as the one missing value, so it unpickles as `NaT` itself."""
+        return (NaTType, ())
+
+    def __copy__(self) -> NaTType:
+        """Itself, since there is one."""
+        return self
+
+    def __deepcopy__(self, memo: Any) -> NaTType:
+        """Itself, since there is one."""
+        return self
+
+    def __repr__(self) -> str:
+        """`NaT`, which is what pandas prints."""
+        return "NaT"
+
+    __str__ = __repr__
+
+    def __format__(self, spec: str) -> str:
+        """`NaT` with no format, and refused with one, since there are no fields to write."""
+        if spec:
+            raise ValueError("NaTType does not support strftime")
+        return "NaT"
+
+    def isoformat(self, *args: Any, **kwargs: Any) -> str:
+        """`NaT`, as pandas writes a missing moment."""
+        return "NaT"
+
+    def __hash__(self) -> int:
+        """The hash pandas gives it, which is the count it keeps for a gap."""
+        return _NAT_VALUE
+
+    def __eq__(self, other: object) -> bool:
+        """False, whatever the other side is, since a gap is equal to nothing."""
+        return False
+
+    def __ne__(self, other: object) -> bool:
+        """True, whatever the other side is."""
+        return True
+
+    def _ordered(self, other: Any) -> Any:
+        """False against a moment, a span or a gap, and refused against anything else."""
+        if isinstance(other, (_datetime.datetime, _datetime.timedelta)):
+            return False
+        if isinstance(other, _datetime.date):
+            raise TypeError(f"Cannot compare NaT with {type(other).__module__}.date object")
+        return NotImplemented
+
+    def __lt__(self, other: Any) -> Any:
+        """False against a moment or a span. See `_ordered`."""
+        return self._ordered(other)
+
+    def __le__(self, other: Any) -> Any:
+        """False against a moment or a span. See `_ordered`."""
+        return self._ordered(other)
+
+    def __gt__(self, other: Any) -> Any:
+        """False against a moment or a span. See `_ordered`."""
+        return self._ordered(other)
+
+    def __ge__(self, other: Any) -> Any:
+        """False against a moment or a span. See `_ordered`."""
+        return self._ordered(other)
+
+    @staticmethod
+    def _whole(other: Any) -> bool:
+        """Whether a value is a whole number and not a flag."""
+        return isinstance(other, int) and not isinstance(other, bool)
+
+    @staticmethod
+    def _number(other: Any) -> bool:
+        """Whether a value is a whole or a floating point number and not a flag."""
+        return isinstance(other, int | float) and not isinstance(other, bool)
+
+    def __add__(self, other: Any) -> Any:
+        """`NaT` plus a moment, a span or a whole number is `NaT`."""
+        if isinstance(other, (_datetime.datetime, _datetime.timedelta)) or self._whole(other):
+            return NaT
+        return NotImplemented
+
+    __radd__ = __add__
+    __sub__ = __add__
+    __rsub__ = __add__
+
+    def __mul__(self, other: Any) -> Any:
+        """`NaT` times a number is `NaT`."""
+        return NaT if self._number(other) else NotImplemented
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other: Any) -> Any:
+        """Divided by a span it is a NaN, and by a number it is `NaT`."""
+        if isinstance(other, (_datetime.timedelta, NaTType)):
+            return float("nan")
+        return NaT if self._number(other) else NotImplemented
+
+    __floordiv__ = __truediv__
+
+    def __rtruediv__(self, other: Any) -> Any:
+        """A span divided by `NaT` is a NaN."""
+        return float("nan") if isinstance(other, _datetime.timedelta) else NotImplemented
+
+    __rfloordiv__ = __rtruediv__
+
+    def __neg__(self) -> NaTType:
+        """`NaT`."""
+        return NaT
+
+    __pos__ = __neg__
+
+    def __abs__(self) -> NaTType:
+        """Refused, as pandas refuses it."""
+        raise TypeError("bad operand type for abs(): 'NaTType'")
+
+    value = property(lambda self: _NAT_VALUE, doc="The count pandas keeps for a gap.")
+    _value = value
+    tz = property(lambda self: None, doc="None, since a gap has no zone.")
+    tzinfo = tz  # type: ignore[assignment]
+    fold = property(lambda self: 0, doc="0, as for any moment that is not a repeated hour.")
+
+    date = _nat_answer  # type: ignore[assignment]
+    to_pydatetime = _nat_answer
+    now = _nat_answer  # type: ignore[assignment]
+    today = _nat_answer  # type: ignore[assignment]
+    floor = _nat_answer
+    ceil = _nat_answer
+    round = _nat_answer
+    tz_localize = _nat_answer
+    tz_convert = _nat_answer
+    replace = _nat_answer  # type: ignore[assignment]
+    as_unit = _nat_answer
+
+    day_name = _nan_answer
+    month_name = _nan_answer
+    weekday = _nan_answer  # type: ignore[assignment]
+    isoweekday = _nan_answer  # type: ignore[assignment]
+    total_seconds = _nan_answer
+
+    def to_datetime64(self) -> Any:
+        """numpy's missing moment, in nanoseconds."""
+        return _numpy("NaT.to_datetime64").datetime64("NaT", "ns")
+
+    def to_numpy(self, dtype: Any = None, copy: bool = False) -> Any:
+        """numpy's missing moment, in nanoseconds or in the type asked for."""
+        numpy = _numpy("NaT.to_numpy")
+        return numpy.datetime64("NaT", "ns") if dtype is None else numpy.array("NaT", dtype)[()]
+
+    asm8 = property(to_datetime64, doc="numpy's missing moment, in nanoseconds.")
+
+
+for _field in (
+    "year", "month", "day", "hour", "minute", "second", "millisecond", "microsecond",
+    "nanosecond", "qyear", "dayofweek", "day_of_week", "dayofyear", "day_of_year",
+    "quarter", "week", "weekofyear", "days_in_month", "daysinmonth", "days", "seconds",
+    "microseconds", "nanoseconds",
+):  # fmt: skip
+    setattr(NaTType, _field, property(_nan_answer, doc="A NaN, since a gap has no fields."))
+
+for _flag in (
+    "is_leap_year", "is_month_start", "is_month_end", "is_quarter_start",
+    "is_quarter_end", "is_year_start", "is_year_end",
+):  # fmt: skip
+    setattr(NaTType, _flag, property(lambda self: False, doc="False, since a gap is no day."))
+
+for _name in (
+    "astimezone", "combine", "ctime", "dst", "isocalendar", "strftime", "time",
+    "timestamp", "timetuple", "timetz", "toordinal", "tzname", "utcnow", "utcoffset",
+    "utctimetuple",
+):  # fmt: skip
+    setattr(NaTType, _name, _unsupported(_name))
+
+NaT: NaTType = _datetime.datetime.__new__(NaTType, 1, 1, 1)
+"""The missing moment and the missing span, which is `pandas.NaT`."""
+
+
 class _Resolution:
     """The smallest step a scalar can take, which depends on the scalar.
 
@@ -2565,7 +2831,7 @@ def _inward(values: list[Any]) -> tuple[list[Any], str, str] | None:
     which is the one road into the extension that is written for them.
 
     Args:
-        values: The list, with None for a missing value.
+        values: The list, with None or `NaT` for a missing value.
 
     Returns:
         The counts, `"moment"` or `"span"`, and the type to build, or None when
@@ -2575,6 +2841,12 @@ def _inward(values: list[Any]) -> tuple[list[Any], str, str] | None:
         InvalidArgumentError: For moments with different zones, or some with a
             zone and some without, which pandas refuses as well.
     """
+    if any(value is NaT for value in values):
+        # `NaT` is a gap, and a list of nothing else is a column of moments in
+        # seconds, which is what pandas builds for it.
+        values = [None if value is NaT else value for value in values]
+        if all(value is None for value in values):
+            return values, "moment", "datetime64[s]"
     present = [value for value in values if value is not None]
     if not present:
         return None

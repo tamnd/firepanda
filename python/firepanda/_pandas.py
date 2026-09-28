@@ -42,7 +42,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _config, _firepanda, _row_dates, _row_formats
-from ._scalars import _inward, _outward, _outward_one, _temporal, _zone_name
+from ._scalars import NaT, _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
     DataError,
@@ -139,11 +139,16 @@ def _gapped(values: list[Any], dtype: str) -> list[Any]:
     gap is a float column there, so both hand out `nan`. A text column in
     pandas 3 carries its gaps as NaN too, and so does a category column. A
     column of flags with a gap is an object column there and hands out None, as
-    it does here. Every other type keeps None.
+    it does here. A moment or a span hands out `NaT`, and every other type
+    keeps None.
     """
-    if not dtype.startswith(_NAN_GAPS) or None not in values:
+    if None not in values:
         return values
-    return [math.nan if value is None else value for value in values]
+    if dtype.startswith(_NAN_GAPS):
+        return [math.nan if value is None else value for value in values]
+    if dtype.startswith(("datetime64", "timedelta64")):
+        return [NaT if value is None else value for value in values]
+    return values
 
 
 def _named_as[Column](column: Column, name: Any) -> Column:
@@ -235,6 +240,9 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
 
     if not isinstance(other, (datetime.datetime, datetime.timedelta)):
         return other
+    if other is NaT and str(owner.dtype).startswith("timedelta64"):
+        # pandas reads `NaT` beside a span as a missing span, so the answer stays a span.
+        return owner.where(Series([False] * len(owner), index=owner.index))
     return Series([other] * len(owner), index=owner.index, name=owner.name)
 
 
@@ -304,7 +312,8 @@ def _unwrapped(values: Any) -> Any:
 
     A series or an index is read with None for its gaps, and a NaN among
     text is a gap, as it is in pandas, which reads `["a", nan]` as
-    a text column with one value missing, so it becomes None. Only asked for
+    a text column with one value missing, so it becomes None, as `NaT` does
+    anywhere. Only asked for
     after the extension has refused the sequence, so a list of plain values
     pays nothing for it.
     """
@@ -318,6 +327,8 @@ def _unwrapped(values: Any) -> Any:
             value.item() if type(value).__module__ == "numpy" and hasattr(value, "item") else value
             for value in values
         ]
+    if any(value is NaT for value in values):
+        values = [None if value is NaT else value for value in values]
     if any(isinstance(value, str) for value in values) and any(
         isinstance(value, float) and value != value for value in values
     ):
@@ -2380,9 +2391,9 @@ def _isin_nulls(printed: str, values: list[Any]) -> bool:
 
     pandas has a different missing value per dtype and matches each column against its own. A float
     column finds `nan` and does not find `None`, a column of words finds both, and a `datetime64`
-    column finds neither because it wants `NaT`. firepanda has one missing value underneath all of
-    them, so the distinction cannot come from the column and is read off the set instead, which
-    lands on the same answer for every case pandas has an answer for.
+    column finds neither because it wants `NaT`, and finds that. firepanda has one missing value
+    underneath all of them, so the distinction cannot come from the column and is read off the set
+    instead, which lands on the same answer for every case pandas has an answer for.
 
     Args:
         printed: The column's type as `dtype` spells it.
@@ -2397,6 +2408,8 @@ def _isin_nulls(printed: str, values: list[Any]) -> bool:
         return none or nan
     if printed in _FLOATING:
         return nan
+    if printed.startswith(("datetime64", "timedelta64", "timestamp")):
+        return any(value is NaT for value in values)
     return False
 
 
@@ -2423,13 +2436,18 @@ def _isin_mask(column: Any, values: list[Any]) -> Any:
         keep: list[Any] = list(_isin_codes(column, values))
         against = looked.dtype()
     else:
-        _isin_no_timestamps(printed, values)
+        # `NaT` is the gap of a moment or a span, and finds it through `_isin_nulls` below.
+        present = [value for value in values if value is not NaT]
+        _isin_no_timestamps(printed, present)
         looked = inner
-        keep = _isin_wanted(printed, values)
+        keep = _isin_wanted(printed, present)
         against = printed
     try:
-        mask = looked.is_in(Series(keep)._inner.cast(against, True))
-        mask = mask.fill_null(Series([False])._inner)
+        if keep:
+            mask = looked.is_in(Series(keep)._inner.cast(against, True))
+            mask = mask.fill_null(Series([False])._inner)
+        else:
+            mask = Series([False] * len(column), index=column.index)._inner
         if _isin_nulls(printed, values):
             # A float column can hold a real nan as well as a missing row, and the kernel answers
             # false for the nan because a nan is not equal to itself. pandas finds both, so both
@@ -4329,6 +4347,17 @@ def _matched(inner: Any, old: Any) -> Any:
     """
     if _nothing(old):
         return inner.transform("isna", 0)
+    if isinstance(old, (datetime.datetime, datetime.timedelta)):
+        # The extension compares a column with a number or a column, so a
+        # moment or a span is looked for the way `==` looks for it.
+        from ._frame import Series
+
+        if _temporal(inner.dtype()) is None:
+            return None
+        try:
+            return _no_gaps((Series._wrap(inner) == old)._inner)
+        except Exception:
+            return None
     try:
         flags = inner.binary_value(old, "eq", False)
     except Exception as error:
@@ -6278,9 +6307,10 @@ def _held_type(values: list[Any]) -> str | None:
 def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
     """A column with `apply` called on each value, the labels and name kept.
 
-    A missing value reaches `apply` as NaN, as pandas hands it over, or stays
-    missing without a call when `na_action` is `"ignore"`. The answer's type is
-    read from what came back, the way the constructor reads a list.
+    A missing value reaches `apply` as NaN, or `NaT` in a temporal column, as
+    pandas hands it over, or stays missing without a call when `na_action` is
+    `"ignore"`. The answer's type is read from what came back, the way the
+    constructor reads a list.
 
     Raises:
         InvalidArgumentError: For an `na_action` pandas does not know.
@@ -6299,7 +6329,7 @@ def _mapped(column: Any, apply: Callable[[Any], Any], na_action: Any) -> Any:
         )
     if len(column) == 0:
         return column.copy()
-    gap = None if printed.startswith("datetime64") else math.nan
+    gap = NaT if printed.startswith(("datetime64", "timedelta64")) else math.nan
     answers = []
     for value in column.tolist():
         if _missing(value):
@@ -12781,9 +12811,8 @@ class SeriesMixin:
         than about the reduction, so the kernel runs as it always does and the
         rule is applied to what comes back. pandas answers NaN for either one,
         on an integer column as well, and runs the reduction first, so a column
-        the reduction cannot read still raises the reduction's own error. The
-        one gap left is a temporal column with `skipna=False`, where pandas
-        answers `NaT` and firepanda has no `NaT` to hand back.
+        the reduction cannot read still raises the reduction's own error. A
+        temporal column answers `NaT` where any other answers NaN, as in pandas.
         """
         _reducing_axis(axis, "Series")
         skipna = _flag("skipna", skipna)
@@ -12807,18 +12836,13 @@ class SeriesMixin:
             raise
         except Exception as error:
             raise translate(error) from None
+        gap = NaT if self.dtype.startswith(("datetime", "timedelta")) else float("nan")
         if not skipna and self.hasnans:
-            if self.dtype.startswith(("datetime", "timedelta")):
-                raise UnsupportedError(
-                    "skipna=False is not supported yet on a temporal column with a"
-                    " missing value, because pandas answers NaT there and firepanda"
-                    " has no NaT to hand back"
-                )
-            return float("nan")
+            return gap
         if min_count > 0 and self.count() < min_count:
-            return float("nan")
+            return gap
         if answer is None:
-            return float("nan")
+            return gap
         return _reduced_outward(answer, kind, self.dtype)
 
     def kurt(
@@ -18723,11 +18747,15 @@ class IndexMixin:
             KeyError: For a key that is not there, or not an instant or a span.
         """
         values = self.to_series()
-        bounds = _temporal_bounds(values, key, False)
-        if bounds is None:
-            raise KeyError(key)
-        start, end, period = bounds
-        hits = ((values >= start) & (values < end)).tolist()
+        if key is NaT:
+            # `NaT` finds the missing labels, as in pandas.
+            hits, period = values.isna().tolist(), False
+        else:
+            bounds = _temporal_bounds(values, key, False)
+            if bounds is None:
+                raise KeyError(key)
+            start, end, period = bounds
+            hits = ((values >= start) & (values < end)).tolist()
         found = [i for i, hit in enumerate(hits) if hit]
         rising = self.is_monotonic_increasing
         if period:
@@ -20479,7 +20507,7 @@ def isna(obj: Any) -> Any:
             "firepanda:unsupported: isna on a list answers a numpy array in pandas and "
             "numpy is not a firepanda dependency, so pass a Series"
         )
-    return obj is None or (isinstance(obj, float) and obj != obj)
+    return obj is None or obj is NaT or (isinstance(obj, float) and obj != obj)
 
 
 def notna(obj: Any) -> Any:
@@ -22405,8 +22433,8 @@ def qcut(
 def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     """Reads text or numbers as elapsed times, which is `pandas.to_timedelta`.
 
-    One value answers a `Timedelta`, or None for a missing one where pandas
-    answers `NaT`. A column answers a column with the same labels and name.
+    One value answers a `Timedelta`, or `NaT` for a missing one, as pandas
+    does. A column answers a column with the same labels and name.
     A list answers a column too, where pandas answers a `TimedeltaIndex`, for
     the reason `to_datetime` gives.
 
@@ -22415,7 +22443,7 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     units that holds it, and floats and anything mixed are nanoseconds.
 
     Returns:
-        A `Timedelta`, None, or a column of elapsed times.
+        A `Timedelta`, `NaT`, or a column of elapsed times.
 
     Raises:
         TypeError: For a frame, and for a flag, with pandas' words.
@@ -22452,7 +22480,8 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
             raise
 
     if not _list_like(arg):
-        return read(arg, True)
+        answer = read(arg, True)
+        return NaT if answer is None else answer
     column = arg if isinstance(arg, Series) else None
     if column is not None and str(column.dtype).startswith("timedelta"):
         return column
@@ -22573,7 +22602,7 @@ def to_datetime(
 
     What it answers follows what it is handed, as in pandas: a column for a
     column, a `DatetimeIndex` for a list, a tuple or an index, and a
-    `Timestamp` for a single value, or None where pandas answers `NaT`.
+    `Timestamp` for a single value, or `NaT` for a missing one.
 
     The format is worked out from the first row that is not missing, and only
     ISO 8601 is recognised. pandas guesses more than that, including
@@ -23125,7 +23154,7 @@ def _text_values(
     pandas writes a gap in its nullable integer and boolean columns.
     """
     dtype = str(column.dtype)
-    values = column.tolist()
+    values = _held_values(column._inner)
     if dtype.startswith("float"):
         return _text_floats(values, formatter, float_format, na_rep, decimal, leading, justify)
     if dtype.startswith("datetime64"):
@@ -23584,7 +23613,7 @@ def _index_text(index: Any) -> str:
         klass = "Index"
     else:
         return repr(index._inner)
-    values = index.tolist()
+    values = _held_values(index._inner)
     present = [v for v in values if not _missing(v)]
     if klass == "DatetimeIndex":
         dates = "," not in dtype and all(

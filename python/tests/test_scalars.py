@@ -1172,19 +1172,10 @@ def test_throwing_the_nanoseconds_away_says_so_the_way_pandas_says_so(
 
 
 @needs_pandas
-def test_the_two_things_pandas_turns_into_nat_are_refused_here(firepanda: ModuleType) -> None:
-    """firepanda has no NaT, so the input that makes one has nowhere to go.
-
-    This is asserted rather than worked around because it is a gap and not a
-    decision. A missing temporal value inside a column is an Arrow null and that
-    works; a missing temporal value as a scalar needs a singleton that is equal
-    to nothing including itself, and there is not one. Until there is, refusing
-    with a clear class beats returning None and letting it travel.
-    """
-    with pytest.raises(TypeError):
-        firepanda.Timestamp(None)
-    with pytest.raises(ValueError):
-        firepanda.Timedelta(None)
+def test_the_two_things_pandas_turns_into_nat_answer_nat(firepanda: ModuleType) -> None:
+    """`Timestamp(None)` and `Timedelta(None)` are the one missing value, as in pandas."""
+    assert firepanda.Timestamp(None) is firepanda.NaT
+    assert firepanda.Timedelta(None) is firepanda.NaT
 
 
 @needs_pandas

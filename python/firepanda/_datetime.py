@@ -39,6 +39,7 @@ from ._pandas import (
     NO_DEFAULT,
     _beyond_nanoseconds,
     _held_at,
+    _held_values,
     _instants,
     _is_default,
     _label_of,
@@ -155,7 +156,7 @@ class DatetimeIndex(Index):
             except Exception as error:
                 raise translate(error) from None
             return
-        values: Any = data.tolist() if isinstance(data, Index) else data
+        values: Any = _held_values(data._inner) if isinstance(data, Index) else data
         if not isinstance(values, Series) or not _is_temporal(values.dtype):
             values = _instants(
                 values, "raise", dayfirst, yearfirst, False, "mixed", NO_DEFAULT, None, "unix"
@@ -481,7 +482,7 @@ class DatetimeIndex(Index):
     def _labels(self) -> list[Any]:
         """The labels as timestamps, with None for a missing one."""
         try:
-            return list(self.tolist())
+            return list(_held_values(self._inner))
         except Exception as error:
             raise translate(error) from None
 

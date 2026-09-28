@@ -30,6 +30,7 @@ from ._date_range import _UNITS, _frequency, _points
 from ._frame import DataFrame, Index, Series
 from ._pandas import (
     NO_DEFAULT,
+    _held_values,
     _label_of,
     _span_column,
     _span_frame,
@@ -105,7 +106,7 @@ class TimedeltaIndex(Index):
             except Exception as error:
                 raise translate(error) from None
             return
-        values: Any = data.tolist() if isinstance(data, Index) else data
+        values: Any = _held_values(data._inner) if isinstance(data, Index) else data
         if not isinstance(values, Series):
             values = Series(values)
         if not _is_span(values.dtype):
@@ -117,7 +118,7 @@ class TimedeltaIndex(Index):
 
     def _field(self, field: str) -> Index:
         """One field of every label, as pandas reads it off a span."""
-        values = _span_column(_span_parts(self.tolist()), field)
+        values = _span_column(_span_parts(_held_values(self._inner)), field)
         whole = "int64" if field == "days" else "int32"
         return Index(Series(values, name=self.name, dtype=_span_type(values, whole)))
 
@@ -144,7 +145,7 @@ class TimedeltaIndex(Index):
     @property
     def components(self) -> DataFrame:
         """Every label cut into days down to nanoseconds, one column each."""
-        parts = _span_parts(self.tolist())
+        parts = _span_parts(_held_values(self._inner))
         return _span_frame(parts, list(range(len(parts))))
 
     def total_seconds(self) -> Index:
@@ -160,7 +161,9 @@ class TimedeltaIndex(Index):
     def asi8(self) -> list[Any]:
         """Every label as the whole number it is stored as, in its own unit."""
         scale = _UNITS[self.unit]
-        return [None if value is None else value.value // scale for value in self.tolist()]
+        return [
+            None if value is None else value.value // scale for value in _held_values(self._inner)
+        ]
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""
@@ -168,7 +171,11 @@ class TimedeltaIndex(Index):
 
     def _column(self) -> Series:
         """The labels as a column of spans."""
-        return Series(self.tolist(), name=self.name).pipe(to_timedelta).dt.as_unit(self.unit)
+        return (
+            Series(_held_values(self._inner), name=self.name)
+            .pipe(to_timedelta)
+            .dt.as_unit(self.unit)
+        )
 
 
 _CLOSED = (None, "left", "right")
