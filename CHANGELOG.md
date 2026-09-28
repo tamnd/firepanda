@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Writing into a series with s[key] = value, loc, iloc, at and iat
+
+A series now takes writes as pandas 3 does. A label, a list of labels, a slice, a mask, or a position through `iloc` and `iat` picks the rows, and one value, a list, or a series goes in. A series is lined up on the labels under `loc` and a mask, and read by position under `iloc`. A value that does not fit the column raises pandas' `TypeError`, a gap widens whole numbers to float64, and `loc`, `at` or `s[label]` with a new label puts a row on the end. The write rebinds the series, so copies taken before keep their values.
+
 ### Added: kurt of a float column summed in pandas' order
 
 `Series.kurt` and `DataFrame.kurt` on a float column now take pandas' `nankurt` sums in numpy when numpy is installed, over the whole column with its gaps as zeros, as pandas does. Far from zero the fourth moment moves with the order of adding, and at values near 4.6e18 with a spread of 4e9 two orders differ by 2e-7, which is more than pandas' own distance from the exact answer, so only the same order agrees. Without numpy the answer comes from the column's own sums as before, and whole number columns keep the exact shift from their least value.
