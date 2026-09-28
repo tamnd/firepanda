@@ -1097,9 +1097,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var offsets = List[Int]()
         var fixed = 0
         for i in range(len(self.columns)):
-            if self.columns[i].num_chunks() == 1 and not self.columns[i].chunks[
-                0
-            ].is_string():
+            if (
+                self.columns[i].num_chunks() == 1
+                and not self.columns[i].chunks[0].is_string()
+            ):
                 fixed += 1
         if fixed > 1 and len(mask) >= PARALLEL_FILTER_ROWS:
             offsets = filter_offsets(mask)

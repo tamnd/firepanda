@@ -519,9 +519,10 @@ struct _TextStore(Movable):
         if count <= INLINE_CAPACITY:
             # A short view is zero padded, so its second word is the rest of
             # the key and nothing else.
-            return head.unsafe_offset(1).unsafe_load() == row.unsafe_offset(
-                1
-            ).unsafe_load()
+            return (
+                head.unsafe_offset(1).unsafe_load()
+                == row.unsafe_offset(1).unsafe_load()
+            )
         return _bytes_equal(
             col.unsafe_bytes(i),
             Span[UInt8, ImmutAnyOrigin](
