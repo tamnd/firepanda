@@ -254,19 +254,10 @@ def test_a_key_that_is_neither_a_column_nor_values_is_a_key_error(firepanda: Mod
         firepanda.DataFrame(DATA).groupby(0)
 
 
-@pytest.mark.parametrize(
-    ("arguments", "expected"),
-    [
-        ({"level": 0}, "level"),
-        ({"observed": False}, "observed"),
-    ],
-)
-def test_a_declared_grouping_argument_that_is_not_implemented_refuses(
-    firepanda: ModuleType, arguments: dict[str, Any], expected: str
-) -> None:
+def test_a_key_and_a_level_together_refuse(firepanda: ModuleType) -> None:
     """By name, with the reason in the message, rather than being ignored."""
-    with pytest.raises(NotImplementedError, match=expected):
-        firepanda.DataFrame(DATA).groupby("k", **arguments)
+    with pytest.raises(NotImplementedError, match="level"):
+        firepanda.DataFrame(DATA).groupby("k", level=0)
 
 
 @pytest.mark.parametrize(
