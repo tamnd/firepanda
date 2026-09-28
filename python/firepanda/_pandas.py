@@ -12902,7 +12902,16 @@ class SeriesMixin:
         _kurt_refusal(self.dtype)
         if not skipna and self.hasnans:
             return math.nan
-        return _kurtosis(self.dropna().astype("float64"))
+        values = self.dropna()
+        if str(values.dtype) in _SIGNED and len(values):
+            # A kurtosis does not move when a constant is added, so whole numbers
+            # are measured from their least as whole numbers, which is exact, and
+            # only the difference is cast. Near two to the sixty two the cast
+            # alone would move each value by up to 512, as `skew` avoids too.
+            least, most = int(values.min()), int(values.max())
+            if most - least < 2**63:
+                values = values - least
+        return _kurtosis(values.astype("float64"))
 
     kurtosis = kurt
 

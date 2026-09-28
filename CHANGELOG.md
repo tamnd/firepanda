@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Exact kurtosis of whole numbers far from zero
+
+`Series.kurt` and `DataFrame.kurt` on a whole number column now measure the values from the column's least value as whole numbers before the cast to float, as `skew` already does. On values near two to the sixty two the cast alone moved each value by up to 512 and the kurtosis in its seventh digit. The answer is now within a few bits of exact arithmetic, and within the suite's tolerance of pandas.
+
 ### Added: Names and text read from a DatetimeIndex with a gap
 
 `day_name`, `month_name` and `strftime` on a `DatetimeIndex` with a gap raised since the gap handling for whole number parts, because the text went through the float path. They now answer the text with the gap shown as NaN, as pandas does. `time`, `timetz` and `to_pydatetime` hand out `NaT` for a gap where they handed out None.
