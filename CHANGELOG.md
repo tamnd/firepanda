@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Instants and spans in different units meet as in pandas
+
+`concat` of instant or span columns, or of instant row labels, in different units now keeps the finest unit, as pandas does, where it refused them as pandas' object column. A mix of zones, or of instants and spans, is still refused, since pandas answers an object column there. `astype` to the same kind in another unit, such as `astype("datetime64[ms]")`, is now `as_unit` on a series and on a frame, and dropping a zone that way raises pandas' `TypeError`.
+
 ### Added: Calendar parts of a column with a gap, typed as in pandas
 
 A whole number read through `dt` or a `DatetimeIndex` from instants or spans with a gap, such as `year`, `hour`, `dayofweek` or `days`, is now float64 with NaN in the gap, as pandas gives it, where it was int32 with a gap. The yes or no fields, such as `is_month_start` and `is_leap_year`, answer False for a gap as pandas does, where they answered missing. Without a gap nothing changes.
