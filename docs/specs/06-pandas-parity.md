@@ -119,7 +119,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 ### Selection and indexing
 
 - [ ] `__getitem__` for column, list of columns, boolean mask, slice (M1)
-- [ ] `__setitem__` for column assignment (M1)
+- [x] `__setitem__` for column assignment (M1), with `__delitem__`, several names at once and rows or cells marked by a mask, apart from None or a function as the value, which pandas holds in an object column
 - [x] `loc`, `iloc`, `at`, `iat` (M6), apart from a key that collapses the row axis and leaves the columns, which answers a row as a series and needs one type every column fits
 - [ ] `head`, `tail`, `sample`, `nlargest`, `nsmallest` (M1)
 - [ ] `filter` with `items`, `like`, `regex` (M6)

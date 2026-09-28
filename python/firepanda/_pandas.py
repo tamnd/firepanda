@@ -7716,11 +7716,11 @@ class DataFrameMixin:
 
         `deep` is accepted and never read, and the reason is stronger than the
         one `Index.copy` gives for the same parameter. Nothing in this library
-        writes into a frame. There is no `__setitem__`, there is no `assign`,
-        and `inplace` is a rebind of the one attribute a frame has rather than
-        a write into a buffer, which document 51 is the argument for. So there
-        is no later write for a deep copy to protect the original from, and no
-        expression a caller can write tells the two kinds of copy apart.
+        writes into a frame's buffers. `__setitem__` and `inplace` both rebind
+        the one attribute a frame has rather than write into a buffer, which
+        document 51 is the argument for. So there is no later write for a deep
+        copy to protect the original from, and no expression a caller can
+        write tells the two kinds of copy apart.
 
         This is the one member where the difference in cost is worth saying out
         loud rather than leaving in the benchmarks. `df.copy()` in pandas
@@ -8284,6 +8284,95 @@ class DataFrameMixin:
         out = DataFrame._wrap(self._inner)
         for name, value in kwargs.items():
             out = out._assigned(name, value(out) if callable(value) else value)
+        return out
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Puts columns or rows into this frame, which is `df[key] = value`.
+
+        A frame holds one slot, and this rebinds it to the frame `assign` or
+        `mask` would answer, as `inplace` does, so no other object ever sees the
+        write. That is pandas' copy on write: a copy taken before, or a column
+        read out before, keeps what it had.
+
+        A name puts one column, lined up on the row labels when it is a series,
+        where a name the frame has keeps its place and a new one goes on the end.
+        A list of names puts several, from a frame by position, from rows of
+        values, or one value in all of them. A column of true and false, or a
+        frame of them, puts the value in the rows or cells it marks.
+
+        Raises:
+            InvalidArgumentError: For a frame or rows of the wrong width, or values
+                of the wrong length, in pandas' words.
+            UnsupportedError: For a function or None, which pandas holds in an
+                object column.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(key, DataFrame):
+            self._inner = self.mask(key, value)._inner
+            return
+        marks = isinstance(key, list) and bool(key) and all(isinstance(k, bool) for k in key)
+        if marks or (isinstance(key, Series) and str(key.dtype) == "bool"):
+            self._inner = self._marked_rows(key, value)._inner
+            return
+        if callable(value) and not isinstance(value, (Series, DataFrame)):
+            raise UnsupportedError(
+                "a function in every row is a column pandas holds as objects, and"
+                " firepanda has no object column to hold it"
+            )
+        if not isinstance(key, list):
+            self._inner = self._assigned(key, value)._inner
+            return
+        out = DataFrame._wrap(self._inner)
+        if isinstance(value, DataFrame):
+            if len(value.columns) != len(key):
+                raise InvalidArgumentError("Columns must be same length as key")
+            for name, source in zip(key, value.columns, strict=True):
+                out = out._assigned(name, value[source])
+        elif _list_like(value) and not isinstance(value, Series):
+            rows = [list(row) if _list_like(row) else row for row in value]
+            if rows and all(isinstance(row, list) for row in rows):
+                if any(len(row) != len(key) for row in rows):
+                    raise InvalidArgumentError("Columns must be same length as key")
+                for at, name in enumerate(key):
+                    out = out._assigned(name, [row[at] for row in rows])
+            else:
+                if len(rows) != len(key):
+                    raise InvalidArgumentError("Columns must be same length as key")
+                for name, one in zip(key, rows, strict=True):
+                    out = out._assigned(name, one)
+        else:
+            for name in key:
+                out = out._assigned(name, value)
+        self._inner = out._inner
+
+    def __delitem__(self, key: Any) -> None:
+        """Takes a column out of this frame, which is `del df[key]`.
+
+        Raises:
+            KeyError: When there is no such column.
+        """
+        if key not in list(self.columns):
+            raise KeyError(key)
+        self.drop(columns=[key], inplace=True)
+
+    def _marked_rows(self, marks: Any, value: Any) -> DataFrame:
+        """The frame with `value` in every column of the rows `marks` calls true.
+
+        A column of marks is lined up on the row labels, and a list of them is
+        read by position, as pandas reads them.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(marks, list):
+            if len(marks) != len(self):
+                raise InvalidArgumentError(
+                    f"Item wrong length {len(marks)} instead of {len(self)}."
+                )
+            marks = Series(marks, index=self.index)
+        out = DataFrame._wrap(self._inner)
+        for name in list(self.columns):
+            out = out._assigned(name, self[name].mask(marks, value))
         return out
 
     def _assigned(self, name: str, value: Any) -> DataFrame:
