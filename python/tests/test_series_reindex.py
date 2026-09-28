@@ -132,9 +132,12 @@ def test_copy_and_level_are_taken_and_ignored(firepanda):
     )
 
 
-def test_filling_from_the_row_beside_it_is_not_done_here(firepanda):
-    with pytest.raises(NotImplementedError, match="method"):
-        made(firepanda).reindex([10, 99], method="ffill")
+def test_filling_from_the_row_beside_it_is_pandas_filling(firepanda):
+    for method in ("ffill", "bfill", "nearest"):
+        same_series(
+            made(firepanda).reindex([10, 15, 99], method=method),
+            theirs().reindex([10, 15, 99], method=method),
+        )
 
 
 def test_a_limit_without_a_method_is_refused_in_pandas_words(firepanda):
