@@ -1466,6 +1466,25 @@ def test_a_filter_past_the_split_agrees_at_every_density() raises:
                 assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
 
 
+def test_a_sparse_filter_keeps_the_rows_at_the_end_of_every_morsel() raises:
+    # A mask this sparse is read eight bytes at a time, and a morsel or a
+    # column whose length is not a multiple of eight leaves a tail that is read
+    # a byte at a time. Keeping only the last few rows of every stretch of
+    # sixty five thousand, and the last three rows of the column, puts every
+    # kept row in or next to one of those tails.
+    comptime ROWS = (1 << 18) + 5
+    var col = build[DType.int64](ROWS, 0)
+    var mask = Array[DType.bool](ROWS)
+    for i in range(ROWS):
+        mask[i] = (i + 3) % (1 << 16) < 3 or i >= ROWS - 3
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
 def test_a_filter_past_the_split_of_a_narrow_dtype_skips_too() raises:
     # The block read is over the mask, which is a byte a row whatever the
     # column holds, but the fallback copy is as wide as the dtype and the
