@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Writing a column into a frame with df[key] = value
+
+`DataFrame.__setitem__` and `DataFrame.__delitem__` now exist. A name puts one column, lined up on the row labels when it is a series, a list of names puts several from a frame, from rows or from one value, and a column or frame of true and false puts the value in the rows or cells it marks. The write rebinds the frame's one slot to what `assign` or `mask` would answer, as `inplace` does, so a copy or a column taken before the write keeps what it had, which is pandas' copy on write. None and a function are refused, since pandas holds them in an object column.
+
 ### Added: Exact kurtosis of whole numbers far from zero
 
 `Series.kurt` and `DataFrame.kurt` on a whole number column now measure the values from the column's least value as whole numbers before the cast to float, as `skew` already does. On values near two to the sixty two the cast alone moved each value by up to 512 and the kurtosis in its seventh digit. The answer is now within a few bits of exact arithmetic, and within the suite's tolerance of pandas.
