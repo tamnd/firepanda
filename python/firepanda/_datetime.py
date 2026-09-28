@@ -36,6 +36,7 @@ from ._frame import Index, Series
 from ._pandas import (
     _NONEXISTENT,
     _NONEXISTENT_REFUSAL,
+    _SIGNED,
     NO_DEFAULT,
     _beyond_nanoseconds,
     _gap_part,
@@ -49,6 +50,7 @@ from ._pandas import (
     _spelled,
     _zone_name,
 )
+from ._scalars import NaT
 from .errors import DTypeError, InvalidArgumentError, translate
 
 __all__ = ["DatetimeIndex"]
@@ -184,8 +186,9 @@ class DatetimeIndex(Index):
         """
         try:
             part = self._inner.temporal_part(kind, arg)
-            if not part.null_count():
-                return Index._wrap(part)
+            answer = Index._wrap(part)
+            if not part.null_count() or str(answer.dtype) not in {*_SIGNED, "bool"}:
+                return answer
             # An index's inner column casts nothing, so a gap goes through a column.
             column = Series(_held_values(part))._inner
             return Index(Series._wrap(_gap_part(column)).tolist())
@@ -682,22 +685,22 @@ class DatetimeIndex(Index):
         )
 
     def to_pydatetime(self) -> list[Any]:
-        """Every label as a Python datetime, None for a missing one.
+        """Every label as a Python datetime, `NaT` for a missing one, as in pandas.
 
         A list where pandas answers a numpy array of objects, which is the
         convention document 41 set for everything an index answers position by position.
         """
-        return [None if label is None else label.to_pydatetime() for label in self._labels()]
+        return [NaT if label is None else label.to_pydatetime() for label in self._labels()]
 
     @property
     def time(self) -> list[Any]:
-        """The time of day of every label, without the clock."""
-        return [None if label is None else label.time() for label in self._labels()]
+        """The time of day of every label, without the clock, and `NaT` for a gap."""
+        return [NaT if label is None else label.time() for label in self._labels()]
 
     @property
     def timetz(self) -> list[Any]:
-        """The time of day of every label, with the clock."""
-        return [None if label is None else label.timetz() for label in self._labels()]
+        """The time of day of every label, with the clock, and `NaT` for a gap."""
+        return [NaT if label is None else label.timetz() for label in self._labels()]
 
     @property
     def tzinfo(self) -> Any:
