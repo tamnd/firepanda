@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: json_normalize
+
+`firepanda.json_normalize` flattens nested records into a frame the way `pandas.json_normalize` does. It is a port of pandas' own code: nested dicts become dotted columns, `sep` and `max_level` change how, `record_path` pulls the rows out of lists nested in each object, `meta` repeats outer fields on every row, the two prefixes rename columns, and `errors='ignore'` fills a missing field with NaN. The error messages are pandas' words. A cell left holding a dict or a list needs a column of objects, which firepanda does not have, so that case still raises. 14 calls and 6 mistakes match pandas.
+
 ### Added: An index prints what pandas prints
 
 `repr` and `str` of an `Index`, a `DatetimeIndex` and a `TimedeltaIndex` used to print the core's summary, so a zoned index printed the counts behind its instants. They now go through a port of pandas' `format_object_summary`: the labels in brackets, wrapped at `display.width`, cut to ten from each end past `display.max_seq_items` with dots between, then the type, the name, the length when cut, and `freq` for instants and spans. Labels that are still a range print as a `RangeIndex`. Dates at midnight print as dates, whole days as days, text is quoted with its tabs and newlines escaped, and a gap prints as pandas prints it for each kind. 24 shapes and 16 option combinations match pandas.
