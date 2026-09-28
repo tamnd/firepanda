@@ -51,6 +51,7 @@ from ._date_range import bdate_range, date_range
 from ._datetime import DatetimeIndex
 from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
+from ._frequency import infer_freq
 from ._interval import Interval
 from ._multi import MultiIndex
 from ._na import NA, IndexSlice
@@ -129,6 +130,7 @@ __all__ = [
     "from_dummies",
     "get_dummies",
     "get_option",
+    "infer_freq",
     "isna",
     "isnull",
     "json_normalize",

@@ -385,6 +385,18 @@ class DatetimeIndex(Index):
             raise translate(error) from None
 
     @property
+    def inferred_freq(self) -> str | None:
+        """The frequency the labels keep, as `infer_freq` finds it, or None."""
+        from ._frequency import infer_freq
+
+        if len(self) < 3:
+            return None
+        try:
+            return infer_freq(self)
+        except ValueError:
+            return None
+
+    @property
     def tz(self) -> str | None:
         """The clock the labels are read against, or None when they carry none."""
         try:

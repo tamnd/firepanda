@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: infer_freq, inferred_freq and dt.freq
+
+`firepanda.infer_freq` names the frequency a run of instants or spans keeps, as pandas' alias for it, by the same rules pandas' frequency inferer uses: years, quarters and months anchored at the calendar or business start or end, weeks anchored on a weekday, business days, business hours, the week of the month, and fixed steps from days down to nanoseconds, read on the wall clock for labels with a zone. It takes a `DatetimeIndex`, a `TimedeltaIndex`, a column of either or a list of dates, and raises pandas' errors for fewer than three labels or labels that are not instants. `DatetimeIndex.inferred_freq`, `TimedeltaIndex.inferred_freq` and `Series.dt.freq` give the same answer, or None where pandas gives None.
+
 ### Added: asfreq on a frame and a column
 
 `DataFrame.asfreq` and `Series.asfreq` put the rows on a fixed frequency from the first label to the last, as pandas does. A label the rows do not have is filled by `method` from a neighbour or with `fill_value`, `normalize` takes the labels to midnight, and the labels keep their unit, their zone and their name. It is pandas' own recipe, a `date_range` and then a `reindex`, so it fills exactly as `reindex` does.
