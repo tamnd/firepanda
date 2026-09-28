@@ -42,6 +42,7 @@ from ._pandas import (
     _Labelled,
     _Point,
     _Positional,
+    _printed,
     _resample,
     _rolling,
     _values_of,
@@ -2211,14 +2212,14 @@ class DataFrame(DataFrameMixin):
     def __repr__(self) -> str:
         """The frame, rendered."""
         try:
-            return repr(self._inner)
+            return _printed(self)
         except Exception as error:
             raise translate(error) from None
 
     def __str__(self) -> str:
         """The frame, rendered. Same as repr, which is what pandas does."""
         try:
-            return repr(self._inner)
+            return _printed(self)
         except Exception as error:
             raise translate(error) from None
 
@@ -3393,14 +3394,14 @@ class Series(SeriesMixin):
     def __repr__(self) -> str:
         """The series, rendered."""
         try:
-            return repr(self._inner)
+            return _printed(self)
         except Exception as error:
             raise translate(error) from None
 
     def __str__(self) -> str:
         """The series, rendered. Same as repr, which is what pandas does."""
         try:
-            return repr(self._inner)
+            return _printed(self)
         except Exception as error:
             raise translate(error) from None
 

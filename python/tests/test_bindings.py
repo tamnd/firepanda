@@ -210,7 +210,7 @@ def test_a_frame_read_from_csv_answers_the_pandas_way(
     assert len(top) == 2
     assert len(frame.tail(1)) == 1
     assert repr(frame) == str(frame)
-    assert "3 rows" in repr(frame)
+    assert repr(frame).split("\n")[1].split() == ["0", "rivet", "4", "1.25"]
 
 
 @needs_pandas

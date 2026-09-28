@@ -35,6 +35,7 @@ import math
 import operator
 import os
 import re
+import shutil
 import sys
 import warnings
 from collections.abc import Callable, Iterator
@@ -8849,16 +8850,13 @@ class DataFrameMixin:
         A port of pandas' text formatter: floats get six digits after the point
         with the zeros trimmed across each column, or scientific form when the
         column needs it, instants are dates alone when every one is at
-        midnight, and every column is padded to its widest cell. The row and
-        column limits and wrapping are refused, since the text is always the
-        whole frame.
+        midnight, and every column is padded to its widest cell. A frame past
+        `max_rows` or `max_cols` loses its middle to dots, and one wider than
+        `line_width` goes on in blocks below, the way pandas cuts and wraps it.
 
         Returns:
             The text when `buf` is None, and None otherwise.
         """
-        _text_refused(
-            max_rows=max_rows, max_cols=max_cols, line_width=line_width, min_rows=min_rows
-        )
         text = _text_frame(
             self,
             {
@@ -8874,6 +8872,10 @@ class DataFrameMixin:
                 "show_dimensions": show_dimensions,
                 "decimal": decimal,
                 "max_colwidth": max_colwidth,
+                "max_rows": max_rows,
+                "max_cols": max_cols,
+                "min_rows": min_rows,
+                "line_width": line_width,
             },
         )
         return _text_written(text, buf, encoding)
@@ -12357,13 +12359,12 @@ class SeriesMixin:
         """The column as text, one row per line, written to a file or answered.
 
         Values are written the way `DataFrame.to_string` writes them, and the
-        name, length and type go in a last line when asked for. The row limits
-        are refused, since the text is always the whole column.
+        name, length and type go in a last line when asked for. A column past
+        `max_rows` loses its middle to dots, as pandas cuts it.
 
         Returns:
             The text when `buf` is None, and None otherwise.
         """
-        _text_refused(max_rows=max_rows, min_rows=min_rows)
         text = _text_series(
             self,
             {
@@ -12374,6 +12375,8 @@ class SeriesMixin:
                 "length": length,
                 "dtype": dtype,
                 "name": name,
+                "max_rows": max_rows,
+                "min_rows": min_rows,
             },
         )
         return _text_written(text, buf, None)
@@ -22946,7 +22949,7 @@ def _text_floats(
 
 
 def _text_moments(values: list[Any], formatter: Any, zoned: bool) -> list[str]:
-    """Instants as text, dates alone when every one is at midnight.
+    """Instants as text, dates alone when every one is at midnight and has no zone.
 
     Otherwise each is written to the second, with as many digits after it as
     the finest instant in the column needs: three, six or nine. Gaps are NaT.
@@ -22955,10 +22958,7 @@ def _text_moments(values: list[Any], formatter: Any, zoned: bool) -> list[str]:
         return ["NaT" if v is None else str(formatter(v)) for v in values]
     present = [v for v in values if v is not None]
     if zoned:
-        midnight = all(v.hour == v.minute == v.second == v.microsecond == 0 for v in present)
-        return [
-            "NaT" if v is None else v.strftime("%Y-%m-%d") if midnight else str(v) for v in values
-        ]
+        return ["NaT" if v is None else str(v) for v in values]
     if all(v.hour == v.minute == v.second == v.microsecond == v.nanosecond == 0 for v in present):
         return ["NaT" if v is None else v.strftime("%Y-%m-%d") for v in values]
     nanos = any(v.nanosecond for v in present)
@@ -23121,6 +23121,40 @@ def _text_numeric(dtype: str) -> bool:
     return dtype.startswith(("int", "uint", "float", "complex")) or dtype == "bool"
 
 
+def _text_limits(rows: int, kw: dict[str, Any], labels: int, header: bool) -> tuple[Any, Any]:
+    """How many rows and columns print, as pandas' `DataFrameFormatter` works it out.
+
+    A limit of zero means the terminal decides, which is how pandas reads it:
+    the rows that fit its height, less the lines around them, and when there
+    are more columns than it is wide, as many columns as it is wide.
+    """
+    max_rows, max_cols = kw["max_rows"], kw["max_cols"]
+    fitted_rows, fitted_cols = max_rows, max_cols
+    if max_cols == 0 or max_rows == 0:
+        width, height = shutil.get_terminal_size()
+        if max_cols == 0 and labels > width:
+            fitted_cols = width
+        if max_rows == 0:
+            return height - 2 - (3 if kw["show_dimensions"] else 0) - header, fitted_cols
+    if fitted_rows and rows > fitted_rows and kw["min_rows"]:
+        fitted_rows = min(kw["min_rows"], fitted_rows)
+    return fitted_rows, fitted_cols
+
+
+def _text_cut(count: int, fitted: Any, limit: Any) -> tuple[list[int], int | None]:
+    """The positions that print when `count` is cut to `fitted`, and where the dots go.
+
+    Half from the top and half from the bottom. A limit of one keeps the first
+    `limit` instead, which is what pandas does, odd as it is.
+    """
+    if not fitted or count <= fitted:
+        return list(range(count)), None
+    half = fitted // 2
+    if half >= 1:
+        return [*range(half), *range(count - half, count)], half
+    return list(range(min(limit, count))), limit
+
+
 def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
     """The frame as text, which is the body of `DataFrame.to_string`."""
     if kw["columns"] is not None:
@@ -23150,20 +23184,56 @@ def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
                 f"columns({len(labels)})"
             )
         spaces = dict(zip(labels, spaces, strict=True))
+    header = kw["header"]
+    rows = len(frame)
+    fitted_rows, fitted_cols = _text_limits(rows, kw, len(labels), bool(header))
+    text, cut = _text_table(frame, kw, formatters, spaces, fitted_rows, fitted_cols)
+    line_width = kw["line_width"]
+    if rows and labels and line_width is not None:
+        if kw["max_cols"] is None or kw["max_cols"] > 0:
+            text = _text_wrapped(text, line_width, bool(kw["index"]))
+        else:
+            fitted_cols = _text_fitted(text, bool(kw["index"]))
+            text, cut = _text_table(frame, kw, formatters, spaces, fitted_rows, fitted_cols)
+            text = _text_adjoin(1, *text)
+    elif rows and labels:
+        text = _text_adjoin(1, *text)
+    shown = kw["show_dimensions"]
+    if shown is True or (shown == "truncate" and cut):
+        text += f"\n\n[{rows} rows x {len(labels)} columns]"
+    return text
+
+
+def _text_table(
+    frame: Any,
+    kw: dict[str, Any],
+    formatters: Any,
+    spaces: dict[Any, Any],
+    fitted_rows: Any,
+    fitted_cols: Any,
+) -> tuple[Any, bool]:
+    """The columns of text for the rows and columns that print, dots in the gaps.
+
+    Answers the columns and whether anything was cut, or the whole text when
+    the frame is empty.
+    """
+    labels = list(frame.columns)
+    rows = len(frame)
+    kept_rows, dots_row = _text_cut(rows, fitted_rows, kw["max_rows"])
+    kept_cols, dots_col = _text_cut(len(labels), fitted_cols, kw["max_cols"])
+    cut = dots_row is not None or dots_col is not None
+    if not rows or not labels:
+        return (
+            f"Empty DataFrame\nColumns: {_text_sequence(labels)}\n"
+            f"Index: {_text_sequence(frame.index.tolist())}"
+        ), cut
+    if dots_row is not None:
+        frame = frame.iloc[kept_rows]
     justify = kw["justify"] or "right"
     widest = kw["max_colwidth"]
     header = kw["header"]
     index = kw["index"]
     float_format = _text_float_format(kw["float_format"])
-    rows = len(frame)
-    dimensions = ""
-    if kw["show_dimensions"] is True:
-        dimensions = f"\n\n[{rows} rows x {len(labels)} columns]"
-    if not rows or not labels:
-        return (
-            f"Empty DataFrame\nColumns: {_text_sequence(labels)}\n"
-            f"Index: {_text_sequence(frame.index.tolist())}{dimensions}"
-        )
 
     def picked(position: int, label: str) -> Any:
         if isinstance(formatters, dict):
@@ -23179,7 +23249,7 @@ def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
     elif header:
         heads = [
             [
-                (" " if picked(p, c) is None and _text_numeric(str(frame[c].dtype)) else "")
+                (" " if picked(p, c) is None and _text_numeric(str(frame.iloc[:, p].dtype)) else "")
                 + _text_plain(c)
             ]
             for p, c in enumerate(labels)
@@ -23190,9 +23260,15 @@ def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
         for head in heads:
             head.append("")
     blocks = []
-    for position, label in enumerate(labels):
+    for position in kept_cols:
+        label = labels[position]
         texts = _text_values(
-            frame[label], picked(position, label), float_format, kw["na_rep"], kw["decimal"], index
+            frame.iloc[:, position],
+            picked(position, label),
+            float_format,
+            kw["na_rep"],
+            kw["decimal"],
+            index,
         )
         head = heads[position]
         width = max([int(spaces.get(label, 0)), *(len(x) for x in head)])
@@ -23204,7 +23280,63 @@ def _text_frame(frame: Any, kw: dict[str, Any]) -> str:
             _text_labels(frame.index, named, widest), "left", int(spaces.get("", 0)), widest
         )
         blocks.insert(0, ["", *names] if listed or header else names)
-    return _text_adjoin(1, *blocks) + dimensions
+    tall = len(blocks[-1])
+    if dots_col is not None:
+        blocks.insert(dots_col + 1, [" ..."] * tall)
+    if dots_row is not None:
+        above = tall - len(frame)
+        for place, block in enumerate(blocks):
+            size = len(block[dots_row]) if dots_row < len(block) else 0
+            edge = dots_col is not None and place == dots_col + 1
+            dots = "..." if size > 3 or edge else ".."
+            dots = dots.ljust(size) if place == 0 and index else dots.rjust(4 if edge else size)
+            block.insert(dots_row + above, dots)
+    return blocks, cut
+
+
+def _text_wrapped(blocks: list[list[str]], line_width: int, index: bool) -> str:
+    """Columns that do not fit in `line_width` go on in a second block, as pandas wraps them."""
+    blocks = list(blocks)
+    room = line_width
+    labels = None
+    if index:
+        labels = blocks.pop(0)
+        room -= max(len(x) for x in labels) + 1
+    sizes = [max(len(x) for x in block) if block else 0 for block in blocks]
+    ends = []
+    width = 0
+    for position, size in enumerate(sizes):
+        width += size + 1
+        over = width + (1 if position == len(sizes) - 1 else 2) > room
+        if over and position > 0:
+            ends.append(position)
+            width = size + 1
+    ends.append(len(sizes))
+    parts = []
+    start = 0
+    for number, end in enumerate(ends):
+        row = blocks[start:end]
+        if labels is not None:
+            row.insert(0, labels)
+        if len(ends) > 1:
+            tall = len(row[-1])
+            if end <= len(blocks) and number < len(ends) - 1:
+                row.append([" \\"] + ["  "] * (tall - 1))
+            else:
+                row.append([" "] * tall)
+        parts.append(_text_adjoin(1, *row))
+        start = end
+    return "\n\n".join(parts)
+
+
+def _text_fitted(blocks: list[list[str]], index: bool) -> int:
+    """How many columns fit the terminal, dropping them from the middle as pandas does."""
+    lines = _text_adjoin(1, *blocks).split("\n")
+    over = max(len(line) for line in lines) - shutil.get_terminal_size()[0] + 1
+    sizes = [max(len(x) for x in block) for block in blocks]
+    while over > 0 and len(sizes) > 1:
+        over -= sizes.pop(round(len(sizes) / 2)) + 1
+    return max(len(sizes) - index, 2)
 
 
 def _text_categories(column: Any) -> str:
@@ -23233,23 +23365,45 @@ def _text_categories(column: Any) -> str:
 
 
 def _text_series(column: Any, kw: dict[str, Any]) -> str:
-    """The column as text, which is the body of `Series.to_string`."""
+    """The column as text, which is the body of `Series.to_string`.
+
+    A column longer than `max_rows` prints `min_rows` of them, half from each
+    end, with dots between. `length="truncate"` names the length only then.
+    """
+    rows = len(column)
+    fitted = kw["max_rows"]
+    if fitted and rows > fitted and kw["min_rows"]:
+        fitted = min(kw["min_rows"], fitted)
+    if fitted and rows > fitted:
+        dots = 1 if fitted == 1 else fitted // 2
+        kept = [0] if fitted == 1 else [*range(dots), *range(rows - dots, rows)]
+        shown = column.iloc[kept]
+    else:
+        dots = None
+        shown = column
     parts = []
+    if getattr(column.index, "freq", None) is not None:
+        parts.append(f"Freq: {column.index.freqstr}")
     if kw["name"] and column.name is not None:
         parts.append(f"Name: {_text_plain(column.name)}")
-    if kw["length"] is True:
-        parts.append(f"Length: {len(column)}")
+    length = kw["length"]
+    if length is True or (length == "truncate" and dots is not None):
+        parts.append(f"Length: {rows}")
     if kw["dtype"]:
         dtype = str(column.dtype)
         parts.append(f"dtype: {'str' if dtype == 'string' else dtype}")
     footer = ", ".join(parts)
     if str(column.dtype) == "category":
         footer += ("\n" if footer else "") + _text_categories(column)
-    if not len(column):
+    if not rows:
         return f"Series([], {footer})"
-    labels = _text_labels(column.index, True, _TEXT_SERIES_WIDEST)
-    texts = _text_values(column, None, kw["float_format"], kw["na_rep"], ".", kw["index"])
+    labels = _text_labels(shown.index, True, _TEXT_SERIES_WIDEST)
+    texts = _text_values(shown, None, kw["float_format"], kw["na_rep"], ".", kw["index"])
     texts = _text_fixed(texts, "right", None, _TEXT_SERIES_WIDEST)
+    if dots is not None:
+        size = len(texts[dots - 1])
+        texts.insert(dots, ("..." if size > 3 else "..").center(size))
+        labels.insert(dots + 1, "")
     blocks = [labels[1:], texts] if kw["index"] else [texts]
     result = _text_adjoin(3, *blocks)
     if kw["header"] and column.index.name is not None:
@@ -23257,14 +23411,34 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
     return result + "\n" + footer if footer else result
 
 
-def _text_refused(**kw: Any) -> None:
-    """Refuses the row and column limits, which cut a long frame down in the middle."""
-    for name, value in kw.items():
-        if value is not None:
-            raise NotImplementedError(
-                f"{name}={value!r} is not supported yet, because the text is always the "
-                "whole frame, with no rows or columns left out and no wrapping"
-            )
+def _printed(shown: Any) -> str:
+    """What pandas prints for a frame or a column: `to_string` under the display options.
+
+    The core writes a frame as a summary of its columns and a zoned instant as
+    its count, so both reprs are the text formatter's, with the limits pandas
+    reads from its options.
+    """
+    from ._config import get_option
+
+    max_rows = get_option("display.max_rows")
+    if hasattr(shown, "columns"):
+        wide = get_option("display.expand_frame_repr")
+        return shown.to_string(
+            max_rows=max_rows,
+            min_rows=get_option("display.min_rows"),
+            max_cols=get_option("display.max_columns"),
+            max_colwidth=get_option("display.max_colwidth"),
+            show_dimensions=get_option("display.show_dimensions"),
+            line_width=get_option("display.width") if wide else None,
+        )
+    height = shutil.get_terminal_size()[1]
+    return shown.to_string(
+        name=True,
+        dtype=True,
+        min_rows=height if max_rows == 0 else get_option("display.min_rows"),
+        max_rows=height if max_rows == 0 else max_rows,
+        length=get_option("display.show_dimensions"),
+    )
 
 
 def _text_written(text: str, buf: Any, encoding: Any) -> Any:

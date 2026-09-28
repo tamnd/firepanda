@@ -8,8 +8,7 @@ about their own data by the one member whose entire job is to tell them.
 
 Most of what is below compares the whole rendering against pandas line for line, because the
 output is the whole contract here and an assertion loose enough to accept both spellings would
-have accepted the bug too. The two places the two libraries genuinely differ, a missing label and
-a frame, are asserted against firepanda on purpose and say why.
+have accepted the bug too. A frame prints the same way now, through the same text formatter.
 """
 
 from __future__ import annotations
@@ -224,7 +223,10 @@ def test_a_long_column_is_elided_by_the_dots_pandas_uses(firepanda: ModuleType) 
 
     narrow = {"k": list(range(30)), "b": list(range(30))}
     wide = {"k": list(range(30)), "b": [float(i) - 5 for i in range(30)]}
-    with pd.option_context("display.max_rows", 10, "display.min_rows", 10):
+    with (
+        pd.option_context("display.max_rows", 10, "display.min_rows", 10),
+        firepanda.option_context("display.max_rows", 10, "display.min_rows", 10),
+    ):
         for data in (narrow, wide):
             made = firepanda.DataFrame(data).set_index("k")["b"]
             want = pd.DataFrame(data).set_index("k")["b"]
@@ -232,26 +234,29 @@ def test_a_long_column_is_elided_by_the_dots_pandas_uses(firepanda: ModuleType) 
 
 
 def test_the_footer_says_the_name_before_the_length(firepanda: ModuleType) -> None:
-    """Which is pandas' order, and reads as what it is."""
+    """Which is pandas' order, and the length is there only when rows were left out."""
     column = firepanda.DataFrame({"k": list(range(30)), "b": list(range(30))}).set_index("k")["b"]
-    assert repr(column).split("\n")[-1] == "Name: b, Length: 30, dtype: int64"
+    assert repr(column).split("\n")[-1] == "Name: b, dtype: int64"
+    with firepanda.option_context("display.max_rows", 10):
+        assert repr(column).split("\n")[-1] == "Name: b, Length: 30, dtype: int64"
 
 
-# ---------------------------------------------------------------------------
-# Where the two libraries part
-# ---------------------------------------------------------------------------
+@needs_pandas
+def test_a_missing_label_prints_the_way_pandas_prints_it(firepanda: ModuleType) -> None:
+    """`NaN` in a text index, as pandas writes a gap in text."""
+    import pandas as pd
+
+    data = {"k": ["p", None], "v": [1, 2]}
+    made = firepanda.DataFrame(data).set_index("k")["v"]
+    assert repr(made) == repr(pd.DataFrame(data).set_index("k")["v"])
 
 
-def test_a_missing_label_prints_the_way_a_missing_value_prints(firepanda: ModuleType) -> None:
-    """`<NA>` rather than pandas' `NaN`, because that is the value this library holds there."""
-    column = firepanda.DataFrame({"k": ["p", None], "v": [1, 2]}).set_index("k")["v"]
-    assert repr(column).split("\n")[2].startswith("<NA>")
+@needs_pandas
+def test_a_frame_prints_its_rows_the_way_pandas_prints_them(firepanda: ModuleType) -> None:
+    """Not the schema summary the core writes, which is what it printed before."""
+    import pandas as pd
 
-
-def test_a_frame_still_reports_its_schema_rather_than_its_rows(firepanda: ModuleType) -> None:
-    """Printing a frame is a different decision, recorded in document 13, and is untouched."""
-    printed = repr(labelled(firepanda))
-    assert printed.startswith("DataFrame 3 rows x 2 columns")
+    assert repr(labelled(firepanda)) == repr(labelled(pd))
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +274,8 @@ def test_a_long_column_elides_its_middle_and_keeps_its_labels(firepanda: ModuleT
     """The gap is one row of both columns, with the label left blank the way pandas leaves it."""
     names = [f"r{i}" for i in range(12)]
     column = firepanda.DataFrame({"k": names, "v": list(range(12))}).set_index("k")["v"]
-    lines = repr(column).split("\n")
+    with firepanda.option_context("display.max_rows", 10):
+        lines = repr(column).split("\n")
     assert lines[1].startswith("r0")
     assert lines[6] == "       .."
     assert lines[7].startswith("r7")
@@ -382,7 +388,9 @@ def test_the_labels_are_a_column_and_decide_the_same_way(firepanda: ModuleType) 
     )
 
 
+@needs_pandas
 def test_a_null_is_not_a_number_for_any_of_this(firepanda: ModuleType) -> None:
-    """Asserted here rather than against pandas, which spells the missing cell `NaN`."""
-    column = firepanda.DataFrame({"f": [1.5, None, 2.25]})["f"]
-    assert listing(column) == ["0    1.50", "1    <NA>", "2    2.25"]
+    """The gap is spelled `NaN`, as pandas spells it, and takes no part in the format."""
+    import pandas as pd
+
+    assert repr(floats(firepanda, [1.5, None, 2.25])) == repr(floats(pd, [1.5, None, 2.25]))
