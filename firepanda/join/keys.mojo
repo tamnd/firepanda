@@ -277,8 +277,19 @@ The hashed probe does not care about the span and the direct one gets slower as
 its table leaves the cache, so the line goes where the direct table is still
 clearly ahead, at four million slots, which is sixteen megabytes. Past that the
 two are close enough that a machine with less cache could land on the wrong
-side. A span also has to stay under half the probe height, so a small probe side
-never pays for zeroing a table larger than itself.
+side. A span also has to stay under the height of both sides together, so the
+table is at most four bytes for every row that reads it.
+
+That bound used to be half the probe height, and q10 is what moved it. Its
+fifty seven thousand orders of one quarter are the build side against a
+hundred and fifty thousand customers, the order keys span the customer keys, and
+half the probe height is seventy five thousand. So both sides were hashed, and
+the serial build was most of the join: on the 13900K the key alignment took
+1.03 ms by hashing and 0.24 ms through a table of a hundred and fifty thousand
+slots, which is six hundred kilobytes, and the whole join of the key columns
+went from 1.86 ms to 1.08. Hashing a row costs tens of nanoseconds and zeroing
+four bytes a fraction of one, so a table no larger than both sides together has
+already paid for itself before the probe starts.
 """
 
 comptime SIEVE_SPAN = 1 << 26
@@ -1169,9 +1180,9 @@ def build_side[
     span near the row count is a table that is smaller than the one it replaces
     even when it is half empty. `factorize_dense` draws the line in the same
     place and says why at length. A caller that knows how many rows are going
-    to probe the table can pass that, and a table up to half that height, and
-    up to `DIRECT_PROBE_SPAN`, is accepted too, because each of those rows is a
-    hash the direct table saves.
+    to probe the table can pass that, and a table up to the height of both
+    sides together, and up to `DIRECT_PROBE_SPAN`, is accepted too, because each
+    of those rows is a hash the direct table saves.
 
     Args:
         build: The smaller side's key column.
@@ -1193,7 +1204,7 @@ def build_side[
         var ceiling = max(
             len(build),
             DIRECT_LIMIT,
-            min(probe_rows // 2, DIRECT_PROBE_SPAN),
+            min(probe_rows + len(build), DIRECT_PROBE_SPAN),
         )
         var plan = direct_plan[dt](build, max(ceiling, SIEVE_SPAN))
         if plan.span >= 0 and plan.span <= ceiling:
