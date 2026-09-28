@@ -679,7 +679,9 @@ def _walk(
                                 PrefetchOptions().for_read().high_locality()
                             ](col.unsafe_bytes(first).unsafe_ptr())
                     elif word != 0 and (
-                        Int(store.head(Int(word) - 1).unsafe_load() & 0xFFFFFFFF)
+                        Int(
+                            store.head(Int(word) - 1).unsafe_load() & 0xFFFFFFFF
+                        )
                         > INLINE_CAPACITY
                     ):
                         prefetch[PrefetchOptions().for_read().high_locality()](
@@ -744,9 +746,10 @@ def _rows_equal(
     if first != views.unsafe_offset(j * 2).unsafe_load():
         return False
     if Int(first & 0xFFFFFFFF) <= INLINE_CAPACITY:
-        return views.unsafe_offset(i * 2 + 1).unsafe_load() == views.unsafe_offset(
-            j * 2 + 1
-        ).unsafe_load()
+        return (
+            views.unsafe_offset(i * 2 + 1).unsafe_load()
+            == views.unsafe_offset(j * 2 + 1).unsafe_load()
+        )
     return _bytes_equal(col.unsafe_bytes(i), col.unsafe_bytes(j))
 
 

@@ -156,9 +156,24 @@ def test_a_tall_column_spreads_its_answers_on_every_core() raises:
     var flat = col.decoded()
     var got = binary_value_any(col, Value(String("late")), BinaryOp.EQ)
     var want = binary_value_any(flat, Value(String("late")), BinaryOp.EQ)
-    same_mask(got.as_typed[DType.bool](), want.as_typed[DType.bool]())
+    assert_equal(
+        differ(got.as_typed[DType.bool](), want.as_typed[DType.bool]()), 0
+    )
     var wanted = AnyArray(strings_from_list(["ok"]))
-    same_mask(is_in_any(col, wanted), is_in_any(flat, wanted))
+    assert_equal(differ(is_in_any(col, wanted), is_in_any(flat, wanted)), 0)
+
+
+def differ(a: Array[DType.bool], b: Array[DType.bool]) raises -> Int:
+    # `same_mask` builds a message a row, which on this many rows is most of a
+    # minute, so the tall test counts instead.
+    assert_equal(len(a), len(b), "rows")
+    var wrong = 0
+    for i in range(len(a)):
+        if a.is_valid(i) != b.is_valid(i):
+            wrong += 1
+        elif a.is_valid(i) and a[i] != b[i]:
+            wrong += 1
+    return wrong
 
 
 def frame(var text: AnyArray) raises -> DataFrame:
