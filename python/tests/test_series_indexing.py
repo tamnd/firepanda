@@ -215,11 +215,11 @@ def test_a_boolean_key_of_the_wrong_length_is_refused(firepanda):
         counted(firepanda).iloc[[True, False]]
 
 
-def test_a_missing_value_comes_back_as_none(firepanda):
+def test_a_missing_value_comes_back_as_nan(firepanda):
     series = firepanda.Series([1.5, None, 3.5], name="v")
-    assert series.iloc[1] is None
-    assert series.iat[1] is None
-    assert series.loc[1] is None
+    assert series.iloc[1] != series.iloc[1]
+    assert series.iat[1] != series.iat[1]
+    assert series.loc[1] != series.loc[1]
 
 
 def test_a_selection_off_a_frame_column_still_has_the_frames_labels(firepanda):

@@ -22,6 +22,7 @@ early depending on what the labels were.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -91,10 +92,10 @@ def test_iterating_a_column_of_text(firepanda: ModuleType) -> None:
     assert list(firepanda.Series(["a", "b"])) == ["a", "b"]
 
 
-def test_a_missing_row_comes_out_as_none(firepanda: ModuleType) -> None:
-    """This library's answer and not pandas', which gives nan for both of these."""
-    assert list(firepanda.Series([1.5, None])) == [1.5, None]
-    assert list(firepanda.Series(["a", None])) == ["a", None]
+def test_a_missing_row_comes_out_as_nan(firepanda: ModuleType) -> None:
+    """pandas' answer, which is nan for a gap among numbers and among text."""
+    assert list(firepanda.Series([1.5, None])) == [1.5, nan]
+    assert list(firepanda.Series(["a", None])) == ["a", nan]
 
 
 @needs_pandas
@@ -409,7 +410,7 @@ def test_itertuples_is_lazy(firepanda: ModuleType) -> None:
     assert not isinstance(firepanda.DataFrame(DATA).itertuples(), list)
 
 
-def test_itertuples_carries_a_missing_row_as_none(firepanda: ModuleType) -> None:
-    """This library's answer, where pandas gives nan."""
+def test_itertuples_carries_a_missing_row_as_nan(firepanda: ModuleType) -> None:
+    """pandas' answer, a gap among numbers as nan."""
     made = firepanda.DataFrame({"a": [1.5, None]})
-    assert [row.a for row in made.itertuples()] == [1.5, None]
+    assert [row.a for row in made.itertuples()] == [1.5, nan]

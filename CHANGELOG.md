@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Read a missing value out the way pandas spells it
+
+A gap read out of a column through `tolist`, iteration, `iloc`, `iat`, `loc`, `at` or `items` now comes back as pandas hands it out for the column's type. A float column, an integer column with a gap, a text column and a category column hand out `nan`, and a column of flags hands out None, as an object column does in pandas. A frame cell and an index read the same way, a category's missing row has a code of -1, and a NaN given back among text or asked for by `get_indexer` finds the gap. A missing instant or span still reads as None, since firepanda has no `NaT` yet.
+
 ### Added: groupby sample
 
 `groupby(...).sample` draws rows at random from each group, the same rows pandas draws for the same seed. pandas walks the groups in order and asks numpy's `choice` for each one's positions from one random state, and this walks them the same way, so `n`, `frac`, `replace`, `weights` as a list or a column name, `sort=False` and `dropna=False` all give pandas' rows in pandas' order, and a size or weights pandas refuses are refused with its words. The size and weight checks moved out of `DataFrame.sample` into two helpers both now share. 11 calls and 7 mistakes match pandas.

@@ -22,6 +22,7 @@ grammar of the replacement, which is RE2's and is narrower than Python's.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -302,7 +303,7 @@ def test_a_missing_row_stays_missing(firepanda: ModuleType) -> None:
     """
     import pandas as pd
 
-    assert made(firepanda).str.replace("a.c", "#", regex=True).tolist()[-1] is None
+    assert made(firepanda).str.replace("a.c", "#", regex=True).tolist()[-1] is nan
     assert pd.isna(theirs().str.replace("a.c", "#", regex=True).tolist()[-1])
 
 

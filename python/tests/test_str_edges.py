@@ -66,17 +66,16 @@ def theirs(values: list[Any] = ROWS) -> Any:
 
 
 def like(mine: list[Any], them: list[Any]) -> bool:
-    """Compares two columns of values, reading a NaN as a None.
+    """Compares two columns of values, reading a NaN and a None as the same gap.
 
-    The library wide rule is that a missing row reads back as None and pandas
-    reads it back as NaN, so the two lists are the same answer written two ways
-    and have to be compared through this rather than through `==`.
+    A NaN is not equal to itself, so two lists that both hold one are the same
+    answer and still unequal under `==`, and have to be compared through this.
     """
     if len(mine) != len(them):
         return False
     for one, two in zip(mine, them, strict=True):
         if two is None or (isinstance(two, float) and two != two):
-            if one is not None:
+            if not (one is None or (isinstance(one, float) and one != one)):
                 return False
             continue
         if one != two:

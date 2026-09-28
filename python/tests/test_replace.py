@@ -24,6 +24,8 @@ all to a frame with a column called `a`.
 
 from __future__ import annotations
 
+from math import nan
+
 import pandas as pd
 import pytest
 
@@ -90,7 +92,7 @@ def test_a_missing_value_is_named_by_nothing(firepanda):
 
 def test_a_missing_value_is_left_alone_by_every_other_pair(firepanda):
     made = firepanda.Series([1.0, None, 3.0])
-    assert made.replace(1.0, 0.0).tolist() == [0.0, None, 3.0]
+    assert made.replace(1.0, 0.0).tolist() == [0.0, nan, 3.0]
 
 
 def test_nothing_to_replace_is_nothing_done(firepanda):

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -263,5 +264,5 @@ def test_a_missing_row_answers_false_to_the_masks_and_is_missing_in_the_count(
     for name in ("contains", "match", "fullmatch"):
         assert getattr(mine.str, name)("ab").tolist()[-1] is False, name
         assert getattr(theirs().str, name)("ab").tolist()[-1] is False, name
-    assert mine.str.count("ab").tolist()[-1] is None
+    assert mine.str.count("ab").tolist()[-1] is nan
     assert str(theirs().str.count("ab").dtype) == "float64"

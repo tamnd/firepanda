@@ -17,6 +17,8 @@ beside text.
 
 from __future__ import annotations
 
+from math import nan
+
 import pandas as pd
 import pytest
 
@@ -39,20 +41,20 @@ def test_a_value_fills_the_column_it_was_offered_for(firepanda):
 
 def test_the_columns_that_were_not_named_are_left_alone(firepanda):
     answered = frame(firepanda).fillna({"f": 0.0})
-    assert answered["i"].tolist() == [1, None, 3]
-    assert answered["s"].tolist() == ["a", None, "c"]
+    assert answered["i"].tolist() == [1, nan, 3]
+    assert answered["s"].tolist() == ["a", nan, "c"]
 
 
 def test_a_dict_fills_several_columns_in_one_call(firepanda):
     answered = frame(firepanda).fillna({"i": 9, "s": "z"})
     assert answered["i"].tolist() == [1, 9, 3]
     assert answered["s"].tolist() == ["a", "z", "c"]
-    assert answered["f"].tolist() == [1.5, None, 3.5]
+    assert answered["f"].tolist() == [1.5, nan, 3.5]
 
 
 def test_a_key_the_frame_does_not_have_is_dropped_rather_than_refused(firepanda):
     """The opposite of what `drop` does, because this was offered a value."""
-    assert frame(firepanda).fillna({"nope": 1})["i"].tolist() == [1, None, 3]
+    assert frame(firepanda).fillna({"nope": 1})["i"].tolist() == [1, nan, 3]
 
 
 def test_one_value_fills_every_column_that_can_hold_it(firepanda):
@@ -63,7 +65,7 @@ def test_one_value_fills_every_column_that_can_hold_it(firepanda):
 
 
 def test_a_none_means_there_is_nothing_to_do(firepanda):
-    assert frame(firepanda).fillna(None)["i"].tolist() == [1, None, 3]
+    assert frame(firepanda).fillna(None)["i"].tolist() == [1, nan, 3]
 
 
 def test_the_column_keeps_its_type_and_the_frame_its_shape(firepanda):
@@ -232,15 +234,15 @@ def test_the_second_axis_of_a_frame_is_the_same_answer(firepanda):
 
 def test_a_dict_on_a_column_maps_row_labels(firepanda):
     """The one shape that means something different on a column than on a frame."""
-    assert firepanda.Series([1.0, None, None]).fillna({1: 5.0}).tolist() == [1.0, 5.0, None]
+    assert firepanda.Series([1.0, None, None]).fillna({1: 5.0}).tolist() == [1.0, 5.0, nan]
 
 
 def test_a_dict_key_the_column_does_not_have_fills_nothing(firepanda):
-    assert firepanda.Series([1.0, None]).fillna({7: 5.0}).tolist() == [1.0, None]
+    assert firepanda.Series([1.0, None]).fillna({7: 5.0}).tolist() == [1.0, nan]
 
 
 def test_a_dict_with_nothing_in_it_is_nothing_to_do(firepanda):
-    assert firepanda.Series([1.0, None]).fillna({}).tolist() == [1.0, None]
+    assert firepanda.Series([1.0, None]).fillna({}).tolist() == [1.0, nan]
 
 
 def test_a_column_is_lined_up_by_label_and_not_by_position(firepanda):
@@ -252,12 +254,12 @@ def test_a_column_is_lined_up_by_label_and_not_by_position(firepanda):
 def test_a_label_the_fallback_does_not_have_stays_missing(firepanda):
     made = labelled(firepanda, ["a", "b", "c"], [1.0, None, None])
     other = labelled(firepanda, ["z", "b"], [7.0, 8.0])
-    assert made.fillna(other).tolist() == [1.0, 8.0, None]
+    assert made.fillna(other).tolist() == [1.0, 8.0, nan]
 
 
 def test_a_fallback_row_with_nothing_in_it_fills_nothing(firepanda):
     made = labelled(firepanda, ["a", "b"], [1.0, None])
-    assert made.fillna(labelled(firepanda, ["a", "b"], [None, None])).tolist() == [1.0, None]
+    assert made.fillna(labelled(firepanda, ["a", "b"], [None, None])).tolist() == [1.0, nan]
 
 
 def test_a_column_handed_to_a_frame_names_columns_rather_than_rows(firepanda):
@@ -265,14 +267,14 @@ def test_a_column_handed_to_a_frame_names_columns_rather_than_rows(firepanda):
     answered = frame(firepanda).fillna(labelled(firepanda, ["i", "f"], [9.0, 0.0]))
     assert answered["i"].tolist() == [1, 9, 3]
     assert answered["f"].tolist() == [1.5, 0.0, 3.5]
-    assert answered["s"].tolist() == ["a", None, "c"]
+    assert answered["s"].tolist() == ["a", nan, "c"]
 
 
 def test_a_frame_handed_to_a_frame_lines_up_on_both_axes(firepanda):
     made = firepanda.DataFrame({"a": [1.0, None], "b": [None, 2.0]})
     answered = made.fillna(firepanda.DataFrame({"a": [0.0, 0.0]}))
     assert answered["a"].tolist() == [1.0, 0.0]
-    assert answered["b"].tolist() == [None, 2.0]
+    assert answered["b"].tolist() == [nan, 2.0]
 
 
 def test_a_frame_handed_to_a_column_is_refused_in_pandas_words(firepanda):
@@ -341,8 +343,8 @@ def test_a_fallback_whose_labels_repeat_has_no_one_row_to_answer_with(firepanda)
 def test_the_original_is_untouched(firepanda):
     made = frame(firepanda)
     made.fillna({"i": 0, "f": 0.0, "s": "z"})
-    assert made["i"].tolist() == [1, None, 3]
-    assert made["s"].tolist() == ["a", None, "c"]
+    assert made["i"].tolist() == [1, nan, 3]
+    assert made["s"].tolist() == ["a", nan, "c"]
 
 
 def test_both_libraries_answer_the_same_things(firepanda):

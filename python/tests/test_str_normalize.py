@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import unicodedata
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -101,16 +102,12 @@ def mine(column: Any) -> list[Any]:
 
 
 def readable(values: list[Any]) -> list[Any]:
-    """pandas' missing value written the way firepanda writes it.
+    """pandas' missing value as the one `nan`, so the two lists compare with `==`.
 
-    The one difference between the two answers anywhere on this page, and it is
-    not about this method. pandas reads a missing text value out as a float nan
-    and firepanda reads it out as None, which document 63 records and which is
-    the same on every name in the accessor. Flattening it here keeps the
-    comparison about normalization, and the test below keeps the difference
-    itself in view rather than hiding it.
+    A NaN is not equal to itself, so a list holding one is only equal to
+    another that holds the same object.
     """
-    return [None if value is None or value != value else value for value in values]
+    return [nan if value is None or value != value else value for value in values]
 
 
 @needs_pandas
@@ -123,18 +120,11 @@ def test_every_form_matches_pandas_on_every_row(firepanda: ModuleType) -> None:
 
 
 @needs_pandas
-def test_the_missing_row_is_the_only_thing_written_differently(
-    firepanda: ModuleType,
-) -> None:
-    """Stated once, so that `readable` above is not quietly hiding anything.
-
-    Both libraries agree the row is missing. They disagree about what a missing
-    text value looks like when it is read out into Python, which is a property
-    of the library rather than of this method.
-    """
+def test_the_missing_row_is_written_as_pandas_writes_it(firepanda: ModuleType) -> None:
+    """Both libraries agree the row is missing and both read it out as a NaN."""
     answer = made(firepanda).str.normalize("NFC")
     theirs_answer = theirs().str.normalize("NFC")
-    assert answer[15] is None
+    assert answer[15] != answer[15]
     assert theirs_answer.iloc[15] != theirs_answer.iloc[15]
     assert answer.isna().sum() == 1
     assert theirs_answer.isna().sum() == 1
@@ -151,7 +141,7 @@ def test_every_form_matches_the_standard_library(firepanda: ModuleType) -> None:
         answers = mine(made(firepanda).str.normalize(form))
         for row, answer in zip(ROWS, answers, strict=True):
             if row is None:
-                assert answer is None
+                assert answer != answer
             else:
                 assert answer == unicodedata.normalize(form, row)
 

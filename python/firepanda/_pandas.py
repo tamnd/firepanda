@@ -116,8 +116,34 @@ def _beyond_nanoseconds(column: Series) -> None:
 
 
 def _values_of(inner: Any) -> list[Any]:
-    """A column's or an index's values as pandas hands them out, a moment as a `Timestamp`."""
+    """A column's or an index's values as pandas hands them out, a moment as a `Timestamp`.
+
+    A gap is spelled the way pandas spells it for the column's type, which is
+    `_gapped`.
+    """
+    return _gapped(_held_values(inner), inner.dtype())
+
+
+def _held_values(inner: Any) -> list[Any]:
+    """A column's values with None for a gap, which is what the code in here reads."""
     return _outward(list(inner.to_list()), inner.dtype())
+
+
+_NAN_GAPS = ("float", "int", "uint", "str", "string", "large_string", "category")
+
+
+def _gapped(values: list[Any], dtype: str) -> list[Any]:
+    """Values with a gap spelled as pandas hands it out for a column of this type.
+
+    pandas holds a gap in a float column as NaN, and an integer column with a
+    gap is a float column there, so both hand out `nan`. A text column in
+    pandas 3 carries its gaps as NaN too, and so does a category column. A
+    column of flags with a gap is an object column there and hands out None, as
+    it does here. Every other type keeps None.
+    """
+    if not dtype.startswith(_NAN_GAPS) or None not in values:
+        return values
+    return [math.nan if value is None else value for value in values]
 
 
 def _named_as[Column](column: Column, name: Any) -> Column:
@@ -138,9 +164,9 @@ def _named_as[Column](column: Column, name: Any) -> Column:
 def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
     """One value out of a series, or out of a frame by row and column position."""
     if column is None:
-        return _outward_one(inner.cell(row), inner.dtype())
+        return _gapped([_outward_one(inner.cell(row), inner.dtype())], inner.dtype())[0]
     held = inner.column(inner.names()[column])
-    return _outward_one(inner.cell(row, column), held.dtype())
+    return _gapped([_outward_one(inner.cell(row, column), held.dtype())], held.dtype())[0]
 
 
 def _reduced_outward(answer: Any, kind: str, dtype: str) -> Any:
@@ -276,17 +302,27 @@ def _retyped(inner: Any, typed: str) -> Any:
 def _unwrapped(values: Any) -> Any:
     """A sequence with each numpy scalar in it made the Python value it holds.
 
-    Only asked for after the extension has refused the sequence, so a list of
-    plain values pays nothing for it.
+    A series or an index is read with None for its gaps, and a NaN among
+    text is a gap, as it is in pandas, which reads `["a", nan]` as
+    a text column with one value missing, so it becomes None. Only asked for
+    after the extension has refused the sequence, so a list of plain values
+    pays nothing for it.
     """
+    if isinstance(values, (SeriesMixin, IndexMixin)):
+        return _held_values(values._inner)
     if not isinstance(values, (list, tuple)):
         return values
-    if not any(type(value).__module__ == "numpy" for value in values):
-        return values
-    return [
-        value.item() if type(value).__module__ == "numpy" and hasattr(value, "item") else value
-        for value in values
-    ]
+    numpy = any(type(value).__module__ == "numpy" for value in values)
+    if numpy:
+        values = [
+            value.item() if type(value).__module__ == "numpy" and hasattr(value, "item") else value
+            for value in values
+        ]
+    if any(isinstance(value, str) for value in values) and any(
+        isinstance(value, float) and value != value for value in values
+    ):
+        return [None if isinstance(value, float) and value != value else value for value in values]
+    return values
 
 
 def _is_scalar(value: Any) -> bool:
@@ -6640,7 +6676,11 @@ class DataFrameMixin:
                 found[name] = [values] * rows
             elif rows is not None and len(values) != rows:
                 raise _mismatched(len(values), rows)
-        out = DataFrame._wrap(DataFrameMixin._across(found))
+        held = {
+            name: _held_values(values._inner) if isinstance(values, SeriesMixin) else values
+            for name, values in found.items()
+        }
+        out = DataFrame._wrap(DataFrameMixin._across(held))
         cast = {name: kind for name, kind in typed.items() if not kind.startswith("datetime")}
         if cast:
             try:
@@ -13373,7 +13413,7 @@ class DatetimeMixin:
         """The components of every span, refusing a column of instants as pandas does."""
         if not str(self._series.dtype).startswith("timedelta"):
             raise AttributeError(f"'DatetimeProperties' object has no attribute '{name}'")
-        return _span_parts(self._series.tolist())
+        return _span_parts(_held_values(self._series._inner))
 
     def _span_field(self, field: str) -> Series:
         """One field of every span, which is how pandas reads `seconds` and the two finer."""
@@ -13585,14 +13625,16 @@ class CategoricalMixin:
         int32 here and int8 in pandas, which is a difference a caller can see
         through `dtype` and is the one deliberate divergence on this accessor.
         The width is what the encoder writes and the reason it writes it is in
-        document 26.
+        document 26. A row whose category is missing has the code -1, as in
+        pandas, where it is the sentinel a numpy integer array needs.
         """
         from ._frame import Series
 
         try:
-            return Series._wrap(self._series._inner.codes())
+            codes = Series._wrap(self._series._inner.codes())
         except Exception as error:
             raise translate(error) from None
+        return codes.fillna(-1) if codes.hasnans else codes
 
     def _with_order(self, ordered: bool) -> Series:
         """The same column under a type that says whether the order matters."""
@@ -16171,7 +16213,7 @@ class StringMixin:
             raise InvalidArgumentError(
                 "Cannot use a compiled regex as replacement pattern with regex=False"
             )
-        rows = self._series.tolist()
+        rows = _held_values(self._series._inner)
         if from_right:
             if pat is not None and not isinstance(pat, str):
                 raise TypeError(f"must be str or None, not {type(pat).__name__}")
@@ -16239,7 +16281,7 @@ class StringMixin:
         from ._frame import Series
 
         try:
-            rows = [None if row is None else each(row) for row in self._series.tolist()]
+            rows = [None if row is None else each(row) for row in _held_values(self._series._inner)]
         except ValueError as error:
             if isinstance(error, FirepandaError):
                 raise
@@ -18727,6 +18769,11 @@ class IndexMixin:
 
                 raise InvalidIndexError("Reindexing only valid with uniquely valued Index objects")
             return self.get_indexer_non_unique(target)[0]
+        # A gap is None to the core, and a NaN asked for finds it, as in pandas.
+        if isinstance(target, (IndexMixin, SeriesMixin)):
+            target = _held_values(target._inner)
+        elif isinstance(target, list) and any(v != v for v in target if isinstance(v, float)):
+            target = [None if isinstance(v, float) and v != v else v for v in target]
         try:
             return list(self._inner.get_indexer(target))
         except Exception as error:

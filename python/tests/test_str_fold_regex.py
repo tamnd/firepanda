@@ -28,6 +28,7 @@ under folding and do not move.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -161,7 +162,7 @@ def test_replacing_folds_the_same_way(firepanda: ModuleType) -> None:
         got = mine.str.replace("(?i)" + pattern, "#", regex=True)
         want = them.str.replace("(?i)" + pattern, "#", regex=True)
         assert got.tolist() == [
-            None if one is None or one != one else one for one in want.tolist()
+            nan if one is None or one != one else one for one in want.tolist()
         ], pattern
 
 
@@ -212,9 +213,7 @@ def test_the_two_engines_disagree_about_the_turkish_i(firepanda: ModuleType) -> 
 
     ours = mine.str.extract("(?i)(i)", expand=False)
     upstream = them.str.extract("(?i)(i)", expand=False)
-    assert ours.tolist() == [
-        None if one is None or one != one else one for one in upstream.tolist()
-    ]
+    assert ours.tolist() == [nan if one is None or one != one else one for one in upstream.tolist()]
     assert ours.tolist()[2] == "\u0130"
     assert ours.tolist()[3] == "\u0131"
     assert ours.tolist()[5] == "\u0130"

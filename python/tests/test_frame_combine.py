@@ -59,8 +59,15 @@ def converted(answer: Any) -> Any:
 
 
 def gaps(column: Any) -> int:
-    """How many values are missing rather than NaN."""
-    return sum(v is None or type(v).__name__ == "NAType" for v in column.tolist())
+    """How many values are missing rather than NaN.
+
+    pandas hands a gap in a nullable column out as `NA`. firepanda hands a gap
+    in a float column out as a NaN, as pandas does for its own float columns,
+    so the holes are counted in what the core holds, where a NaN is a value.
+    """
+    if type(column).__module__.startswith("pandas"):
+        return sum(v is None or type(v).__name__ == "NAType" for v in column.tolist())
+    return list(column._inner.to_list()).count(None)
 
 
 def facts(answer: Any) -> Any:

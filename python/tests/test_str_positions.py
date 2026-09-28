@@ -23,6 +23,7 @@ through `==`.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -69,11 +70,11 @@ def by_default(values: list[Any] = ROWS) -> Any:
 
 
 def like(mine: list[Any], them: list[Any]) -> bool:
-    """Compares two columns of values, reading a NaN as a None."""
+    """Compares two columns of values, reading a NaN and a None as the same gap."""
     if len(mine) != len(them):
         return False
     for one, other in zip(mine, them, strict=True):
-        if one is None:
+        if one is None or one != one:
             if other is None or other != other:
                 continue
             return False
@@ -90,7 +91,7 @@ def by_hand(rows: list[Any], call: Any) -> list[Any]:
 @needs_pandas
 def test_length_counts_characters_and_not_bytes(firepanda: ModuleType) -> None:
     """The whole reason the kernel exists, on the two rows that can tell."""
-    assert made(firepanda).str.len().tolist() == [5, 5, 0, 6, None, 5]
+    assert made(firepanda).str.len().tolist() == [5, 5, 0, 6, nan, 5]
     assert like(made(firepanda).str.len().tolist(), by_hand(ROWS, len))
 
 
@@ -149,7 +150,7 @@ def test_getting_one_character_answers_nothing_past_the_end(
     mine = made(firepanda).str.get(1)
     assert like(mine.tolist(), theirs().str.get(1).tolist())
     assert mine.tolist()[0] == "é"
-    assert mine.tolist()[2] is None
+    assert mine.tolist()[2] is nan
 
 
 @needs_pandas

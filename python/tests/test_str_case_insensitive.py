@@ -21,6 +21,7 @@ below check the agreement rather than assuming it.
 from __future__ import annotations
 
 import importlib.util
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -100,8 +101,8 @@ def mask_of(them: Any) -> list[Any]:
 
 
 def text_of(them: Any) -> list[Any]:
-    """pandas' text column as a list, with its `nan` read as None."""
-    return [None if one is None or one != one else one for one in them.tolist()]
+    """pandas' text column as a list, with every flavour of missing read as `nan`."""
+    return [nan if one is None or one != one else one for one in them.tolist()]
 
 
 PATTERNS = [
@@ -277,8 +278,8 @@ def test_a_folded_search_answers_what_pandas_answers_on_a_missing_row(
     for name in ("contains", "match", "fullmatch"):
         assert getattr(mine.str, name)("a", case=False).tolist()[-1] is False, name
         assert getattr(theirs().str, name)("a", case=False).tolist()[-1] is False, name
-    assert mine.str.replace("a", "#", case=False).tolist()[-1] is None
-    assert text_of(theirs().str.replace("a", "#", case=False))[-1] is None
+    assert mine.str.replace("a", "#", case=False).tolist()[-1] is nan
+    assert text_of(theirs().str.replace("a", "#", case=False))[-1] is nan
 
 
 @needs_pandas

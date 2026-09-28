@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+from math import nan
 from types import ModuleType
 from typing import Any
 
@@ -85,13 +86,13 @@ def mask_of(them: Any) -> list[Any]:
 
 
 def counts_of(them: Any) -> list[Any]:
-    """pandas' counts as a list, with every flavour of missing read as None."""
-    return [None if one is None or one != one else int(one) for one in them.tolist()]
+    """pandas' counts as a list, with every flavour of missing read as `nan`."""
+    return [nan if one is None or one != one else int(one) for one in them.tolist()]
 
 
 def texts_of(them: Any) -> list[Any]:
-    """pandas' text answers as a list, with every flavour of missing read as None."""
-    return [None if one is None or one != one else one for one in them.tolist()]
+    """pandas' text answers as a list, with every flavour of missing read as `nan`."""
+    return [nan if one is None or one != one else one for one in them.tolist()]
 
 
 def without_the_missing(values: list[Any]) -> list[Any]:
@@ -219,7 +220,7 @@ def test_extract_needs_no_flag_to_reach_it(firepanda: ModuleType) -> None:
     mine, them = made(firepanda), theirs()
     ours = mine.str.extract(r"(a)?(?(1)b|c)").iloc[:, 0].tolist()
     assert ours == texts_of(them.str.extract(r"(a)?(?(1)b|c)")[0])
-    assert ours == ["a", None, None, None, "a", None, None]
+    assert ours == ["a", nan, nan, nan, "a", nan, nan]
 
 
 @needs_pandas

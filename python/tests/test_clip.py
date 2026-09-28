@@ -21,6 +21,8 @@ fraction is a column of floats over there and a refusal here.
 
 from __future__ import annotations
 
+from math import nan
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -77,7 +79,7 @@ def test_a_bound_that_is_a_nan_is_no_bound(firepanda):
 def test_a_value_that_is_missing_is_not_clipped(firepanda):
     """The rule nobody had to write, since a comparison answers nothing here."""
     made = firepanda.Series([1.0, None, 10.0])
-    assert made.clip(2, 8).tolist() == [2.0, None, 8.0]
+    assert made.clip(2, 8).tolist() == [2.0, nan, 8.0]
 
 
 def test_a_nan_is_not_clipped_either(firepanda):
@@ -134,7 +136,7 @@ def test_a_label_the_bound_does_not_carry_loses_its_value(firepanda):
     """Which is not the same as a row it carries nothing in, one test above."""
     made = labelled(firepanda, ["a", "b", "c"], [1, 5, 10])
     bound = labelled(firepanda, ["a", "c"], [9, 9])
-    assert made.clip(bound).tolist() == [9, None, 10]
+    assert made.clip(bound).tolist() == [9, nan, 10]
 
 
 def test_labels_the_column_does_not_have_are_ignored(firepanda):
@@ -226,7 +228,7 @@ def test_one_column_read_across_them_is_a_bound_for_each(firepanda):
 
 def test_a_column_the_bound_does_not_reach_loses_every_row(firepanda):
     answered = frame(firepanda).clip(firepanda.DataFrame({"a": [2, 2, 2]}))
-    assert cells(answered) == {"a": [2, 5, 10], "b": [None, None, None]}
+    assert cells(answered) == {"a": [2, 5, 10], "b": [nan, nan, nan]}
 
 
 def test_a_frame_of_bounds_lines_up_on_both_axes(firepanda):

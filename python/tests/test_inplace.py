@@ -18,6 +18,8 @@ is refused, a `numpy.bool_` is taken, and None is taken and means False.
 
 from __future__ import annotations
 
+from math import nan
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -71,8 +73,8 @@ def column(module):
 def values(made):
     """A column as a list with a missing value spelled one way.
 
-    A gap is a real Arrow null here and a NaN in pandas, which document 47 is
-    about and this slice is not, so both are read as None before comparing.
+    A NaN is not equal to itself, so both sides read a gap as None before
+    comparing.
     """
     return [None if one is None or one != one else one for one in made.tolist()]
 
@@ -99,7 +101,7 @@ def test_a_column_taken_out_beforehand_does_not_see_it(firepanda):
     made = frame(firepanda)
     taken = made["a"]
     made.fillna(0, inplace=True)
-    assert taken.tolist() == [1.0, None, 3.0]
+    assert taken.tolist() == [1.0, nan, 3.0]
     assert made["a"].tolist() == [1.0, 0.0, 3.0]
 
 
@@ -108,14 +110,14 @@ def test_the_frame_does_not_see_a_call_made_on_one_of_its_columns(firepanda):
     taken = made["a"]
     taken.fillna(0, inplace=True)
     assert taken.tolist() == [1.0, 0.0, 3.0]
-    assert made["a"].tolist() == [1.0, None, 3.0]
+    assert made["a"].tolist() == [1.0, nan, 3.0]
 
 
 def test_a_copy_does_not_see_it(firepanda):
     made = frame(firepanda)
     kept = made.copy()
     made.fillna(0, inplace=True)
-    assert kept["a"].tolist() == [1.0, None, 3.0]
+    assert kept["a"].tolist() == [1.0, nan, 3.0]
 
 
 def test_a_second_name_for_the_same_frame_sees_it(firepanda):
