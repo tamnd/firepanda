@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: pandas.offsets and DateOffset
+
+`firepanda.offsets` now carries every name in `pandas.tseries.offsets`, and `firepanda.DateOffset` is the same class pandas exports. Month, quarter, half year and year offsets and their business forms, the semi month, week, week of month, Easter and 52 or 53 week fiscal offsets, business days and business hours with custom week masks and holidays, `Day` and the ticks all move a `Timestamp` the way pandas 3 does, including zero steps, negative steps, `normalize`, zoned moments and the time unit. They print, compare, hash, roll forward and back and read their own frequency text as pandas does. An offset adds to and subtracts from a column of moments and an index of moments, and `date_range` takes one as its `freq`. Business hours that run over midnight and a holiday calendar other than numpy's are refused. `test_offsets.py` checks 567 cases against pandas.
+
 ### Fixed: astype("category") of a column that is not text refuses cleanly
 
 A category of numbers, flags or instants raised a bare `RuntimeError` from inside the core's cast. It now raises `UnsupportedError`, which is a `NotImplementedError`, naming the column's type, on a series and on a frame. pandas keeps such categories in the values' own type, and firepanda holds categories as a text column.
