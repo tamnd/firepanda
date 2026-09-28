@@ -15,6 +15,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: The grouped kurt and SeriesGroupBy.ohlc
 
 `DataFrameGroupBy.kurt` and `SeriesGroupBy.kurt` give pandas' excess kurtosis for each group, including NaN for a group with fewer than four values and zero for one with no spread, and `agg("kurt")` reaches them. The core has no grouped kurtosis, so the answer is built from grouped sums of centred powers, centred twice so that a group far from zero keeps its digits. `SeriesGroupBy.ohlc` gives the first, highest, lowest and last value of each group as `open`, `high`, `low` and `close`.
+
 ### Changed: a group by skips text keys another key already decides
 
 A group by on several keys factorized every key, and a text key's factorize hashes and compares every row's bytes. When the keys include text and a fixed width key, the fixed width key is now grouped first and every other key is checked against the first row of each of its groups, one comparison a row. If they all agree, which is what grouping by a customer's key and then by its name, address, phone and comment looks like, those groups are the answer, and otherwise the grouping goes on as before without factorizing the first key twice. On the 13900K the grouping in TPC-H q10 goes from 5.8 to 1.7 ms and its group by from 8.5 to 4.7 ms.
@@ -90,6 +91,7 @@ A frame groups by a category column in the order of its categories, and the key 
 ### Added: grouping by keys from outside the frame, and Series.groupby
 
 `groupby` takes every key pandas takes: a column of values lined up on the row labels, an array, list or Index as long as the frame, a function or a dictionary of the row labels, and the labels themselves by `level` or by their name. Each key is named as pandas names it, including `index` and `level_N` for keys with no name under `as_index=False`, and a key from outside the frame is never reduced or handed back by `head`, `filter` or iteration. `Series.groupby` takes the same keys. Grouping a frame by one of its own columns leaves that column out when the values are the column's, where pandas asks whether it is the same object. A NaN in a key of floats is now left out under `dropna`, a column's `size` carries the column's name, and `pd.Grouper` reads `(*args, **kwargs)` as pandas' does.
+
 ### Changed: a join reads its keys through a table indexed by value more often
 
 A join on an integer key could look its keys up in a table indexed by the key value only when the range of values was under half the larger side's height, and otherwise it hashed both sides, with the build on one core. The bound is now both sides' height together. TPC-H q10 joins a quarter's orders to all customers on a key range just past the old bound, and on the 13900K the key alignment for that join goes from 1.03 ms to 0.24 ms and the whole join of the key columns from 1.86 ms to 1.08 ms.
@@ -97,6 +99,7 @@ A join on an integer key could look its keys up in a table indexed by the key va
 ### Added: describe over a column's groups, and pd.Grouper
 
 `SeriesGroupBy.describe` answers the count, mean, spread, extremes and percentiles of each group as float64 columns on the keys, with the same percentile labels as `Series.describe`. `firepanda.Grouper` groups by a column, and on its own it brings its own `sort` and `dropna` as pandas reads them, so a plain one leaves the groups in the order they are first seen. A grouper with a frequency bins a column of moments as `resample(freq, on=key)` does, and prints as pandas' `TimeGrouper`.
+
 ### Added: LATERAL subqueries
 
 A `LATERAL` subquery written after a comma, or on the right of an inner or a cross join, now runs, as in DuckDB. It is not run once per left row. Its `FROM` is joined to what is on its left, an equality in its `WHERE` between the two sides becomes a join key, and its select list is worked out over each pair, so `FROM shops, LATERAL (SELECT qty FROM sales WHERE sales.shop = shops.shop)` is one hash join. A left row the subquery finds nothing for is dropped. A condition on a `JOIN LATERAL` is a filter over the result. An aggregate, a `DISTINCT`, an `ORDER BY` or a `LIMIT` inside a lateral subquery is refused by name, as is a left join to one. A `LATERAL` with nothing to its left is an ordinary subquery.
@@ -120,6 +123,7 @@ The month anchored offsets name their anchor in their signature, as pandas' `Yea
 ### Added: pandas.offsets and DateOffset
 
 `firepanda.offsets` now carries every name in `pandas.tseries.offsets`, and `firepanda.DateOffset` is the same class pandas exports. Month, quarter, half year and year offsets and their business forms, the semi month, week, week of month, Easter and 52 or 53 week fiscal offsets, business days and business hours with custom week masks and holidays, `Day` and the ticks all move a `Timestamp` the way pandas 3 does, including zero steps, negative steps, `normalize`, zoned moments and the time unit. They print, compare, hash, roll forward and back and read their own frequency text as pandas does. An offset adds to and subtracts from a column of moments and an index of moments, and `date_range` takes one as its `freq`. Business hours that run over midnight and a holiday calendar other than numpy's are refused. `test_offsets.py` checks 567 cases against pandas.
+
 ### Changed: a comparison against a coded column spreads its answers on every core
 
 Comparing a dictionary coded text column with a constant, or asking it `is_in`, answers once per distinct value and then copies each row's answer out by its code. That copy ran on one core, and on TPC-H q10's `l_returnflag == "R"` over six million rows it took 6.9ms of the query. A column of 65536 rows or more now copies in morsels on every core, and a shorter one keeps the old path.
@@ -189,6 +193,7 @@ A whole number read through `dt` or a `DatetimeIndex` from instants or spans wit
 ### Added: Read a missing value out the way pandas spells it
 
 A gap read out of a column through `tolist`, iteration, `iloc`, `iat`, `loc`, `at` or `items` now comes back as pandas hands it out for the column's type. A float column, an integer column with a gap, a text column and a category column hand out `nan`, and a column of flags hands out None, as an object column does in pandas. A frame cell and an index read the same way, a category's missing row has a code of -1, and a NaN given back among text or asked for by `get_indexer` finds the gap. A missing instant or span still reads as None, since firepanda has no `NaT` yet.
+
 ### Changed: a tuple of keys is read back from the map at the end
 
 A group by on several keys with text among them writes each row's keys out as bytes and looks those up in the text map, which already stores every distinct tuple. Each chunk also gathered its new groups' keys out of its own columns, a second copy of the same values, and then found its new groups again with a serial pass over the ordinals. The text map now hands back the rows it already knew were new, and the key columns are read out of the stored tuples once, on the cores, when the operator finishes. On a six core Linux machine, alternating the old and new driver over eight rounds, ClickBench q18 went from 106 to 84 ms at best, and every answer matched.
@@ -230,6 +235,7 @@ A patch release. On the pandas side, `MultiIndex`, `RangeIndex`, `TimedeltaIndex
 ### Changed: a grown lasting table is zeroed a part at a time on the cores
 
 When a lasting map grows its table for a chunk that could be all new keys, the new table can be tens of megabytes, and it was zeroed on the calling thread with its page faults before the parts were moved in on the cores. Each part now zeroes its own share as it moves. On a six core Linux machine that was heavily loaded by other work, alternating the old and new driver over six rounds, ClickBench q15 went from 72 to 58 ms at best and q34 from 186 to 174, and every answer matched.
+
 ### Changed: a frame filter counts its mask once
 
 `DataFrame.filter` counted the mask again for every fixed width column, and on a frame of one chunk it copied the whole mask for every column before filtering it. It now counts once for the frame, as the lazy `Filter` node already did for a chunk, and a column of one chunk reads the mask where it lies. TPC-H at scale 1 does not move, because its big filters do not go through `DataFrame.filter`, and instructions across the 22 queries fell by about half a percent.
@@ -333,6 +339,7 @@ When an inner join's left side is much shorter than its right, the join builds o
 
 - `str.split` and `str.rsplit` with `expand=True` cut every row at a separator, a regular expression or runs of whitespace and answer a frame with one column per piece, as wide as the row cut into the most pieces, with gaps padding the rest, the way pandas does. `n` limits the cuts, and the pattern is read as a regular expression by pandas' rule: when `regex=True`, when it is compiled, or when it is longer than one character and `regex` is left out. The columns are labelled with the text of their position, which is the registered integer column label divergence. `expand=False` answers a column of lists in pandas and is refused by name until there is a list column type.
 - `str.join` puts a separator between the characters of every row, and `str.wrap` breaks every row into lines with `textwrap` and every argument pandas takes.
+
 ### Added: ASOF JOIN
 
 `ASOF JOIN` and `ASOF LEFT JOIN` written with `ON` now run, as in DuckDB. The condition is equal keys, which may be none, and exactly one inequality between a column on each side. For each left row the join takes the right rows whose keys agree and whose value passes the inequality, and of those the nearest one, so `a.t >= b.t` is the latest right row at or before the left row and `a.t <= b.t` the earliest at or after it. An inner ASOF join drops a left row that found nothing and an ASOF LEFT JOIN keeps it with the right side null. The compared columns can be numbers, dates or times. A new `AsOf` operator sorts the right side by key and value once and does a binary search per left row, and a filter on the left side can go under the join while one on the right side stays above it. ASOF with `USING` and ASOF RIGHT or FULL are still refused by name.
@@ -438,6 +445,7 @@ When the built side of an inner or semi join is small, most probe rows usually f
 ### Added: the rest of pandas.errors
 
 `firepanda.errors` now has a class for every class in `pandas.errors`, 40 more, from `AbstractMethodError` to `ValueLabelTypeMismatch`, each on the same builtins and under the same parents as pandas' class, so an `except` clause or a warnings filter that names one of them works unchanged. Most are raised by readers and writers firepanda does not have yet and are carried for the name.
+
 ### Changed: a stored text key is compared through a flat head the walk can prefetch
 
 `LastingText` found a stored key by a binary search over where each piece of keys starts and then read that piece's view, two dependent loads before the key's bytes, and the probe could not ask for any of them early. The store now keeps sixteen bytes a key beside the pieces, the length and first four bytes and then either the rest of a short key or where a long key's bytes are, so an ordinal names its head. The walk asks for a row's slot sixteen rows ahead, for the stored key's head eight rows ahead and for its bytes four rows ahead. `Group` also cuts its output into windows over the key columns instead of copying them, which rebuilt every text key a second time, and three scratch buffers that are written in full are no longer zeroed first. On a six core Linux machine that was busy with other work, alternating the old and new driver over eight rounds, q34 went from 121 to 93 ms at best, q33 from 169 to 146 and q18 from 187 to 173, and every answer matched.
