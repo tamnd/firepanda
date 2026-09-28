@@ -665,6 +665,50 @@ def _is_scalar(value: Any) -> bool:
     return isinstance(value, (str, bytes)) or not isinstance(value, collections.abc.Iterable)
 
 
+def _written_index(index: Any) -> Any:
+    """An `index=` argument, with a `MultiIndex` written as the text labels that hold it.
+
+    A list of tuples is a `MultiIndex` too, as pandas reads one.
+    """
+    from ._multi import MultiIndex
+
+    if (
+        isinstance(index, (list, tuple))
+        and len(index) > 0
+        and all(isinstance(label, tuple) for label in index)
+    ):
+        index = MultiIndex.from_tuples(index)
+    if isinstance(index, MultiIndex):
+        from ._levels import labels_of
+
+        return labels_of(index)
+    return index
+
+
+def _has_levels(owner: Any) -> bool:
+    """Whether a frame or column is labelled by a `MultiIndex`, read without decoding it."""
+    from ._levels import is_written
+
+    labels = owner._inner.labels()
+    if str(labels.dtype()) not in ("string", "str"):
+        return False
+    return is_written(labels.label()) or (labels.length() > 0 and is_written(labels.at(0)))
+
+
+def _raw_labels(owner: Any) -> Any:
+    """The row labels as the extension holds them, written tuples left written."""
+    from ._frame import Index
+
+    return Index._wrap(owner._inner.labels())
+
+
+def _label_values(owner: Any) -> list[Any]:
+    """The row labels as Python values, a tuple each when there are several levels."""
+    if _has_levels(owner):
+        return owner.index.tolist()
+    return _values_of(owner._inner.labels())
+
+
 def _labels_of(index: Any) -> tuple[list[Any], Any]:
     """The labels an `index=` argument names, and the level name it carries."""
     return list(index), getattr(index, "name", None)
@@ -1090,6 +1134,20 @@ def _one_name(value: Any) -> str | None:
     return None if names[0] is None else str(names[0])
 
 
+def _axis_name(owner: Any, value: Any) -> str | None:
+    """The new name of a frame's or a column's labels, one name a level for a `MultiIndex`."""
+    if _has_levels(owner) and _list_like(value) and not hasattr(value, "items"):
+        from ._levels import named
+
+        names, count = list(value), owner.index.nlevels
+        if len(names) != count:
+            raise InvalidArgumentError(
+                "Length of names must match number of levels in MultiIndex."
+            )
+        return named(names)
+    return _one_name(value)
+
+
 def _dropping(labels: Any, axis: Any, index: Any, columns: Any, owner: str) -> tuple[Any, Any]:
     """Works out which axis a drop was aimed at, the way pandas works it out.
 
@@ -1430,6 +1488,9 @@ def _reindex_target(owner: Any, target: Any) -> Any:
     """
     from ._frame import Index
 
+    written = _written_index(target)
+    if written is not target:
+        return written
     labels = target if isinstance(target, IndexMixin) else Index(_sequence(target))
     if not hasattr(target, "name"):
         labels = labels.rename(owner.index.name)
@@ -6969,14 +7030,26 @@ def _with_row_labels(owner: Any, labels: list[Any]) -> Any:
     """The frame or column with new row labels, one per row, the index name kept.
 
     The labels go in as a column and `set_index` takes them from there, since an
-    index is not assigned to directly here.
+    index is not assigned to directly here. A `MultiIndex`, or labels that are
+    all tuples, go in written as the text labels that hold them.
     """
     from ._frame import DataFrame
+    from ._levels import labels_of
+    from ._multi import MultiIndex
 
+    name = owner.index.name
+    if isinstance(labels, MultiIndex) or (
+        isinstance(labels, (list, tuple))
+        and len(labels) > 0
+        and all(isinstance(label, tuple) for label in labels)
+    ):
+        multi = labels if isinstance(labels, MultiIndex) else MultiIndex.from_tuples(labels)
+        written = labels_of(multi)
+        labels, name = written.tolist(), written.name
     values, held = "__firepanda_values", "__firepanda_labels"
     frame = isinstance(owner, DataFrame)
     work = owner if frame else owner.to_frame(values)
-    work = work.assign(**{held: labels}).set_index(held).rename_axis(owner.index.name)
+    work = work.assign(**{held: labels}).set_index(held).rename_axis(name)
     return work if frame else work[values].rename(owner.name)
 
 
@@ -7436,6 +7509,10 @@ def _with_axis(owner: Any, labels: Any, axis: Any) -> Any:
             f" {len(values)} elements"
         )
     if number == 0:
+        from ._multi import MultiIndex
+
+        if isinstance(labels, MultiIndex):
+            return _with_row_labels(owner, labels)
         return _with_row_labels(owner, values).rename_axis(name)
     if len(set(values)) != len(values):
         raise NotImplementedError(
@@ -8027,6 +8104,14 @@ class _Carries:
         """What the object allows, which is whether its labels may repeat."""
         return flags_of(self)
 
+    def _labels(self) -> Any:
+        """The row labels, read back as a `MultiIndex` when they hold written tuples."""
+        from ._frame import Index
+        from ._levels import multi_of
+
+        labels = Index._wrap(self._inner.labels())  # type: ignore[attr-defined]
+        return multi_of(labels) if _has_levels(self) else labels
+
     def set_flags(
         self, *, copy: Any = NO_DEFAULT, allows_duplicate_labels: bool | None = None
     ) -> Any:
@@ -8100,6 +8185,7 @@ class DataFrameMixin(_Carries):
         answer and differ only in how much work they do.
         """
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
+        index = _written_index(index)
         if isinstance(data, DataFrameMixin):
             self._inner = self._copied(data, index, columns)
         elif data is None and (index is not None or columns is not None):
@@ -8391,9 +8477,8 @@ class DataFrameMixin(_Carries):
         which is the divergence `columns` carries rather than a new one, and
         this is one more place it shows.
         """
-        from ._frame import Index
 
-        return [Index._wrap(self._inner.labels()), self._inner.names()]
+        return [self.index, self._inner.names()]
 
     @property
     def dtypes(self) -> Series:
@@ -9247,7 +9332,7 @@ class DataFrameMixin(_Carries):
         names = self._inner.names()
         try:
             columns = [_values_of(self._inner.column(held)) for held in names]
-            labels = _values_of(self._inner.labels()) if index else []
+            labels = _label_values(self) if index else []
         except Exception as error:
             raise translate(error) from None
         fields = (["Index"] if index else []) + names
@@ -10470,7 +10555,7 @@ class DataFrameMixin(_Carries):
             return False
         if list(self.columns) != list(other.columns):
             return False
-        if not _same_values(self.index.to_series(), other.index.to_series()):
+        if not _same_values(_raw_labels(self).to_series(), _raw_labels(other).to_series()):
             return False
         return all(_same_values(self[name], other[name]) for name in self.columns)
 
@@ -11012,7 +11097,7 @@ class DataFrameMixin(_Carries):
             return _settled(self, self.copy(), inplace)
         try:
             return _settled(
-                self, DataFrame._wrap(self._inner.renamed_axis(_one_name(wanted))), inplace
+                self, DataFrame._wrap(self._inner.renamed_axis(_axis_name(self, wanted))), inplace
             )
         except Exception as error:
             raise translate(error) from None
@@ -11757,7 +11842,6 @@ class DataFrameMixin(_Carries):
         """
         from ._frame import DataFrame
 
-        _held_at("append", append, False, "keeping the old labels as well needs a MultiIndex")
         inplace = _flag("inplace", inplace)
         if verify_integrity is not NO_DEFAULT and verify_integrity:
             raise NotImplementedError(
@@ -11766,17 +11850,71 @@ class DataFrameMixin(_Carries):
                 " nothing else here needs"
             )
         wanted = list(keys) if isinstance(keys, (list, tuple)) else [keys]
-        if len(wanted) != 1:
-            raise NotImplementedError(
-                "set_index on more than one column is not supported yet, because"
-                " the result is a MultiIndex and there is not one yet"
-            )
+        if len(wanted) != 1 or _flag("append", append):
+            return _settled(self, self._set_levels(wanted, bool(drop), bool(append)), inplace)
         try:
             return _settled(
                 self, DataFrame._wrap(self._inner.set_index(str(wanted[0]), bool(drop))), inplace
             )
         except Exception as error:
             raise translate(error) from None
+
+    def _set_levels(self, wanted: list[Any], drop: bool, append: bool) -> DataFrame:
+        """The frame labelled by several of its columns, or by its labels and some columns."""
+        from ._levels import rows_of
+        from ._multi import MultiIndex
+
+        missing = [key for key in wanted if key not in self.columns]
+        if missing:
+            raise KeyError(f"None of {missing} are in the columns")
+        columns, names = [], []
+        if append:
+            held = self.index
+            if isinstance(held, MultiIndex):
+                columns += [held.get_level_values(n).tolist() for n in range(held.nlevels)]
+                names += held.names
+            else:
+                columns.append(held.tolist())
+                names.append(held.name)
+        columns += [self[key].tolist() for key in wanted]
+        names += wanted
+        labels = rows_of(columns, names)
+        out = self.drop(columns=wanted) if drop else self
+        try:
+            return type(self)._wrap(_put_labels(out._inner, labels.tolist(), labels.name))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _reset_levels(self, level: Any, drop: bool, names: Any) -> DataFrame:
+        """The frame with some or all levels of its `MultiIndex` put back as columns."""
+        from ._levels import rows_of
+
+        multi = self.index
+        chosen = list(range(multi.nlevels)) if level is None else multi._level_numbers(level)
+        kept = [n for n in range(multi.nlevels) if n not in chosen]
+        try:
+            if not kept:
+                out = type(self)._wrap(self._inner.reset_index(True))
+            elif len(kept) == 1:
+                labels = multi.get_level_values(kept[0])
+                out = type(self)._wrap(_put_labels(self._inner, labels.tolist(), labels.name))
+            else:
+                labels = rows_of(
+                    [multi.get_level_values(n).tolist() for n in kept],
+                    [multi.names[n] for n in kept],
+                )
+                out = type(self)._wrap(_put_labels(self._inner, labels.tolist(), labels.name))
+        except Exception as error:
+            raise translate(error) from None
+        if drop:
+            return out
+        titles = [multi.names[n] if multi.names[n] is not None else f"level_{n}" for n in chosen]
+        if names is not None:
+            given = list(names) if _list_like(names) else [names]
+            titles = given[: len(chosen)]
+        for at, (n, title) in enumerate(zip(chosen, titles, strict=True)):
+            out.insert(at, title, multi.get_level_values(n).tolist())
+        return out
 
     def _reset_index(
         self,
@@ -11796,10 +11934,13 @@ class DataFrameMixin(_Carries):
         is none is the string `index` rather than anything cleverer.
         """
         from ._frame import DataFrame
+        from ._multi import MultiIndex
 
+        inplace = _flag("inplace", inplace)
+        if isinstance(self.index, MultiIndex):
+            return _settled(self, self._reset_levels(level, bool(drop), names), inplace)
         _no_level(level)
         _refuse("names", names, "naming the columns the old labels land in needs a MultiIndex")
-        inplace = _flag("inplace", inplace)
         _held_at("col_level", col_level, 0, "there is one level of columns and it is that one")
         _held_at("col_fill", col_fill, "", "there is nothing above the columns to fill")
         if allow_duplicates is not NO_DEFAULT and allow_duplicates:
@@ -12394,6 +12535,7 @@ class DataFrameMixin(_Carries):
                         f" kind, {columns!r} was passed"
                     )
                 inner = inner.reindex_columns([str(one) for one in columns], value)
+            index = _written_index(index)
             if index is not None and _reindex_here(self, index, method):
                 return _reindex_by_position(
                     DataFrame._wrap(inner), index, method, value, limit, tolerance
@@ -12753,6 +12895,7 @@ class SeriesMixin(_Carries):
         """
         keyed = isinstance(data, collections.abc.Mapping) and len(data) > 0
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
+        index = _written_index(index)
         if name is None and isinstance(data, IndexMixin):
             # pandas names a column built from an index after the index.
             name = data.name
@@ -12906,6 +13049,10 @@ class SeriesMixin(_Carries):
         reasonable.
         """
         try:
+            if isinstance(key, tuple) and _has_levels(self):
+                from ._levels import written
+
+                key = written(key)
             return self._inner.labels().contains(key)
         except Exception as error:
             raise translate(error) from None
@@ -12926,9 +13073,8 @@ class SeriesMixin(_Carries):
         two are the same member because a frame and a column are both mappings,
         differing in what they are a mapping of.
         """
-        from ._frame import Index
 
-        return Index._wrap(self._inner.labels())
+        return self.index
 
     @property
     def axes(self) -> list[Any]:
@@ -12939,9 +13085,8 @@ class SeriesMixin(_Carries):
         which is the only reason this member exists on a class that has exactly
         one axis and a member called `index` that answers it.
         """
-        from ._frame import Index
 
-        return [Index._wrap(self._inner.labels())]
+        return [self.index]
 
     @property
     def dtypes(self) -> str:
@@ -13463,7 +13608,7 @@ class SeriesMixin(_Carries):
         than one of them being enough.
         """
         try:
-            labels, values = _values_of(self._inner.labels()), _values_of(self._inner)
+            labels, values = _label_values(self), _values_of(self._inner)
             return iter(zip(labels, values, strict=True))
         except Exception as error:
             raise translate(error) from None
@@ -14431,7 +14576,7 @@ class SeriesMixin(_Carries):
         """
         if not isinstance(other, type(self)):
             return False
-        if not _same_values(self.index.to_series(), other.index.to_series()):
+        if not _same_values(_raw_labels(self).to_series(), _raw_labels(other).to_series()):
             return False
         return _same_values(self, other)
 
@@ -14639,7 +14784,7 @@ class SeriesMixin(_Carries):
             return _settled(self, self.copy(), inplace)
         try:
             return _settled(
-                self, Series._wrap(self._inner.renamed_axis(_one_name(wanted))), inplace
+                self, Series._wrap(self._inner.renamed_axis(_axis_name(self, wanted))), inplace
             )
         except Exception as error:
             raise translate(error) from None
@@ -15418,6 +15563,7 @@ class SeriesMixin(_Carries):
             return Series._wrap(self._inner)
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+        index = _written_index(index)
         if _reindex_here(self, index, method):
             return _reindex_by_position(self, index, method, value, limit, tolerance)
         try:
@@ -20027,7 +20173,6 @@ class GroupByMixin[Answer]:
         Returns:
             The frame the core produced, one row per group.
         """
-        from ._frame import DataFrame
 
         if kind == "kurt":
             return self._kurtosis(columns)
@@ -20035,22 +20180,32 @@ class GroupByMixin[Answer]:
             source = self._frame._inner
             if columns is not None:
                 source = source.select(self._by + columns)
-            return DataFrame._wrap(
-                source.group_agg(self._by, kind, param, self._dropna, self._sort, self._as_index)
-            )
+            return self._aggregated(source, kind, param, self._as_index)
         except Exception as error:
             raise translate(error) from None
 
     def _grouped(self, source: Any, kind: str, as_index: bool) -> DataFrame:
         """One core reduction over the groups of `source`, which carries the keys."""
-        from ._frame import DataFrame
 
         try:
-            return DataFrame._wrap(
-                source.group_agg(self._by, kind, 0.0, self._dropna, self._sort, as_index)
-            )
+            return self._aggregated(source, kind, 0.0, as_index)
         except Exception as error:
             raise translate(error) from None
+
+    def _aggregated(self, source: Any, kind: str, param: float, as_index: bool) -> DataFrame:
+        """One core reduction over the groups, the keys made the row labels when asked.
+
+        The core labels the rows by one key. Several keys are reduced with the
+        keys kept as columns and then written into the labels of a `MultiIndex`,
+        so the order of the groups is still the core's.
+        """
+        from ._frame import DataFrame
+
+        many = as_index and len(self._by) > 1
+        out = DataFrame._wrap(
+            source.group_agg(self._by, kind, param, self._dropna, self._sort, as_index and not many)
+        )
+        return out._set_levels(list(self._by), True, False) if many else out
 
     def _broadcast_mean(self, source: Any) -> DataFrame:
         """Each row's group mean, for every column of `source` that is not a key."""
@@ -21323,6 +21478,12 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     """
 
     __slots__ = ()
+
+    def __getattr__(self, name: str) -> Any:
+        """A column read as an attribute, `df.groupby("k").v` for `df.groupby("k")["v"]`."""
+        if not name.startswith("_") and name in self._frame.columns:
+            return self[name]
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def __getitem__(self, key: Any) -> DataFrameGroupBy | SeriesGroupBy:
         """Narrows the group by to one column or to several.
@@ -27099,6 +27260,13 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
         "bare": quoting == csv.QUOTE_NONNUMERIC,
     }
     header, index, index_label = kw["header"], kw["index"], kw["index_label"]
+    from ._multi import MultiIndex
+
+    if isinstance(rows, MultiIndex):
+        levels = [rows.get_level_values(n) for n in range(rows.nlevels)]
+    else:
+        levels = [rows]
+    levels_names = [level.name for level in levels]
     lines: list[list[Any]] = []
     if header is not False:
         titles = list(names)
@@ -27109,18 +27277,21 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
         titles = [str(title) for title in titles]
         if index and index_label is not False:
             if index_label is None:
-                label = "" if rows.name is None else str(rows.name)
+                label = ["" if name is None else str(name) for name in levels_names]
             elif _list_like(index_label):
-                label = str(next(iter(index_label)))
+                label = [str(one) for one in index_label][: len(levels_names)]
             else:
-                label = str(index_label)
-            titles = [label, *titles]
+                label = [str(index_label)]
+            titles = [*label, *titles]
         lines.append(titles)
     texts = [
         _csv_cells(column, kw["float_format"], kw["date_format"], **cells) for column in columns
     ]
     if index:
-        texts = [_csv_cells(rows.to_series(), kw["float_format"], None, **cells), *texts]
+        texts = [
+            *(_csv_cells(level.to_series(), kw["float_format"], None, **cells) for level in levels),
+            *texts,
+        ]
     lines.extend(zip(*texts, strict=True) if texts else [])
     buffer = io.StringIO()
     writer = csv.writer(
@@ -27375,13 +27546,50 @@ def _text_adjoin(space: int, *blocks: list[str]) -> str:
     return "\n".join("".join(line) for line in zip(*padded, strict=True))
 
 
-def _text_labels(index: Any, named: bool, widest: int | None) -> list[str]:
+def _text_named(index: Any) -> bool:
+    """Whether an index has a name to print, which for a `MultiIndex` is any level's."""
+    return any(name is not None for name in getattr(index, "names", [index.name]))
+
+
+def _text_levels(index: Any, named: bool, widest: int | None, between: int) -> list[str]:
+    """The rows of a `MultiIndex` as text, one column per level, sparsified as pandas does.
+
+    A value on any level but the last is left blank when the row above has
+    the same values on it and on every level to its left. A frame puts one
+    space between the levels and a column two.
+    """
+    codes = index._codes
+    last = index.nlevels - 1
+    columns = []
+    for number in range(index.nlevels):
+        values = index.get_level_values(number)
+        texts = _text_labels(values, named, widest)
+        above = 1 if named else 0
+        if str(values.dtype) in ("string", "str"):
+            # pandas prints a gap in a level of text as nan, and NaN everywhere else.
+            for row, code in enumerate(codes[number]):
+                if code < 0:
+                    texts[row + above] = "nan"
+        if number < last:
+            for row in range(1, len(index)):
+                if all(codes[n][row] == codes[n][row - 1] for n in range(number + 1)):
+                    texts[row + above] = ""
+        size = max((len(x) for x in texts), default=0)
+        columns.append([x.ljust(size) for x in texts])
+    return [(" " * between).join(parts) for parts in zip(*columns, strict=True)]
+
+
+def _text_labels(index: Any, named: bool, widest: int | None, between: int = 1) -> list[str]:
     """The row labels as text, headed by the index name when `named` is set.
 
     Text labels are written as they are. Other labels go through the column
     formatter, left aligned, and then lose the spaces every one of them starts
     with.
     """
+    from ._multi import MultiIndex
+
+    if isinstance(index, MultiIndex):
+        return _text_levels(index, named, widest, between)
     header = []
     if named:
         header.append("" if index.name is None else _text_plain(index.name))
@@ -27543,7 +27751,7 @@ def _text_table(
             return formatters.get(label)
         return formatters[position]
 
-    named = bool(index and kw["index_names"] and frame.index.name is not None)
+    named = bool(index and kw["index_names"] and _text_named(frame.index))
     listed = _list_like(header)
     if listed:
         if len(header) != len(labels):
@@ -27700,7 +27908,7 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
         footer += ("\n" if footer else "") + _text_categories(column)
     if not rows:
         return f"Series([], {footer})"
-    labels = _text_labels(shown.index, True, _TEXT_SERIES_WIDEST)
+    labels = _text_labels(shown.index, True, _TEXT_SERIES_WIDEST, 2)
     texts = _text_values(shown, None, kw["float_format"], kw["na_rep"], ".", kw["index"])
     texts = _text_fixed(texts, "right", None, _TEXT_SERIES_WIDEST)
     if dots is not None:
@@ -27709,8 +27917,8 @@ def _text_series(column: Any, kw: dict[str, Any]) -> str:
         labels.insert(dots + 1, "")
     blocks = [labels[1:], texts] if kw["index"] else [texts]
     result = _text_adjoin(3, *blocks)
-    if kw["header"] and column.index.name is not None:
-        result = labels[0] + "\n" + result
+    if kw["header"] and _text_named(column.index):
+        result = labels[0].rstrip() + "\n" + result
     return result + "\n" + footer if footer else result
 
 

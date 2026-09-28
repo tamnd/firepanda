@@ -167,17 +167,15 @@ def test_sort_index_accepts_the_sort_kinds_and_ignores_them(firepanda: ModuleTyp
 
 
 @needs_pandas
-def test_more_than_one_key_says_that_it_is_not_written_yet(firepanda: ModuleType) -> None:
-    """Because the answer is a MultiIndex and there is not one yet."""
-    with pytest.raises(NotImplementedError, match="MultiIndex"):
-        made(firepanda).set_index(["k", "v"])
+def test_more_than_one_key_labels_the_rows_by_both(firepanda: ModuleType) -> None:
+    """The answer is labelled by a MultiIndex of the two columns."""
+    got = made(firepanda).set_index(["k", "v"])
+    assert got.index.names == ["k", "v"]
 
 
 @needs_pandas
 def test_the_arguments_that_are_not_implemented_say_so(firepanda: ModuleType) -> None:
     """Each one by name, rather than as an unexpected keyword."""
-    with pytest.raises(NotImplementedError, match="append"):
-        made(firepanda).set_index("k", append=True)
     with pytest.raises(NotImplementedError, match="verify_integrity"):
         made(firepanda).set_index("k", verify_integrity=True)
     with pytest.raises(NotImplementedError, match="level"):

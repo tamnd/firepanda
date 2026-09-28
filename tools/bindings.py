@@ -2860,10 +2860,9 @@ FRAME = Exposed(
         Member(
             name="index",
             kind="property",
-            body="self._inner.labels()",
-            doc="The row labels of the frame.",
+            body="self._labels()",
+            doc="The row labels of the frame, a `MultiIndex` when they have several levels.",
             returns="Index",
-            wraps="Index",
         ),
         Member(
             name="head",
@@ -3727,10 +3726,9 @@ SERIES = Exposed(
         Member(
             name="index",
             kind="property",
-            body="self._inner.labels()",
-            doc="The row labels of the series.",
+            body="self._labels()",
+            doc="The row labels of the series, a `MultiIndex` when they have several levels.",
             returns="Index",
-            wraps="Index",
         ),
         Member(
             name="head",

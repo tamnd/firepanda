@@ -2286,9 +2286,9 @@ class DataFrame(DataFrameMixin):
 
     @property
     def index(self) -> Index:
-        """The row labels of the frame."""
+        """The row labels of the frame, a `MultiIndex` when they have several levels."""
         try:
-            return Index._wrap(self._inner.labels())
+            return self._labels()
         except Exception as error:
             raise translate(error) from None
 
@@ -3486,9 +3486,9 @@ class Series(SeriesMixin):
 
     @property
     def index(self) -> Index:
-        """The row labels of the series."""
+        """The row labels of the series, a `MultiIndex` when they have several levels."""
         try:
-            return Index._wrap(self._inner.labels())
+            return self._labels()
         except Exception as error:
             raise translate(error) from None
 
