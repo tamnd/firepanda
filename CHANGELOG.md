@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Instants and spans among objects in a frame's values
+
+When a frame's `values` or `to_numpy()` is an object array, an instant or a span in it is now a `Timestamp` or a `Timedelta` and a gap is `NaT`, as pandas gives them, where numpy had put a `datetime`, a `timedelta` and None.
+
 ### Added: Instants and spans in different units meet as in pandas
 
 `concat` of instant or span columns, or of instant row labels, in different units now keeps the finest unit, as pandas does, where it refused them as pandas' object column. A mix of zones, or of instants and spans, is still refused, since pandas answers an object column there. `astype` to the same kind in another unit, such as `astype("datetime64[ms]")`, is now `as_unit` on a series and on a frame, and dropping a zone that way raises pandas' `TypeError`.

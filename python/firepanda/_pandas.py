@@ -6498,7 +6498,8 @@ def _frame_to_numpy(frame: Any, dtype: Any, na_value: Any) -> Any:
 
     The columns share one type: their own when they agree, the wider number
     when every column holds numbers, and objects otherwise, which is pandas'
-    rule and is why a frame of whole numbers and flags gives objects.
+    rule and is why a frame of whole numbers and flags gives objects. Instants
+    and spans among objects are `Timestamp` and `Timedelta`, with `NaT` for a gap.
     """
     np = _numpy()
     columns = [_column_to_numpy(frame[name], None, na_value) for name in frame.columns]
@@ -6513,7 +6514,12 @@ def _frame_to_numpy(frame: Any, dtype: Any, na_value: Any) -> Any:
         shared = np.dtype("object")
     answer = np.empty((len(frame), len(columns)), dtype=shared)
     for position, column in enumerate(columns):
-        answer[:, position] = column
+        if shared.kind == "O" and column.dtype.kind in "mM":
+            # numpy hands an instant out of an object array as a `datetime` and a gap as
+            # None, where pandas puts a `Timestamp` and `NaT`, which `tolist` gives.
+            answer[:, position] = frame.iloc[:, position].tolist()
+        else:
+            answer[:, position] = column
     return answer if dtype is None else answer.astype(dtype)
 
 
