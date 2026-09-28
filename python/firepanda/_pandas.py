@@ -7193,6 +7193,76 @@ def _numpy_type(printed: str, gaps: bool) -> str:
     return "object"
 
 
+def _eight_byte_buffer(column: Any) -> tuple[Any, Any] | None:
+    """A column of eight byte values copied straight out of its Arrow buffers.
+
+    Reading values one at a time into Python and back is what `to_numpy` does
+    for every type, and for a million floats that is most of a second. A
+    float64, int64, instant or span column is one buffer of eight byte values
+    beside a bit for each row saying whether it holds one, so it is copied in
+    one step. The answer is the values as float64 or int64, and a mask of the
+    rows that hold a value, or None when every row does. None for any other
+    type, which the caller then reads the slow way.
+    """
+    import ctypes
+
+    import numpy
+
+    class _Schema(ctypes.Structure):
+        _fields_ = [
+            ("format", ctypes.c_char_p),
+            ("name", ctypes.c_char_p),
+            ("metadata", ctypes.c_void_p),
+            ("flags", ctypes.c_int64),
+            ("n_children", ctypes.c_int64),
+            ("children", ctypes.c_void_p),
+            ("dictionary", ctypes.c_void_p),
+            ("release", ctypes.c_void_p),
+            ("private_data", ctypes.c_void_p),
+        ]
+
+    class _Array(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_int64),
+            ("null_count", ctypes.c_int64),
+            ("offset", ctypes.c_int64),
+            ("n_buffers", ctypes.c_int64),
+            ("n_children", ctypes.c_int64),
+            ("buffers", ctypes.POINTER(ctypes.c_void_p)),
+            ("children", ctypes.c_void_p),
+            ("dictionary", ctypes.c_void_p),
+            ("release", ctypes.c_void_p),
+            ("private_data", ctypes.c_void_p),
+        ]
+
+    opened = ctypes.pythonapi.PyCapsule_GetPointer
+    opened.restype = ctypes.c_void_p
+    opened.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    # Both capsules stay referenced until the copy is made, so the buffers
+    # they own are not released under it.
+    schema_capsule, array_capsule = column.__arrow_c_array__()
+    schema = _Schema.from_address(opened(schema_capsule, b"arrow_schema"))
+    array = _Array.from_address(opened(array_capsule, b"arrow_array"))
+    code = (schema.format or b"").decode()
+    if code == "g":
+        kind = numpy.float64
+    elif code == "l" or code.startswith(("ts", "tD")):
+        kind = numpy.int64
+    else:
+        return None
+    length, offset = array.length, array.offset
+    if array.n_buffers != 2 or length == 0 or not array.buffers[1]:
+        return (numpy.empty(length, dtype=kind), None) if length == 0 else None
+    held = (ctypes.c_char * (8 * (length + offset))).from_address(array.buffers[1])
+    values = numpy.frombuffer(held, dtype=kind)[offset:].copy()
+    mask = None
+    if array.null_count != 0 and array.buffers[0]:
+        bits = (ctypes.c_char * ((length + offset + 7) // 8)).from_address(array.buffers[0])
+        flags = numpy.unpackbits(numpy.frombuffer(bits, dtype=numpy.uint8), bitorder="little")
+        mask = flags[offset : offset + length].astype(bool)
+    return values, mask
+
+
 def _column_to_numpy(column: Any, dtype: Any, na_value: Any) -> Any:
     """A column's values as the numpy array pandas' `to_numpy` hands back.
 
@@ -15582,11 +15652,30 @@ class WindowMixin(_ReadingMixin):
     call.
     """
 
-    __slots__ = ("_center", "_closed", "_data", "_min_periods", "_step", "_window")
+    __slots__ = (
+        "_axis",
+        "_center",
+        "_closed",
+        "_data",
+        "_min_periods",
+        "_on",
+        "_selection",
+        "_shown",
+        "_span",
+        "_step",
+        "_whole",
+        "_window",
+    )
     """The data and the five numbers that survive to the reduction. Slotted for
     the reason `DataFrameMixin` gives. There is no `_inner`, because a window
     object has no extension object of its own: it is some data and a plan for
-    which rows to read together."""
+    which rows to read together.
+
+    A window given as a span of time also keeps the span in the axis' own unit
+    as `_span`, and the axis as whole numbers in `_axis`. `_on` is the column
+    the window is ordered by, which `_data` leaves out and the answer puts back.
+    `_whole` is the frame as it was given, `_shown` is the columns picked out of
+    it, on column included, and `_selection` is what picked them."""
 
     _data: Series | DataFrame
     _window: int | None
@@ -15631,20 +15720,24 @@ class WindowMixin(_ReadingMixin):
         """
         if center is not True and center is not False:
             raise InvalidArgumentError("center must be a boolean")
-        if window is not None and (not isinstance(window, int) or isinstance(window, bool)):
-            # pandas says the same thing for a float, for a string and for an
-            # offset, because all three reach it as a window it cannot count
-            # rows with. A window given as a duration needs a datetime index to
-            # measure against and that is its own piece of work.
+        timed = _spans_time(window)
+        if (
+            window is not None
+            and not timed
+            and (not isinstance(window, int) or isinstance(window, bool))
+        ):
+            # pandas says the same thing for a float, and for a span of time
+            # over rows that are not times, which `_rolling` checks once it
+            # knows the axis.
             raise InvalidArgumentError("window must be an integer 0 or greater")
-        if window is not None and window < 0:
+        if window is not None and not timed and window < 0:
             raise InvalidArgumentError("window must be an integer 0 or greater")
         if min_periods is not None:
             if not isinstance(min_periods, int) or isinstance(min_periods, bool):
                 raise InvalidArgumentError("min_periods must be an integer")
             if min_periods < 0:
                 raise InvalidArgumentError("min_periods must be >= 0")
-            if window is not None and min_periods > window:
+            if window is not None and not timed and min_periods > window:
                 raise InvalidArgumentError(f"min_periods {min_periods} must be <= window {window}")
         if closed is not None and closed not in _CLOSED:
             raise InvalidArgumentError("closed must be 'right', 'left', 'both' or 'neither'")
@@ -15663,6 +15756,12 @@ class WindowMixin(_ReadingMixin):
         self._center = center
         self._closed = closed
         self._step = step
+        self._span = None
+        self._axis = None
+        self._on = None
+        self._selection = None
+        self._shown = data
+        self._whole = data
 
     def _over_frame(self) -> bool:
         """Whether this window is over a frame rather than a column.
@@ -15834,6 +15933,8 @@ class WindowMixin(_ReadingMixin):
         # absent and crosses that way, because its default is the width on one of
         # these two classes and one on the other, and the side that knows which
         # is the kernel.
+        if self._span is not None:
+            return self._carry(self._timed(kind, settings))
         plan = (
             kind,
             self._window,
@@ -15845,10 +15946,177 @@ class WindowMixin(_ReadingMixin):
         )
         try:
             if isinstance(self._data, DataFrame):
-                return DataFrame._wrap(self._data._inner.window_agg(*plan))
+                return self._carry(DataFrame._wrap(self._data._inner.window_agg(*plan)))
             return Series._wrap(self._data._inner.window_agg(*plan))
         except Exception as error:
             raise translate(error) from None
+
+    def _timed(self, kind: str, settings: tuple[Any, ...]) -> Series | DataFrame:
+        """One reduction over windows measured in time, answered by the row kernel.
+
+        A window over the rows from `start` up to `stop` holds the same values
+        as a window of `stop - start` rows ending at row `stop - 1`, so each
+        height the windows take is one run of the kernel, and each row reads
+        its answer off the run of its own height. A window with fewer rows
+        than `min_periods` answers NaN, which is the rule for every reduction
+        here, `count` included, since a count reads the height of the window.
+        """
+        import numpy
+
+        from ._frame import DataFrame, Series
+
+        data = self._data
+        least = self._least()
+        starts, stops = self._span_bounds()
+        heights = numpy.maximum(stops - starts, 0)
+
+        def floats(column: Series) -> Any:
+            read = _eight_byte_buffer(column)
+            if read is None or read[0].dtype != numpy.float64:
+                return column.to_numpy(dtype="float64")
+            values, mask = read
+            if mask is not None:
+                values[~mask] = numpy.nan
+            return values
+
+        def run(height: int) -> tuple[Any, Any]:
+            plan = (kind, height, min(least, height), False, "right", None, settings)
+            try:
+                if isinstance(data, DataFrame):
+                    answer = DataFrame._wrap(data._inner.window_agg(*plan))
+                    parts = [floats(answer[label]) for label in answer.columns]
+                    stacked = numpy.column_stack(parts) if parts else numpy.empty((len(answer), 0))
+                    return answer, stacked
+                answer = Series._wrap(data._inner.window_agg(*plan))
+                return answer, floats(answer)
+            except Exception as error:
+                raise translate(error) from None
+
+        wide = isinstance(data, DataFrame)
+        shape = (len(heights), len(data.columns)) if wide else (len(heights),)
+        answers = numpy.full(shape, numpy.nan)
+        like = None
+        for height in (int(height) for height in numpy.unique(heights)):
+            if height < least:
+                continue
+            rows = numpy.nonzero(heights == height)[0]
+            like, answered = run(height)
+            answers[rows] = answered[0] if height == 0 else answered[stops[rows] - 1]
+        if like is None:
+            # Every window is too short, or there are no rows. The kernel still
+            # runs once, so a column it cannot read is refused the way a window
+            # of rows refuses it, and its answer lends the labels.
+            like, _ = run(1)
+        # The answer goes into the kernel's own answer column by column, which
+        # keeps its labels and name rather than building the labels again.
+        if wide:
+            inner = like._inner
+            for at, label in enumerate(like.columns):
+                built = _firepanda.Series(answers[:, at].tolist(), None)
+                inner = inner.pick(label, built.is_in(built.head(0)), built)
+            return DataFrame._wrap(inner)
+        built = _firepanda.Series(answers.tolist(), None)
+        return Series._wrap(like._inner.pick(built.is_in(built.head(0)), built))
+
+    def _span_bounds(self) -> tuple[Any, Any]:
+        """Where each row's window starts and stops, when the window is a span of time.
+
+        pandas' own rule, over an axis that only rises or only falls, worked
+        on the axis turned to rise. The window behind a row keeps the rows
+        after the time one span back, and a centred one reaches half a span
+        either way. A closed left end reaches one unit further back, and an
+        open right end stops before the first row at the row's own time. The
+        start never passes the row itself.
+
+        Half a span is cut to a whole number of units, as pandas cuts it, and
+        a centred window whose span is odd keeps both its ends, as in pandas,
+        since the two halves would otherwise miss half a unit.
+        """
+        import numpy
+
+        axis = self._axis
+        sign = -1 if len(axis) and axis[-1] < axis[0] else 1
+        closed = self._closed or "right"
+        right = closed in ("right", "both")
+        left = closed in ("left", "both")
+        if self._center and self._span % 2 == 1:
+            right = left = True
+        risen = sign * axis
+        rows = numpy.arange(len(axis))
+        if self._center:
+            half = sign * (self._span // 2)
+            ends = axis + half
+            reach = axis - half
+            stops = numpy.searchsorted(risen, sign * ends, side="right" if right else "left")
+        else:
+            reach = axis - sign * self._span
+            stops = rows + 1 if right else numpy.searchsorted(risen, risen, side="left")
+        if left:
+            reach = reach - sign
+        starts = numpy.minimum(numpy.searchsorted(risen, sign * reach, side="right"), rows)
+        return starts, stops
+
+    def _carry(self, answer: Any) -> Any:
+        """A frame's answer with the `on` column put back, where pandas puts it.
+
+        It goes back where it stood among the columns picked, counting the
+        columns before it that came back, or on the end when it was not picked.
+        """
+        from ._frame import DataFrame
+
+        if self._on is None or not isinstance(answer, DataFrame):
+            return answer
+        carried = self._whole[self._on]
+        if self._on in answer.columns:
+            answer[self._on] = carried
+            return answer
+        picked = list(self._shown.columns) if isinstance(self._shown, DataFrame) else []
+        if self._on in picked:
+            before = set(picked[: picked.index(self._on)])
+            answer.insert(sum(label in before for label in answer.columns), self._on, carried)
+        else:
+            answer[self._on] = carried
+        return answer
+
+    def __getitem__(self, key: Any) -> Any:
+        """The same window over one column of the frame, or over some of its columns.
+
+        Raises:
+            KeyError: For a column the frame does not have, in pandas' words.
+            IndexError: When columns are already picked, as in pandas.
+        """
+        from ._frame import DataFrame
+
+        if self._selection is not None:
+            raise IndexError(f"Column(s) {self._selection} already selected")
+        whole = self._whole
+        labels = list(whole.columns) if isinstance(whole, DataFrame) else []
+        if isinstance(key, list | tuple):
+            missing = [label for label in key if label not in labels]
+            if missing:
+                raise KeyError("Columns not found: " + ", ".join(map(repr, missing)))
+            shown = whole[list(key)]
+        else:
+            if key not in labels:
+                raise KeyError(f"Column not found: {key}")
+            shown = whole[key]
+        data = shown
+        if isinstance(shown, DataFrame) and self._on in shown.columns:
+            data = shown.drop(columns=[self._on])
+        window = self._over(data)
+        window._selection = key
+        window._shown = shown
+        return window
+
+    def __repr__(self) -> str:
+        """The class and what it was given, as pandas prints a window."""
+        names = ("window", "min_periods", "center", "win_type", "on", "closed", "step", "method")
+        if self._window is None:
+            names = ("min_periods", "method")
+        shown = [
+            f"{name}={getattr(self, name)}" for name in names if getattr(self, name) is not None
+        ]
+        return f"{type(self).__name__} [{','.join(shown)}]"
 
     # What follows is the part of a window that is not a kernel reduction. Each
     # of these reads every window in Python, which is slower than the kernel by
@@ -15861,6 +16129,10 @@ class WindowMixin(_ReadingMixin):
         """The same window over other data, for a column of a frame or a swapped pair."""
         window = object.__new__(type(self))
         window._hold(data, self._window, self._min_periods, self._center, self._closed, self._step)
+        window._span = self._span
+        window._axis = self._axis
+        window._on = self._on
+        window._whole = self._whole
         return window
 
     def _least(self) -> int:
@@ -15878,6 +16150,12 @@ class WindowMixin(_ReadingMixin):
         """
         if self._window is None:
             return [(0, row + 1) for row in range(rows)]
+        if self._span is not None:
+            starts, stops = self._span_bounds()
+            return [
+                (int(start), max(int(start), int(stop)))
+                for start, stop in zip(starts, stops, strict=True)
+            ]
         width = self._window
         ahead = (width - 1) // 2 if self._center or width == 0 else 0
         closed = self._closed or "right"
@@ -15923,7 +16201,9 @@ class WindowMixin(_ReadingMixin):
             frame = self._data
             for label in frame.columns:
                 self._numbers(frame[label])
-            return _float_frame({label: one(frame[label]) for label in frame.columns}, frame)
+            return self._carry(
+                _float_frame({label: one(frame[label]) for label in frame.columns}, frame)
+            )
         return one(self._data)
 
     def first(self, numeric_only: bool = False) -> Series | DataFrame:
@@ -16167,16 +16447,18 @@ def _rolling(
     nine arguments mean the same thing on each and the class that comes out is
     the same class.
 
-    Three of the nine are declared and refused. `win_type` asks for a weighted
+    Two of the nine are declared and refused. `win_type` asks for a weighted
     window, which is a different kernel and not a parameter of this one, and
-    pandas needs scipy for it. `on` says to take the window's ordering from
-    another column, and on a frame it also carries that column through into the
-    answer unreduced. The carrying is the easy half and the ordering is the
-    whole point, and ordering by a column means a window given as a duration,
-    which needs a calendar first. Writing the half that copies a column would be
-    a `rolling("2D", on="t")` that silently counted rows. `method` chooses
-    between reducing each column separately and reducing them together, and this
-    library reduces them separately.
+    pandas needs scipy for it. `method` chooses between reducing each column
+    separately and reducing them together, and this library reduces them
+    separately.
+
+    A window given as a span of time, as text, a `Timedelta` or a fixed offset,
+    is measured along the row labels, or along the column `on` names. That axis
+    has to be dates or durations, with no gaps, and has to only rise or only
+    fall. The span is kept in the axis' own unit, `min_periods` defaults to
+    one, and a `step` is refused, all as in pandas. `on` leaves its column out
+    of the reduction and puts it back into the answer.
 
     Args:
         data: The column or the frame.
@@ -16184,7 +16466,7 @@ def _rolling(
         min_periods: How many values a window needs.
         center: Whether the window sits around its row.
         win_type: Declared and refused.
-        on: Declared and refused.
+        on: The column the window is ordered by, on a frame.
         closed: Which ends the window keeps.
         step: How many rows apart the answered rows are.
         method: Declared and held at `single`.
@@ -16200,13 +16482,6 @@ def _rolling(
         "it asks for a weighted window, which is a different kernel from an"
         " unweighted one rather than a parameter of this one",
     )
-    _refuse(
-        "on",
-        on,
-        "it says to order the window by another column, and a window measured in"
-        " rows is already ordered by rows, so it would only mean something once a"
-        " window can be given as a duration",
-    )
     _held_at(
         "method",
         method,
@@ -16215,7 +16490,101 @@ def _rolling(
         " reduced one at a time, which is what a window over a pair of row"
         " numbers can do without holding the whole frame at once",
     )
-    return Rolling(data, window, min_periods, center, closed, step)
+    from ._frame import DataFrame
+
+    whole = data
+    if on is not None:
+        if not isinstance(data, DataFrame) or on not in list(data.columns):
+            raise InvalidArgumentError(
+                f"invalid on specified as {on}, must be a column (of DataFrame), an Index or None"
+            )
+        data = data.drop(columns=[on])
+    rolling = Rolling(data, window, min_periods, center, closed, step)
+    rolling._whole = whole
+    rolling._shown = whole
+    rolling._on = on
+    if _spans_time(window):
+        _time_window(rolling, whole[on] if on is not None else whole.index)
+    return rolling
+
+
+_UNIT_NANOS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
+"""How many nanoseconds one step of each unit a date or a duration is held in."""
+
+
+def _spans_time(window: Any) -> bool:
+    """Whether a window is a span of time rather than a count of rows."""
+    return isinstance(window, str | datetime.timedelta | BaseOffset)
+
+
+def _time_window(rolling: Any, axis: Any) -> None:
+    """Measures a window given as a span of time along `axis`, in pandas' order and words.
+
+    Raises:
+        ValueError: For an axis that is not dates or durations, has a gap, or
+            neither only rises nor only falls, and for a span that is not a
+            fixed length of time.
+        NotImplementedError: For a `step`, as in pandas.
+    """
+    import numpy
+
+    kind = str(axis.dtype)
+    where = rolling._on if rolling._on is not None else "index"
+    if not kind.startswith(("datetime64", "timedelta64")) and len(axis):
+        raise InvalidArgumentError("window must be an integer 0 or greater")
+    unit = re.search(r"\[(\w+)", kind)
+    unit = unit.group(1) if unit else "ns"
+    read = _eight_byte_buffer(axis) if len(axis) else None
+    if read is not None and read[0].dtype == numpy.int64:
+        values, mask = read
+        gaps = mask is not None and not mask.all()
+    else:
+        values = numpy.asarray(axis.to_numpy())
+        if values.dtype.kind not in "mM":
+            values = numpy.array([value.value for value in axis.tolist()], dtype="int64")
+        values = values.view("int64") if values.dtype.kind in "mM" else values.astype("int64")
+        gaps = bool((values == numpy.iinfo("int64").min).any())
+    if gaps:
+        raise InvalidArgumentError(f"{where} values must not have NaT")
+    steps = numpy.diff(values)
+    if not ((steps >= 0).all() or (steps <= 0).all()):
+        raise InvalidArgumentError(f"{where} values must be monotonic")
+    rolling._span = _span_nanos(rolling._window) // _UNIT_NANOS.get(unit, 1)
+    rolling._axis = values
+    if rolling._min_periods is None:
+        rolling._min_periods = 1
+    if rolling._step is not None:
+        raise NotImplementedError("step is not supported with frequency windows")
+
+
+def _span_nanos(window: Any) -> int:
+    """How many nanoseconds a window given as text, a duration or an offset spans.
+
+    Raises:
+        ValueError: For text that names no frequency, and for a frequency whose
+            length changes, such as a month, in pandas' words.
+    """
+    from ._scalars import Timedelta
+    from .offsets import _parsed
+
+    if isinstance(window, datetime.timedelta):
+        return int(Timedelta(window).value)
+    if isinstance(window, BaseOffset):
+        offset = window
+    else:
+        try:
+            offset = _parsed(window)
+        except ValueError:
+            try:
+                return int(Timedelta(window).value)
+            except (ValueError, TypeError):
+                raise InvalidArgumentError(
+                    f"passed window {window} is not compatible with a datetimelike index"
+                ) from None
+    try:
+        return int(offset.nanos)
+    except ValueError as error:
+        raise InvalidArgumentError(str(error)) from None
 
 
 def _expanding(data: Series | DataFrame, min_periods: int, method: str) -> Expanding:

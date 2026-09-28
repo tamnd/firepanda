@@ -1679,8 +1679,8 @@ WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
     (
         "window",
         "self._window",
-        "int | None",
-        "How many rows wide, and None for an expanding window.",
+        "Any",
+        "How many rows wide, or the span of time, and None for an expanding window.",
     ),
     (
         "min_periods",
@@ -1708,7 +1708,7 @@ WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "obj",
-        "self._data",
+        "self._whole",
         "Series | DataFrame",
         "The column or the frame the windows are read out of.",
     ),
@@ -1732,9 +1732,9 @@ WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "on",
-        "None",
-        "str | None",
-        "The column the window is ordered by, which here is always the rows.",
+        "self._on",
+        "Any",
+        "The column the window is ordered by, and None for the row labels.",
     ),
     (
         "exclusions",
@@ -1747,10 +1747,10 @@ WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
 
 pandas puts these on the window object and code in the wild reads them, mostly
 to find out what a window it was handed is going to do before asking it to do
-it. Six of the eleven are the arguments back, which is why `_hold` keeps them as
+it. Seven of the eleven are the arguments back, which is why `_hold` keeps them as
 they arrived rather than resolved: `df.rolling(2).closed` is None in pandas and
 answering `right` here would be reporting a decision rather than an argument.
-The other five are constant, because they describe the choices this library has
+The other four are constant or read off the data, because they describe the choices this library has
 made once rather than per window.
 """
 
@@ -3110,7 +3110,7 @@ FRAME = Exposed(
                 ' closed: str | None = None, step: int | None = None, method: str = "single"'
             ),
             body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
-            doc="A window of a fixed width over every column, computing nothing until reduced.",
+            doc="A window of rows or of time over every column, computing nothing until reduced.",
             returns="Rolling",
         ),
         Member(
@@ -3948,7 +3948,7 @@ SERIES = Exposed(
                 ' closed: str | None = None, step: int | None = None, method: str = "single"'
             ),
             body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
-            doc="A window of a fixed width, which computes nothing until it is reduced.",
+            doc="A window of rows or of time, which computes nothing until it is reduced.",
             returns="Rolling",
         ),
         Member(
@@ -4678,7 +4678,7 @@ ACCESSORS: tuple[Accessor, ...] = (
         py="Rolling",
         owner="Series and DataFrame",
         doc=(
-            "A window of a fixed width, waiting for a reduction.\n\n"
+            "A window of rows or of time, waiting for a reduction.\n\n"
             "Reached from `s.rolling(...)` and from `df.rolling(...)`, and it"
             " holds what it was given and the five numbers that say where each"
             " window sits rather than computing anything, which is what pandas"

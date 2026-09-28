@@ -938,7 +938,7 @@ class CategoricalAccessor(CategoricalMixin):
 
 
 class Rolling(RollingMixin):
-    """A window of a fixed width, waiting for a reduction.
+    """A window of rows or of time, waiting for a reduction.
 
     Reached from `s.rolling(...)` and from `df.rolling(...)`, and it holds what it was
     given and the five numbers that say where each window sits rather than computing
@@ -960,8 +960,8 @@ class Rolling(RollingMixin):
     __slots__ = ()
 
     @property
-    def window(self) -> int | None:
-        """How many rows wide, and None for an expanding window."""
+    def window(self) -> Any:
+        """How many rows wide, or the span of time, and None for an expanding window."""
         try:
             return self._window
         except Exception as error:
@@ -1003,7 +1003,7 @@ class Rolling(RollingMixin):
     def obj(self) -> Series | DataFrame:
         """The column or the frame the windows are read out of."""
         try:
-            return self._data
+            return self._whole
         except Exception as error:
             raise translate(error) from None
 
@@ -1032,10 +1032,10 @@ class Rolling(RollingMixin):
             raise translate(error) from None
 
     @property
-    def on(self) -> str | None:
-        """The column the window is ordered by, which here is always the rows."""
+    def on(self) -> Any:
+        """The column the window is ordered by, and None for the row labels."""
         try:
-            return None
+            return self._on
         except Exception as error:
             raise translate(error) from None
 
@@ -1197,8 +1197,8 @@ class Expanding(ExpandingMixin):
     __slots__ = ()
 
     @property
-    def window(self) -> int | None:
-        """How many rows wide, and None for an expanding window."""
+    def window(self) -> Any:
+        """How many rows wide, or the span of time, and None for an expanding window."""
         try:
             return self._window
         except Exception as error:
@@ -1240,7 +1240,7 @@ class Expanding(ExpandingMixin):
     def obj(self) -> Series | DataFrame:
         """The column or the frame the windows are read out of."""
         try:
-            return self._data
+            return self._whole
         except Exception as error:
             raise translate(error) from None
 
@@ -1269,10 +1269,10 @@ class Expanding(ExpandingMixin):
             raise translate(error) from None
 
     @property
-    def on(self) -> str | None:
-        """The column the window is ordered by, which here is always the rows."""
+    def on(self) -> Any:
+        """The column the window is ordered by, and None for the row labels."""
         try:
-            return None
+            return self._on
         except Exception as error:
             raise translate(error) from None
 
@@ -2544,7 +2544,7 @@ class DataFrame(DataFrameMixin):
         step: int | None = None,
         method: str = "single",
     ) -> Rolling:
-        """A window of a fixed width over every column, computing nothing until reduced."""
+        """A window of rows or of time over every column, computing nothing until reduced."""
         try:
             return _rolling(self, window, min_periods, center, win_type, on, closed, step, method)
         except Exception as error:
@@ -4031,7 +4031,7 @@ class Series(SeriesMixin):
         step: int | None = None,
         method: str = "single",
     ) -> Rolling:
-        """A window of a fixed width, which computes nothing until it is reduced."""
+        """A window of rows or of time, which computes nothing until it is reduced."""
         try:
             return _rolling(self, window, min_periods, center, win_type, on, closed, step, method)
         except Exception as error:

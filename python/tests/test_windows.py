@@ -322,7 +322,7 @@ def test_a_step_of_zero_is_refused_here_and_divides_by_zero_there(
 def test_the_arguments_with_no_implementation_behind_them_are_refused_by_name(
     firepanda: ModuleType,
 ) -> None:
-    """Four declared parameters that are not honoured, each naming itself.
+    """Three declared parameters that are not honoured, each naming itself.
 
     Declared rather than left out, for the reason document 18 gives: the
     signature parity check compares the whole parameter list against a running
@@ -332,8 +332,6 @@ def test_the_arguments_with_no_implementation_behind_them_are_refused_by_name(
     series = made(firepanda)
     with pytest.raises(NotImplementedError, match="win_type"):
         series.rolling(2, win_type="boxcar")
-    with pytest.raises(NotImplementedError, match="on"):
-        series.rolling(2, on="v")
     with pytest.raises(NotImplementedError, match="method"):
         series.rolling(2, method="table")
     with pytest.raises(NotImplementedError, match="engine"):
@@ -1135,20 +1133,11 @@ def test_dropping_the_columns_a_window_cannot_read_is_refused(
 
 
 @needs_pandas
-def test_ordering_the_window_by_a_column_is_refused_on_a_frame_too(
-    firepanda: ModuleType,
-) -> None:
-    """`on` is the one refusal whose reason changes on a frame and whose answer
-    does not.
+def test_the_refusals_are_the_same_on_a_frame(firepanda: ModuleType) -> None:
+    """A weighted window and reducing the columns together are refused on a frame too.
 
-    On a frame pandas both orders the window by the named column and carries it
-    through into the answer unreduced. Carrying it is the easy half and the
-    ordering is the point, and ordering by a column means a window given as a
-    duration, so writing the copying half would be a `rolling("2D", on="t")`
-    that silently counted rows.
+    `on` is not among them any more: `test_time_windows.py` covers it.
     """
-    with pytest.raises(NotImplementedError, match="on"):
-        framed(firepanda).rolling(2, on="a")
     with pytest.raises(NotImplementedError, match="win_type"):
         framed(firepanda).rolling(2, win_type="boxcar")
     with pytest.raises(NotImplementedError, match="method"):
