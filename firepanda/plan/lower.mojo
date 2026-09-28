@@ -267,6 +267,7 @@ from firepanda.exec.node import (
     Cross,
     Cut,
     Expand,
+    Unnest,
     Fill,
     Filter,
     Group,
@@ -2845,6 +2846,55 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     pipe.add(Node(Project(keep^)))
 
 
+def _lower_unnest(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Lowers an unnest into a column per element and one operator.
+
+    Each list is written out, so each of its elements is an expression lowered
+    to a column like any other and converted to the list's type, and a column
+    of nulls at that type goes after them for when a shorter list runs out
+    before the longest one. The operator keeps the input's columns and appends
+    one per list, so the intermediates drop out without a projection of their
+    own.
+
+    Args:
+        plan: The plan.
+        at: The unnest node.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If an element has a kind no operator computes.
+    """
+    var base = len(pipe.schema)
+    var memo = Memo()
+    var held = plan.nodes[at].exprs.copy()
+    var names = plan.nodes[at].names.copy()
+    var elements = List[List[Int]](capacity=len(held))
+    var pads = List[Int](capacity=len(held))
+    for i in range(len(held)):
+        ref node = plan.exprs.nodes[held[i]]
+        var type = node.type
+        var columns = List[Int](capacity=len(node.children))
+        for j in range(len(node.children)):
+            columns.append(
+                _lower_side(
+                    plan.exprs,
+                    node.children[j],
+                    pipe,
+                    base,
+                    "element",
+                    memo,
+                    type,
+                )
+            )
+        elements.append(columns^)
+        pipe.add(Node(Constant(Value(null=type), type, "pad")))
+        pads.append(len(pipe.schema) - 1)
+    var keep = List[Int](capacity=base)
+    for i in range(base):
+        keep.append(i)
+    pipe.add(Node(Unnest(keep^, elements^, pads^, names^)))
+
+
 def _lower_limit(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a limit, and the offset it may start at.
 
@@ -3939,6 +3989,8 @@ def _lower_from(
             _lower_sort(plan, at, pipe)
         elif kind == NodeKind.WINDOW:
             _lower_window(plan, at, pipe)
+        elif kind == NodeKind.UNNEST:
+            _lower_unnest(plan, at, pipe)
         elif kind == NodeKind.DISTINCT:
             _lower_distinct(plan, at, pipe)
         elif kind == NodeKind.PROJECT:

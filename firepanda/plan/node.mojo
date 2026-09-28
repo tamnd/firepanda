@@ -1,4 +1,4 @@
-"""The twelve logical nodes a query is, and the arena they live in.
+"""The thirteen logical nodes a query is, and the arena they live in.
 
 The same collision as `exec/node.mojo` and the right one, because these are the
 same concept at two levels. A node here says what the query wants. A node there
@@ -27,6 +27,11 @@ would mean every pass that treats a project as elementwise now has to check. The
 node keeps that check in one place, and it adds its columns to the ones below it
 rather than replacing them, because `SELECT x, sum(x) OVER ()` wants both and a
 node that replaced them would need a project above it saying so.
+
+Unnest is the thirteenth, and the argument for it is that it is the one node
+that writes more rows than it reads without a second input to take them from.
+`SELECT unnest([1, 2, 3])` is three rows out of one, and no projection can say
+that, since a projection writes one row for every row it reads.
 
 ## The arena, and why the expressions are in it
 
@@ -64,10 +69,10 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 
 @fieldwise_init
 struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """Which of the twelve kinds a logical node is."""
+    """Which of the thirteen kinds a logical node is."""
 
     var code: Int
-    """The kind, as one of the twelve values below."""
+    """The kind, as one of the thirteen values below."""
 
     comptime SCAN = Self(0)
     """A table, a file or an in memory frame. The only node with no input, and
@@ -122,6 +127,12 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     input already produces. The one node whose output is wider than what it was
     asked for, and the only place a window expression is allowed to sit."""
 
+    comptime UNNEST = Self(12)
+    """Lists over one input, each written out a row at a time, added to the
+    columns that input already produces. Every row below comes out once for
+    each element of its longest list, and a shorter list is padded with nulls,
+    so a row whose lists are all empty is not written at all."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -172,6 +183,8 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("TABLE FUNCTION")
         elif self == Self.WINDOW:
             writer.write("WINDOW")
+        elif self == Self.UNNEST:
+            writer.write("UNNEST")
         else:
             writer.write("UNION")
 
@@ -226,17 +239,17 @@ def asof_compare(backward: Bool, strict: Bool) -> String:
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
 
-    One struct for all twelve kinds, on the same grounds as `Expr`: the arena
+    One struct for all thirteen kinds, on the same grounds as `Expr`: the arena
     holds them in one list and a list has one element type. Which fields a kind
     uses is documented on the builder that makes it.
     """
 
     var kind: NodeKind
-    """Which of the twelve this is."""
+    """Which of the thirteen this is."""
 
     var inputs: List[Int]
     """The nodes this one reads, as plan arena indices. Empty on a `SCAN`, on a
-    `VALUES` and on a `TABLE_FUNCTION`, one on the seven in the middle, two on a
+    `VALUES` and on a `TABLE_FUNCTION`, one on the eight in the middle, two on a
     `JOIN`, and any number on a `UNION`."""
 
     var exprs: List[Int]
@@ -296,7 +309,7 @@ struct PlanNode(Copyable, Movable):
         """Builds a node.
 
         Args:
-            kind: Which of the twelve.
+            kind: Which of the thirteen.
             inputs: The nodes this one reads.
             exprs: The expressions.
             parts: Where the first expression list ends.
@@ -676,6 +689,82 @@ struct Plan(Movable, Sized):
                 NodeKind.WINDOW,
                 [input],
                 outputs^,
+                0,
+                names^,
+                List[Bool](),
+                0,
+                0,
+                0,
+                UNBOUND,
+                String(),
+            )
+        )
+
+    def unnest(
+        mut self, input: Int, var lists: List[Int], var names: List[String]
+    ) raises -> Int:
+        """Builds the node that writes a row once for each element of a list.
+
+        One input. Each expression is an `unnest` call whose arguments are the
+        elements of one list, as they were written, so `unnest([a, b + 1])` is
+        a call with the two of them under it. What the node produces is the
+        input's columns and then one column per list, and a row comes out as
+        many times as its longest list is long, with the shorter lists padded
+        with nulls. That is DuckDB's rule for two `unnest` calls in one select
+        list, and a list with no elements in it pads all the way, so a row
+        whose every list is empty comes out no times at all.
+
+        Args:
+            input: The node whose rows are written out again.
+            lists: The `unnest` calls, one per list.
+            names: What each list's column is called.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If the input is not in the plan, an expression is not an `unnest`
+            call, an element is not elementwise, the two lists are different
+            lengths, or there are no lists at all.
+        """
+        self.check(input)
+        if len(lists) != len(names):
+            raise Error(
+                String(
+                    "an unnest node writes ",
+                    len(lists),
+                    " lists out and has ",
+                    len(names),
+                    " names for them",
+                )
+            )
+        if len(lists) == 0:
+            raise Error(
+                "an unnest node that writes no list out is the node below it"
+            )
+        for i in range(len(lists)):
+            self.exprs.check(lists[i])
+            ref call = self.exprs.nodes[lists[i]]
+            if call.kind != ExprKind.CALL or call.name != "unnest":
+                raise Error(
+                    String(
+                        "column ",
+                        i + 1,
+                        (
+                            " of an unnest node is not an unnest call, and the"
+                            " node writes out the elements of one"
+                        ),
+                    )
+                )
+            for j in range(len(call.children)):
+                self._rowwise(
+                    call.children[j], "an element of an unnested list"
+                )
+        return self._add(
+            PlanNode(
+                NodeKind.UNNEST,
+                [input],
+                lists^,
                 0,
                 names^,
                 List[Bool](),

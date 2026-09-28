@@ -959,6 +959,182 @@ struct Expand(Movable):
         return Chunk(written^, len(indices))
 
 
+struct Unnest(Movable):
+    """Writes each row once for every element of the longest of some lists.
+
+    The lists are written out, so each one is a handful of columns already in
+    the chunk, one per element, and element `j` of a row's list is row `r` of
+    the `j`th of them. A row comes out as many times as the longest list has
+    elements, carrying the columns it had, and each list's column reads its
+    elements in order and then its pad, a column of nulls of the list's type,
+    once the shorter list has run out.
+
+    Each list's elements and its pad are stacked into one column and one gather
+    reads the output out of that, so a list of three elements over a chunk of
+    a thousand rows is one stack of four thousand and one gather of three
+    thousand, rather than a gather per element and a pass to interleave them.
+
+    `Expand` is the operator it is nearest to. That one repeats a row as many
+    times as a column says. This one repeats it as many times as a list is long
+    and says which element each copy is, which is the part `Expand` has no way
+    to write.
+    """
+
+    var keep: List[Int]
+    """The input positions every copy of a row carries, in output order."""
+
+    var elements: List[List[Int]]
+    """For each list, the positions of its elements in the order written."""
+
+    var pads: List[Int]
+    """For each list, the position of a column of nulls of its type."""
+
+    var names: List[String]
+    """What each list's column is called in the output."""
+
+    def __init__(
+        out self,
+        var keep: List[Int],
+        var elements: List[List[Int]],
+        var pads: List[Int],
+        var names: List[String],
+    ):
+        """Constructs the operator.
+
+        Args:
+            keep: The input positions every copy carries, in output order.
+            elements: For each list, the positions of its elements.
+            pads: For each list, a column of nulls of its type.
+            names: What each list's column is called.
+        """
+        self.keep = keep^
+        self.elements = elements^
+        self.pads = pads^
+        self.names = names^
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the kept columns and then one nullable column per list.
+
+        Args:
+            input: The schema of the chunks coming in. Consumed.
+
+        Returns:
+            The schema that comes out.
+
+        Raises:
+            Error: If a position is outside the input, or an element's type is
+                not its pad's.
+        """
+        if len(self.elements) != len(self.pads) or len(self.pads) != len(
+            self.names
+        ):
+            raise Error(
+                "unnest: the lists, their pads and their names are not the"
+                " same length"
+            )
+        var out = _narrow(self.keep, input, "unnest")
+        for i in range(len(self.pads)):
+            var pad = self.pads[i]
+            if pad < 0 or pad >= len(input):
+                raise Error(
+                    String(
+                        "unnest: column ",
+                        pad,
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+            var type = input[pad].dtype
+            for j in range(len(self.elements[i])):
+                var at = self.elements[i][j]
+                if at < 0 or at >= len(input):
+                    raise Error(
+                        String(
+                            "unnest: column ",
+                            at,
+                            " is outside a schema of ",
+                            len(input),
+                            " columns",
+                        )
+                    )
+                if input[at].dtype != type:
+                    raise Error(
+                        String(
+                            "unnest: element ",
+                            j + 1,
+                            " of the list '",
+                            self.names[i],
+                            "' is a ",
+                            input[at].dtype,
+                            " in a list of ",
+                            type,
+                        )
+                    )
+            out.append(Field(self.names[i], type, True))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Writes every row out once per element of its longest list.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The rows written out, or None when every list is empty or the chunk
+            has no rows, since a chunk of no rows is work for everything
+            downstream and no information.
+
+        Raises:
+            Error: If a position is outside the chunk.
+        """
+        var rows = chunk.rows
+        var longest = 0
+        for i in range(len(self.elements)):
+            longest = max(longest, len(self.elements[i]))
+        if rows == 0 or longest == 0:
+            return None
+        for i in range(len(self.keep)):
+            if self.keep[i] < 0 or self.keep[i] >= chunk.width():
+                raise Error(
+                    String(
+                        "unnest: column ",
+                        self.keep[i],
+                        " is outside a chunk of ",
+                        chunk.width(),
+                        " columns",
+                    )
+                )
+
+        # Copy `j` of row `r` lands at `r * longest + j`, so a row's copies sit
+        # together and the rows keep the order they came in.
+        var copies = List[Int](capacity=rows * longest)
+        for r in range(rows):
+            for _ in range(longest):
+                copies.append(r)
+        var written = List[AnyArray](capacity=len(self.keep) + len(self.pads))
+        for i in range(len(self.keep)):
+            written.append(take_any(chunk.columns[self.keep[i]], copies))
+
+        for i in range(len(self.elements)):
+            var count = len(self.elements[i])
+            var refs = List[Pointer[AnyArray, ImmUntrackedOrigin]](
+                capacity=count + 1
+            )
+            for j in range(count):
+                refs.append(column_ref(chunk.columns[self.elements[i][j]]))
+            refs.append(column_ref(chunk.columns[self.pads[i]]))
+            var stacked = concat_refs_any(refs)
+            # Element `j` of row `r` is row `r` of the `j`th part of the stack,
+            # and past the end of the list it is row `r` of the pad.
+            var picks = List[Int](capacity=rows * longest)
+            for r in range(rows):
+                for j in range(longest):
+                    picks.append(min(j, count) * rows + r)
+            written.append(take_any(stacked, picks))
+        return Chunk(written^, rows * longest)
+
+
 struct Project(Movable):
     """Keeps some columns of the chunk, in an order the plan chose.
 
@@ -8352,6 +8528,7 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
 comptime Node = Variant[
     Filter,
     Expand,
+    Unnest,
     Project,
     Compute,
     Connective,
@@ -8478,6 +8655,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         )
     if node.isa[Expand]():
         return node[Expand].bind(input^)
+    if node.isa[Unnest]():
+        return node[Unnest].bind(input^)
     if node.isa[Filter]() and node[Filter].narrows:
         return _narrow(node[Filter].keep, input, "filter")
     return input^
@@ -8603,6 +8782,7 @@ def node_is_row_local(node: Node) -> Bool:
     return (
         node.isa[Filter]()
         or node.isa[Expand]()
+        or node.isa[Unnest]()
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Connective]()
@@ -8848,6 +9028,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Filter].process(chunk^)
     if node.isa[Expand]():
         return node[Expand].process(chunk^)
+    if node.isa[Unnest]():
+        return node[Unnest].process(chunk^)
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():
@@ -8944,6 +9126,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Filter].process(chunk^, False)
     if node.isa[Expand]():
         return node[Expand].process(chunk^)
+    if node.isa[Unnest]():
+        return node[Unnest].process(chunk^)
     if node.isa[Project]():
         return node[Project].process(chunk^)
     if node.isa[Compute]():

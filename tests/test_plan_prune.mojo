@@ -522,6 +522,29 @@ def test_a_column_under_a_window_that_nothing_reads_still_goes() raises:
     )
 
 
+def test_an_unnest_keeps_what_its_lists_read() raises:
+    # Nothing above reads the list's elements, only the column the unnest
+    # writes, so the scan keeps them for the unnest alone.
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var who = plan.exprs.column("o_custkey")
+    var list = plan.exprs.call("unnest", [who], False)
+    var at = plan.unnest(scan, [list], ["u"])
+    var key = plan.exprs.column("o_orderkey")
+    var kept = plan.exprs.column("u")
+    var root = plan.project(at, [key, kept], ["o_orderkey", "u"])
+    _ = prune(plan, root, [_orders()])
+    assert_equal(
+        explain(plan, root),
+        (
+            "PROJECT [o_orderkey, u]\n"
+            "  UNNEST [unnest(o_custkey) as u]\n"
+            "    SCAN orders [o_orderkey, o_custkey]\n"
+        ),
+        "the key above and the element below, and nothing else",
+    )
+
+
 def test_a_difference_that_keeps_duplicates_reads_the_whole_row_too() raises:
     # The duplicate flag decides nothing here. Whether an orders row is in the
     # right arm is a question about the whole row whatever happens to the

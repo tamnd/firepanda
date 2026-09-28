@@ -374,6 +374,15 @@ def _line(plan: Plan, at: Int) raises -> String:
             written += String(" as ", node.names[i])
         return written + "]"
 
+    if node.kind == NodeKind.UNNEST:
+        var written = String("UNNEST [")
+        for i in range(len(node.exprs)):
+            if i != 0:
+                written += ", "
+            written += render_expr(plan.exprs, node.exprs[i])
+            written += String(" as ", node.names[i])
+        return written + "]"
+
     if node.kind == NodeKind.JOIN:
         var how = JoinKind(UInt8(node.op))
         var pairs = String()

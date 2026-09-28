@@ -1778,6 +1778,8 @@ def _lowers(name: String) -> Bool:
     """
     if _is_aggregate(name):
         return True
+    if name == "unnest":
+        return True
     if name == "coalesce" or name == "ifnull" or name == "nullif":
         return True
     if name == "substring" or name == "substr":
@@ -2659,6 +2661,17 @@ struct _Walk(Movable):
     var window_specs: List[UInt32]
     """The `EXPR_WINDOW` each of those names stands for."""
 
+    var unnests: List[Int]
+    """The `unnest` calls found in the select list, in the order they were
+    found, each already lowered to a call over the list's elements."""
+
+    var unnest_names: List[String]
+    """What each of those is called in the unnest node's output."""
+
+    var unnesting: Bool
+    """Whether the expression being lowered is a select item an `unnest` may
+    sit in. Nowhere else has a row for each element to be written into."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -2682,6 +2695,9 @@ struct _Walk(Movable):
         self.grouping_names = List[String]()
         self.window_defs = List[String]()
         self.window_specs = List[UInt32]()
+        self.unnests = List[Int]()
+        self.unnest_names = List[String]()
+        self.unnesting = False
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -3549,6 +3565,8 @@ def _lower_expr(
         if node.b != NO_NODE:
             return _lower_over(ast, at, name, plan, walk, scope, grouped)
         var args = _call_arguments(ast, node)
+        if name == "unnest":
+            return _lower_unnest(ast, args, plan, walk, scope, grouped)
         if _is_aggregate(name):
             if not grouped:
                 raise Error(
@@ -3810,6 +3828,74 @@ def _lower_expr(
     if node.kind == EXPR_MAP:
         raise not_implemented(MAP_LITERAL, "", "")
     raise Error("an expression shape firepanda does not lower yet")
+
+
+def _lower_unnest(
+    ast: Ast,
+    args: List[UInt32],
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Takes an `unnest` of a written out list out to the node that writes it.
+
+    The call is lowered to a call over the list's elements, recorded for the
+    `UNNEST` node the block puts over everything but its projection, and
+    replaced by a reference to the column that node writes, the way an
+    aggregate or a window is. `unnest([1, 2]) + 1` is then an ordinary sum over
+    that column.
+
+    A null is a list of no elements, which is what DuckDB unnests it as. A list
+    column is the case this does not reach: firepanda has no column that holds
+    lists yet, so the only list there is to unnest is one written out in the
+    query.
+
+    Args:
+        ast: The arenas.
+        args: The call's arguments.
+        plan: Where the lowered expressions go.
+        walk: The block's walk, which the call is recorded on.
+        scope: What the FROM put in reach.
+        grouped: Whether the query aggregates.
+
+    Returns:
+        A reference to the column the unnest comes out in.
+
+    Raises:
+        If the call is somewhere a row cannot be written once per element, or
+        its argument is not a list written out.
+    """
+    if not walk.unnesting:
+        raise Error(
+            "unnest is written in the select list, where it has a row for each"
+            " element to write into, and firepanda takes it nowhere else"
+        )
+    if grouped:
+        raise Error("firepanda does not unnest in a query that aggregates yet")
+    if len(args) != 1:
+        raise Error(
+            String("unnest takes one list and this call has ", len(args))
+        )
+    var list = ast.exprs[Int(args[0])]
+    var elements = List[Int]()
+    if list.kind == EXPR_LIST:
+        walk.unnesting = False
+        for part in ast.items(list.children):
+            elements.append(
+                _lower_operand(ast, part, plan, walk, scope, grouped)
+            )
+        walk.unnesting = True
+    elif not (list.kind == EXPR_LITERAL and list.b == LITERAL_NULL):
+        raise Error(
+            "unnest reads a list, and firepanda has no column that holds a list"
+            " yet, so the list has to be written out, as in unnest([1, 2, 3])"
+        )
+    var built = plan.exprs.call("unnest", elements^, False)
+    var name = String("__unnest_", len(walk.unnests))
+    walk.unnests.append(built)
+    walk.unnest_names.append(name.copy())
+    return plan.exprs.column(name^)
 
 
 def _lower_between(
@@ -5364,6 +5450,8 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
     var walk = _Walk()
     var nothing = _Scope()
     var written = ast.items(source.children)
+    if fold(name) == "unnest":
+        return _unnest_from(ast, written, plan, walk, nothing)
     var args = List[Int](capacity=len(written))
     for i in range(len(written)):
         args.append(_lower_operand(ast, written[i], plan, walk, nothing, False))
@@ -5374,6 +5462,44 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
     var names = List[String](capacity=1)
     names.append(name.copy())
     return _From(plan.table_function(name^, args^, names^), schema^, origin^)
+
+
+def _unnest_from(
+    ast: Ast,
+    written: List[UInt32],
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+) raises -> _From:
+    """Lowers `FROM unnest([...])`, a row for each element of a list.
+
+    It is the select list's unnest over a table of one row and no columns,
+    which is what a `SELECT` with no `FROM` reads, and its one column is
+    called `unnest`, which is what DuckDB calls it.
+
+    Args:
+        ast: The arenas.
+        written: The call's arguments.
+        plan: Where the nodes go.
+        walk: A walk of its own, since nothing outside it can be read.
+        scope: Nothing in reach.
+
+    Returns:
+        The node and what it produces.
+
+    Raises:
+        If the argument is not a list written out.
+    """
+    walk.unnesting = True
+    var column = _lower_unnest(ast, written, plan, walk, scope, False)
+    var rows = List[Int]()
+    rows.append(plan.exprs.literal(Value(Int64(0))))
+    var at = plan.values(rows^, ["__row"])
+    at = plan.unnest(at, walk.unnests.copy(), walk.unnest_names.copy())
+    at = plan.project(at, [column], ["unnest"])
+    var schema = bind(plan, at, List[Schema]())
+    var origin = List[Int](length=1, fill=UNBOUND)
+    return _From(at, schema^, origin^)
 
 
 def _subquery(
@@ -6755,10 +6881,10 @@ def _produces(plan: Plan, at: Int) raises -> List[String]:
         or kind == NodeKind.TABLE_FUNCTION
     ):
         return node.names.copy()
-    if kind == NodeKind.WINDOW:
+    if kind == NodeKind.WINDOW or kind == NodeKind.UNNEST:
         # A window adds its columns to the ones below it rather than replacing
-        # them, so it is the one node whose output names are its input's and
-        # then its own.
+        # them, and so does an unnest, so they are the nodes whose output names
+        # are their input's and then their own.
         var out = _produces(plan, node.inputs[0])
         for i in range(len(node.names)):
             out.append(String(node.names[i]))
@@ -9439,7 +9565,9 @@ def _block(
                 item_shapes.append(_agg_shape(plan.exprs, keys[reads[i]]))
                 item_names.append(called^)
             continue
+        walk.unnesting = True
         var lowered = _lower_expr(ast, item.a, plan, walk, scope, grouped)
+        walk.unnesting = False
         outputs.append(_read_keys(plan.exprs, lowered, shapes, shape_names))
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
@@ -9560,6 +9688,12 @@ def _block(
 
     if qualify >= 0:
         at = plan.filter(at, qualify)
+
+    # Over the filters rather than under them, since a row a filter drops has
+    # no elements to write, and under the projection, which reads the column
+    # each list comes out in.
+    if len(walk.unnests) != 0:
+        at = plan.unnest(at, walk.unnests.copy(), walk.unnest_names.copy())
 
     at = plan.project(at, outputs^, names^)
 
@@ -9695,9 +9829,44 @@ def _name_of(
         if positions.live and Int(node.a) <= len(positions.names):
             return positions.names[Int(node.a) - 1].copy()
     try:
-        return print_expr(ast, at, grammar)
+        var printed = print_expr(ast, at, grammar)
+        if "unnest([" in printed:
+            return _list_values(printed)
+        return printed^
     except:
         return String("__expr_", place)
+
+
+def _list_values(text: String) -> String:
+    """Writes each list in a printed name the way DuckDB names it.
+
+    DuckDB names `unnest([1, 2])` after the call the brackets stand for,
+    `unnest(main.list_value(1, 2))`, so every bracket outside a quoted string
+    or name becomes that call and its closing parenthesis.
+
+    Args:
+        text: The name as printed.
+
+    Returns:
+        The name with its lists written as calls.
+    """
+    var out = String()
+    var bytes = text.as_bytes()
+    var quote = UInt8(0)
+    var start = 0
+    for i in range(len(bytes)):
+        var c = bytes[i]
+        if quote != 0:
+            if c == quote:
+                quote = 0
+        elif c == UInt8(ord("'")) or c == UInt8(ord('"')):
+            quote = c
+        elif c == UInt8(ord("[")) or c == UInt8(ord("]")):
+            out += text[byte=start:i]
+            out += "main.list_value(" if c == UInt8(ord("[")) else ")"
+            start = i + 1
+    out += text[byte = start : len(bytes)]
+    return out^
 
 
 def _spelled_out(

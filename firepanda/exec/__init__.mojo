@@ -49,6 +49,7 @@ from .node import (
     Constant,
     Cross,
     Expand,
+    Unnest,
     Filter,
     Group,
     GroupAgg,

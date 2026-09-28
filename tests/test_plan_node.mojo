@@ -187,6 +187,26 @@ def test_a_sort_prints_a_direction_for_each_key() raises:
     )
 
 
+def test_an_unnest_prints_each_list_and_what_it_is_called() raises:
+    var plan = Plan()
+    var t = plan.scan("t", ["x"], 0)
+    var x = plan.exprs.column("x")
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var list = plan.exprs.call("unnest", [x, two], False)
+    var at = plan.unnest(t, [list], ["u"])
+    assert_equal(
+        explain(plan, at), "UNNEST [unnest(x, 2) as u]\n  SCAN t [x]\n"
+    )
+
+
+def test_an_unnest_node_holds_only_unnest_calls() raises:
+    var plan = Plan()
+    var t = plan.scan("t", ["x"], 0)
+    var x = plan.exprs.column("x")
+    with assert_raises(contains="not an unnest call"):
+        _ = plan.unnest(t, [x], ["u"])
+
+
 def test_a_limit_prints_its_offset_only_when_it_has_one() raises:
     var plan = Plan()
     var scan = plan.scan("orders", ["o_orderkey"], 0)
