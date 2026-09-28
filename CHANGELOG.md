@@ -15,6 +15,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: The grouped kurt and SeriesGroupBy.ohlc
 
 `DataFrameGroupBy.kurt` and `SeriesGroupBy.kurt` give pandas' excess kurtosis for each group, including NaN for a group with fewer than four values and zero for one with no spread, and `agg("kurt")` reaches them. The core has no grouped kurtosis, so the answer is built from grouped sums of centred powers, centred twice so that a group far from zero keeps its digits. `SeriesGroupBy.ohlc` gives the first, highest, lowest and last value of each group as `open`, `high`, `low` and `close`.
+### Changed: a group by skips text keys another key already decides
+
+A group by on several keys factorized every key, and a text key's factorize hashes and compares every row's bytes. When the keys include text and a fixed width key, the fixed width key is now grouped first and every other key is checked against the first row of each of its groups, one comparison a row. If they all agree, which is what grouping by a customer's key and then by its name, address, phone and comment looks like, those groups are the answer, and otherwise the grouping goes on as before without factorizing the first key twice. On the 13900K the grouping in TPC-H q10 goes from 5.8 to 1.7 ms and its group by from 8.5 to 4.7 ms.
 
 ### Added: DataFrame.to_html and the notebook repr
 
@@ -23,6 +26,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Fixed: uint64 values past the int64 range
 
 A uint64 value above the int64 range came back from `tolist()`, `to_csv` and every other path through the column's values as a negative number, because the core hands the values out through a signed integer. They are now put back before anyone sees them. `read_csv` on a plain file also read such a value as float64, where pandas reads uint64, and now reads it as pandas does.
+
 ### Changed: a join hands over a side it takes whole
 
 When every row of one side comes out of a join once and in order, which is what an inner join of a fact table against a dimension it always finds looks like, the join now shares that side's columns instead of gathering each of them through the identity. On the 13900K, TPC-H q10's join of 114,705 lines against nation goes from 3.1 to 0.8 ms, and the whole query from 29 to 26 ms. q9 goes from 46 to 40 ms and q11 from 6.4 to 5.6.

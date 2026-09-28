@@ -259,6 +259,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
+from firepanda.array.strview import StringView
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.exec.parallel import parallel_for, worker_count
@@ -687,6 +688,141 @@ def _fused_grouping[
     return Grouping(codes^, groups, firsts^)
 
 
+comptime FOLLOW_SLICE_ROWS = 1 << 14
+"""Rows a worker checks at least when `_all_follow` splits the check.
+
+The check is a comparison a row against a row the group's ordinal points at,
+so a slice of this many rows is tens of microseconds and a smaller one would
+be mostly the cost of starting it.
+"""
+
+
+def _key_grouping(col: AnyArray) raises -> Grouping:
+    """Groups by one key column.
+
+    One key is the whole answer, so its ordinals are the result's and the only
+    thing that can be wrong with them is where the null group sits.
+
+    Args:
+        col: The key.
+
+    Returns:
+        The ordinals, the group count and the first row of every group.
+
+    Raises:
+        If the dtype has no physical layout.
+    """
+    var first = factorize_any(col)
+    var groups = first.groups
+    var known = first.knows_rows()
+    var codes = Array[DType.uint32](0)
+    var rows_at = List[Int]()
+    first^.into_parts(codes, rows_at)
+    if not known:
+        rows_at = List[Int]()
+        groups = _densify(codes, rows_at)
+    return Grouping(codes^, groups, rows_at^)
+
+
+def _all_follow[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o], keys: List[Int], led: Grouping, rows: Int
+) raises -> Bool:
+    """Reports whether every one of some keys is constant within each group.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        keys: Which of them to check.
+        led: A grouping of the same rows by another key.
+        rows: The frame's height.
+
+    Returns:
+        True if every row of every key equals, nulls included, the value of
+        the first row of its group. A false answer can be wrong in one
+        direction only: a NaN is not equal to itself here, so a key with one
+        answers false and the caller does the work it would have done anyway.
+
+    Raises:
+        If a key's dtype has no physical layout.
+    """
+    var pieces = max(1, min(worker_count(), rows // FOLLOW_SLICE_ROWS))
+    var tasks = len(keys) * pieces
+    var broken = List[Int](length=tasks, fill=0)
+
+    def check(t: Int) raises {mut broken, imm}:
+        var piece = t % pieces
+        var begin = rows * piece // pieces
+        var stop = rows * (piece + 1) // pieces
+        if not _follows(columns[keys[t // pieces]][], led, begin, stop):
+            broken[t] = 1
+
+    if tasks == 1:
+        check(0)
+    else:
+        parallel_for(check, tasks)
+    for t in range(tasks):
+        if broken[t] != 0:
+            return False
+    return True
+
+
+def _follows(col: AnyArray, led: Grouping, begin: Int, stop: Int) raises -> Bool:
+    """Checks one key over a range of rows for `_all_follow`.
+
+    Args:
+        col: The key.
+        led: The grouping it is checked against.
+        begin: The first row.
+        stop: One past the last row.
+
+    Returns:
+        True if every row in the range equals the first row of its group.
+
+    Raises:
+        If the dtype has no physical layout.
+    """
+    if col.is_coded():
+        return _follows(col.code_column(), led, begin, stop)
+    var ordinal = led.codes.unsafe_ptr()
+    var nulls = col.null_count() > 0
+    if col.is_string():
+        ref text = col.strings()
+        var views = text.views.unsafe_ptr().unsafe_bitcast[StringView]()
+        for i in range(begin, stop):
+            var first = led.rows_at[Int(ordinal.unsafe_offset(i).unsafe_load())]
+            if nulls:
+                var here = col.is_valid(i)
+                if here != col.is_valid(first):
+                    return False
+                if not here:
+                    continue
+            if not text.views_equal(
+                views.unsafe_offset(i)[], views.unsafe_offset(first)[]
+            ):
+                return False
+        return True
+    comptime for dt in ALL:
+        if col.dtype() == dt:
+            var values = col.unsafe_ptr[dt]()
+            for i in range(begin, stop):
+                var first = led.rows_at[
+                    Int(ordinal.unsafe_offset(i).unsafe_load())
+                ]
+                if nulls:
+                    var here = col.is_valid(i)
+                    if here != col.is_valid(first):
+                        return False
+                    if not here:
+                        continue
+                if values.unsafe_offset(i).unsafe_load() != values.unsafe_offset(
+                    first
+                ).unsafe_load():
+                    return False
+            return True
+    raise Error("group by: unsupported key dtype")
+
+
 def group_ordinals[
     o: ImmOrigin
 ](columns: ColumnRefs[o], at: List[Int], rows: Int) raises -> Grouping:
@@ -740,18 +876,39 @@ def group_ordinals[
                 return fused.take()
 
     if len(at) == 1:
-        # One key is the whole answer, so its ordinals are the result's and the
-        # only thing that can be wrong with them is where the null group sits.
-        var first = factorize_any(columns[at[0]][])
-        var groups = first.groups
-        var known = first.knows_rows()
-        var codes = Array[DType.uint32](0)
-        var rows_at = List[Int]()
-        first^.into_parts(codes, rows_at)
-        if not known:
-            rows_at = List[Int]()
-            groups = _densify(codes, rows_at)
-        return Grouping(codes^, groups, rows_at^)
+        return _key_grouping(columns[at[0]][])
+
+    # A text key that only ever repeats what a cheaper key already says costs a
+    # factorize that splits nothing. TPC-H q10 groups by a customer's key and
+    # then by five of its text columns and its balance, all of which the key
+    # decides, and hashing the name, address, phone and comment of 114,705 rows
+    # was most of the group by. So the first fixed width key is grouped on its
+    # own, and every other key is checked against that grouping's first row of
+    # each group, which is a comparison a row rather than a hash table. When
+    # every key agrees, the one key's groups are the tuple's. When one does not
+    # the lead's codes are kept and the rest goes the ordinary way.
+    var lead = -1
+    var texts = False
+    if rows > 0:
+        for k in range(len(at)):
+            if columns[at[k]][].is_string():
+                texts = True
+            elif lead < 0:
+                lead = k
+    var done = -1
+    var lead_codes = Array[DType.uint32](0)
+    var lead_groups = 0
+    if lead >= 0 and texts:
+        var led = _key_grouping(columns[at[lead]][])
+        var others = List[Int]()
+        for k in range(len(at)):
+            if k != lead:
+                others.append(at[k])
+        if _all_follow(columns, others, led, rows):
+            return led^
+        done = lead
+        lead_groups = led.groups
+        lead_codes = led^.into_codes()
 
     # Two or more. Nothing about any key's ordinals is read from here on except
     # their value, so a null group in the wrong place does not matter and
@@ -768,8 +925,13 @@ def group_ordinals[
     for _ in range(len(at)):
         stacked.append(Array[DType.uint32](0))
         counts.append(0)
+    if done >= 0:
+        stacked[done] = lead_codes^
+        counts[done] = lead_groups
 
     def one_key(k: Int) raises {mut stacked, mut counts, imm}:
+        if k == done:
+            return
         var key = factorize_any(columns[at[k]][])
         var next_groups = key.groups
         var spare = List[Int]()
