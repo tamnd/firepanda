@@ -269,13 +269,102 @@ def _temporal_operand(owner: Any, other: Any) -> Any:
     temporal pair pandas allows. Anything else comes back as it was.
     """
     from ._frame import Series
+    from ._scalars import Timestamp
+    from .offsets import Day, Tick, _elapsed
 
+    kind = type(other).__name__ if type(other).__module__ == "numpy" else None
+    if kind == "timedelta64":
+        other = Timedelta(other)
+    elif kind == "datetime64":
+        other = Timestamp(other)
+    elif isinstance(other, (Tick, Day)) and _is_spans(owner):
+        # A fixed offset beside spans is the span it lasts, which is how pandas reads it.
+        other = _elapsed(other)
     if not isinstance(other, (datetime.datetime, datetime.timedelta)):
         return other
     if other is NaT and str(owner.dtype).startswith("timedelta64"):
         # pandas reads `NaT` beside a span as a missing span, so the answer stays a span.
         return owner.where(Series([False] * len(owner), index=owner.index))
     return Series([other] * len(owner), index=owner.index, name=owner.name)
+
+
+def _is_spans(value: Any) -> bool:
+    """Whether a value is a series of spans."""
+    return isinstance(value, SeriesMixin) and str(value.dtype).startswith("timedelta64")
+
+
+def _is_numbers(value: Any) -> bool:
+    """Whether a value is a number, or a series of numbers, that scales a span."""
+    if isinstance(value, SeriesMixin):
+        return str(value.dtype).lower().startswith(("int", "uint", "float"))
+    return isinstance(value, numbers.Real) and type(value).__name__ not in ("bool", "bool_")
+
+
+_SPAN_UNITS = ("s", "ms", "us", "ns")
+
+
+def _span_counts(spans: Any, unit: str) -> Any:
+    """A series of spans as float counts of a unit, with NaN for a missing span."""
+    from ._frame import Series
+
+    return Series._wrap(spans.dt.as_unit(unit)._inner.cast("float64", True))
+
+
+def _counts_as_spans(counts: Any, unit: str) -> Any:
+    """Whole float counts of a unit as spans, with NaT for NaN or an infinite count."""
+    return to_timedelta(counts.where(counts.abs() < math.inf), unit=unit).dt.as_unit(unit)
+
+
+def _floored(left: Any, right: Any) -> Any:
+    """Counts floored over counts, which is 0 over a zero span, as numpy answers it."""
+    return (left // right).where(right != 0, (left * 0).abs())
+
+
+def _span_arithmetic(owner: Any, other: Any, op: str, flip: bool) -> Any:
+    """Spans scaled by a number, or a span over a span, the way pandas answers it.
+
+    The extension has no kernel for either, so the counts of each span are
+    worked on as floats and the answer is turned back into spans. pandas
+    truncates a span times or over a number toward zero, floors a span over a
+    span, and keeps the remainder's sign on the divisor, as Python does. A
+    floor over spans is whole numbers when nothing is missing. A span over
+    zero is missing, and a span floored over a zero span is zero. The answer
+    is None when the operands are none of these, so the operator goes on.
+    """
+    left, right = (other, owner) if flip else (owner, other)
+    if not (_is_spans(left) or _is_spans(right)):
+        return None
+    both = isinstance(left, SeriesMixin) and isinstance(right, SeriesMixin)
+    if both and not left.index.equals(right.index):
+        left, right = left.align(right)
+    if _is_spans(left) and _is_spans(right):
+        if op not in ("truediv", "floordiv", "mod"):
+            return None
+        unit = max(_unit_of(str(left.dtype)), _unit_of(str(right.dtype)), key=_SPAN_UNITS.index)
+        mine, theirs = _span_counts(left, unit), _span_counts(right, unit)
+        if op == "truediv":
+            return mine / theirs
+        floor = _floored(mine, theirs)
+        if op == "mod":
+            return _counts_as_spans(mine - theirs * floor, unit)
+        return floor if floor.isna().any() else floor.astype("int64")
+    spans, scale = (left, right) if _is_spans(left) else (right, left)
+    if op == "mul" and type(scale).__name__ in ("bool", "bool_"):
+        raise TypeError(
+            f"Cannot multiply '{spans.dtype}' by bool, explicitly cast to integers instead"
+        )
+    if op == "truediv" and spans is right and _is_numbers(scale) and not both:
+        raise TypeError(f"Cannot divide {type(scale).__name__} by TimedeltaArray")
+    if not _is_numbers(scale) or (op != "mul" and spans is not left):
+        return None
+    if op not in ("mul", "truediv", "floordiv"):
+        return None
+    unit = _unit_of(str(spans.dtype))
+    counts = _span_counts(spans, unit)
+    got = counts * scale if op == "mul" else counts / scale
+    got = got.where(got.abs() < math.inf)
+    whole = (got // 1).where(got >= 0, -((-got) // 1))
+    return _counts_as_spans(whole, unit)
 
 
 def _offset_operand(owner: Any, offset: Any, op: str, flip: bool) -> Any:
@@ -14387,9 +14476,12 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
-        if isinstance(other, BaseOffset):
+        if isinstance(other, BaseOffset) and not _is_spans(self):
             return _offset_operand(self, other, op, flip)
         other = _temporal_operand(self, other)
+        scaled = _span_arithmetic(self, other, op, flip)
+        if scaled is not None:
+            return scaled
         try:
             if isinstance(other, SeriesMixin):
                 if strict:
@@ -14421,6 +14513,9 @@ class SeriesMixin(_Carries):
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
         other = _temporal_operand(self, other)
+        scaled = None if fill_value is not None else _span_arithmetic(self, other, op, flip)
+        if scaled is not None:
+            return scaled
         try:
             if isinstance(other, SeriesMixin):
                 answer = self._inner.binary_series(other._inner, op, flip, fill_value)
