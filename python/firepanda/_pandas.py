@@ -32,6 +32,7 @@ import contextlib
 import datetime
 import itertools
 import math
+import numbers
 import operator
 import os
 import re
@@ -22552,7 +22553,8 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
 
     The unit of the answer follows pandas: text is microseconds, or finer when
     a value needs it, whole numbers are in `unit` or the coarsest of the four
-    units that holds it, and floats and anything mixed are nanoseconds.
+    units that holds it, floats are nanoseconds, and text mixed with spans
+    takes the finer of microseconds and their units.
 
     Returns:
         A `Timedelta`, `NaT`, or a column of elapsed times.
@@ -22600,13 +22602,15 @@ def to_timedelta(arg: Any, unit: Any = None, errors: str = "raise") -> Any:
     values = column.tolist() if column is not None else list(arg)
     spans = [read(value, False) for value in values]
     present = [value for value in values if not _missing(value)]
-    texts = sum(isinstance(value, str) for value in present)
+    texts = any(isinstance(value, str) for value in present)
+    counts = any(isinstance(value, numbers.Real) for value in present)
     if not present or any(isinstance(value, float) for value in present):
         target = "ns"
     else:
         units = [span.unit for span in spans if span is not None]
         if texts:
-            units.append("us" if texts == len(present) else "ns")
+            # Text is read at microseconds beside a span, and at nanoseconds beside a count.
+            units.append("ns" if counts else "us")
         target = max(units, key=["s", "ms", "us", "ns"].index)
     counts = [None if span is None else span.value for span in spans]
     built = to_datetime(Series(counts, dtype="int64" if None not in counts else None), unit="ns")
@@ -22852,7 +22856,10 @@ def _moments_among_text(
     `date` with text cannot go in whole. pandas takes each moment as it is and reads
     the text with the format it works out from the first piece of text, so the text
     is read here as a list of its own and put back among the moments. Any other list
-    comes back as it was.
+    comes back as it was, apart from a NaN beside a moment, which is a gap.
+
+    A number among moments is pandas' count of nanoseconds since 1970, and then
+    every instant is held in nanoseconds, as pandas holds them.
     """
     from ._scalars import Timestamp
 
@@ -22860,15 +22867,35 @@ def _moments_among_text(
     moments = [
         i for i, value in enumerate(values) if isinstance(value, datetime.date) and value is not NaT
     ]
-    if not texts or not moments or unit is not None:
+    counts = [
+        i
+        for i, value in enumerate(values)
+        if isinstance(value, numbers.Real) and not isinstance(value, bool) and not _missing(value)
+    ]
+    if not moments or unit is not None:
         return values
-    options = (errors, dayfirst, yearfirst, utc, format, NO_DEFAULT, None, "unix")
-    read = _instants([values[i] for i in texts], *options).tolist()
-    out = list(values)
-    for i, value in zip(texts, read, strict=True):
-        out[i] = value
-    for i in moments:
-        moment = Timestamp(out[i])
+    flag = next((value for value in values if isinstance(value, bool)), None)
+    if flag is not None:
+        raise TypeError(f"{type(flag)} is not convertible to datetime")
+    out = [None if _missing(value) and value is not NaT else value for value in values]
+    if not (texts or counts):
+        return out
+    if texts:
+        options = (errors, dayfirst, yearfirst, utc, format, NO_DEFAULT, None, "unix")
+        read = _instants([values[i] for i in texts], *options).tolist()
+        for i, value in zip(texts, read, strict=True):
+            out[i] = value
+    if counts and not utc and any(Timestamp(values[i]).tz is not None for i in moments):
+        raise ValueError(_row_dates._MIXED_ZONES)
+    for i in counts:
+        out[i] = Timestamp(int(values[i]), unit="ns")
+    for i in [*moments, *counts, *(texts if counts else [])]:
+        moment = out[i]
+        if moment is NaT or moment is None:
+            continue
+        moment = Timestamp(moment)
+        if counts:
+            moment = moment.as_unit("ns")
         if utc:
             # The text was read against UTC, so the moments are put on it too.
             moment = moment.tz_localize("UTC") if moment.tz is None else moment.tz_convert("UTC")

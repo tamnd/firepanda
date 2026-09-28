@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Numbers among moments in to_datetime, and text among spans in to_timedelta
+
+`to_datetime` of a list mixing a `Timestamp`, `datetime` or `date` with a number now reads the number as pandas does, as nanoseconds since 1970, and holds the column in nanoseconds. A NaN beside a moment is a gap, a flag raises pandas' `TypeError`, and a zoned moment beside a number raises pandas' mixed timezones `ValueError` unless `utc` is set. `to_timedelta` of text mixed with spans now answers microseconds, or the finer unit of the spans, where it answered nanoseconds, and keeps nanoseconds when a number is mixed in.
+
 ### Added: to_datetime of moments mixed with text
 
 `to_datetime` of a list mixing `Timestamp`, `datetime` or `date` values with text now reads as pandas reads it, taking each moment as it is and reading the text with the format worked out from the first piece of text, where it refused the list as a column of mixed kinds. `format`, `dayfirst`, `errors="coerce"` and `utc` apply to the text as before, and under `utc` the moments are put on UTC too.

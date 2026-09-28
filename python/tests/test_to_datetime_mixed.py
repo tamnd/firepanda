@@ -2,7 +2,10 @@
 
 pandas takes each `Timestamp`, `datetime` or `date` as it is and reads the text
 with the format it works out from the first piece of text, so a list mixing the
-two reads as one column of instants.
+two reads as one column of instants. A number among moments is a count of
+nanoseconds since 1970, and then every instant is held in nanoseconds.
+`to_timedelta` reads text beside spans at microseconds, and at nanoseconds when
+a number is there too.
 """
 
 from __future__ import annotations
@@ -36,6 +39,16 @@ CALLS: dict[str, Callable[[ModuleType], Any]] = {
     "coerce": lambda m: m.to_datetime([stamp(m), "nope"], errors="coerce"),
     "utc": lambda m: m.to_datetime([stamp(m), "2020-05-05"], utc=True),
     "zoned": lambda m: m.to_datetime([stamp(m).tz_localize("UTC"), "2020-05-05 00:00+00:00"]),
+    "count": lambda m: m.to_datetime([stamp(m), 5]),
+    "count at seconds": lambda m: m.to_datetime([stamp(m).as_unit("s"), 2**62]),
+    "count and float": lambda m: m.to_datetime([datetime.date(2020, 1, 2), 5, 1.5e18]),
+    "count and text": lambda m: m.to_datetime([stamp(m), 5, "2020-05-05"]),
+    "count and gaps": lambda m: m.to_datetime([stamp(m), 5, m.NaT, None, float("nan")]),
+    "count utc": lambda m: m.to_datetime([stamp(m).tz_localize("Asia/Tokyo"), 5], utc=True),
+    "nan": lambda m: m.to_datetime([stamp(m), float("nan")]),
+    "spans and text": lambda m: m.to_timedelta([m.Timedelta("1s").as_unit("s"), "2h", None]),
+    "timedelta and text": lambda m: m.to_timedelta([datetime.timedelta(1), "2h"]),
+    "spans and count": lambda m: m.to_timedelta([m.Timedelta("1s"), 5, "2h"]),
 }
 
 
@@ -55,3 +68,21 @@ def test_text_that_will_not_read_raises(firepanda: ModuleType) -> None:
     """The text is read by the same rules as without a moment beside it."""
     with pytest.raises(ValueError):
         firepanda.to_datetime([stamp(firepanda), "nope"])
+
+
+@needs_pandas
+@pytest.mark.parametrize("values", [[1, True], [1, 5, "UTC"]], ids=["flag", "zoned count"])
+def test_a_moment_beside_what_pandas_refuses_raises_its_error(
+    firepanda: ModuleType, values: list[Any]
+) -> None:
+    """A flag is a `TypeError`, and a zoned moment beside a count a `ValueError`."""
+    import pandas as pd
+
+    def build(m: ModuleType) -> list[Any]:
+        moment = stamp(m).tz_localize(values[2]) if len(values) == 3 else stamp(m)
+        return [moment, values[1]]
+
+    with pytest.raises(Exception) as theirs:
+        pd.to_datetime(build(pd))
+    with pytest.raises(type(theirs.value), match=str(theirs.value).split(".")[0]):
+        firepanda.to_datetime(build(firepanda))
