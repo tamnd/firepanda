@@ -503,3 +503,28 @@ def test_a_calendar_offset_as_a_rule_is_refused(firepanda: ModuleType) -> None:
     """Bins of a calendar offset are not all one length, which resample does not do yet."""
     with pytest.raises(NotImplementedError):
         hourly(firepanda).resample(firepanda.offsets.MonthEnd())
+
+
+@needs_pandas
+def test_an_anchor_goes_by_position_and_shows_in_the_signature(firepanda: ModuleType) -> None:
+    """pandas names `month` in the signature of `YearEnd` and takes it third."""
+    import inspect
+
+    import pandas as pd
+
+    assert str(inspect.signature(firepanda.offsets.YearEnd)) == str(
+        inspect.signature(pd.offsets.YearEnd)
+    )
+    assert repr(firepanda.offsets.YearEnd(1, False, 6)) == repr(pd.offsets.YearEnd(1, False, 6))
+    assert repr(firepanda.offsets.QuarterEnd(2, False, 1)) == repr(
+        pd.offsets.QuarterEnd(2, False, 1)
+    )
+    for make in (
+        lambda m: m.offsets.YearEnd(1, False, 6, 7),
+        lambda m: m.offsets.MonthEnd(1, False, 3),
+        lambda m: m.offsets.YearEnd(1, False, 6, month=3),
+    ):
+        with pytest.raises(TypeError):
+            make(pd)
+        with pytest.raises(TypeError):
+            make(firepanda)

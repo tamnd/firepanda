@@ -342,6 +342,18 @@ def test_a_zone_goes_on_and_comes_off(firepanda: ModuleType) -> None:
 
 
 @both
+def test_taking_no_zone_off_a_column_without_one_changes_nothing(firepanda: ModuleType) -> None:
+    """pandas hands back the readings when the column carries no zone to take off."""
+    column = stamps(firepanda)
+    back = column.dt.tz_localize(None)
+    assert back.dt.tz is None
+    assert read(back) == read(column)
+    index = firepanda.DatetimeIndex(["2024-01-01", "2024-06-01"], name="d")
+    assert index.tz_localize(None).tolist() == index.tolist()
+    assert index.tz_localize(None).name == "d"
+
+
+@both
 def test_converting_to_the_same_zone_changes_nothing(firepanda: ModuleType) -> None:
     """A convert is a relabelling, so UTC to UTC has to be the identity."""
     put = stamps(firepanda).dt.tz_localize("UTC")

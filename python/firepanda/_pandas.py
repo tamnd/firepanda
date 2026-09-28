@@ -14450,6 +14450,9 @@ class DatetimeMixin:
         if tz is None:
             if not isinstance(nonexistent, datetime.timedelta):
                 _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
+            if self.tz is None:
+                # pandas takes no zone off a column that has none and hands back the readings.
+                return self._series.copy()
             return self._part("tz_localize_none", "")
         if not isinstance(tz, str):
             raise NotImplementedError(

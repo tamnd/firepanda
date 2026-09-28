@@ -478,6 +478,8 @@ class DatetimeIndex(Index):
         if tz is None:
             if not isinstance(nonexistent, datetime.timedelta):
                 _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
+            if self.tz is None:
+                return self.copy()
             return self._moved("tz_localize_none", "")
         if not isinstance(tz, str):
             raise NotImplementedError(
