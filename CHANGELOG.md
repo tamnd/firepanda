@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: An index of instants or spans passes its frequency on
+
+A DatetimeIndex or a TimedeltaIndex now hands its frequency to the index an operation builds, by pandas' rules. unique, drop_duplicates, fillna, dropna, view and a same type astype keep it. take and sort_values keep it when the positions make a slice, times the slice's step, so a daily index sorted backwards is `-1D`, and a mask keeps it when the labels it keeps are one run. delete and insert keep it at the ends, union and intersection keep it or read it off the labels the way pandas does, append keeps it for pieces that follow on, and reindex takes the target's. normalize reads it off the labels, tz_localize keeps it on UTC, tz_convert keeps a fixed step, and arithmetic keeps, flips or scales it. `Index.sort_values` now takes `key`, and reindex of an index of instants takes a list of them.
+
 ### Added: Index arithmetic and comparisons
 
 An index now takes the arithmetic operators, `+`, `-`, `*`, `/`, `//`, `%` and `**` on either side, and `-`, `+` and `abs`, against a number, a scalar instant or span, a list, another index or a series, and gives back an index, or a series for a series, the way pandas does. `<`, `<=`, `>` and `>=` join `==` and `!=`, and an index of instants or spans compares with a scalar, text or another index. An index of instants or spans stays a DatetimeIndex or a TimedeltaIndex through unique, delete, take, the set operations, append, diff and `Index(series)`, `to_timedelta` of a list gives a TimedeltaIndex, and drop, insert, putmask and isin work on both. A column of spans takes a span in where, mask and fillna. Inserting a number into an index of instants, which pandas turns into an index of objects, is refused.
