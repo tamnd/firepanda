@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: tz_localize and tz_convert on a frame and a column
+
+`DataFrame.tz_localize`, `DataFrame.tz_convert`, `Series.tz_localize` and `Series.tz_convert` move the row labels between time zones and leave the values alone, as pandas does. They take pandas' `axis`, `level`, `copy`, `ambiguous` and `nonexistent` arguments, warn about `copy` as pandas does, and raise pandas' errors for labels that are not instants, a level that is not there, and an axis a column does not have. An empty axis of any kind comes back as an empty axis of instants in the zone asked for.
+
 ### Added: The grouped kurt and SeriesGroupBy.ohlc
 
 `DataFrameGroupBy.kurt` and `SeriesGroupBy.kurt` give pandas' excess kurtosis for each group, including NaN for a group with fewer than four values and zero for one with no spread, and `agg("kurt")` reaches them. The core has no grouped kurtosis, so the answer is built from grouped sums of centred powers, centred twice so that a group far from zero keeps its digits. `SeriesGroupBy.ohlc` gives the first, highest, lowest and last value of each group as `open`, `high`, `low` and `close`.
