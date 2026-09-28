@@ -29,6 +29,9 @@ A patch release. On the pandas side, `MultiIndex`, `RangeIndex`, `TimedeltaIndex
 ### Changed: a grown lasting table is zeroed a part at a time on the cores
 
 When a lasting map grows its table for a chunk that could be all new keys, the new table can be tens of megabytes, and it was zeroed on the calling thread with its page faults before the parts were moved in on the cores. Each part now zeroes its own share as it moves. On a six core Linux machine that was heavily loaded by other work, alternating the old and new driver over six rounds, ClickBench q15 went from 72 to 58 ms at best and q34 from 186 to 174, and every answer matched.
+### Changed: a frame filter counts its mask once
+
+`DataFrame.filter` counted the mask again for every fixed width column, and on a frame of one chunk it copied the whole mask for every column before filtering it. It now counts once for the frame, as the lazy `Filter` node already did for a chunk, and a column of one chunk reads the mask where it lies. TPC-H at scale 1 does not move, because its big filters do not go through `DataFrame.filter`, and instructions across the 22 queries fell by about half a percent.
 
 ### Changed: a lasting map counts and scatters its buckets through a pointer
 
