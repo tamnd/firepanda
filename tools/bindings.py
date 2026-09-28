@@ -2822,9 +2822,9 @@ FRAME = Exposed(
         Member(
             name="columns",
             kind="property",
-            body="self._inner.names()",
-            doc="The column labels of the frame.",
-            returns="list[str]",
+            body="_column_labels(self)",
+            doc="The column labels of the frame, as an index.",
+            returns="Index",
         ),
         Member(
             name="shape",
@@ -5154,6 +5154,9 @@ def wrapper() -> str:
     # writes a frame as a summary and a zoned instant as its count.
     if any("_printed(" in m.body for m in every):
         mixins.add("_printed")
+    # The column labels are handed out as an index, which is built by hand.
+    if any("_column_labels(" in m.body for m in every):
+        mixins.add("_column_labels")
     # An index prints its labels through the same port of pandas' summary.
     if any("_index_text(" in m.body for m in every):
         mixins.add("_index_text")

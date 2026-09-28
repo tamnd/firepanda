@@ -36,6 +36,7 @@ from ._pandas import (
     StringMixin,
     _Along,
     _Cell,
+    _column_labels,
     _ewm,
     _expanding,
     _grouped,
@@ -2243,10 +2244,10 @@ class DataFrame(DataFrameMixin):
             raise translate(error) from None
 
     @property
-    def columns(self) -> list[str]:
-        """The column labels of the frame."""
+    def columns(self) -> Index:
+        """The column labels of the frame, as an index."""
         try:
-            return self._inner.names()
+            return _column_labels(self)
         except Exception as error:
             raise translate(error) from None
 
