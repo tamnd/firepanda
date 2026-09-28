@@ -1377,7 +1377,9 @@ def _bucket_partitioned(
     var moved_rows = List[Int](unsafe_uninit_length=running)
     var moved_codes = List[UInt32](unsafe_uninit_length=running)
 
-    def move(run: Int) raises {mut places, mut moved_rows, mut moved_codes, imm}:
+    def move(
+        run: Int,
+    ) raises {mut places, mut moved_rows, mut moved_codes, imm}:
         var code_at = codes.unsafe_ptr()
         var seat = places.unsafe_ptr().unsafe_offset(run * ranges)
         var to_row = moved_rows.unsafe_ptr()
