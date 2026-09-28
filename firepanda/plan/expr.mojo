@@ -53,6 +53,7 @@ nothing" and would tell pushdown that a predicate is safe to push anywhere.
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import WindowFrame
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 
@@ -284,6 +285,11 @@ struct Expr(Copyable, Movable):
     var children: List[Int]
     """The operands, as arena indices, in the order the kind documents."""
 
+    var frame: WindowFrame
+    """On a `WINDOW`, which function it is, how many of the children are its
+    arguments, the directions of the order keys and the frame. The default
+    everywhere else, which is a fold over one argument with no frame."""
+
     def __init__(
         out self,
         kind: ExprKind,
@@ -295,6 +301,7 @@ struct Expr(Copyable, Movable):
         rowwise: Bool,
         parts: Int,
         var children: List[Int],
+        var frame: WindowFrame = WindowFrame(),
     ):
         """Builds a node with no type on it yet.
 
@@ -308,6 +315,7 @@ struct Expr(Copyable, Movable):
             rowwise: Whether a call is elementwise.
             parts: The partition key count, on a window.
             children: The operands, as arena indices.
+            frame: The function and the frame, on a window.
         """
         self.kind = kind
         self.type = LogicalType.NULL
@@ -319,6 +327,7 @@ struct Expr(Copyable, Movable):
         self.rowwise = rowwise
         self.parts = parts
         self.children = children^
+        self.frame = frame^
 
 
 struct Expressions(Movable, Sized):
@@ -697,11 +706,7 @@ struct Expressions(Movable, Sized):
         var order: List[Int],
         empty_is_null: Bool = False,
     ) raises -> Int:
-        """Builds a window aggregate.
-
-        The children are the expression being aggregated, then the partition
-        keys, then the order keys, and `parts` records where the first list ends
-        so that the second can begin.
+        """Builds a window aggregate over the whole of its partition.
 
         Args:
             op: Which aggregate.
@@ -719,14 +724,70 @@ struct Expressions(Movable, Sized):
         Raises:
             If any of them is not in the arena.
         """
-        self.check(over)
-        var children: List[Int] = [over]
+        var frame = WindowFrame()
+        for _ in range(len(order)):
+            frame.descending.append(False)
+            frame.nulls_last.append(True)
+        return self.framed(
+            op, [over], partition^, order^, frame^, empty_is_null
+        )
+
+    def framed(
+        mut self,
+        op: AggKind,
+        var args: List[Int],
+        var partition: List[Int],
+        var order: List[Int],
+        var frame: WindowFrame,
+        empty_is_null: Bool = False,
+    ) raises -> Int:
+        """Builds a window.
+
+        The children are the function's arguments, then the partition keys,
+        then the order keys. `frame.args` records where the first list ends and
+        `parts` where the second does, so that the third can begin.
+
+        Args:
+            op: Which aggregate, read when the function is a fold.
+            args: The function's arguments, which is none for `rank()`, one for
+                a fold, and two for `lag(x, n, d)`, whose second is `d`.
+            partition: The partition keys.
+            order: The order keys.
+            frame: The function, the order directions and the frame. Its
+                `args` is set here.
+            empty_is_null: Whether a frame whose values were all missing
+                answers null rather than the fold's own identity.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If any of them is not in the arena, or if the directions do not
+            match the order keys.
+        """
+        if len(frame.descending) != len(order) or len(frame.nulls_last) != len(
+            order
+        ):
+            raise Error(
+                String(
+                    "a window with ",
+                    len(order),
+                    " order keys was given ",
+                    len(frame.descending),
+                    " directions",
+                )
+            )
+        var children = List[Int]()
+        for i in range(len(args)):
+            self.check(args[i])
+            children.append(args[i])
         for i in range(len(partition)):
             self.check(partition[i])
             children.append(partition[i])
         for i in range(len(order)):
             self.check(order[i])
             children.append(order[i])
+        frame.args = len(args)
         return self._add(
             Expr(
                 ExprKind.WINDOW,
@@ -738,6 +799,7 @@ struct Expressions(Movable, Sized):
                 False,
                 len(partition),
                 children^,
+                frame^,
             )
         )
 
@@ -1049,6 +1111,7 @@ struct Expressions(Movable, Sized):
                 self.nodes[root].rowwise,
                 self.nodes[root].parts,
                 kids^,
+                self.nodes[root].frame.copy(),
             )
         )
         if kind == ExprKind.LITERAL or kind == ExprKind.CAST:

@@ -59,6 +59,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp, binary_type, resolve_constant
+from firepanda.kernel.framed import WINDOW_FOLD, window_type
 from firepanda.kernel.group import AggKind, agg_type
 from firepanda.kernel.unary import UnaryOp, unary_type
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions, agg_kind
@@ -950,6 +951,15 @@ def _bind_expr(
         exprs.nodes[root].type = binary_type(op, below[0], below[1])
     elif kind == ExprKind.CALL:
         exprs.nodes[root].type = _call_type(exprs.nodes[root].name, below)
+    elif (
+        kind == ExprKind.WINDOW
+        and exprs.nodes[root].frame.function != WINDOW_FOLD
+    ):
+        var function = exprs.nodes[root].frame.function
+        var argument = below[0] if exprs.nodes[
+            root
+        ].frame.args > 0 else LogicalType.NULL
+        exprs.nodes[root].type = window_type(function, argument)
     elif kind == ExprKind.AGGREGATE or kind == ExprKind.WINDOW:
         exprs.nodes[root].type = agg_type(
             agg_kind(exprs.nodes[root].op),

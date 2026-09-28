@@ -75,6 +75,7 @@ from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import WINDOW_ROW_NUMBER, WindowFrame
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.pattern import MatchKind, Pattern
 from firepanda.kernel.temporal import (
@@ -5449,6 +5450,40 @@ def test_a_window_partitions_on_a_column_of_the_chunk() raises:
     var counts = read_back(out, "how_many")
     assert_equal(counts[0], 4, "four rows on that side")
     assert_equal(counts[1], 2, "and two on this one")
+
+
+def test_an_ordered_window_runs_down_its_partition() raises:
+    # Ordered by n going down inside each side of the mask, so the kept side
+    # adds 6, 4, 3, 1 in that order and the dropped side 5, 2. The rows come
+    # back in the order they arrived, not in the order the window read them.
+    var down = WindowFrame()
+    down.descending = [True]
+    down.nulls_last = [True]
+    var numbered = down.copy()
+    numbered.function = WINDOW_ROW_NUMBER
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Window(
+                [1],
+                [0, -1],
+                [AggKind.SUM, AggKind.SUM],
+                ["running", "place"],
+                List[Bool](),
+                [0],
+                [down^, numbered^],
+            )
+        )
+    )
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "two windows on two columns")
+    var running = read_back(out, "running")
+    var place = read_back(out, "place")
+    var want_running: List[Int64] = [14, 7, 13, 10, 5, 6]
+    var want_place: List[Int64] = [4, 2, 3, 2, 1, 1]
+    for i in range(6):
+        assert_equal(running[i], want_running[i], "running at " + String(i))
+        assert_equal(place[i], want_place[i], "place at " + String(i))
 
 
 def test_a_window_over_a_partition_of_nothing_but_nulls_sums_to_zero() raises:

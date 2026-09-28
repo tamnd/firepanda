@@ -21,6 +21,14 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import (
+    EDGE_FOLLOWING,
+    EDGE_PRECEDING,
+    LEAVE_TIES,
+    SPAN_ROWS,
+    WINDOW_LAG,
+    WindowFrame,
+)
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
@@ -429,6 +437,39 @@ def test_a_window_keeps_its_partition_keys_apart_from_its_order_keys() raises:
         1,
         "one partition key and one order key",
     )
+
+
+def test_a_window_keeps_its_function_its_arguments_and_its_frame() raises:
+    # lag(a, 2, b) over (partition c order a desc rows between 1 preceding and
+    # 3.5 following exclude ties) ignore nulls, which is every field at once.
+    var plan = Plan()
+    var t = plan.scan("t", List[String](), 0)
+    var a = plan.exprs.column("a")
+    var b = plan.exprs.column("b")
+    var c = plan.exprs.column("c")
+    var frame = WindowFrame()
+    frame.function = WINDOW_LAG
+    frame.amount = 2
+    frame.mode = SPAN_ROWS
+    frame.start = EDGE_PRECEDING
+    frame.start_by = 1
+    frame.end = EDGE_FOLLOWING
+    frame.end_by = 3.5
+    frame.exclude = LEAVE_TIES
+    frame.ignore_nulls = True
+    frame.descending = [True]
+    frame.nulls_last = [False]
+    var at = plan.project(
+        t,
+        [plan.exprs.framed(AggKind.SUM, [a, b], [c], [a], frame.copy())],
+        ["lagged"],
+    )
+    var back = _trip(plan, at)
+    ref node = back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]]
+    frame.args = 2
+    assert_equal(node.frame.key(), frame.key(), "the frame came back whole")
+    assert_equal(len(node.children), 4, "two arguments, a key and an order")
+    assert_equal(node.parts, 1, "one partition key")
 
 
 def test_a_cast_says_the_type_it_is_casting_to() raises:

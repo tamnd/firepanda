@@ -204,6 +204,9 @@ def key_for(exprs: Expressions, root: Int, kids: List[String]) raises -> String:
     # print the same are the same constant.
     if node.kind == ExprKind.LITERAL:
         written += String("|", node.value)
+    # A window's frame is as much of what it computes as its operands are.
+    if node.kind == ExprKind.WINDOW:
+        written += String("|", node.frame.key())
     for i in range(len(kids)):
         written += String("|", kids[i])
     return written^

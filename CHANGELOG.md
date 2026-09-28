@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SQL windows with an ORDER BY, a frame and the window functions
+
+A window in SQL can now be ordered and framed. `OVER (PARTITION BY ... ORDER BY ...)` runs the fold up to the row's last peer, and `ROWS`, `RANGE` and `GROUPS` frames take `UNBOUNDED`, `n PRECEDING`, `n FOLLOWING` and `CURRENT ROW` bounds with `EXCLUDE CURRENT ROW`, `GROUP`, `TIES` and `NO OTHERS`. `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value` and `nth_value` are lowered, the five that read another row take `IGNORE NULLS`, and a `QUALIFY` can filter on any of them. Sums, counts, averages, minimums and maximums over a frame are answered from blocks folded once, so a running total costs a logarithm per row rather than the width of the frame. An order key's nulls go last whichever way it sorts, as in DuckDB. A named `WINDOW` clause is still refused by name.
+
 ### Added: moving windows and take on a group by, DataFrameGroupBy.value_counts, and concat with keys
 
 `rolling`, `expanding` and `ewm` on a group by run the window over each group on its own and label the answer by the group and the row, as pandas does, and `take` does the same with the rows at the given places in each group. `DataFrameGroupBy.value_counts` and `corrwith` are in, and both kinds of `value_counts` now order ties the way pandas does, by where each combination is first seen. `concat` takes `keys`, or a dict, and `names`, and puts each part's key in front of its rows' labels as levels of a `MultiIndex`. Keys across the columns stay refused, since a column name is text.

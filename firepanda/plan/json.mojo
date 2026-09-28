@@ -81,6 +81,12 @@ from firepanda.io.jsonscan import text_of
 from firepanda.io.parse import parse_float, parse_int
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.framed import (
+    LEAVE_NONE,
+    SPAN_DEFAULT,
+    WINDOW_FOLD,
+    WindowFrame,
+)
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import (
@@ -690,16 +696,32 @@ def _expr_json(
         # null, since a partition is never empty.
         if folds_empty_to_null(node.op):
             out += ', "empty_is_null": true'
+        # A fold over one argument keeps the one `over` it always had. The
+        # rest write their arguments as a list, and everything a frame says
+        # beyond the default goes in an object of its own.
+        ref frame = node.frame
+        var first = frame.args
+        if frame.function == WINDOW_FOLD and first == 1:
+            out += String(
+                ', "over": ', _expr_json(tree, node.children[0], naming)
+            )
+        else:
+            out += String(
+                ', "args": ', _exprs_json(tree, node.children, 0, first, naming)
+            )
         out += String(
-            ', "over": ',
-            _expr_json(tree, node.children[0], naming),
             ', "partition": ',
-            _exprs_json(tree, node.children, 1, 1 + node.parts, naming),
+            _exprs_json(tree, node.children, first, first + node.parts, naming),
             ', "order": ',
             _exprs_json(
-                tree, node.children, 1 + node.parts, len(node.children), naming
+                tree,
+                node.children,
+                first + node.parts,
+                len(node.children),
+                naming,
             ),
         )
+        out += _frame_json(frame)
     # The type is written on everything that has one and left off where it is
     # still null, which is what an unbound expression holds and what a bound one
     # over a null holds too, so leaving it off loses nothing either way. A
@@ -712,6 +734,58 @@ def _expr_json(
     ):
         out += String(', "type": ', _quoted(_type_text(node.type)))
     return out + "}"
+
+
+def _frame_json(frame: WindowFrame) -> String:
+    """Writes what a window's frame says, or nothing when it says the default.
+
+    Args:
+        frame: The frame.
+
+    Returns:
+        A leading comma and a `"frame"` member, or empty.
+    """
+    var plain = (
+        frame.function == WINDOW_FOLD
+        and frame.amount == 1
+        and frame.mode == SPAN_DEFAULT
+        and frame.exclude == LEAVE_NONE
+        and not frame.ignore_nulls
+    )
+    for i in range(len(frame.descending)):
+        if frame.descending[i] or not frame.nulls_last[i]:
+            plain = False
+    if plain:
+        return String()
+    var out = String(
+        ', "frame": {"function": ',
+        frame.function,
+        ', "amount": ',
+        frame.amount,
+        ', "mode": ',
+        frame.mode,
+        ', "start": ',
+        frame.start,
+        ', "end": ',
+        frame.end,
+        ', "start_by": ',
+        frame.start_by,
+        ', "end_by": ',
+        frame.end_by,
+        ', "exclude": ',
+        frame.exclude,
+        ', "ignore_nulls": ',
+        "true" if frame.ignore_nulls else "false",
+        ', "descending": [',
+    )
+    for i in range(len(frame.descending)):
+        out += ", " if i > 0 else ""
+        out += "true" if frame.descending[i] else "false"
+    out += '], "nulls_last": ['
+    for i in range(len(frame.nulls_last)):
+        out += ", " if i > 0 else ""
+        out += "true" if frame.nulls_last[i] else "false"
+    return out + "]}"
 
 
 def _exprs_json(
@@ -1347,12 +1421,18 @@ def _expr_of(
             )
         )
         var marked = _at(bytes, members, "empty_is_null")
-        var over = _expr_of(
-            bytes,
-            members[_need(bytes, members, "over", "a window")].value,
-            tree,
-            ids,
-        )
+        var args = List[Int]()
+        var over = _at(bytes, members, "over")
+        if over != -1:
+            args.append(_expr_of(bytes, members[over].value, tree, ids))
+        else:
+            args = _expr_list(
+                bytes,
+                members[_need(bytes, members, "args", "a window")].value,
+                "the arguments of a window",
+                tree,
+                ids,
+            )
         var partition = _expr_list(
             bytes,
             members[_need(bytes, members, "partition", "a window")].value,
@@ -1367,11 +1447,20 @@ def _expr_of(
             tree,
             ids,
         )
-        at = tree.window(
+        var frame = WindowFrame()
+        var framed = _at(bytes, members, "frame")
+        if framed != -1:
+            frame = _frame_of(bytes, members[framed].value)
+        else:
+            for _ in range(len(order)):
+                frame.descending.append(False)
+                frame.nulls_last.append(True)
+        at = tree.framed(
             op,
-            over,
+            args^,
             partition^,
             order^,
+            frame^,
             marked != -1
             and _flag(bytes, members[marked].value, "empty_is_null"),
         )
@@ -1384,6 +1473,74 @@ def _expr_of(
     if id != -1:
         ids[_whole(bytes, members[id].value, "an id")] = at
     return at
+
+
+def _frame_of(bytes: Span[UInt8, _], written: JsonValue) raises -> WindowFrame:
+    """Reads back what `_frame_json` wrote.
+
+    Args:
+        bytes: The document.
+        written: Where the object is.
+
+    Returns:
+        The frame, with `args` left for the builder to set.
+
+    Raises:
+        Error: If it is not an object holding a frame.
+    """
+    if written.kind != JSON_OBJECT:
+        raise Error("a window's frame is written as an object")
+    var members = List[Member]()
+    _ = scan_object(bytes, written.start, members)
+    var frame = WindowFrame()
+    comptime what = "a window's frame"
+    frame.function = _whole(
+        bytes, members[_need(bytes, members, "function", what)].value, what
+    )
+    frame.amount = _whole(
+        bytes, members[_need(bytes, members, "amount", what)].value, what
+    )
+    frame.mode = _whole(
+        bytes, members[_need(bytes, members, "mode", what)].value, what
+    )
+    frame.start = _whole(
+        bytes, members[_need(bytes, members, "start", what)].value, what
+    )
+    frame.end = _whole(
+        bytes, members[_need(bytes, members, "end", what)].value, what
+    )
+    frame.exclude = _whole(
+        bytes, members[_need(bytes, members, "exclude", what)].value, what
+    )
+    frame.ignore_nulls = _flag(
+        bytes, members[_need(bytes, members, "ignore_nulls", what)].value, what
+    )
+    for key in ["start_by", "end_by"]:
+        var by = members[_need(bytes, members, key, what)].value
+        if by.kind != JSON_NUMBER:
+            raise Error("a frame's offset is written as a number")
+        var got = parse_float[DType.float64](bytes[by.start : by.end])
+        if not got.ok:
+            raise Error("a frame's offset is written as a number")
+        if key == "start_by":
+            frame.start_by = Float64(got.value)
+        else:
+            frame.end_by = Float64(got.value)
+    var down = _elements(
+        bytes,
+        members[_need(bytes, members, "descending", what)].value,
+        "the directions of a window's order keys",
+    )
+    for i in range(len(down)):
+        frame.descending.append(_flag(bytes, down[i], "a direction"))
+    var last = _elements(
+        bytes,
+        members[_need(bytes, members, "nulls_last", what)].value,
+        "where a window's order keys put their nulls",
+    )
+    for i in range(len(last)):
+        frame.nulls_last.append(_flag(bytes, last[i], "where the nulls go"))
+    return frame^
 
 
 def _expr_list(

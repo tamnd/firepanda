@@ -296,6 +296,7 @@ from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.framed import WindowFrame
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.kernel.pattern import MatchKind, read_pattern
@@ -2684,11 +2685,12 @@ def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
 def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a window into the computes it needs and one breaker.
 
-    Every window in the node has to partition the same way, because one operator
-    does one grouping pass. The first window says what the partitioning is and
-    the rest have to agree with it, by expression rather than by shape, which
-    they do when they were written the same way, since the arena hands the same
-    index back to a binder that resolved the same name twice.
+    Every window in the node has to partition the same way and order the same
+    way, because one operator does one grouping pass and one sort. The first
+    window says what the partitioning and the ordering are and the rest have to
+    agree with it, by expression rather than by shape, which they do when they
+    were written the same way, since the arena hands the same index back to a
+    binder that resolved the same name twice.
 
     The trim afterwards is a selection rather than a prefix. The keys and the
     aggregated expressions were appended before the breaker and the windows land
@@ -2701,8 +2703,8 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If a window is ordered, if two windows partition differently, or
-            if an expression has a kind no operator computes.
+        Error: If two windows partition or order differently, or if an
+            expression has a kind no operator computes.
     """
     var base = len(pipe.schema)
     var memo = Memo()
@@ -2710,9 +2712,12 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var names = plan.nodes[at].names.copy()
 
     var keys = List[Int]()
+    var order = List[Int]()
     var sources = List[Int](capacity=len(held))
+    var seconds = List[Int](capacity=len(held))
     var kinds = List[AggKind](capacity=len(held))
     var marked = List[Bool](capacity=len(held))
+    var frames = List[WindowFrame](capacity=len(held))
     for i in range(len(held)):
         ref node = plan.exprs.nodes[held[i]]
         if node.kind != ExprKind.WINDOW:
@@ -2728,48 +2733,41 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                     ),
                 )
             )
-        if len(node.children) - 1 > node.parts:
-            raise Error(
-                String(
-                    "lower: the window '",
-                    names[i],
-                    (
-                        "' is ordered, and an ordered window is a running fold"
-                        " over the partition rather than one value broadcast"
-                        " across it, so there is no operator for it yet"
-                    ),
+        var first = node.frame.args
+        var sorts = len(node.children) - first - node.parts
+        # The first window decides the partitioning and the ordering and the
+        # rest have to be the same, since one operator makes one set of
+        # ordinals and one sort.
+        var lowered = List[Int]()
+        for k in range(node.parts + sorts):
+            lowered.append(
+                _lower_expr(
+                    plan.exprs,
+                    node.children[first + k],
+                    pipe,
+                    base,
+                    "key",
+                    memo,
+                    reuse=True,
                 )
             )
-        # The first window decides the partitioning and the rest have to be the
-        # same partitioning, since one operator makes one set of ordinals.
         if i == 0:
             for k in range(node.parts):
-                keys.append(
-                    _lower_expr(
-                        plan.exprs,
-                        node.children[1 + k],
-                        pipe,
-                        base,
-                        "key",
-                        memo,
-                        reuse=True,
-                    )
-                )
+                keys.append(lowered[k])
+            for k in range(sorts):
+                order.append(lowered[node.parts + k])
         else:
-            var same = node.parts == len(keys)
+            var same = node.parts == len(keys) and sorts == len(order)
             if same:
                 for k in range(node.parts):
-                    if (
-                        _lower_expr(
-                            plan.exprs,
-                            node.children[1 + k],
-                            pipe,
-                            base,
-                            "key",
-                            memo,
-                            reuse=True,
-                        )
-                        != keys[k]
+                    if lowered[k] != keys[k]:
+                        same = False
+                for k in range(sorts):
+                    if lowered[node.parts + k] != order[k]:
+                        same = False
+                    elif (
+                        node.frame.descending[k] != frames[0].descending[k]
+                        or node.frame.nulls_last[k] != frames[0].nulls_last[k]
                     ):
                         same = False
             if not same:
@@ -2778,9 +2776,10 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                         "lower: the window '",
                         names[i],
                         (
-                            "' partitions differently from the first one in the"
-                            " same node, and one window operator has one"
-                            " partitioning, so this wants a node each"
+                            "' partitions or orders differently from the first"
+                            " one in the same node, and one window operator"
+                            " has one partitioning and one sort, so this wants"
+                            " a node each"
                         ),
                     )
                 )
@@ -2798,13 +2797,38 @@ def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 "over",
                 memo,
                 reuse=True,
-            )
+            ) if first > 0 else -1
+        )
+        seconds.append(
+            _lower_expr(
+                plan.exprs,
+                node.children[1],
+                pipe,
+                base,
+                "over",
+                memo,
+                reuse=True,
+            ) if first > 1 else -1
         )
         kinds.append(agg_kind(node.op))
         marked.append(folds_empty_to_null(node.op))
+        frames.append(node.frame.copy())
 
     var made = len(pipe.schema) - base
-    pipe.add(Node(Window(keys^, sources^, kinds^, names^, marked^)))
+    pipe.add(
+        Node(
+            Window(
+                keys^,
+                sources^,
+                kinds^,
+                names^,
+                marked^,
+                order^,
+                frames^,
+                seconds^,
+            )
+        )
+    )
     if made == 0:
         return
     var keep = List[Int](capacity=base + len(held))
