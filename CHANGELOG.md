@@ -23,6 +23,9 @@ A frame groups by a category column in the order of its categories, and the key 
 ### Added: grouping by keys from outside the frame, and Series.groupby
 
 `groupby` takes every key pandas takes: a column of values lined up on the row labels, an array, list or Index as long as the frame, a function or a dictionary of the row labels, and the labels themselves by `level` or by their name. Each key is named as pandas names it, including `index` and `level_N` for keys with no name under `as_index=False`, and a key from outside the frame is never reduced or handed back by `head`, `filter` or iteration. `Series.groupby` takes the same keys. Grouping a frame by one of its own columns leaves that column out when the values are the column's, where pandas asks whether it is the same object. A NaN in a key of floats is now left out under `dropna`, a column's `size` carries the column's name, and `pd.Grouper` reads `(*args, **kwargs)` as pandas' does.
+### Changed: a join reads its keys through a table indexed by value more often
+
+A join on an integer key could look its keys up in a table indexed by the key value only when the range of values was under half the larger side's height, and otherwise it hashed both sides, with the build on one core. The bound is now both sides' height together. TPC-H q10 joins a quarter's orders to all customers on a key range just past the old bound, and on the 13900K the key alignment for that join goes from 1.03 ms to 0.24 ms and the whole join of the key columns from 1.86 ms to 1.08 ms.
 
 ### Added: describe over a column's groups, and pd.Grouper
 
