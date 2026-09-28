@@ -48,6 +48,14 @@ _ISO = re.compile(
     r"(?:[T ](\d{2})(?::?(\d{2})(?::?(\d{2})(?:[.,](\d+))?)?)?)?"
     r"(?: ?(Z|[+-]\d{2}(?::?\d{2})?))?"
 )
+# pandas' own ISO 8601 reader, stricter than dateutil in one way and looser in
+# another: the date may be split by a slash, a dot, a space or a backslash as
+# long as both splits are the same, and the fraction takes a dot and no comma.
+_ISO_STRICT = re.compile(
+    r"(\d{4})(?:([-/\\. ])(\d{1,2})(?:\2(\d{1,2}))?|(\d{2})(\d{2}))?"
+    r"(?:[T ](\d{2})(?::?(\d{2})(?::?(\d{2})(?:\.(\d+))?)?)?)?"
+    r"(?: ?(Z|[+-]\d{2}(?::?\d{2})?))?"
+)
 
 _HINT = (
     " You might want to try:\n"
@@ -121,11 +129,12 @@ def _iso_parts(text: str) -> tuple[Any, ...] | None:
     The parts are the year, month, day, hour, minute and second, the fraction's
     digits as text, and the offset in minutes, or None for a row at no offset.
     """
-    found = _ISO.fullmatch(text)
+    found = _ISO_STRICT.fullmatch(text)
     if found is None:
         return None
+    groups = found.groups()
     try:
-        return _checked(_iso_fields(found))
+        return _checked(_iso_fields((groups[0], *groups[2:])))
     except ValueError:
         return None
 
@@ -177,7 +186,7 @@ def _loose_parts(
             f'Parsed string "{text}" included an un-recognized timezone "{words[-1]}".'
         )
     if iso is not None:
-        fields = _iso_fields(iso)
+        fields = _iso_fields(iso.groups())
         if dayfirst and (iso.group(3) or iso.group(5)) and fields[2] <= 12:
             # dateutil reads a year first and two numbers as year, day, month
             # when asked for the day first, and pandas asks it for every row.
@@ -190,11 +199,9 @@ def _loose_parts(
     return _fielded(text, rest, zone, today, dayfirst, yearfirst)
 
 
-def _iso_fields(found: re.Match[str]) -> tuple[Any, ...]:
-    """The fields of an ISO 8601 match, before the range check."""
-    year, month, day, packed_month, packed_day, hour, minute, second, fraction, zone = (
-        found.groups()
-    )
+def _iso_fields(groups: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The fields of an ISO 8601 match's groups, before the range check."""
+    year, month, day, packed_month, packed_day, hour, minute, second, fraction, zone = groups
     return (
         int(year),
         int(month or packed_month or 1),
