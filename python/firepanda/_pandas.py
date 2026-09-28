@@ -25628,9 +25628,15 @@ def _write_csv(names: list[Any], columns: list[Any], rows: Any, path_or_buf: Any
 
 
 _TEXT_ESCAPES = (("\t", "\\t"), ("\r", "\\r"), ("\n", "\\n"))
-_TEXT_DIGITS = 6
 _TEXT_SERIES_WIDEST = 50
 _TEXT_SEQUENCE_ITEMS = 100
+
+
+def _text_float_options() -> tuple[Any, int]:
+    """The `display.float_format` and `display.precision` options, which floats print by."""
+    from ._config import get_option
+
+    return get_option("display.float_format"), get_option("display.precision")
 
 
 def _text_plain(value: Any) -> str:
@@ -25671,11 +25677,16 @@ def _text_floats(
 ) -> list[str]:
     """A float column as text, the way pandas' float formatter writes it.
 
-    With neither a formatter nor a float format, every value is written with
-    six digits after the point and the zeros are trimmed across the column. If
-    a value is below a millionth, or one is above a million and the widest text
-    is over twelve characters, the whole column is written in scientific form.
+    With neither a formatter nor a float format, `display.float_format` is
+    used, and without that every value is written with `display.precision`
+    digits after the point, six unless set, and the zeros are trimmed across
+    the column. If a value is below one in ten to that many digits, or one is
+    above a million and the widest text is over six characters more than the
+    digits, the whole column is written in scientific form.
     """
+    digits = None
+    if formatter is None and float_format is None:
+        float_format, digits = _text_float_options()
     if formatter is None and callable(float_format):
         formatter, float_format = float_format, None
     if formatter is not None:
@@ -25693,14 +25704,16 @@ def _text_floats(
 
     if float_format is not None:
         return written(float_format)
+    if digits is None:
+        digits = _text_float_options()[1]
     sign = " " if leading else ""
-    texts = _text_trimmed(written(f"%{sign}.{_TEXT_DIGITS}f"), decimal)
+    texts = _text_trimmed(written(f"%{sign}.{digits}f"), decimal)
     present = [abs(v) for v in values if not _missing(v)]
-    too_long = bool(texts) and max(len(x) for x in texts) > _TEXT_DIGITS + 6
+    too_long = bool(texts) and max(len(x) for x in texts) > digits + 6
     large = any(v > 1e6 for v in present)
-    small = any(0 < v < 10**-_TEXT_DIGITS for v in present)
+    small = any(0 < v < 10**-digits for v in present)
     if small or (too_long and large):
-        texts = _text_trimmed(written(f"%{sign}.{_TEXT_DIGITS}e"), decimal)
+        texts = _text_trimmed(written(f"%{sign}.{digits}e"), decimal)
     return texts
 
 
@@ -25786,7 +25799,11 @@ def _text_values(
             texts.append(text)
             continue
         elif isinstance(value, float):
-            text = f"{value: .{_TEXT_DIGITS}f}".rstrip("0")
+            shape, digits = _text_float_options()
+            if shape is not None:
+                texts.append(space + str(shape(value)))
+                continue
+            text = f"{value: .{digits}f}".rstrip("0")
             text = text + "0" if text.endswith(".") else text
             texts.append(text)
             continue

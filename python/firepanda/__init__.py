@@ -43,6 +43,7 @@ from ._config import (
     option_context,
     options,
     reset_option,
+    set_eng_float_format,
     set_option,
 )
 from ._date_range import bdate_range, date_range
@@ -85,6 +86,7 @@ from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
 from ._timedelta import TimedeltaIndex, timedelta_range
+from ._versions import show_versions
 from .offsets import DateOffset
 
 __all__ = [
@@ -143,7 +145,9 @@ __all__ = [
     "read_csv",
     "read_json",
     "reset_option",
+    "set_eng_float_format",
     "set_option",
+    "show_versions",
     "timedelta_range",
     "to_datetime",
     "to_numeric",

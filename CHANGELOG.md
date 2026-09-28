@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: floats print by display.precision and display.float_format
+
+The repr and `to_string` of a frame or a column now read `display.precision` for how many digits a float gets, and `display.float_format` when no `float_format` is given, as pandas does, for float columns and for floats in text columns alike. `set_eng_float_format` sets that option to pandas' engineering formatter, so floats print as `1.23M` or `1.230E+06`, and `show_versions` prints the system and the versions of firepanda and what it reads through, as a table, as JSON or into a file.
+
 ### Added: NA, IndexSlice, eval, col and functions as loc keys
 
 `firepanda.NA` is pandas' missing value, with its three-valued logic and every operator answering as pandas 3.0 does against numbers, flags, text, bytes, dates, spans and numpy arrays, and `isna` knows it. `IndexSlice` hands back what goes between its brackets. `firepanda.eval` reads an expression over the caller's variables with the reader `DataFrame.eval` uses, assigns into a `target`, reads several lines into one, and refuses `@` in pandas' words. `firepanda.col` makes an expression that `assign`, `loc`, `iloc`, `[]`, `where`, `mask` and `case_when` read on the frame, and it prints as pandas prints it. `loc` and `iloc` on a frame or a column now take a function of the object on either axis, and a query or `eval` can call pandas' math functions such as `sin`, `log10` and `arctan2`.

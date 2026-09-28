@@ -16,19 +16,22 @@ against pandas 3.0.
 - `mode.copy_on_write` and `future.no_silent_downcasting` still answer, with a
   `Pandas4Warning` each time they are named.
 
-Most options change nothing here. The printed form of a frame is made by the
-extension, which knows nothing of these options, and there is no plotting, no
-Excel and no HDF5. `display.max_info_columns` is read by `info`, which is the
-one place an option has an effect.
+The printed form of a frame or a column reads the row, column and width
+limits, `display.precision` and `display.float_format`, which
+`set_eng_float_format` sets. `display.max_info_columns` is read by `info`.
+Most other options change nothing here, as there is no plotting, no Excel and
+no HDF5.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any, NamedTuple
+from decimal import Decimal
+from typing import Any, ClassVar, NamedTuple
 
 from .errors import OptionError, Pandas4Warning
 
@@ -38,6 +41,7 @@ __all__ = [
     "option_context",
     "options",
     "reset_option",
+    "set_eng_float_format",
     "set_option",
 ]
 
@@ -584,3 +588,69 @@ class _Options:
 
 options = _Options(_tree())
 """Every option as an attribute, read and set the way `get_option` and `set_option` do."""
+
+
+class EngFormatter:
+    """Writes a float in engineering form, its power of ten a multiple of three.
+
+    `EngFormatter(accuracy=1, use_eng_prefix=True)(1_000_000)` is `" 1.0M"`,
+    and without the prefix it is `" 1.0E+06"`. A number is read through its
+    text as a `Decimal`, so text that `Decimal` reads is taken too.
+    """
+
+    ENG_PREFIXES: ClassVar[dict[int, str]] = {
+        -24: "y",
+        -21: "z",
+        -18: "a",
+        -15: "f",
+        -12: "p",
+        -9: "n",
+        -6: "u",
+        -3: "m",
+        0: "",
+        3: "k",
+        6: "M",
+        9: "G",
+        12: "T",
+        15: "P",
+        18: "E",
+        21: "Z",
+        24: "Y",
+    }
+
+    def __init__(self, accuracy: int | None = None, use_eng_prefix: bool = False) -> None:
+        self.accuracy = accuracy
+        self.use_eng_prefix = use_eng_prefix
+
+    def __call__(self, num: Any) -> str:
+        dnum = Decimal(str(num))
+        if dnum.is_nan():
+            return "NaN"
+        if dnum.is_infinite():
+            return "inf"
+        sign = 1
+        if dnum < 0:
+            sign, dnum = -1, -dnum
+        power = int(math.floor(dnum.log10() / 3) * 3) if dnum != 0 else 0
+        power = max(min(power, max(self.ENG_PREFIXES)), min(self.ENG_PREFIXES))
+        if self.use_eng_prefix:
+            prefix = self.ENG_PREFIXES[power]
+        elif power < 0:
+            prefix = f"E-{-power:02d}"
+        else:
+            prefix = f"E+{power:02d}"
+        mant = sign * dnum / (10 ** Decimal(power))
+        if self.accuracy is None:
+            return f"{mant: g}{prefix}"
+        return f"{mant: .{self.accuracy:d}f}{prefix}"
+
+
+def set_eng_float_format(accuracy: int = 3, use_eng_prefix: bool = False) -> None:
+    """Prints floats in engineering form from now on, by setting `display.float_format`.
+
+    Args:
+        accuracy: How many digits after the point.
+        use_eng_prefix: Whether to write the power of ten as an SI prefix,
+            `k` for a thousand, rather than as `E+03`.
+    """
+    set_option("display.float_format", EngFormatter(accuracy, use_eng_prefix))
