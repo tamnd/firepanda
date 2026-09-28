@@ -248,20 +248,10 @@ def test_grouping_by_nothing_says_what_pandas_says(firepanda: ModuleType) -> Non
         firepanda.DataFrame(DATA).groupby([])
 
 
-@pytest.mark.parametrize(
-    ("by", "expected"),
-    [
-        (lambda row: row, "column name or a list of them"),
-        ({"a": 1}, "column name or a list of them"),
-        (0, "column name or a list of them"),
-    ],
-)
-def test_a_key_that_is_not_a_name_is_refused_with_the_reason(
-    firepanda: ModuleType, by: Any, expected: str
-) -> None:
-    """A function, a mapping and a position are each a different piece of work."""
-    with pytest.raises(NotImplementedError, match=expected):
-        firepanda.DataFrame(DATA).groupby(by)
+def test_a_key_that_is_neither_a_column_nor_values_is_a_key_error(firepanda: ModuleType) -> None:
+    """A number is read as a column's name, as pandas reads it."""
+    with pytest.raises(KeyError):
+        firepanda.DataFrame(DATA).groupby(0)
 
 
 @pytest.mark.parametrize(
