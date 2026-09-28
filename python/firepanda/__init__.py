@@ -50,6 +50,7 @@ from ._interval import Interval
 from ._multi import MultiIndex
 from ._normalize import json_normalize
 from ._pandas import (
+    Grouper,
     NamedAgg,
     concat,
     crosstab,
@@ -85,6 +86,7 @@ __all__ = [
     "DataFrame",
     "DateOffset",
     "DatetimeIndex",
+    "Grouper",
     "Index",
     "Interval",
     "MultiIndex",

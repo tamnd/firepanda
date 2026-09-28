@@ -14738,6 +14738,13 @@ def _grouped(
     """
     from ._frame import DataFrameGroupBy
 
+    if isinstance(by, Grouper):
+        if by.freq is not None:
+            return by._binned_by(frame)
+        # A grouper on its own brings its own sort and dropna, as pandas reads it.
+        by, sort, dropna = by._column(frame), by.sort, by.dropna
+    elif isinstance(by, list) and any(isinstance(key, Grouper) for key in by):
+        by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
     _held_at(
         "observed",
         observed,
@@ -17548,6 +17555,125 @@ _NARROW_WHOLE = frozenset({"int8", "int16", "int32", "uint8", "uint16", "uint32"
 """The integer types a broadcast `sum` or `prod` is cast back to."""
 
 
+_END_BINS = frozenset(
+    {"MonthEnd", "QuarterEnd", "YearEnd", "BusinessMonthEnd", "BQuarterEnd", "BYearEnd", "Week"}
+)
+"""The offsets whose bins pandas closes and labels on the right."""
+
+
+class Grouper:
+    """A key for `groupby`, a column with its own sort and dropna, or bins of time.
+
+    A grouper with a key and no frequency groups by that column. When it is the
+    only key, its own `sort` and `dropna` decide, not the ones `groupby` was
+    given, which is how pandas reads it, so a plain `Grouper(key=...)` leaves
+    the groups in the order they are first seen. In a list beside other keys it
+    is just the column. A grouper with a frequency bins a column of moments the
+    way `resample(freq, on=key)` does, and answers the resampler. Grouping by
+    the row labels, which is what a grouper with no key does, is refused.
+    """
+
+    __slots__ = ("_binned", "dropna", "freq", "key", "level", "sort")
+
+    _BINNED = ("closed", "label", "convention", "origin", "offset")
+    """The resample keywords a grouper with a frequency takes."""
+
+    def __init__(
+        self,
+        key: Any = None,
+        level: Any = None,
+        freq: Any = None,
+        sort: bool = False,
+        dropna: bool = True,
+        **binned: Any,
+    ) -> None:
+        """Holds the key and how to group by it.
+
+        Args:
+            key: The column to group by.
+            level: The level of the row labels, refused when it is used.
+            freq: The width of the bins for a column of moments, or None.
+            sort: Whether the groups come out in key order.
+            dropna: Whether a missing key is left out.
+            **binned: `closed`, `label`, `convention`, `origin` and `offset`,
+                taken with a frequency as `resample` takes them.
+
+        Raises:
+            TypeError: For any other keyword, or one of those with no
+                frequency, in pandas' words.
+        """
+        for name in binned:
+            if freq is None or name not in self._BINNED:
+                raise TypeError(f"Grouper.__init__() got an unexpected keyword argument '{name}'")
+        self.key = key
+        self.level = level
+        self.freq = freq
+        self.sort = sort
+        self.dropna = dropna
+        self._binned = binned
+
+    def __repr__(self) -> str:
+        """The grouper as pandas prints it.
+
+        A grouper with a frequency prints as pandas' `TimeGrouper`, with the
+        frequency as an offset, the sort it always does, and the ends of the
+        bins, which are on the right for an offset that lands on the end of a
+        month, a quarter, a year or a week.
+        """
+        if self.freq is None:
+            shown = [f"{name}={getattr(self, name)!r}" for name in ("key", "level")]
+            parts = [part for part in shown if not part.endswith("=None")]
+            parts += [f"sort={self.sort!r}", f"dropna={self.dropna!r}"]
+            return f"Grouper({', '.join(parts)})"
+        from . import offsets
+        from ._scalars import Timedelta
+
+        step = offsets._parsed(self.freq) if isinstance(self.freq, str) else self.freq
+        side = "right" if type(step).__name__ in _END_BINS else "left"
+        binned = {"closed": side, "label": side, **self._binned}
+        parts = [f"key={self.key!r}"] if self.key is not None else []
+        parts += [f"freq={step!r}", "sort=True", f"dropna={self.dropna!r}"]
+        parts += [f"closed={binned['closed']!r}", f"label={binned['label']!r}", "how='mean'"]
+        parts += [f"convention={binned.get('convention', 'e')!r}"]
+        parts += [f"origin={binned.get('origin', 'start_day')!r}"]
+        if binned.get("offset") is not None:
+            parts.append(f"offset={Timedelta(binned['offset'])!r}")
+        return f"TimeGrouper({', '.join(parts)})"
+
+    def _column(self, frame: DataFrame) -> str:
+        """The column this grouper names, checked against the frame.
+
+        Raises:
+            KeyError: If the frame has no such column, in pandas' words.
+            NotImplementedError: For a frequency in a list of keys, a level, or
+                no key at all.
+        """
+        if self.freq is not None:
+            raise NotImplementedError(
+                "a Grouper with a frequency beside other keys is not supported yet,"
+                " because its bins are a key that is not a column of the frame"
+            )
+        if self.key is None or self.level is not None:
+            raise NotImplementedError(
+                "a Grouper with no key, or with a level, groups by the row labels,"
+                " which is not supported yet"
+            )
+        if self.key not in frame.columns:
+            raise KeyError(f"The grouper name {self.key} is not found")
+        return self.key
+
+    def _binned_by(self, frame: DataFrame) -> Any:
+        """The resampler for a grouper with a frequency, which bins its key."""
+        if self.key is None or self.level is not None:
+            raise NotImplementedError(
+                "a Grouper with a frequency and no key bins the row labels, which is"
+                " not supported yet"
+            )
+        if self.key not in frame.columns:
+            raise KeyError(f"The grouper name {self.key} is not found")
+        return frame.resample(self.freq, on=self.key, **self._binned)
+
+
 class NamedAgg:
     """One output column of `groupby(...).agg`, a column and what to run on it.
 
@@ -19456,6 +19582,49 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         """One value a group, named after the column, or beside the keys."""
         out = self._on_groups({self._column: _built(values)})
         return out[self._column] if self._as_index else out
+
+    def describe(
+        self, percentiles: Any = None, include: Any = None, exclude: Any = None
+    ) -> DataFrame:
+        """The count, mean, spread, extremes and percentiles of each group, one row a group.
+
+        The numbers `Series.describe` gives for the group's values, as float64
+        columns on the keys, so a group with one value has no spread and a group
+        with no values has a count of zero and gaps elsewhere. `include` and
+        `exclude` are ignored, as pandas ignores them for a column. A column of
+        text, flags, moments or spans is refused as `Series.describe` refuses it.
+        """
+        from ._frame import SeriesGroupBy
+
+        asked = _percentiles_asked(percentiles)
+        printed = str(self._source().dtype)
+        if printed not in _SIGNED | _UNSIGNED | _FLOATING:
+            raise NotImplementedError(
+                f"describe is not supported yet for a {printed} column, because pandas"
+                " answers it with columns of mixed values and firepanda has no object"
+                " column to hold them"
+            )
+        grouped = SeriesGroupBy(
+            self._frame, self._by, self._as_index, self._sort, self._dropna, self._column
+        )
+        parts = {
+            "count": grouped.count(),
+            "mean": grouped.mean(),
+            "std": grouped.std(),
+            "min": grouped.min(),
+        }
+        for label, share in zip(_percentile_labels(asked), asked, strict=True):
+            parts[label] = grouped.quantile(share)
+        parts["max"] = grouped.max()
+        # With the keys as columns each part is a frame, and its last column is the answer.
+        return self._on_groups(
+            {
+                name: part.iloc[:, -1].astype("float64").reset_index(drop=True)
+                if part.ndim == 2
+                else part.astype("float64").reset_index(drop=True)
+                for name, part in parts.items()
+            }
+        )
 
     def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
         """A list of names, each answering a column called after it.
