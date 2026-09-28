@@ -920,6 +920,28 @@ def test_an_order_by_descending_reverses_it() raises:
     )
 
 
+def test_a_descending_order_still_puts_the_nulls_last() raises:
+    # DuckDB's answer. Reversing the ascending sort would put them first.
+    same(
+        gapped(
+            run("SELECT mark FROM gappy ORDER BY mark DESC", session()), "mark"
+        ),
+        [9, 4, 4, 1, -1, -1],
+        "mark",
+    )
+    same(
+        gapped(
+            run(
+                "SELECT mark FROM gappy ORDER BY mark DESC NULLS FIRST",
+                session(),
+            ),
+            "mark",
+        ),
+        [-1, -1, 9, 4, 4, 1],
+        "mark",
+    )
+
+
 def test_an_order_by_of_a_position_orders_the_answer() raises:
     # The same rows the query naming the column gets. Before this the number
     # lowered as a constant and every row sorted the same, so the answer came
