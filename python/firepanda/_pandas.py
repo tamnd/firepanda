@@ -20347,6 +20347,40 @@ def _group_key(value: Any) -> Any:
         return value
 
 
+class _GroupedWindow:
+    """A moving window over each group of a group by, which pandas calls `RollingGroupby`.
+
+    Each method of the window is run on every group's rows on its own and the
+    answers are stacked under the group's key, as pandas stacks them.
+    """
+
+    __slots__ = ("_args", "_grouped", "_kind", "_kwargs")
+
+    def __init__(self, grouped: Any, kind: str, args: Any, kwargs: Any) -> None:
+        self._grouped = grouped
+        self._kind = kind
+        self._args = args
+        self._kwargs = kwargs
+        getattr(grouped._source().iloc[:0], kind)(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        from ._frame import Expanding, ExponentialMovingWindow, Rolling
+
+        kind = {"rolling": Rolling, "expanding": Expanding, "ewm": ExponentialMovingWindow}
+        if name.startswith("_") or not hasattr(kind[self._kind], name):
+            called = kind[self._kind].__name__ + "Groupby"
+            raise AttributeError(f"'{called}' object has no attribute '{name}'")
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            def one(group: Any) -> Any:
+                window = getattr(group, self._kind)(*self._args, **self._kwargs)
+                return getattr(window, name)(*args, **kwargs)
+
+            return self._grouped._each_keyed(one)
+
+        return call
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
@@ -21456,17 +21490,78 @@ class GroupByMixin[Answer]:
 
     def _keyed(self, joined: Any, keys: list[tuple[Any, ...]], answers: list[Any]) -> Any:
         """The answers put together with each group's key as levels in front of their labels."""
-        from ._multi import MultiIndex
+        return _levelled_rows(joined, keys, [len(answer) for answer in answers], self._by)
 
-        inner = joined.index
-        depth = getattr(inner, "nlevels", 1)
-        columns: list[list[Any]] = [[] for _ in self._by]
-        for key, answer in zip(keys, answers, strict=True):
-            for column, value in zip(columns, key, strict=True):
-                column.extend([value] * len(answer))
-        columns += [inner.get_level_values(n).tolist() for n in range(depth)]
-        names = [*self._by, *inner.names]
-        return joined.set_axis(MultiIndex.from_arrays(columns, names=names))
+    def _each_keyed(self, call: Any) -> Any:
+        """`call` on each group's rows less the keys, stacked under each group's key.
+
+        This is how pandas answers the moving windows and `take` of a group by,
+        whatever `group_keys` and `as_index` say.
+        """
+        source = self._source()
+        members = self._members()
+        answers = [call(self._named_group(source.iloc[places], key)) for key, places in members]
+        joined = concat(answers)
+        return self._renamed(self._keyed(joined, [key for key, _ in members], answers))
+
+    def _tallied(
+        self, columns: list[Any], normalize: bool, sort: bool, ascending: bool, dropna: bool
+    ) -> Any:
+        """How often each combination of `columns` comes up in each group, for `value_counts`.
+
+        The counts are the size of a group by on the keys and the columns, in the
+        order each combination is first seen. `sort` sorts them stably by count,
+        the most common first unless `ascending`, and a sorted group by then
+        sorts them stably by the keys, as pandas does. `normalize` divides each
+        count by its group's total.
+
+        Raises:
+            NotImplementedError: For a `dropna` that differs from the group by's,
+                since one group by drops a missing key and value together.
+        """
+        from ._frame import Series
+
+        if bool(dropna) != bool(self._dropna):
+            raise NotImplementedError(
+                "value_counts with a dropna that differs from the group by's is not supported"
+                " yet, because the keys and the values are grouped together"
+            )
+        from ._levels import written
+
+        keys = len(self._by)
+        counts = self._frame.groupby([*self._by, *columns], sort=False, dropna=self._dropna).size()
+        labels, values = counts.index.tolist(), counts.tolist()
+        totals: dict[Any, int] = {}
+        for label, value in zip(labels, values, strict=True):
+            totals[label[:keys]] = totals.get(label[:keys], 0) + value
+        order = list(range(len(labels)))
+        if sort:
+            order.sort(key=lambda at: values[at] if ascending else -values[at])
+        if self._sort:
+            order.sort(key=lambda at: written(labels[at][:keys]))
+        taken = counts.take(order)
+        if normalize:
+            shares = [values[at] / totals[labels[at][:keys]] for at in order]
+            answer = Series(shares, index=taken.index, name="proportion")
+        else:
+            answer = taken.rename("count")
+        return answer if self._as_index else answer.reset_index()
+
+    def rolling(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+        """A rolling window over each group, labelled by the group and the row."""
+        return _GroupedWindow(self, "rolling", args, kwargs)
+
+    def expanding(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+        """An expanding window over each group, labelled by the group and the row."""
+        return _GroupedWindow(self, "expanding", args, kwargs)
+
+    def ewm(self, *args: Any, **kwargs: Any) -> _GroupedWindow:
+        """An exponentially weighted window over each group, labelled by the group and the row."""
+        return _GroupedWindow(self, "ewm", args, kwargs)
+
+    def take(self, indices: Any, **kwargs: Any) -> Any:
+        """The rows at `indices` of each group, counted within it, under the group's key."""
+        return self._each_keyed(lambda group: group.take(indices, **kwargs))
 
     @property
     def ngroups(self) -> int:
@@ -21894,6 +21989,32 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
         settings = {"method": method, "min_periods": min_periods, "numeric_only": numeric_only}
         return self._applied(lambda group: group.corr(**settings), (), {})
 
+    def corrwith(
+        self, other: Any, drop: bool = False, method: Any = "pearson", numeric_only: bool = False
+    ) -> Any:
+        """Each group's columns correlated with `other`, one row a group."""
+        settings = {"drop": drop, "method": method, "numeric_only": numeric_only}
+        return self._applied(lambda group: group.corrwith(other, **settings), (), {})
+
+    def value_counts(
+        self,
+        subset: Any = None,
+        normalize: bool = False,
+        sort: bool = True,
+        ascending: bool = False,
+        dropna: bool = True,
+    ) -> DataFrame | Series:
+        """How often each combination of the other columns comes up in each group.
+
+        `subset` narrows the columns counted, and the rest is as
+        `SeriesGroupBy.value_counts` has it.
+
+        Raises:
+            NotImplementedError: For a `dropna` that differs from the group by's.
+        """
+        columns = self._value_columns() if subset is None else list(subset)
+        return self._tallied(columns, normalize, sort, ascending, dropna)
+
     def cov(self, min_periods: Any = None, ddof: Any = 1, numeric_only: bool = False) -> Any:
         """Each group's covariance matrix, labelled by the group and the column."""
         return self._applied(
@@ -22286,46 +22407,18 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
     ) -> DataFrame | Series:
         """How often each value comes up in each group, labelled by the group and the value.
 
-        The counts are the size of a group by on the keys and the column. Within
-        each group the most common value comes first, or the least common with
-        `ascending`, ties keep the order of the values, and `normalize` divides
-        each count by its group's total.
+        The counts are the size of a group by on the keys and the column, ordered
+        as `DataFrameGroupBy.value_counts` orders them, so within each group the
+        most common value comes first, or the least common with `ascending`, and
+        ties keep the order the values are first seen.
 
         Raises:
             NotImplementedError: For `bins`, and for a `dropna` that differs from
                 the group by's, since one group by drops a missing key and value
                 together.
         """
-        from ._frame import Series
-
         _refuse("bins", bins, "cutting the values into bins before counting them is not written")
-        if bool(dropna) != bool(self._dropna):
-            raise NotImplementedError(
-                "value_counts with a dropna that differs from the group by's is not supported"
-                " yet, because the keys and the values are grouped together"
-            )
-        keys = len(self._by)
-        counts = self._frame.groupby(
-            [*self._by, self._column], sort=self._sort, dropna=self._dropna
-        ).size()
-        labels, values = counts.index.tolist(), counts.tolist()
-        rank: dict[Any, int] = {}
-        totals: dict[Any, int] = {}
-        for label, value in zip(labels, values, strict=True):
-            rank.setdefault(label[:keys], len(rank))
-            totals[label[:keys]] = totals.get(label[:keys], 0) + value
-        order = list(range(len(labels)))
-        if sort:
-            order.sort(
-                key=lambda at: (rank[labels[at][:keys]], values[at] if ascending else -values[at])
-            )
-        taken = counts.take(order)
-        if normalize:
-            shares = [values[at] / totals[labels[at][:keys]] for at in order]
-            answer = Series(shares, index=taken.index, name="proportion")
-        else:
-            answer = taken.rename("count")
-        return answer if self._as_index else answer.reset_index()
+        return self._tallied([self._column], normalize, sort, ascending, dropna)
 
     def _named_group(self, rows: Any, key: tuple[Any, ...]) -> Any:
         """The group's values, named after its key the way iterating spells it."""
@@ -25504,13 +25597,15 @@ def _concat_type(types: list[str], gap: bool, what: str) -> str:
     return only
 
 
-def _concat_parts(objs: Any, keys: Any) -> list[Any]:
-    """The parts to stack, in order, with the ones that are None left out.
+def _concat_parts(objs: Any, keys: Any) -> tuple[list[Any], list[Any] | None]:
+    """The parts to stack and their keys, in order, with the ones that are None left out.
+
+    A dict's keys are the keys when none are given, as pandas reads it.
 
     Raises:
-        InvalidArgumentError: For no parts at all, in pandas' words.
+        InvalidArgumentError: For no parts at all, or keys of another length
+            than the parts, in pandas' words.
         TypeError: For a part that is neither a frame nor a series.
-        UnsupportedError: For keys, which build a MultiIndex.
     """
     from ._frame import DataFrame, Series
 
@@ -25522,13 +25617,17 @@ def _concat_parts(objs: Any, keys: Any) -> list[Any]:
     if hasattr(objs, "keys") and hasattr(objs, "values"):
         keys = list(objs.keys()) if keys is None else keys
         objs = list(objs.values())
-    if keys is not None:
-        raise UnsupportedError(
-            "concat(keys=) labels the rows with a MultiIndex, and firepanda has no MultiIndex yet"
-        )
     parts = list(objs)
     if not parts:
         raise InvalidArgumentError("No objects to concatenate")
+    if keys is not None:
+        keys = list(keys)
+        if len(keys) != len(parts):
+            raise InvalidArgumentError(
+                f"The length of the keys ({len(keys)}) must match the length of the objects"
+                f" to concatenate ({len(parts)})"
+            )
+        keys = [key for key, part in zip(keys, parts, strict=True) if part is not None]
     parts = [part for part in parts if part is not None]
     if not parts:
         raise InvalidArgumentError("All objects passed were None")
@@ -25538,7 +25637,29 @@ def _concat_parts(objs: Any, keys: Any) -> list[Any]:
                 f"cannot concatenate object of type '{type(part)}'; only Series and DataFrame"
                 " objs are valid"
             )
-    return parts
+    return parts, keys
+
+
+def _levelled_rows(joined: Any, keys: list[Any], lengths: list[int], names: Any) -> Any:
+    """Stacked parts with each part's key as levels in front of its rows' labels.
+
+    A key that is a tuple is one level a value, and `names` names the levels
+    from the front, the keys' first.
+    """
+    from ._multi import MultiIndex
+
+    wide = all(isinstance(key, tuple) for key in keys)
+    depth = len(keys[0]) if wide and keys else 1
+    columns: list[list[Any]] = [[] for _ in range(depth)]
+    for key, length in zip(keys, lengths, strict=True):
+        for column, value in zip(columns, key if wide else (key,), strict=True):
+            column.extend([value] * length)
+    inner = joined.index
+    columns += [inner.get_level_values(n).tolist() for n in range(getattr(inner, "nlevels", 1))]
+    given = [] if names is None else list(names)
+    labels = [*given, *[None] * (depth - len(given))] if len(given) <= depth else given
+    labels = [*labels, *list(inner.names)[len(labels) - depth :]]
+    return joined.set_axis(MultiIndex.from_arrays(columns, names=labels))
 
 
 def _concat_framed(part: Any, axis: int) -> DataFrame:
@@ -26166,9 +26287,10 @@ def concat(
     of them or with `join="inner"` the labels every part has, in the order they
     first appear.
 
-    `keys`, `levels` and `names` build a MultiIndex and are refused by name, as
-    is anything whose answer is pandas' object column. `copy` is accepted and
-    does nothing, as in pandas 3.
+    `keys` put each part's key in front of its rows' labels as a MultiIndex
+    down the rows, and `names` names those levels. Keys across the columns and
+    `levels` are refused by name, as is anything whose answer is pandas' object
+    column. `copy` is accepted and does nothing, as in pandas 3.
 
     Raises:
         InvalidArgumentError: For no parts, a `join` or `axis` pandas does not
@@ -26178,12 +26300,27 @@ def concat(
     """
     from ._frame import DataFrame, Series
 
-    parts = _concat_parts(objs, keys)
-    if levels is not None or names is not None:
+    parts, keys = _concat_parts(objs, keys)
+    if levels is not None or (names is not None and keys is None):
         raise UnsupportedError(
-            "concat(levels=, names=) name the levels of a MultiIndex, and firepanda has no"
-            " MultiIndex yet"
+            "concat(levels=) and concat(names=) without keys are not supported yet, because"
+            " the levels are read from the keys"
         )
+    if keys is not None:
+        if ignore_index:
+            raise InvalidArgumentError(
+                f"Cannot set ignore_index={ignore_index!r} and specify keys. Either should be"
+                " used."
+            )
+        if CONCAT_AXES.get(axis) == 1:
+            raise UnsupportedError(
+                "concat(keys=) across the columns labels them with levels, and a firepanda"
+                " column name is text"
+            )
+        if verify_integrity:
+            raise UnsupportedError("concat(keys=) with verify_integrity is not supported yet")
+        joined = concat(parts, axis=axis, join=join, sort=sort)
+        return _levelled_rows(joined, keys, [len(part) for part in parts], names)
     if axis not in CONCAT_AXES:
         kind = "DataFrame" if any(isinstance(p, DataFrame) for p in parts) else "Series"
         raise InvalidArgumentError(f"No axis named {axis} for object type {kind}")

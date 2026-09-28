@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: moving windows and take on a group by, DataFrameGroupBy.value_counts, and concat with keys
+
+`rolling`, `expanding` and `ewm` on a group by run the window over each group on its own and label the answer by the group and the row, as pandas does, and `take` does the same with the rows at the given places in each group. `DataFrameGroupBy.value_counts` and `corrwith` are in, and both kinds of `value_counts` now order ties the way pandas does, by where each combination is first seen. `concat` takes `keys`, or a dict, and `names`, and puts each part's key in front of its rows' labels as levels of a `MultiIndex`. Keys across the columns stay refused, since a column name is text.
+
 ### Added: group keys in front of what apply answers, and GroupBy corr and cov
 
 `apply` answering a series or a frame a group with `group_keys=True`, the default, now puts each group's key in front of the answer's labels as levels of a `MultiIndex`, as pandas does, rather than refusing. With `as_index=False` the answers stay group after group on their own labels. `DataFrameGroupBy.corr` and `cov` answer each group's matrix labelled by the group and the column, and `SeriesGroupBy.corr` and `cov` answer each group's value against another column.
