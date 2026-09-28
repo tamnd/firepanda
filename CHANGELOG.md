@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: grouping by keys from outside the frame, and Series.groupby
+
+`groupby` takes every key pandas takes: a column of values lined up on the row labels, an array, list or Index as long as the frame, a function or a dictionary of the row labels, and the labels themselves by `level` or by their name. Each key is named as pandas names it, including `index` and `level_N` for keys with no name under `as_index=False`, and a key from outside the frame is never reduced or handed back by `head`, `filter` or iteration. `Series.groupby` takes the same keys. Grouping a frame by one of its own columns leaves that column out when the values are the column's, where pandas asks whether it is the same object. A NaN in a key of floats is now left out under `dropna`, a column's `size` carries the column's name, and `pd.Grouper` reads `(*args, **kwargs)` as pandas' does.
+
 ### Added: describe over a column's groups, and pd.Grouper
 
 `SeriesGroupBy.describe` answers the count, mean, spread, extremes and percentiles of each group as float64 columns on the keys, with the same percentile labels as `Series.describe`. `firepanda.Grouper` groups by a column, and on its own it brings its own `sort` and `dropna` as pandas reads them, so a plain one leaves the groups in the order they are first seen. A grouper with a frequency bins a column of moments as `resample(freq, on=key)` does, and prints as pandas' `TimeGrouper`.

@@ -12284,6 +12284,41 @@ class SeriesMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def groupby(
+        self,
+        by: Any = None,
+        level: Any = None,
+        *,
+        as_index: bool = True,
+        sort: bool = True,
+        group_keys: bool = True,
+        observed: bool = True,
+        dropna: bool = True,
+    ) -> SeriesGroupBy:
+        """A grouping over the column's values by keys read as `DataFrame.groupby` reads them.
+
+        The column goes into a frame of its own under a hidden name and is
+        grouped from there, so every key a frame takes is taken here, and the
+        answers carry the column's own name.
+
+        Raises:
+            TypeError: For `as_index=False`, in pandas' words.
+            NotImplementedError: For a `Grouper`, which names a frame's column.
+        """
+        if not as_index:
+            raise TypeError("as_index=False only valid with DataFrame")
+        keys = by if isinstance(by, list) else [by]
+        if any(isinstance(key, Grouper) for key in keys):
+            raise NotImplementedError(
+                "a Grouper on a column names a column the column does not have"
+            )
+        value = f"{_HIDDEN}value"
+        frame = self.rename(value).to_frame()
+        grouped = _grouped(frame, by, level, True, sort, group_keys, observed, dropna)
+        keyed = grouped if hasattr(grouped, "_shown") else _rekeyed(grouped, {})
+        keyed._shown = {**keyed._shown, value: self.name}
+        return cast("SeriesGroupBy", keyed[value])
+
     def to_frame(self, name: Any = NO_DEFAULT) -> DataFrame:
         """The column as a frame of one column, keeping its labels.
 
@@ -14725,7 +14760,7 @@ def _grouped(
     Args:
         frame: The frame being grouped.
         by: The key column name or names.
-        level: Declared and refused, since there is no MultiIndex to have one.
+        level: The row labels as the key, which have one level to name.
         as_index: Whether the key becomes the row labels.
         sort: Whether the groups come out in key order.
         group_keys: Whether `apply` puts the key in front of the labels of an
@@ -14752,11 +14787,281 @@ def _grouped(
         "it says whether a categorical key contributes the groups it has no rows"
         " for, and a group with no rows in it is a row this has nothing to put in",
     )
-    keys = GroupByMixin._keys(frame, by, level)
-    grouped = DataFrameGroupBy(frame, keys, as_index, sort, dropna)
-    grouped._single = isinstance(by, str)
+    single = not isinstance(by, list) or _values_key(frame, by)
+    frame, names, shown = _outside_keys(frame, by, level)
+    keys = GroupByMixin._keys(frame, names, None)
+    if dropna:
+        frame = _gaps_as_nulls(frame, keys)
+    kind = _key_showing(DataFrameGroupBy) if shown else DataFrameGroupBy
+    grouped = kind(frame, keys, as_index, sort, dropna)
+    grouped._single = single
     grouped._group_keys = bool(group_keys)
+    if shown:
+        grouped._shown = shown
+        grouped._busy = False
     return grouped
+
+
+def _gaps_as_nulls(frame: DataFrame, keys: list[str]) -> DataFrame:
+    """The frame with each NaN in a key of floats held as a null, which the grouping leaves out.
+
+    A float column holds a gap as NaN, and the grouping underneath makes a
+    group of NaN rather than leaving the rows out, where pandas counts NaN as a
+    missing key. Writing a null over each one leaves those rows in no group,
+    as `dropna` asks.
+    """
+    from ._frame import Series
+
+    changed: dict[str, Any] = {}
+    for name in keys:
+        column = frame[name]._inner
+        if column.dtype().startswith("float") and column.null_count():
+            gap = Series([None], dtype=column.dtype())._inner
+            changed[name] = Series._wrap(column.pick(column.transform("notna", 0), gap))
+    return frame.assign(**changed) if changed else frame
+
+
+_HIDDEN = "\x00firepanda "
+"""The start of the name a key from outside the frame is grouped under.
+
+A key that is not one of the frame's columns, such as a column of another
+frame, a list of values, a function of the row labels or the labels
+themselves, goes into a copy of the frame as a column of its own so the
+grouping has one road for every key. The name starts with a character no
+caller writes, so it cannot meet one of the frame's own columns."""
+
+_KEPT_ROWS = frozenset({"head", "tail", "_nth", "filter", "sample", "get_group", "__iter__"})
+"""The methods whose answer is some of the frame's rows, which pandas hands back
+without a key that came from outside the frame."""
+
+_UNWRAPPED = frozenset({"pipe"})
+"""The methods that hand the group by itself to the caller's function."""
+
+
+def _outside_keys(frame: DataFrame, by: Any, level: Any) -> tuple[DataFrame, Any, dict[str, Any]]:
+    """The frame with every key from outside it added as a column, the key names, and their names.
+
+    pandas reads a key in seven ways. A name is a column, or the row labels
+    when no column has it and the labels do. A column of values is lined up
+    on the row labels, and grouping by one of the frame's own columns is
+    grouping by its name, so the column is not also reduced. An array or a
+    list as long as the frame goes by position. A function is called on each
+    row label and a dictionary is looked up with each, and both are named
+    after the labels, as `level` is.
+
+    Returns:
+        The frame, the key names for `GroupByMixin._keys`, and each added
+        column's name as pandas shows it, which is None for a key with no name.
+    """
+    if level is not None:
+        if by is not None:
+            raise NotImplementedError(
+                "by= and level= together pick the levels of a MultiIndex, and the"
+                " row labels here are one level"
+            )
+        _level_read(frame, level)
+        by = _AT_LABELS
+    if by is None:
+        return frame, by, {}
+    keys = by if isinstance(by, list) and not _values_key(frame, by) else [by]
+    names: list[Any] = []
+    shown: dict[str, Any] = {}
+    added: dict[str, Any] = {}
+    for key in keys:
+        if isinstance(key, str) and key in frame.columns:
+            names.append(key)
+            continue
+        read = _key_read(frame, key)
+        if isinstance(read, str):
+            names.append(read)
+            continue
+        hidden = f"{_HIDDEN}{len(added)}"
+        added[hidden], shown[hidden] = read
+        names.append(hidden)
+    if added:
+        frame = frame.assign(**added)
+    return frame, names if isinstance(by, list) or not names else names[0], shown
+
+
+_AT_LABELS = object()
+"""The key `level` asks for, which is the row labels."""
+
+
+def _level_read(frame: DataFrame, level: Any) -> None:
+    """Checks that `level` names the one level the row labels have, in pandas' words."""
+    levels = level if isinstance(level, (list, tuple)) else [level]
+    if len(levels) != 1:
+        raise NotImplementedError(
+            "a list of levels groups by the levels of a MultiIndex, and the row labels here"
+            " are one level"
+        )
+    (one,) = levels
+    if isinstance(one, int) and not isinstance(one, bool):
+        if one not in (0, -1):
+            raise InvalidArgumentError("level > 0 or level < -1 only valid with MultiIndex")
+    elif one != frame.index.name:
+        raise InvalidArgumentError(f"level name {one} is not the name of the index")
+
+
+def _values_key(frame: DataFrame, by: list[Any]) -> bool:
+    """Whether a list is one key of values rather than a list of keys, as pandas tells them apart.
+
+    A list of plain values as long as the frame is one key, unless every value
+    in it is a column's name.
+    """
+    if len(by) != len(frame) or all(isinstance(key, str) and key in frame.columns for key in by):
+        return False
+    return not any(
+        callable(key)
+        or isinstance(key, (list, tuple, dict, Grouper, SeriesMixin, IndexMixin))
+        or hasattr(key, "__array__")
+        for key in by
+    )
+
+
+def _key_read(frame: DataFrame, key: Any) -> str | tuple[Any, Any]:
+    """One key that is not a column's name, as its values and its name, or a column's name.
+
+    Raises:
+        KeyError: For a name that is neither a column nor the row labels'.
+        ValueError: For values that are not as long as the frame, in pandas' words.
+    """
+    labels = frame.index
+    if key is _AT_LABELS or (isinstance(key, str) and key == labels.name):
+        return labels, labels.name
+    if isinstance(key, SeriesMixin):
+        name = key.name
+        if (
+            isinstance(name, str)
+            and name in frame.columns
+            and key.index.equals(labels)
+            and frame[name].equals(key)
+        ):
+            return name
+        return (key if key.index.equals(labels) else key.reindex(labels)), name
+    if isinstance(key, IndexMixin):
+        _long_enough(frame, key)
+        return key, key.name
+    if isinstance(key, dict):
+        return [key.get(label) for label in labels.tolist()], labels.name
+    if callable(key):
+        return [key(label) for label in labels.tolist()], labels.name
+    if isinstance(key, (list, tuple)) or hasattr(key, "__array__"):
+        _long_enough(frame, key)
+        return key, None
+    raise KeyError(key)
+
+
+def _long_enough(frame: DataFrame, values: Any) -> None:
+    """Refuses values that are not one a row, in pandas' words."""
+    if len(values) != len(frame):
+        raise InvalidArgumentError("Grouper and axis must be same length")
+
+
+_KEY_SHOWING: dict[type, type] = {}
+"""The class for each group by class that shows the keys from outside the frame."""
+
+
+def _key_showing(base: type) -> Any:
+    """`base` with every answer showing the names of the keys that came from outside the frame.
+
+    Each public method is wrapped so its answer has each hidden name put back
+    as pandas shows it: the key's own name on the row labels, `index` or
+    `level_N` for a key with no name in a column, and no column at all in an
+    answer that is some of the frame's rows. A flag keeps the methods the
+    wrapped ones call on each other unwrapped, so only the answer the caller
+    sees is changed.
+    """
+    if base in _KEY_SHOWING:
+        return _KEY_SHOWING[base]
+    import inspect
+
+    space: dict[str, Any] = {
+        "__slots__": ("_busy", "_shown"),
+        "__doc__": base.__doc__,
+        "__module__": base.__module__,
+        "__qualname__": base.__qualname__,
+    }
+    for name in dir(base):
+        if (name.startswith("_") and name not in ("__getitem__", "__iter__", "_nth")) or (
+            name in _UNWRAPPED
+        ):
+            continue
+        member = inspect.getattr_static(base, name)
+        if inspect.isfunction(member):
+            space[name] = _showing(member, name)
+    _KEY_SHOWING[base] = type(base.__name__, (base,), space)
+    return _KEY_SHOWING[base]
+
+
+def _showing(method: Callable[..., Any], name: str) -> Callable[..., Any]:
+    """`method`, answering with the hidden names shown as pandas shows them."""
+    import functools
+
+    @functools.wraps(method)
+    def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self._busy:
+            return method(self, *args, **kwargs)
+        self._busy = True
+        try:
+            answer = method(self, *args, **kwargs)
+        finally:
+            self._busy = False
+        if name == "__iter__":
+            return ((key, _shown_as(self, group, True)) for key, group in answer)
+        return _shown_as(self, answer, name in _KEPT_ROWS)
+
+    return call
+
+
+def _shown_as(owner: Any, answer: Any, rows: bool) -> Any:
+    """`answer` with the hidden names `owner` holds put back, or dropped from rows of the frame."""
+    shown = owner._shown
+    if isinstance(answer, GroupByMixin):
+        return _rekeyed(answer, shown)
+    if isinstance(answer, DataFrameMixin):
+        hidden = [name for name in answer.columns if name in shown]
+        if rows:
+            answer = answer.drop(columns=hidden) if hidden else answer
+        elif hidden:
+            answer = answer.rename(
+                columns={
+                    name: _column_name(shown[name], owner._by.index(name), len(owner._by))
+                    for name in hidden
+                }
+            )
+    elif isinstance(answer, SeriesMixin):
+        if isinstance(answer.name, str) and answer.name in shown:
+            answer = answer.rename(shown[answer.name])
+    else:
+        return answer
+    label = answer.index.name
+    if isinstance(label, str) and label in shown:
+        answer = answer.rename_axis(shown[label])
+    return answer
+
+
+def _rekeyed(grouped: Any, shown: dict[str, Any]) -> Any:
+    """`grouped` as the class that shows the names in `shown`, holding what it holds."""
+    keyed = object.__new__(_key_showing(type(grouped)))
+    for kind in type(grouped).__mro__:
+        for slot in getattr(kind, "__slots__", ()):
+            if hasattr(grouped, slot):
+                setattr(keyed, slot, getattr(grouped, slot))
+    keyed._shown = shown
+    keyed._busy = False
+    return keyed
+
+
+def _column_name(name: Any, place: int, keys: int) -> Any:
+    """The column a key becomes when it is not the row labels.
+
+    A key with no name is `index` when it is the only key and `level_N` after
+    its place among several, as `reset_index` names them.
+    """
+    if name is not None:
+        return name
+    return "index" if keys == 1 else f"level_{place}"
 
 
 def _relabelled(frame: DataFrame, name: str, label: str | None) -> Series:
@@ -17578,6 +17883,10 @@ class Grouper:
     _BINNED = ("closed", "label", "convention", "origin", "offset")
     """The resample keywords a grouper with a frequency takes."""
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Grouper:
+        """A bare grouper, so the signature reads `(*args, **kwargs)` as pandas' does."""
+        return super().__new__(cls)
+
     def __init__(
         self,
         key: Any = None,
@@ -17824,9 +18133,8 @@ class GroupByMixin[Answer]:
 
         pandas takes a name, a list of names, a column, a list of columns, a
         function, a dictionary and a level, and turns all seven into the same
-        thing. Two of them are here: a name and a list of names. The rest are
-        refused by shape with the reason, because each one is a different piece
-        of work rather than a longer list.
+        thing. `_outside_keys` turns the five that are not names into columns
+        of the frame first, so only names reach here.
 
         Args:
             frame: The frame, so the names can be checked against it.
@@ -19439,7 +19747,7 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         # column it counted, because it did not read that column. Either way
         # there is exactly one column left once the keys have gone into the
         # labels, so the answer is the column that is there.
-        return _relabelled(out, out.columns[-1], None if kind == "size" else self._column)
+        return _relabelled(out, out.columns[-1], self._column)
 
     def _shape_rows(self, kind: str, periods: int) -> Series:
         """One transform over the one column.
