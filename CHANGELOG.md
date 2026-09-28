@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: The columns of a frame as an index
+
+`DataFrame.columns` now answers an `Index` of the column names, and an empty `RangeIndex` for a frame without columns, as pandas does, rather than a list. Reading it as a list, by iterating, `len`, `in` or position, is unchanged, and the index methods such as `tolist`, `get_loc`, `equals`, `intersection` and `difference` now work on it. `df[key]` also takes an index, a column or an array of names, so `df[df.columns[:2]]` selects columns. Document 94 of the compat notes describes this and the next step, which is column names that are not text.
+
 ### Added: Group by windows take pandas' arguments by name
 
 `GroupBy.rolling`, `GroupBy.expanding` and `GroupBy.ewm` now have the same parameters as pandas, in the same order and with the same defaults, rather than passing any arguments through, so a signature check and a misspelled keyword both behave as they do in pandas.

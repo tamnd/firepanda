@@ -7463,10 +7463,15 @@ def _moved_to(owner: Any, rows: Index | None, columns: list[Any] | None, fill_va
 
 
 def _column_labels(frame: DataFrame) -> Index:
-    """A frame's column labels as an index, so they can be joined like row labels."""
-    from ._frame import Index
+    """A frame's column labels as an index, which is what `DataFrame.columns` hands out.
 
-    return Index(list(frame.columns))
+    A frame without columns answers an empty `RangeIndex`, as pandas' does.
+    """
+    from ._frame import Index
+    from ._range_index import RangeIndex
+
+    names = frame._inner.names()
+    return Index(names) if names else RangeIndex(0)
 
 
 def _aligned(this: Any, other: Any, join: Any, axis: Any, level: Any, fill_value: Any) -> tuple:
@@ -8285,12 +8290,8 @@ class DataFrameMixin(_Carries):
             """
 
         @property
-        def columns(self) -> list[str]:
-            """The column names in position order, declared for the same reason.
-
-            A list and not an index, which is the difference `rename_axis` runs
-            into when it is asked to name the column axis.
-            """
+        def columns(self) -> Index:
+            """The column names in position order, declared for the same reason."""
 
     def __init__(
         self,
@@ -8531,6 +8532,9 @@ class DataFrameMixin(_Carries):
             if len(key) != len(self):
                 raise InvalidArgumentError(f"Item wrong length {len(key)} instead of {len(self)}.")
             return self.loc[key]
+        if isinstance(key, (IndexMixin, SeriesMixin)) or _is_numpy(key):
+            # An index, a column or an array of names, such as `df[df.columns[:2]]`.
+            key = list(key.tolist())
         try:
             if isinstance(key, str):
                 return Series._wrap(self._inner.column(key))
