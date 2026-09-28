@@ -14623,11 +14623,12 @@ class CategoricalMixin:
         The column stores int32 codes for the reason document 26 gives, and
         pandas answers int8 for fewer than 128 categories, int16 for fewer than
         32768, and so on up. The cast is to that width, so the storage stays
-        as it is and the answer matches pandas.
+        as it is and the answer matches pandas. The codes have no name, as in
+        pandas, whatever the column is called.
         """
         from ._categorical import _code_width
 
-        codes = self._codes()
+        codes = self._codes().rename(None)
         width = _code_width(len(self.categories))
         return codes if width == "int32" else codes.astype(width)
 
