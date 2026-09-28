@@ -37,6 +37,7 @@ from __future__ import annotations
 from . import _attrs, _firepanda, api, errors, offsets
 from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
+from ._columnar import read_feather, read_orc, read_parquet
 from ._config import (
     describe_option,
     get_option,
@@ -144,7 +145,10 @@ __all__ = [
     "pivot_table",
     "qcut",
     "read_csv",
+    "read_feather",
     "read_json",
+    "read_orc",
+    "read_parquet",
     "read_pickle",
     "reset_option",
     "set_eng_float_format",

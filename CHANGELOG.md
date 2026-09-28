@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Parquet, Feather and ORC through pyarrow
+
+`DataFrame.to_parquet`, `to_feather` and `to_orc`, and `read_parquet`, `read_feather` and `read_orc`, take pandas' parameters and read and write through pyarrow, which is imported only when one of them is called, so firepanda still has no runtime dependencies. A frame goes to pyarrow through the Arrow stream it already exports. The `pandas` metadata key is written in the layout pyarrow writes for pandas 3.0.3: the row labels as columns or as a range, each column's pandas type, and `attrs`. A file firepanda writes therefore reads back in pandas with its labels and types, and a file pandas writes reads back in firepanda. `index`, `compression`, `partition_cols`, `columns`, `filters` and `filesystem` are handed to pyarrow. `dtype_backend` keeps Arrow's types, so a missing integer stays an integer. ORC refuses labels other than the default range, as pandas does. An unknown engine, storage options on a local file and a missing file raise what pandas raises.
+
 ### Added: frames, columns and indexes pickle, with to_pickle and read_pickle
 
 A frame, a column or an index now pickles. It travels as the bytes of the Arrow C data it already exports, with the row labels as leading columns, so pickling needs neither pyarrow nor a Python object per value. `attrs`, the refusal of repeated labels, names that are numbers or tuples, and the class of an index (a range, instants, spans or pairs) all come back. `DataFrame.to_pickle`, `Series.to_pickle`, `pandas.to_pickle` and `pandas.read_pickle` take pandas' parameters. They write and read gzip, bz2, xz, zip, tar and zstd, chosen by the file's ending or by name, to a path or a handle. An unknown compression, storage options on a local file and a missing file raise what pandas raises. A firepanda pickle names firepanda's classes, so pandas cannot read it, and the other way round. A column name that is a tuple now prints as pandas prints it, as `Name: (a, 1)`.
