@@ -14717,11 +14717,10 @@ def _grouped(
     and the seven arguments have to be read before there is an object to read
     them into, so a generated one line delegation has nothing to delegate to.
 
-    Two of the seven are declared and refused. `group_keys` decides whether the
-    key comes back in the result of an `apply`, and there is no `apply` here for
-    it to decide about. `observed` decides whether a categorical key contributes
-    the groups it has no rows for, and pandas made True the default in version
-    3, which is the behaviour here, so it is refused only at False.
+    One of the seven is declared and refused. `observed` decides whether a
+    categorical key contributes the groups it has no rows for, and pandas made
+    True the default in version 3, which is the behaviour here, so it is refused
+    only at False. `group_keys` is kept for `apply`, which reads it.
 
     Args:
         frame: The frame being grouped.
@@ -14729,7 +14728,8 @@ def _grouped(
         level: Declared and refused, since there is no MultiIndex to have one.
         as_index: Whether the key becomes the row labels.
         sort: Whether the groups come out in key order.
-        group_keys: Declared and refused.
+        group_keys: Whether `apply` puts the key in front of the labels of an
+            answer that keeps each group's rows.
         observed: Declared and held at True.
         dropna: Whether a missing key is a group.
 
@@ -14738,13 +14738,6 @@ def _grouped(
     """
     from ._frame import DataFrameGroupBy
 
-    _held_at(
-        "group_keys",
-        group_keys,
-        True,
-        "it says whether the key comes back in the result of an apply, and there"
-        " is no apply here for it to say anything about",
-    )
     _held_at(
         "observed",
         observed,
@@ -14755,6 +14748,7 @@ def _grouped(
     keys = GroupByMixin._keys(frame, by, level)
     grouped = DataFrameGroupBy(frame, keys, as_index, sort, dropna)
     grouped._single = isinstance(by, str)
+    grouped._group_keys = bool(group_keys)
     return grouped
 
 
@@ -14788,6 +14782,24 @@ def _relabelled(frame: DataFrame, name: str, label: str | None) -> Series:
         return Series._wrap(frame._inner.column(name).relabel(label))
     except Exception as error:
         raise translate(error) from None
+
+
+def _bound(func: Any, args: Any, kwargs: Any) -> Any:
+    """`func` with the arguments `agg` was given after it, or `func` when there are none."""
+    if not args and not kwargs:
+        return func
+
+    def call(group: Any) -> Any:
+        return func(group, *args, **kwargs)
+
+    return call
+
+
+def _built(values: list[Any]) -> Series:
+    """A series of one value a group, its type read from the values, float64 when empty."""
+    from ._frame import Series
+
+    return Series(values) if values else Series([], dtype="float64")
 
 
 _CLOSED = ("right", "left", "both", "neither")
@@ -17638,14 +17650,24 @@ class GroupByMixin[Answer]:
     the wrong default for a library whose claim is the other one.
     """
 
-    __slots__ = ("_as_index", "_by", "_dropna", "_frame", "_selection", "_single", "_sort")
+    __slots__ = (
+        "_as_index",
+        "_by",
+        "_dropna",
+        "_frame",
+        "_group_keys",
+        "_selection",
+        "_single",
+        "_sort",
+    )
     """The frame, the key names, and the three flags that survive to the call.
     Slotted for the reason `DataFrameMixin` gives. There is no `_inner`, because
     a group by object has no extension object of its own: it is a frame and a
     plan for what to do to it. `_selection` is the columns a `[[...]]` narrowed it
     to and `_single` is whether the key was written as one name rather than a
-    list, which is what decides whether a group's key is a tuple. Both are set
-    after the object is made, so they are read with a default."""
+    list, which is what decides whether a group's key is a tuple. `_group_keys`
+    is what `apply` reads. All three are set after the object is made, so they
+    are read with a default."""
 
     _frame: DataFrame
     _by: list[str]
@@ -18100,17 +18122,18 @@ class GroupByMixin[Answer]:
     def _broadcast(
         self, func: Any, args: Any, engine: Any, engine_kwargs: Any, kwargs: Any
     ) -> Answer:
-        """A reduction or a transform named by a string, answered one value a row.
+        """A reduction or a transform, answered one value a row.
 
         A reduction's value is put on every row of its group. A transform's
-        name runs that transform, since pandas lets either be named here.
+        name runs that transform, since pandas lets either be named here. A
+        Python function runs once a group, as `_transformed_by` says.
 
         Args:
-            func: The name of the reduction or transform.
-            args: Arguments for it, refused if there are any.
+            func: The name of the reduction or transform, or a function.
+            args: Arguments for it, refused for a name.
             engine: Refused.
             engine_kwargs: Refused.
-            kwargs: Arguments for it by keyword, refused if there are any.
+            kwargs: Arguments for it by keyword, refused for a name.
 
         Returns:
             The frame or the series pandas answers.
@@ -18126,10 +18149,12 @@ class GroupByMixin[Answer]:
             engine_kwargs,
             "there is nothing to configure while there is nothing to choose",
         )
+        if callable(func) and not isinstance(func, str):
+            return self._transformed_by(func, args, kwargs)
         if not isinstance(func, str):
             raise NotImplementedError(
-                "transform takes the name of a reduction or a transform for now,"
-                " because a Python function runs once a group in the interpreter"
+                "transform takes the name of a reduction or a transform, or a"
+                " function, and a list or a mapping of them is not supported yet"
             )
         if args or kwargs:
             raise UnsupportedError(
@@ -18157,27 +18182,29 @@ class GroupByMixin[Answer]:
         engine_kwargs: Any = None,
         **kwargs: Any,
     ) -> Any:
-        """One or more reductions over the groups, each named by a string.
+        """One or more reductions over the groups, each a name or a function.
 
-        pandas reads `func` in four shapes and all four are read here when every
-        function in them is a name. One name answers what the method of that
-        name answers. A list of names over one column answers a column a name. A
-        mapping of column to name answers a column a column. Keywords of
-        `name=(column, function)` answer a column a keyword, and that is the one
-        shape that can reduce a column twice. Each column is the method of that
-        name run on its own, and the columns are put side by side on the groups,
-        so the numbers and the types are the method's.
+        pandas reads `func` in four shapes and all four are read here. One name
+        answers what the method of that name answers. A list of names over one
+        column answers a column a name. A mapping of column to name answers a
+        column a column. Keywords of `name=(column, function)` answer a column a
+        keyword, and that is the one shape that can reduce a column twice. Each
+        column is the method of that name run on its own, and the columns are
+        put side by side on the groups, so the numbers and the types are the
+        method's.
 
-        A Python function is refused, because it runs once a group in the
-        interpreter, and so is a list over a frame, which pandas answers with
-        two levels of column labels and firepanda has one.
+        A Python function runs once a group in the interpreter on the group's
+        values of one column, as `_aggregated_by` says, and takes `*args` and
+        `**kwargs` after them. A list over a frame is refused, since pandas
+        answers it with two levels of column labels and firepanda has one.
 
         Args:
-            func: A name, a list of names or a mapping of column to name.
-            *args: Arguments for the functions, refused if there are any.
+            func: A name, a function, a list of them or a mapping of column to one.
+            *args: Arguments for a function, refused for a name.
             engine: Refused.
             engine_kwargs: Refused.
-            **kwargs: The named form, one output column a keyword.
+            **kwargs: The named form, one output column a keyword, or the
+                keywords for a function.
 
         Returns:
             The frame or the series pandas answers.
@@ -18196,7 +18223,8 @@ class GroupByMixin[Answer]:
             engine_kwargs,
             "there is nothing to configure while there is nothing to choose",
         )
-        if args or (func is not None and kwargs):
+        function = callable(func) and not isinstance(func, str)
+        if (args or (func is not None and kwargs)) and not function:
             raise UnsupportedError(
                 "agg takes no further arguments for its functions for now, because"
                 " the named reductions are answered with their defaults"
@@ -18207,11 +18235,8 @@ class GroupByMixin[Answer]:
             return self._gathered(self._named_plan(kwargs))
         if isinstance(func, str):
             return self._one(func, None)
-        if callable(func):
-            raise NotImplementedError(
-                "agg takes the name of a reduction for now, because a Python function"
-                " runs once a group in the interpreter"
-            )
+        if function:
+            return self._aggregated_by(_bound(func, args, kwargs))
         return self._gathered(self._plan(func))
 
     agg = aggregate
@@ -18230,10 +18255,12 @@ class GroupByMixin[Answer]:
             AttributeError: If there is no method of that name, which is what
                 pandas raises.
         """
+        if callable(how) and not isinstance(how, str) and column is not None:
+            return self._column_group(column)._aggregated_by(how)
         if not isinstance(how, str):
             raise NotImplementedError(
-                "agg takes the name of a reduction for now, because a Python function"
-                " runs once a group in the interpreter"
+                "agg takes the name of a reduction or a function, and"
+                f" {type(how).__name__} is neither"
             )
         owner = self if column is None else self._column_group(column)
         method = None if how.startswith("_") else getattr(type(owner), how, None)
@@ -18469,6 +18496,160 @@ class GroupByMixin[Answer]:
         rows = self._frame.iloc[places]
         picked = getattr(self, "_selection", None)
         return self._as_answer(rows if picked is None else rows[picked])
+
+    def _source(self) -> Any:
+        """What a function run once a group reads from, which is not the keys.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("apply")
+
+    def _named_group(self, rows: Any, key: tuple[Any, ...]) -> Any:
+        """One group's rows as `apply` and `transform` hand them to a function.
+
+        Overridden by `SeriesGroupBy`, which names the column after the key.
+        """
+        return rows
+
+    def _renamed(self, rows: Any) -> Any:
+        """The rows `apply` put back together, as they are.
+
+        Overridden by `SeriesGroupBy`, which names them after the column again.
+        """
+        return rows
+
+    def _aggregated_by(self, func: Any) -> Any:
+        """`agg` with a Python function.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("agg")
+
+    def _fitted(self, answer: Any, group: Any) -> Any:
+        """One group's answer from `transform` as rows numbered from zero.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("transform")
+
+    def _one_a_group(self, values: list[Any]) -> Any:
+        """One value a group from `apply`, as this group by answers it.
+
+        Overridden in both subclasses and never called on this one.
+        """
+        raise NotImplementedError("apply")
+
+    def _rows_a_group(self, answers: list[Any]) -> Any:
+        """A series a group with the same labels from `apply`, one row a group.
+
+        Overridden by `DataFrameGroupBy` and never called on this one, since a
+        column's group by answering series is not read as rows.
+        """
+        raise NotImplementedError("apply")
+
+    def _on_groups(self, columns: dict[str, Series]) -> DataFrame:
+        """Columns of one value a group, put on the keys the way a reduction puts them.
+
+        The keys come from `size`, which has one row a group in the order
+        `_members` walks them, so the values line up by place.
+
+        Args:
+            columns: Each column, numbered from zero, one row a group.
+
+        Returns:
+            A frame on the keys, or with the keys as its first columns when
+            they are not the labels.
+        """
+        from ._frame import DataFrame
+
+        counts = self._reduced("size", 0.0)
+        if self._as_index:
+            return DataFrame(columns).set_axis(counts.index)
+        return counts[self._by].assign(**columns)
+
+    def _transformed_by(self, func: Any, args: Any, kwargs: Any) -> Any:
+        """`transform` with a Python function, run once a group in the interpreter.
+
+        Each group's answer is fitted to its rows, a single value spread over
+        them and a series or a frame lined up on their labels, and the answers
+        go back into the frame's order. A row whose key is not a group answers
+        missing, which makes whole numbers float64 as pandas does.
+
+        Args:
+            func: The function, handed each group's rows less the keys.
+            args: Arguments after the group.
+            kwargs: Arguments by keyword.
+
+        Returns:
+            A series or a frame as tall as the one grouped, on its labels.
+        """
+        source = self._source()
+        pieces = []
+        order: list[int] = []
+        for key, places in self._members():
+            group = self._named_group(source.iloc[places], key)
+            pieces.append(self._fitted(func(group, *args, **kwargs), group))
+            order.extend(places)
+        if not pieces:
+            return source
+        joined = concat(pieces, ignore_index=True).set_axis(order)
+        return joined.reindex(range(len(source))).set_axis(source.index)
+
+    def _applied(self, func: Any, args: Any, kwargs: Any) -> Any:
+        """`apply`, which runs `func` once a group and reads the shape of what came back.
+
+        Args:
+            func: A function, or the name of a method.
+            args: Arguments after the group.
+            kwargs: Arguments by keyword.
+
+        Returns:
+            One row a group for one value or one series a group, and the rows in
+            the frame's order for answers that keep each group's rows.
+
+        Raises:
+            TypeError: If `func` is neither a name nor a function.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(func, str):
+            return getattr(self, func)(*args, **kwargs)
+        if not callable(func):
+            raise TypeError(f"'{type(func).__name__}' object is not callable")
+        source = self._source()
+        members = self._members()
+        groups = []
+        answers = []
+        for key, places in members:
+            group = self._named_group(source.iloc[places], key)
+            groups.append(group)
+            answers.append(func(group, *args, **kwargs))
+        framed = [isinstance(answer, (Series, DataFrame)) for answer in answers]
+        if not any(framed):
+            return self._one_a_group(answers)
+        if not all(framed):
+            raise NotImplementedError(
+                "apply answering one value for some groups and a series or a frame"
+                " for others is not supported, because pandas makes an object column"
+                " of it"
+            )
+        rows = isinstance(answers[0], Series) and self.ndim == 2
+        if rows and all(a.index.tolist() == answers[0].index.tolist() for a in answers):
+            return self._rows_a_group(answers)
+        if getattr(self, "_group_keys", True):
+            raise NotImplementedError(
+                "apply answering a series or a frame a group is not supported with"
+                " group_keys=True yet, because pandas puts the key in front of each"
+                " row label, which is a MultiIndex. Pass group_keys=False to groupby"
+                " for the rows on their own labels"
+            )
+        joined = concat(answers)
+        if not rows and all(a.index.equals(g.index) for a, g in zip(answers, groups, strict=True)):
+            # Answers that keep each group's rows go back into the frame's order,
+            # and any others stay group after group, as pandas leaves them.
+            order = [place for _, places in members for place in places]
+            joined = joined.iloc[sorted(range(len(order)), key=order.__getitem__)]
+        return self._renamed(joined)
 
     @property
     def ngroups(self) -> int:
@@ -18836,6 +19017,7 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
             out = DataFrameGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna)
             out._selection = names
         out._single = getattr(self, "_single", False)
+        out._group_keys = getattr(self, "_group_keys", True)
         return out
 
     def _shape(self, kind: str, param: float) -> DataFrame:
@@ -18865,6 +19047,98 @@ class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
     def _column_group(self, column: str) -> SeriesGroupBy:
         """One column of this group by, as `self[column]` gives it."""
         return cast("SeriesGroupBy", self[column])
+
+    def apply(self, func: Any, *args: Any, include_groups: bool = False, **kwargs: Any) -> Any:
+        """Calls `func` once a group on the group's rows less the keys, as `_applied` says.
+
+        A frame cannot carry a name here, so the group's rows do not have the
+        key as `name` the way pandas sets it.
+
+        Raises:
+            ValueError: For `include_groups=True`, which pandas 3 no longer allows.
+        """
+        if include_groups:
+            raise InvalidArgumentError("include_groups=True is no longer allowed.")
+        return self._applied(func, args, kwargs)
+
+    def _source(self) -> DataFrame:
+        """The columns that are not keys."""
+        return self._frame[self._value_columns()]
+
+    def _aggregated_by(self, func: Any) -> DataFrame:
+        """The function over each column that is not a key, a column a column."""
+        return self._gathered([(name, name, func) for name in self._value_columns()])
+
+    def _fitted(self, answer: Any, group: DataFrame) -> DataFrame:
+        """A frame lined up on the group's labels, and a series or a value spread over it.
+
+        A series on the group's labels goes into every column, and any other
+        series is one value a column, read by place, as pandas reads them.
+
+        Raises:
+            ValueError: If a series of one value a column has the wrong length.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(answer, DataFrame):
+            if not answer.index.equals(group.index):
+                answer = answer.reindex(group.index)
+            return answer.reset_index(drop=True)
+        names = list(group.columns)
+        size = len(group)
+        if isinstance(answer, Series):
+            if answer.index.equals(group.index):
+                column = answer.reset_index(drop=True)
+                return DataFrame({name: column for name in names})
+            values = answer.tolist()
+            if len(values) != len(names):
+                raise InvalidArgumentError(
+                    f"Length of values ({len(values)}) does not match the number of"
+                    f" columns ({len(names)})"
+                )
+            return DataFrame({name: [v] * size for name, v in zip(names, values, strict=True)})
+        return DataFrame({name: [answer] * size for name in names})
+
+    def _one_a_group(self, values: list[Any]) -> Series:
+        """A series of one value a group, with no name, as pandas answers it.
+
+        Raises:
+            NotImplementedError: With `as_index=False`, where pandas puts the
+                values in a column named None and a firepanda column name is text.
+        """
+        if not self._as_index:
+            raise NotImplementedError(
+                "apply answering one value a group with as_index=False is not"
+                " supported, because pandas puts the values in a column named None"
+            )
+        slot = "__firepanda_value__"
+        return self._on_groups({slot: _built(values)})[slot].rename(None)
+
+    def _rows_a_group(self, answers: list[Any]) -> DataFrame:
+        """A series a group with the same text labels, as one row a group.
+
+        The columns take the type every answer can be read as together, since
+        pandas stacks them into one block before it splits them into columns.
+
+        Raises:
+            UnsupportedError: For labels that are not text, which would be
+                column names.
+        """
+        from ._frame import Series
+
+        labels = answers[0].index.tolist()
+        if len(set(labels)) != len(labels) or not all(isinstance(v, str) for v in labels):
+            raise UnsupportedError(
+                "apply answering a series makes its labels column names, and a"
+                " firepanda frame names each column once, with text"
+            )
+        joined = concat(answers, ignore_index=True)
+        kind = str(joined.dtype)
+        values = joined.tolist()
+        width = len(labels)
+        return self._on_groups(
+            {label: Series(values[at::width]).astype(kind) for at, label in enumerate(labels)}
+        )
 
     def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
         """A mapping of column to the name of a reduction.
@@ -19115,6 +19389,74 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         """This group by, which is over the one column already."""
         return cast("SeriesGroupBy", self)
 
+    def apply(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """Calls `func` once a group on the column's values there, as `_applied` says.
+
+        The group is named after its key, as pandas names it.
+        """
+        return self._applied(func, args, kwargs)
+
+    def _source(self) -> Series:
+        """The one column."""
+        return self._frame[self._column]
+
+    def _named_group(self, rows: Any, key: tuple[Any, ...]) -> Any:
+        """The group's values, named after its key the way iterating spells it."""
+        return rows.rename(self._named(key, True))
+
+    def _renamed(self, rows: Any) -> Any:
+        """The rows named after the column, which the groups were not."""
+        return rows.rename(self._column)
+
+    def _aggregated_by(self, func: Any) -> DataFrame | Series:
+        """One value a group from a Python function, named after the column.
+
+        The group is the column's values there, named after the column, which is
+        what pandas hands `agg`, and the type is read from the values, so a
+        count over floats answers whole numbers.
+
+        Raises:
+            ValueError: If the function answers a series or a frame, in pandas' words.
+        """
+        from ._frame import DataFrame, Series
+
+        column = self._source()
+        values = []
+        for _, places in self._members():
+            answer = func(column.iloc[places])
+            if isinstance(answer, (Series, DataFrame)):
+                raise InvalidArgumentError("Must produce aggregated value")
+            values.append(answer)
+        return self._one_a_group(values)
+
+    def _fitted(self, answer: Any, group: Series) -> Series:
+        """A series lined up on the group's labels, a list read by place, a value spread.
+
+        Raises:
+            ValueError: If a list has the wrong length, in pandas' words.
+        """
+        from ._frame import Series
+
+        if isinstance(answer, Series):
+            if not answer.index.equals(group.index):
+                answer = answer.reindex(group.index)
+            return answer.reset_index(drop=True).rename(self._column)
+        if isinstance(answer, (list, tuple, range)) or hasattr(answer, "__array__"):
+            values = list(answer)
+            if len(values) != len(group):
+                raise InvalidArgumentError(
+                    f"Length of values ({len(values)}) does not match length of index"
+                    f" ({len(group)})"
+                )
+        else:
+            values = [answer] * len(group)
+        return Series(values, name=self._column)
+
+    def _one_a_group(self, values: list[Any]) -> DataFrame | Series:
+        """One value a group, named after the column, or beside the keys."""
+        out = self._on_groups({self._column: _built(values)})
+        return out[self._column] if self._as_index else out
+
     def _plan(self, func: Any) -> list[tuple[str, str, Any]]:
         """A list of names, each answering a column called after it.
 
@@ -19123,7 +19465,14 @@ class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
         """
         if isinstance(func, dict):
             raise SpecificationError("nested renamer is not supported")
-        return [(how if isinstance(how, str) else repr(how), self._column, how) for how in func]
+        names = [
+            how if isinstance(how, str) else getattr(how, "__name__", repr(how)) for how in func
+        ]
+        if len(names) > 1:
+            # pandas numbers the lambdas when there is more than one function.
+            numbered = itertools.count()
+            names = [f"<lambda_{next(numbered)}>" if n == "<lambda>" else n for n in names]
+        return [(name, self._column, how) for name, how in zip(names, func, strict=True)]
 
     def _named_plan(self, named: dict[str, Any]) -> list[tuple[str, str, Any]]:
         """Keywords of `name=function`, each answering a column of that name."""

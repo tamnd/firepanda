@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a Python function over the groups
+
+`GroupBy.agg`, `GroupBy.transform` and a new `GroupBy.apply` take a Python function and run it once a group, as pandas does. `agg` hands it a column's values in each group and reads the type from the answers, and a function can sit in a list, a mapping or the named form beside the names, with lambdas numbered as pandas numbers them. `transform` fits each answer to its group's rows and puts them back in the frame's order, with a row whose key is missing answering missing. `apply` answers one row a group for one value or for a series with the same text labels each time, and the rows on their own labels when `group_keys=False`, which `groupby` now takes. An answer pandas would put on a MultiIndex is refused.
+
 ### Added: Timestamp reads a year, a month or a quarter
 
 `Timestamp("2024")`, `Timestamp("2024-3")`, `Timestamp("2024/03")` and `Timestamp("2024Q1")` are the first day of the span they name, as in pandas, where they used to be refused as text that is not ISO 8601.
