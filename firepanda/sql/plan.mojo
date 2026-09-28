@@ -446,7 +446,10 @@ Checked against DuckDB both ways.
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. So is a `LATERAL` derived table.
+and the joins over them. So is a `LATERAL` derived table written after a comma
+or on the right of an inner or a cross join, which is lowered to a join between
+it and what is to its left. One with a fold, a `DISTINCT`, an `ORDER BY` or a
+`LIMIT` inside it is refused by name, as is a left join to one.
 An `ASOF` join is lowered when it is written with `ON`, and refused by name
 with `USING` or as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
 number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
@@ -5015,7 +5018,9 @@ def _subquery(
     a relation number is a number in the whole plan rather than in one block.
     The names do not work that way: a name the outer query put in reach is not
     in reach inside the subquery, so the statement lowers against a scope of its
-    own and that scope ends here.
+    own and that scope ends here. A `LATERAL` one comes here too when nothing is
+    written to the left of it, since then there is nothing for it to read and it
+    is an ordinary subquery. One written after something is `_lateral`.
 
     The alias is not a relation. A scan is one because it has a schema in
     `sources` and a number that names it, and a derived table has neither. So
@@ -5046,16 +5051,10 @@ def _subquery(
         The statement's root and what it produces.
 
     Raises:
-        If it is `LATERAL`, if it names more columns than the statement
-        produces, or if the statement inside it is one this does not lower.
+        If it names more columns than the statement produces, or if the
+        statement inside it is one this does not lower.
     """
     var source = ast.refs[Int(at)]
-    if source.b == 1:
-        raise Error(
-            "firepanda does not lower a LATERAL subquery yet, which reads the"
-            " columns of the sources written to the left of it and so runs once"
-            " per row of them rather than once for the query"
-        )
     var named = ast.length(source.payload)
 
     var inner = _Scope()
@@ -5098,6 +5097,273 @@ def _subquery(
             outputs.append(plan.exprs.column(String(produced[i])))
         root = plan.project(root, outputs^, aliased(produced, columns))
     return _derived(plan, root, called^, scope)
+
+
+def _lateral(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+    left: _From,
+) raises -> _From:
+    """Lowers a `LATERAL` subquery against what is written to the left of it.
+
+    `SELECT shop, qty FROM shops, LATERAL (SELECT qty FROM sales WHERE
+    sales.shop = shops.shop) s` reads as a subquery run once per shop. Run that
+    way it is a loop over the left side, and the same answer comes out of one
+    join: the subquery's `FROM` joined to the left side on the parts of its
+    `WHERE` that compare the two, and its select list computed over each pair.
+    So this is the rewrite `_folded_join` does with no fold in the middle, and
+    the join is an inner one because a left row the subquery answers nothing
+    for is dropped, which is what a lateral written after a comma does.
+
+    The subquery's `FROM` goes into the scope the left side is using, with the
+    line moved the way `_folded_join` moves it, so a name the subquery writes is
+    its own first and the left side's after. Its `WHERE` is split on `AND`. An
+    equality with one side on each is a key pair, a part that reads only the
+    subquery is a filter under it, and anything else is a filter over the join.
+    The select list is then lowered in the same scope and put in a projection
+    over the join, after every column the left side had, which is the order
+    DuckDB hands them out in.
+
+    What a block computes over the whole of its rows is refused, since here the
+    whole is the rows of one left row and that wants a group per left row. So
+    are an `ORDER BY` or a `LIMIT` on it, a `DISTINCT`, a `WITH` and anything
+    that is not one `SELECT`.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach.
+        left: What is written to the left of it, lowered.
+
+    Returns:
+        The projection, which produces the left side's columns and then the
+        subquery's.
+
+    Raises:
+        If the subquery is a shape this does not lower, or names more columns
+        than it produces.
+    """
+    var source = ast.refs[Int(at)]
+    var top = ast.stmts[Int(source.a)]
+    if top.kind != STMT_SELECT:
+        raise Error("a LATERAL subquery over a statement that is not a SELECT")
+    if top.b != NO_NODE:
+        raise Error(
+            "firepanda does not lower an ORDER BY or a LIMIT inside a LATERAL"
+            " subquery yet, which picks rows per left row rather than over the"
+            " whole join"
+        )
+    if len(read_ctes(ast, source.a)) != 0:
+        raise Error(
+            "firepanda does not lower a WITH written inside a LATERAL subquery"
+            " yet"
+        )
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        raise Error(
+            "firepanda lowers a LATERAL subquery over one SELECT block so far,"
+            " and a VALUES or a set operation inside one is a different node"
+        )
+    var clauses = body.children
+    if (
+        ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0
+        or ast.slot(clauses, CLAUSE_HAVING) != NO_NODE
+        or ast.slot(clauses, CLAUSE_QUALIFY) != NO_NODE
+        or ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0
+    ):
+        raise Error(
+            "firepanda does not lower a GROUP BY, a HAVING, a QUALIFY or a"
+            " WINDOW inside a LATERAL subquery yet, which works over the rows"
+            " of one left row at a time"
+        )
+    if ast.slot(clauses, CLAUSE_SAMPLE) != NO_NODE:
+        raise not_implemented(SELECT_SAMPLE, "", "")
+    if (body.a & SELECT_DISTINCT) != 0 or ast.length(body.b) != 0:
+        raise Error(
+            "firepanda does not lower a DISTINCT inside a LATERAL subquery yet,"
+            " which drops repeats within one left row and not across the join"
+        )
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    if from_clause == NO_NODE:
+        raise Error(
+            "firepanda does not lower a LATERAL subquery with no FROM yet,"
+            " which computes one row from each left row"
+        )
+    var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+    for i in range(len(items)):
+        var item = ast.stmts[Int(items[i])]
+        if ast.exprs[Int(item.a)].kind != EXPR_STAR and _has_aggregate(
+            ast, item.a
+        ):
+            raise Error(
+                "firepanda does not lower an aggregate inside a LATERAL"
+                " subquery yet, which folds the rows of each left row on their"
+                " own and so wants a group per left row"
+            )
+
+    # Lowered into the scope the left side is in, with the line moved, for the
+    # reason `_folded_join` gives. Everything the subquery names goes back out
+    # of reach at the end and its alias comes in instead.
+    var reach = len(scope.names)
+    var merged = len(scope.merged)
+    var outside = scope.floor
+    scope.floor = reach
+    var held = scope.positions.copy()
+    scope.positions = _Positions()
+    var right = _from(
+        ast, from_clause, catalog, grammar, plan, sources, scope, ctes
+    )
+
+    var conjuncts = List[UInt32]()
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction != NO_NODE:
+        _conjuncts(ast, restriction, conjuncts)
+
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    var under = List[Int]()
+    var rest = List[Int]()
+    var split = _Walk()
+    for i in range(len(conjuncts)):
+        var one = ast.exprs[Int(conjuncts[i])]
+        if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
+            var a = _lower_operand(ast, one.a, plan, split, scope, False)
+            var b = _lower_operand(ast, one.b, plan, split, scope, False)
+            var first = _side(plan, a, left, right)
+            var second = _side(plan, b, left, right)
+            if first == _LEFT and second == _RIGHT:
+                left_keys.append(a)
+                right_keys.append(b)
+                continue
+            if first == _RIGHT and second == _LEFT:
+                left_keys.append(b)
+                right_keys.append(a)
+                continue
+            var both = plan.exprs.binary(BinaryOp.EQ, a, b)
+            if (first == _RIGHT or first == _NEITHER) and (
+                second == _RIGHT or second == _NEITHER
+            ):
+                under.append(both)
+            else:
+                rest.append(both)
+            continue
+        var whole = _lower_expr(ast, conjuncts[i], plan, split, scope, False)
+        var reads = _side(plan, whole, left, right)
+        if reads == _RIGHT or reads == _NEITHER:
+            under.append(whole)
+        else:
+            rest.append(whole)
+
+    var outputs = List[Int]()
+    var names = List[String]()
+    var walk = _Walk()
+    for i in range(len(items)):
+        var item = ast.stmts[Int(items[i])]
+        if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+            _expand(
+                ast,
+                item.a,
+                right.schema,
+                right.origin,
+                plan,
+                walk,
+                scope,
+                False,
+                outputs,
+                names,
+            )
+            continue
+        outputs.append(_lower_expr(ast, item.a, plan, walk, scope, False))
+        if item.payload != NO_NODE:
+            names.append(ast.text(item.payload))
+        else:
+            names.append(_name_of(ast, grammar, item.a, i, scope))
+
+    # A subquery inside it is a join this would have to put under the lateral
+    # one, and neither walk builds it.
+    if (
+        len(split.scalars) != 0
+        or len(split.marks) != 0
+        or len(split.asked) != 0
+        or len(walk.scalars) != 0
+        or len(walk.marks) != 0
+        or len(walk.asked) != 0
+        or len(walk.windows) != 0
+    ):
+        raise Error(
+            "firepanda does not lower a subquery or a window inside a LATERAL"
+            " subquery yet"
+        )
+
+    scope.hide(reach, merged)
+    scope.floor = outside
+    scope.positions = held^
+
+    var named = ast.length(source.payload)
+    var called = String()
+    if named >= 1:
+        called = String(ast.text(ast.at(source.payload, 0)))
+    if named > 1:
+        if named - 1 > len(names):
+            raise Error(
+                String(
+                    'Binder Error: table "',
+                    called,
+                    '" has ',
+                    len(names),
+                    " columns available but ",
+                    named - 1,
+                    " columns specified",
+                )
+            )
+        var columns = List[String](capacity=named - 1)
+        for i in range(1, named):
+            columns.append(String(ast.text(ast.at(source.payload, i))))
+        names = aliased(names, columns)
+
+    for i in range(len(under)):
+        right.at = plan.filter(right.at, under[i])
+    var kind = JoinKind.INNER
+    if len(left_keys) == 0:
+        kind = JoinKind.CROSS
+    var joined = _pair(plan, left, right, left_keys^, right_keys^, kind)
+    for i in range(len(rest)):
+        joined.at = plan.filter(joined.at, rest[i])
+
+    # The left side's columns come through as they are, pinned to where they
+    # came from so that a name both sides have is still the left one.
+    var every = List[Int](capacity=len(left.schema) + len(outputs))
+    var called_all = List[String](capacity=len(left.schema) + len(outputs))
+    var schema = Schema(copy=left.schema)
+    var origin = left.origin.copy()
+    for i in range(len(left.schema)):
+        var name = String(left.schema[i].name)
+        if left.origin[i] != UNBOUND:
+            every.append(plan.exprs.column_of(left.origin[i], name.copy()))
+        else:
+            every.append(plan.exprs.column(name.copy()))
+        called_all.append(name^)
+    for i in range(len(outputs)):
+        every.append(outputs[i])
+        called_all.append(names[i].copy())
+        schema.append(Field(names[i].copy(), LogicalType.NULL, True))
+        origin.append(UNBOUND)
+    var at_out = plan.project(joined.at, every^, called_all^)
+    if called.byte_length() != 0:
+        scope.derive(called^, names^)
+    return _From(at_out, schema^, origin^)
 
 
 def _cte(
@@ -5255,6 +5521,10 @@ def _joined(
     var left = _source(
         ast, node.a, catalog, grammar, plan, sources, scope, ctes
     )
+    if _is_lateral(ast, node.b):
+        return _joined_lateral(
+            ast, at, catalog, grammar, plan, sources, scope, ctes, left^
+        )
     var reach = len(scope.names)
     var pairs = len(scope.merged)
     var right = _source(
@@ -5426,6 +5696,79 @@ def _joined(
     )
     for i in range(len(rest)):
         out.at = plan.filter(out.at, rest[i])
+    return out^
+
+
+def _joined_lateral(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+    var left: _From,
+) raises -> _From:
+    """Lowers a `JOIN LATERAL`, which is a lateral subquery with a condition.
+
+    An inner or a cross one is the lateral subquery and then its condition as a
+    filter over it, the same as a condition over an inner join. A left one pads
+    a left row the subquery answers nothing for, which the inner join `_lateral`
+    builds does not do, so it is refused along with every other kind.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_JOIN` or `REF_JOIN_USING`.
+        catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an output
+            column the query did not name.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach.
+        left: The left side, already lowered.
+
+    Returns:
+        The lateral subquery with the condition over it.
+
+    Raises:
+        If the join is not an inner or a cross one, or names its keys with
+        `USING` or `NATURAL`.
+    """
+    var node = ast.refs[Int(at)]
+    var kind = _join_kind(ast.text(node.payload))
+    if kind != JoinKind.INNER and kind != JoinKind.CROSS:
+        raise Error(
+            String(
+                (
+                    "firepanda lowers an inner or a cross join to a LATERAL"
+                    " subquery so far, and not a "
+                ),
+                kind,
+                " one",
+            )
+        )
+    if (
+        node.kind == REF_JOIN_USING
+        or String(ast.text(node.payload)).upper().find("NATURAL") != -1
+    ):
+        raise Error(
+            "firepanda does not lower a LATERAL subquery joined with USING or"
+            " NATURAL yet"
+        )
+    var out = _lateral(
+        ast, node.b, catalog, grammar, plan, sources, scope, ctes, left
+    )
+    var written = ast.items(node.children)
+    if len(written) == 0:
+        return out^
+    var conjuncts = List[UInt32]()
+    _conjuncts(ast, written[0], conjuncts)
+    var walk = _Walk()
+    for i in range(len(conjuncts)):
+        var one = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
+        out.at = plan.filter(out.at, one)
     return out^
 
 
@@ -5658,11 +6001,30 @@ def _from(
         ast, refs[0], catalog, grammar, plan, sources, scope, ctes
     )
     for i in range(1, len(refs)):
+        if _is_lateral(ast, refs[i]):
+            out = _lateral(
+                ast, refs[i], catalog, grammar, plan, sources, scope, ctes, out
+            )
+            continue
         var more = _source(
             ast, refs[i], catalog, grammar, plan, sources, scope, ctes
         )
         out = _pair(plan, out, more, List[Int](), List[Int](), JoinKind.CROSS)
     return out^
+
+
+def _is_lateral(ast: Ast, at: UInt32) -> Bool:
+    """Whether a table reference is a `LATERAL` subquery.
+
+    Args:
+        ast: The arenas.
+        at: The reference.
+
+    Returns:
+        True for a `REF_SUBQUERY` written with `LATERAL`.
+    """
+    var source = ast.refs[Int(at)]
+    return source.kind == REF_SUBQUERY and source.b == 1
 
 
 def lower(
