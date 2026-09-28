@@ -138,6 +138,8 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: frame(lib)[["a", "b"]].value_counts(ascending=True),
     lambda lib: frame(lib)[["a", "b"]].value_counts(sort=False),
     lambda lib: frame(lib).value_counts("a"),
+    lambda lib: lib.DataFrame({"a": ["y", "x", "z", "x"]}).value_counts(),
+    lambda lib: lib.DataFrame({"a": ["y", "x", "z"]}).value_counts(ascending=True),
     lambda lib: frame(lib).value_counts(["b"]),
     lambda lib: frame(lib).groupby("a")["b"].value_counts(),
     lambda lib: frame(lib).groupby("a")["b"].value_counts(normalize=True),

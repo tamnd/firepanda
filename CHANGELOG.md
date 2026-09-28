@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.value_counts keeps pandas' order among equal counts
+
+`DataFrame.value_counts` takes the combinations in the order they first appear and sorts them stably by count, as pandas does, so combinations with the same count come in the order pandas gives them rather than in label order.
+
 ### Added: level methods and reshaping on rows labelled by a MultiIndex
 
 `loc` takes a whole tuple, a prefix of one, or a row key and a column together on a frame or a column labelled by levels, and drops the levels a prefix names, as pandas does. `droplevel`, `swaplevel`, `reorder_levels` and `xs` are on frames and columns, `sort_index` takes `level`, `DataFrame.value_counts`, `DataFrame.stack`, `Series.unstack` and `SeriesGroupBy.value_counts` are in, and `pivot` and `pivot_table` take several row keys. Each works by rewriting the labels in Python over what the extension already does. A key column is no longer offered as an attribute of a group by, so `groupby("a").a` is an AttributeError as it is in pandas.
