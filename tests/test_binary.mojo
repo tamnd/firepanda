@@ -38,6 +38,7 @@ from firepanda.kernel.binary import (
     binary_any,
     binary_type,
     binary_value_any,
+    conjoin_compares,
     resolve_constant,
     weak_operand_type,
 )
@@ -1376,6 +1377,97 @@ def test_not_equal_is_true_on_a_nan_at_every_position() raises:
         assert_equal(a[i], is_nan, "column, row " + String(i))
         assert_equal(b[i], is_nan or i != 3, "constant, row " + String(i))
         assert_true(not c[i], "nothing equals a NaN, row " + String(i))
+
+
+def test_conjoined_compares_keep_the_rows_every_one_holds_on() raises:
+    """Five comparisons over two long columns agree with working each out.
+
+    The length crosses morsels and is not a whole number of registers, so every
+    morsel's tail and the column's last rows go through the scalar loop. A null
+    in either column drops the row, and so does a NaN, which is unequal to the
+    constant it is compared with and neither less nor greater than anything.
+    """
+    var n = 300_001
+    var xs = Array[DType.int64](n)
+    var ys = Array[DType.float64](n)
+    for i in range(n):
+        if i % 11 == 3:
+            xs.set_null(i)
+        else:
+            xs.set_valid(i, Int64(i))
+        if i % 7 == 1:
+            ys.set_null(i)
+        elif i % 13 == 0:
+            ys.set_valid(i, nan[DType.float64]())
+        else:
+            ys.set_valid(i, Float64(i % 5) * 0.5)
+    var x = AnyArray(xs^)
+    var y = AnyArray(ys^)
+    var got = conjoin_compares(
+        [x.copy(), x.copy(), y.copy(), y.copy(), y.copy()],
+        [BinaryOp.GE, BinaryOp.LT, BinaryOp.NE, BinaryOp.LE, BinaryOp.GT],
+        [
+            Value(Int64(10)),
+            Value(Int64(250_000)),
+            Value(Float64(1.0)),
+            Value(Float64(1.5)),
+            Value(Float64(0.0)),
+        ],
+    )
+    assert_equal(len(got), n, "one answer a row")
+    assert_equal(got.null_count(), 0, "no nulls")
+    var kept = 0
+    var wrong = -1
+    for i in range(n):
+        var half = i % 5
+        var want = (
+            i % 11 != 3
+            and i % 7 != 1
+            and i % 13 != 0
+            and i >= 10
+            and i < 250_000
+            and half != 2
+            and half <= 3
+            and half > 0
+        )
+        if Bool(got[i]) != want and wrong < 0:
+            wrong = i
+        if want:
+            kept += 1
+    assert_equal(wrong, -1, "the first row that disagrees")
+    assert_true(kept > 0, "some rows are kept")
+
+
+def test_conjoined_compares_fold_in_the_ones_they_cannot_loop_over() raises:
+    """A text comparison, a converted column and a null constant still count.
+
+    The text column and the int32 column against 2.5 have no loop of their own
+    and are worked out the ordinary way first. A null constant makes its
+    comparison null everywhere, and a null keeps nothing.
+    """
+    var words = AnyArray(strings_from_list(["a", "b", "c", "b", "d"]))
+    var small = typed[DType.int32]([1, 2, 3, 4, 5])
+    var wide = typed[DType.float64]([1.0, 2.0, 3.0, 4.0, 5.0])
+    var got = conjoin_compares(
+        [words.copy(), small.copy(), wide.copy()],
+        [BinaryOp.GE, BinaryOp.LT, BinaryOp.GT],
+        [Value(String("b")), Value(Float64(4.5)), Value(Int64(1))],
+    )
+    assert_equal(got.null_count(), 0, "no nulls")
+    var want: List[Bool] = [False, True, True, True, False]
+    for i in range(5):
+        assert_equal(Bool(got[i]), want[i], "row " + String(i))
+    var none = conjoin_compares(
+        [small.copy(), small.copy()],
+        [BinaryOp.GT, BinaryOp.EQ],
+        [Value(Int64(0)), Value(null=LogicalType.INT64)],
+    )
+    for i in range(5):
+        assert_true(not Bool(none[i]), "a null constant keeps nothing")
+    with assert_raises(contains="one comparison"):
+        _ = conjoin_compares(
+            [small.copy()], [BinaryOp.GT, BinaryOp.LT], [Value(Int64(0))]
+        )
 
 
 def main() raises:
