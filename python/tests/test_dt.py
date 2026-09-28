@@ -21,8 +21,8 @@ pandas and missing here, and pandas is that way because its answer is a numpy
 bool array, which has nowhere to put a missing value. Arrow has somewhere, so
 this says missing.
 
-The second is the five names that are not here at all: `time`, `timetz`,
-`to_period`, `to_pydatetime` and `freq`. Every one of them needs a type firepanda
+The second is the four names that are not here at all: `time`, `timetz`,
+`to_period` and `to_pydatetime`. Every one of them needs a type firepanda
 does not have, and none of them is declared and refused, which is the opposite of
 what the arguments do. An absent name is honest about being unimplemented and a
 declared one that always raises is not, and the line between the two is that a
@@ -113,8 +113,8 @@ FLAGS = [
 ]
 """The parts that answer a yes or a no."""
 
-ABSENT = ["time", "timetz", "to_period", "to_pydatetime", "freq"]
-"""The five pandas has and this does not, for the reason the module docstring gives."""
+ABSENT = ["time", "timetz", "to_period", "to_pydatetime"]
+"""The four pandas has and this does not, for the reason the module docstring gives."""
 
 
 def stamps(firepanda: ModuleType, values: list[Any] = STAMPS, unit: str = "us") -> Any:
@@ -381,7 +381,7 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
 
 @both
 @pytest.mark.parametrize("name", ABSENT)
-def test_the_five_unwritten_names_are_absent_rather_than_refusing(
+def test_the_four_unwritten_names_are_absent_rather_than_refusing(
     firepanda: ModuleType, name: str
 ) -> None:
     """pandas has them and this does not, and the difference is deliberate.

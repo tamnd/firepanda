@@ -15196,6 +15196,22 @@ class DatetimeMixin:
         """
         self._series = data
 
+    @property
+    def freq(self) -> str | None:
+        """The frequency the values keep, as `infer_freq` finds it, or None.
+
+        pandas reads it off the values as an index, so a column of fewer than
+        three values, or one `infer_freq` cannot read, has none.
+        """
+        from ._frequency import infer_freq
+
+        if len(self._series) < 3:
+            return None
+        try:
+            return infer_freq(self._series)
+        except ValueError:
+            return None
+
     def _part(self, kind: str, arg: str) -> Series:
         """Reads one part of the column, and hands back a column.
 

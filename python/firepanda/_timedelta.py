@@ -16,7 +16,7 @@ rules below were measured against pandas 3.0.
   the step's.
 - `closed` keeps both ends, or drops the end it does not name.
 
-`freq`, `freqstr`, `inferred_freq` and `resolution` need a held frequency, `floor`,
+`freq`, `freqstr` and `resolution` need a held frequency, `floor`,
 `ceil` and `round` need a rounding kernel for spans, and `to_pytimedelta` needs a
 column of Python objects. None of them is spelled here, so none of them resolves.
 """
@@ -164,6 +164,18 @@ class TimedeltaIndex(Index):
         return [
             None if value is None else value.value // scale for value in _held_values(self._inner)
         ]
+
+    @property
+    def inferred_freq(self) -> str | None:
+        """The frequency the labels keep, as `infer_freq` finds it, or None."""
+        from ._frequency import infer_freq
+
+        if len(self) < 3:
+            return None
+        try:
+            return infer_freq(self)
+        except ValueError:
+            return None
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""
