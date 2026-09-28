@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: attrs and flags carried as pandas carries them
+
+Frames and columns have `attrs`, `flags` and `set_flags`, and `firepanda.Flags` is exported. Which answers keep `attrs` follows lists measured on pandas 3.0 by calling every method of a frame, a column, a group by, a resample, the windows and the `str`, `dt` and `cat` accessors on an object holding them: most answers keep a deep copy, an operator takes the other side's when it has some, `merge`, `join` and `concat` keep them only when every input holds the same, and the reductions pandas runs in compiled code drop them. `allows_duplicate_labels=False` is carried the same way and raises pandas' `DuplicateLabelError` with its table of positions. Until some object holds `attrs` or flags the wrappers call straight through, so programs that never use them pay nothing measurable. The `@name` lookup in `query` and `eval` skips the wrappers' frames.
+
 ### Added: Rolling windows measured as a span of time
 
 `rolling` takes a window given as text such as `"30s"`, a `Timedelta`, a `timedelta` or a fixed offset, and reaches back that far along the row labels or along the column named by `on`, which may hold dates or durations. Each window starts and stops where pandas' own bounds put it, under every `closed` and with `center`, over times that rise or fall. `on` works for a window of rows too, leaves its column out of the reduction and puts it back into the answer where pandas does. Picking columns out of a window with `[]` keeps the window, `obj`, `on` and `window` answer what pandas answers, and the window prints pandas' repr. The mistakes are pandas' own words: a month, which is not a fixed span, times out of order or with a gap, a `step`, and an `on` that is not a column of dates.

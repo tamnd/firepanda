@@ -43,6 +43,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _config, _firepanda, _row_dates, _row_formats
+from ._attrs import Flags, carried, flags_of, hold
 from ._scalars import NaT, _inward, _outward, _outward_one, _temporal, _zone_name
 from .errors import (
     ColumnNotFoundError,
@@ -7341,16 +7342,63 @@ def _values_array(column: Any) -> Any:
     return _column_to_numpy(column, None, NO_DEFAULT)
 
 
-class DataFrameMixin:
+class _Carries:
+    """`attrs`, `flags` and `set_flags`, which a frame and a column share.
+
+    Both are held in the `_carried` slot each class declares, and `_attrs.py`
+    says which answers keep them.
+    """
+
+    __slots__ = ()
+
+    @property
+    def attrs(self) -> dict[Any, Any]:
+        """A dictionary of whatever the caller wants kept beside the data.
+
+        Most answers made from the object keep a deep copy of it, as in pandas.
+        """
+        held = carried(self)
+        if held is None:
+            held = ({}, False)
+            hold(self, *held)
+        return held[0]
+
+    @attrs.setter
+    def attrs(self, value: Any) -> None:
+        held = carried(self)
+        hold(self, dict(value), held is not None and held[1])
+
+    @property
+    def flags(self) -> Flags:
+        """What the object allows, which is whether its labels may repeat."""
+        return flags_of(self)
+
+    def set_flags(
+        self, *, copy: Any = NO_DEFAULT, allows_duplicate_labels: bool | None = None
+    ) -> Any:
+        """A copy with its flags set, where None leaves a flag as it is.
+
+        Raises:
+            DuplicateLabelError: When duplicates are refused and a label repeats.
+        """
+        _cast_keywords(copy, "raise")
+        result = self.copy()  # type: ignore[attr-defined]
+        if allows_duplicate_labels is not None:
+            result.flags["allows_duplicate_labels"] = allows_duplicate_labels
+        return result
+
+
+class DataFrameMixin(_Carries):
     """The hand written half of `DataFrame`."""
 
-    __slots__ = ("_inner",)
-    """The one piece of state, declared here rather than on the generated class.
+    __slots__ = ("_carried", "_inner")
+    """The state, declared here rather than on the generated class.
 
     It has to be here because the constructor is here, and a class cannot assign
     to a slot it does not own. The generated subclass declares an empty
     `__slots__`, so an instance still has no `__dict__` and there is still
-    exactly one place the extension object lives."""
+    exactly one place the extension object lives. `_carried` is the `attrs` and
+    the flags, which `_attrs.py` explains, and it is unset on most frames."""
 
     _inner: _firepanda.DataFrame
 
@@ -11640,12 +11688,12 @@ class DataFrameMixin:
         return answer
 
 
-class SeriesMixin:
+class SeriesMixin(_Carries):
     """The hand written half of `Series`."""
 
-    __slots__ = ("_inner", "_typed_name")
-    """The column the core holds, for the reason `DataFrameMixin` gives, and a
-    name given as a number, which `_named_as` explains."""
+    __slots__ = ("_carried", "_inner", "_typed_name")
+    """The column the core holds, for the reason `DataFrameMixin` gives, a name
+    given as a number, which `_named_as` explains, and the `attrs` and flags."""
 
     _inner: _firepanda.Series
 

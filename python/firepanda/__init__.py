@@ -34,7 +34,8 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _firepanda, api, errors, offsets
+from . import _attrs, _firepanda, api, errors, offsets
+from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
 from ._config import (
     describe_option,
@@ -90,6 +91,7 @@ __all__ = [
     "DataFrame",
     "DateOffset",
     "DatetimeIndex",
+    "Flags",
     "Grouper",
     "Index",
     "Interval",
@@ -153,3 +155,7 @@ it was compiled from instead. When the wheel metadata and this disagree, the
 wheel was assembled out of two different builds, and `python/tests` is where
 that gets caught.
 """
+
+_attrs.install()
+# Last, because it wraps the classes and the functions imported above so that
+# what they answer keeps `attrs` and `flags` the way pandas' answers do.
