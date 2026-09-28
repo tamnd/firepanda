@@ -26,7 +26,7 @@ resolves.
 from __future__ import annotations
 
 import datetime
-from typing import Any
+from typing import Any, cast
 
 from ._date_range import _UNITS, _frequency, _points
 from ._frame import DataFrame, Index, Series
@@ -195,6 +195,12 @@ class TimedeltaIndex(Index):
             return infer_freq(self)
         except ValueError:
             return None
+
+    def insert(self, loc: int, item: Any) -> TimedeltaIndex:
+        """The index with one label put in at a position, read as pandas reads it."""
+        from ._pandas import _temporal_insert
+
+        return cast(TimedeltaIndex, _temporal_insert(self, loc, item))
 
     def as_unit(self, unit: str, round_ok: bool = True) -> TimedeltaIndex:
         """The same labels stored at another resolution."""

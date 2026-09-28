@@ -463,6 +463,12 @@ class DatetimeIndex(Index):
         """Every label moved to the nearer frequency, with a half going to the even one."""
         return self._rounded("round", freq, ambiguous, nonexistent)
 
+    def insert(self, loc: int, item: Any) -> DatetimeIndex:
+        """The index with one label put in at a position, read as pandas reads it."""
+        from ._pandas import _temporal_insert
+
+        return cast(DatetimeIndex, _temporal_insert(self, loc, item))
+
     def as_unit(self, unit: str, round_ok: bool = True) -> DatetimeIndex:
         """The same instants counted in another resolution."""
         _held_at(
