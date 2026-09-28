@@ -110,27 +110,37 @@ def test_an_argument_that_does_not_change_the_answer_is_accepted(
     assert list(firepanda.read_csv(csv, **arguments).columns) == ["a", "b", "c"]
 
 
+def gapped(values: list[object]) -> list[object]:
+    """The values with every kind of missing as None."""
+    return [None if value is None or value != value else value for value in values]
+
+
+@needs_pandas
 @pytest.mark.parametrize(
-    ("arguments", "expected"),
+    "arguments",
     [
-        ({"sep": ";"}, "sep"),
-        ({"nrows": 2}, "nrows"),
-        ({"dtype": {"a": "int32"}}, "dtype"),
-        ({"skiprows": 1}, "skiprows"),
-        ({"na_values": ["x"]}, "na_values"),
-        ({"names": ["p", "q", "r"]}, "names"),
-        ({"header": None}, "header"),
-        ({"dtype_backend": "pyarrow"}, "dtype_backend"),
-        ({"skipfooter": 1}, "skipfooter"),
-        ({"encoding": "latin-1"}, "encoding"),
-        ({"usecols": lambda name: name != "b"}, "callable"),
+        {"sep": ";"},
+        {"nrows": 2},
+        {"dtype": {"a": "int32"}},
+        {"skiprows": 1},
+        {"na_values": ["x"]},
+        {"names": ["p", "q", "r"]},
+        {"header": None},
+        {"skipfooter": 1, "engine": "python"},
+        {"encoding": "latin-1"},
+        {"usecols": lambda name: name != "b"},
     ],
 )
-def test_an_argument_that_would_change_the_answer_is_refused_by_name(
-    firepanda: ModuleType, csv: Path, arguments: dict[str, object], expected: str
+def test_an_argument_that_changes_the_answer_changes_it_as_in_pandas(
+    firepanda: ModuleType, csv: Path, arguments: dict[str, object]
 ) -> None:
-    with pytest.raises(NotImplementedError, match=expected):
-        firepanda.read_csv(csv, **arguments)
+    import pandas as pd
+
+    ours = firepanda.read_csv(csv, **arguments)
+    theirs = pd.read_csv(csv, **arguments)
+    assert list(ours.columns) == [str(name) for name in theirs.columns]
+    for mine, other in zip(ours.columns, theirs.columns, strict=True):
+        assert gapped(ours[mine].tolist()) == gapped(theirs[other].tolist())
 
 
 @needs_pandas
@@ -152,8 +162,11 @@ def test_a_mistake_is_pandas_value_error(
             module.read_csv(csv, **arguments)
 
 
-def test_a_buffer_is_refused_rather_than_read_as_a_path(firepanda: ModuleType) -> None:
+def test_a_buffer_is_read_as_the_file_would_be(firepanda: ModuleType, csv: Path) -> None:
     import io
 
-    with pytest.raises(NotImplementedError, match="buffer"):
-        firepanda.read_csv(io.StringIO(TEXT))
+    from_buffer = firepanda.read_csv(io.StringIO(TEXT))
+    from_path = firepanda.read_csv(csv)
+    assert list(from_buffer.columns) == list(from_path.columns)
+    for name in from_path.columns:
+        assert from_buffer[name].tolist() == from_path[name].tolist()

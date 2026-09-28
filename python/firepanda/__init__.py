@@ -87,6 +87,7 @@ from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
+from ._textread import read_fwf, read_table
 from ._timedelta import TimedeltaIndex, timedelta_range
 from ._versions import show_versions
 from .offsets import DateOffset
@@ -146,10 +147,12 @@ __all__ = [
     "qcut",
     "read_csv",
     "read_feather",
+    "read_fwf",
     "read_json",
     "read_orc",
     "read_parquet",
     "read_pickle",
+    "read_table",
     "reset_option",
     "set_eng_float_format",
     "set_option",
