@@ -38,6 +38,7 @@ from . import _attrs, _firepanda, api, errors, offsets, testing
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
+from ._clipboard import read_clipboard
 from ._columnar import read_feather, read_orc, read_parquet
 from ._config import (
     describe_option,
@@ -182,6 +183,7 @@ __all__ = [
     "pivot",
     "pivot_table",
     "qcut",
+    "read_clipboard",
     "read_csv",
     "read_feather",
     "read_fwf",
