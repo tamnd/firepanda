@@ -11972,6 +11972,39 @@ class DataFrameMixin(_Carries):
         )
         return _text_written(text, buf, encoding)
 
+    def to_sql(
+        self,
+        name: str,
+        con: Any,
+        *,
+        schema: str | None = None,
+        if_exists: str = "fail",
+        index: bool = True,
+        index_label: Any = None,
+        chunksize: int | None = None,
+        dtype: Any = None,
+        method: Any = None,
+    ) -> int | None:
+        """The frame written to a table over sqlite3, as pandas writes it without SQLAlchemy.
+
+        Returns:
+            The number of rows sqlite3 counts as written.
+        """
+        from ._sql import to_sql
+
+        return to_sql(
+            self,
+            name,
+            con,
+            schema=schema,
+            if_exists=if_exists,
+            index=index,
+            index_label=index_label,
+            chunksize=chunksize,
+            dtype=dtype,
+            method=method,
+        )
+
     def to_markdown(
         self,
         buf: Any = None,
@@ -16140,6 +16173,39 @@ class SeriesMixin(_Carries):
             },
         )
         return _text_written(text, buf, None)
+
+    def to_sql(
+        self,
+        name: str,
+        con: Any,
+        *,
+        schema: str | None = None,
+        if_exists: str = "fail",
+        index: bool = True,
+        index_label: Any = None,
+        chunksize: int | None = None,
+        dtype: Any = None,
+        method: Any = None,
+    ) -> int | None:
+        """The column written to a table over sqlite3, as pandas writes it without SQLAlchemy.
+
+        Returns:
+            The number of rows sqlite3 counts as written.
+        """
+        from ._sql import to_sql
+
+        return to_sql(
+            self,
+            name,
+            con,
+            schema=schema,
+            if_exists=if_exists,
+            index=index,
+            index_label=index_label,
+            chunksize=chunksize,
+            dtype=dtype,
+            method=method,
+        )
 
     def to_markdown(
         self,
