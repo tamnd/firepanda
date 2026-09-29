@@ -40,6 +40,11 @@ SQL PIVOT runs when every column lists its values
 
 pandas' capital letter types, `Int8` to `UInt64`, `Float32`, `Float64` and `boolean`, and their dtype classes, are taken by `astype`, the constructor and `convert_dtypes` where they were refused. A masked column keeps its type through a gap, prints a gap as `<NA>`, answers `boolean` with a gap from a comparison, follows Kleene's logic for `&`, `|` and `^`, and skips gaps in reductions, as pandas does. It is held as an object column whose cells carry the type's name, and arithmetic, comparisons and reductions run over the lower case column of the same width. Document 99 of the compat notes describes the design.
 ### Added: ### Added: SQL UNPIVOT runs
+### Added: A LATERAL subquery that folds runs
+
+`FROM t, LATERAL (SELECT sum(qty) FROM s WHERE s.k = t.k)` and `LEFT JOIN LATERAL (...) ON true` now run when the subquery aggregates, where they used to be refused. The subquery is grouped by the columns its equalities correlate on and left-joined back, so a row with no match still gets its one row: a null sum, and a count of 0 (as DuckDB gives). An uncorrelated fold is one group joined to every row. A correlation other than equalities, or a fold that reads the outer row, is refused by name.
+
+### Added: SQL UNPIVOT runs
 
 `UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
 ### Added: ArrowDtype, and the list and struct accessors

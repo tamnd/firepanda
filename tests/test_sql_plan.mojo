@@ -2080,10 +2080,20 @@ def test_a_join_lateral_puts_its_condition_over_the_subquery() raises:
     assert_true(got.find("k as n") != -1, got)
 
 
+def test_a_lateral_that_folds_is_a_left_join_to_its_groups() raises:
+    var got = _plan(
+        "SELECT a, n FROM t, LATERAL (SELECT count(*) AS n FROM u WHERE b ="
+        " t.a) v"
+    )
+    assert_true(got.find("JOIN left [a = __lateral_key_0]") != -1, got)
+    assert_true(got.find("AGGREGATE") != -1, got)
+    assert_true(got.find("coalesce") != -1, got)
+
+
 def test_what_a_lateral_subquery_does_not_lower_is_refused_by_name() raises:
-    with assert_raises(contains="aggregate inside a LATERAL"):
+    with assert_raises(contains="equalities alone"):
         _ = _plan(
-            "SELECT a FROM t, LATERAL (SELECT count(*) FROM u WHERE b = t.a) v"
+            "SELECT a FROM t, LATERAL (SELECT count(*) FROM u WHERE b < t.a) v"
         )
     with assert_raises(contains="LIMIT inside a LATERAL"):
         _ = _plan("SELECT a FROM t, LATERAL (SELECT k FROM u LIMIT 1) v")

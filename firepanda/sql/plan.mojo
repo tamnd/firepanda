@@ -6035,10 +6035,11 @@ def _lateral(
     over the join, after every column the left side had, which is the order
     DuckDB hands them out in.
 
-    What a block computes over the whole of its rows is refused, since here the
-    whole is the rows of one left row and that wants a group per left row. So
-    are an `ORDER BY` or a `LIMIT` on it, a `DISTINCT`, a `WITH` and anything
-    that is not one `SELECT`.
+    A select list that folds, `LATERAL (SELECT sum(qty) FROM sales WHERE
+    sales.shop = shops.shop)`, folds the rows of one left row at a time, which
+    is a group per left row. `_folded_lateral` has how that is built. A `GROUP
+    BY`, an `ORDER BY` or a `LIMIT` on it, a `DISTINCT`, a `WITH` and anything
+    that is not one `SELECT` are refused.
 
     An outer one, `LEFT JOIN LATERAL`, is the same join as a left one, which
     pads a left row the subquery answers nothing for. The padding has to land
@@ -6117,16 +6118,13 @@ def _lateral(
             " which computes one row from each left row"
         )
     var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+    var folds = False
     for i in range(len(items)):
         var item = ast.stmts[Int(items[i])]
         if ast.exprs[Int(item.a)].kind != EXPR_STAR and _has_aggregate(
             ast, item.a
         ):
-            raise Error(
-                "firepanda does not lower an aggregate inside a LATERAL"
-                " subquery yet, which folds the rows of each left row on their"
-                " own and so wants a group per left row"
-            )
+            folds = True
 
     # Lowered into the scope the left side is in, with the line moved, for the
     # reason `_folded_join` gives. Everything the subquery names goes back out
@@ -6200,7 +6198,7 @@ def _lateral(
                 names,
             )
             continue
-        outputs.append(_lower_expr(ast, item.a, plan, walk, scope, False))
+        outputs.append(_lower_expr(ast, item.a, plan, walk, scope, folds))
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
@@ -6253,7 +6251,11 @@ def _lateral(
     var kind = JoinKind.INNER
     if len(left_keys) == 0:
         kind = JoinKind.CROSS
-    if outer:
+    if folds:
+        _folded_lateral(plan, left, right, right_keys, rest, walk, outputs)
+        if len(left_keys) != 0:
+            kind = JoinKind.LEFT
+    elif outer:
         kind = JoinKind.LEFT
         _outer_lateral(plan, left, right, right_keys, rest, outputs)
     var joined = _pair(plan, left, right, left_keys^, right_keys^, kind)
@@ -6282,6 +6284,107 @@ def _lateral(
     if called.byte_length() != 0:
         scope.derive(called^, names^)
     return _From(at_out, schema^, origin^)
+
+
+def _folded_lateral(
+    mut plan: Plan,
+    left: _From,
+    mut right: _From,
+    mut right_keys: List[Int],
+    rest: List[Int],
+    walk: _Walk,
+    mut outputs: List[Int],
+) raises:
+    """Folds a `LATERAL` subquery's rows into one row per left row.
+
+    A select list that folds with no `GROUP BY` hands back exactly one row
+    whatever it read, so every left row has one to its right, including a left
+    row that nothing matches, where a sum is null and a count is zero. That is
+    `_folded_join`'s rewrite: the subquery's rows grouped by its right keys,
+    and the left side left joined to the groups on them. A left row with no
+    group gets a null from the join, and a count reads that null back as the
+    zero it would have counted. The select list is computed over the join and
+    not under it, so it may read the left side too, as in `count(*) +
+    shops.shop`.
+
+    An uncorrelated one is one group over every row and is crossed with the
+    left side, which the caller does when there are no keys.
+
+    Args:
+        plan: Where the nodes go.
+        left: What is written to the left of it.
+        right: The subquery's `FROM`, filtered, replaced by the aggregate.
+        right_keys: The right keys, replaced by the columns they land in.
+        rest: The parts of the `WHERE` that read both sides and are not keys.
+        walk: The folds the select list found.
+        outputs: The select list, with each count put back to zero where the
+            join padded it.
+
+    Raises:
+        If the `WHERE` compares the two sides other than by equalities, or a
+        fold reads the left side.
+    """
+    if len(rest) != 0:
+        raise Error(
+            "firepanda lowers a LATERAL subquery that folds when it compares"
+            " the two sides with equalities alone so far, and this one"
+            " compares them some other way, which wants a group per left row"
+            " rather than per key"
+        )
+    # A group key keeps the name of the column it reads, since the physical
+    # group by carries the field through as it found it, and the projection
+    # above renames it to one no left column has, as `_folded_join` does.
+    var by = List[String](capacity=len(right_keys) + len(walk.aggs))
+    for i in range(len(right_keys)):
+        if plan.exprs.nodes[right_keys[i]].kind == ExprKind.COLUMN:
+            by.append(String(plan.exprs.nodes[right_keys[i]].name))
+        else:
+            by.append(String("__lateral_key_", i))
+    var counted = List[String]()
+    var zeroed = List[Int]()
+    for i in range(len(walk.aggs)):
+        var reads = _side(plan, walk.aggs[i], left, right)
+        if reads != _RIGHT and reads != _NEITHER:
+            raise Error(
+                "firepanda folds the subquery's own columns inside a LATERAL"
+                " so far, and this fold reads the left side"
+            )
+        by.append(walk.agg_names[i].copy())
+        if _counts_rows(agg_kind(plan.exprs.nodes[walk.aggs[i]].op)):
+            counted.append(walk.agg_names[i].copy())
+            zeroed.append(
+                plan.exprs.call(
+                    "coalesce",
+                    [
+                        plan.exprs.column(walk.agg_names[i].copy()),
+                        plan.exprs.literal(Value(Int64(0))),
+                    ],
+                    True,
+                )
+            )
+    var at = plan.aggregate(
+        right.at, right_keys.copy(), walk.aggs.copy(), by.copy()
+    )
+    var exprs = List[Int](capacity=len(by))
+    var names = List[String](capacity=len(by))
+    for i in range(len(by)):
+        exprs.append(plan.exprs.column(by[i].copy()))
+        if i < len(right_keys):
+            names.append(String("__lateral_key_", i))
+        else:
+            names.append(by[i].copy())
+    var schema = Schema()
+    for i in range(len(names)):
+        schema.append(Field(names[i].copy(), LogicalType.NULL, True))
+    var origin = List[Int](length=len(names), fill=UNBOUND)
+    at = plan.project(at, exprs^, names^)
+    right = _From(at, schema^, origin^)
+    for i in range(len(right_keys)):
+        right_keys[i] = plan.exprs.column(String("__lateral_key_", i))
+    if len(right_keys) == 0 or len(counted) == 0:
+        return
+    for i in range(len(outputs)):
+        outputs[i] = plan.exprs.graft(outputs[i], counted, zeroed)
 
 
 def _outer_lateral(
