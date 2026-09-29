@@ -76,3 +76,11 @@ def test_the_type_survives_moving_rows() -> None:
 def test_a_nan_among_floats_is_a_value_when_exported() -> None:
     column = arrow(fp, [[1.5, float("nan")], None]).list.flatten()
     assert pa.array(column).null_count == 0
+
+
+@pytest.mark.parametrize("name", ["list", "struct"])
+def test_the_accessor_read_off_the_class_is_its_class(name: str) -> None:
+    """pandas answers the accessor class for `Series.list`, so a program can read its members."""
+    accessor = getattr(fp.Series, name)
+    assert isinstance(accessor, type)
+    assert accessor.__name__ == getattr(pd.Series, name).__name__
