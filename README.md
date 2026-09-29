@@ -192,9 +192,9 @@ How much of DuckDB's own test corpus runs is counted per directory of `test/sql`
 | test/sql/projection | 1/17 | 5.8% | 0 | 9 | 0 | 7 | 0 | 0 |
 | test/sql/select | 3/9 | 33.3% | 0 | 5 | 0 | 1 | 0 | 0 |
 | test/sql/setops | 5/24 | 20.8% | 1 | 14 | 0 | 5 | 0 | 0 |
-| test/sql/subquery | 2/92 | 2.1% | 3 | 59 | 3 | 23 | 5 | 0 |
+| test/sql/subquery | 2/92 | 2.1% | 3 | 59 | 3 | 25 | 3 | 0 |
 | test/sql/topn | 1/14 | 7.1% | 8 | 12 | 0 | 1 | 0 | 0 |
-| test/sql/window | 3/77 | 3.8% | 8 | 44 | 8 | 20 | 2 | 0 |
+| test/sql/window | 3/77 | 3.8% | 8 | 44 | 8 | 21 | 1 | 0 |
 
 <!-- end sql-conformance -->
 
