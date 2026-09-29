@@ -167,6 +167,29 @@ tables afterwards is a fair fraction of that, so below here the parallel route i
 break even at best and the serial one is the honest answer.
 """
 
+comptime PRIVATE_TABLE_SHARE = 1
+"""Rows each entry of the private tables has to be paid for with.
+
+`PRIVATE_BYTES` caps what the tables cost in memory and this caps what they cost
+in work. A table per worker is zeroed before the scatter and folded into the
+answer after it, so `workers * groups` entries are written twice and read once
+on top of the `rows` the scatter does, and when the entries outnumber the rows
+that overhead is the larger part of the reduction. Partitioning the rows instead
+costs three passes over the rows and nothing proportional to the groups, so past
+here it is the cheaper route.
+
+TPC-H q20 is where it showed. It sums about 910,000 lines into 543,210 groups,
+and the budget allowed seven tables, 3.8 million entries for 910,000 rows. On a
+busy 8 core VM, the mean of forty runs, the replicated route took 118 ms and the
+partitioned one 54. The partitioned route also won on four million rows into a
+million groups, 208 against 305, and on two million into two hundred thousand,
+68 against 91, which are four and ten rows an entry, but db-benchmark's group
+bys at a hundred rows an entry went the other way on the 13900K, as
+`_partition_parts` records. So the line is drawn where the tables stop paying
+for themselves on any reading, one row an entry, and not where this VM put it.
+"""
+
+
 comptime GROUP_BLOCK_ALIGN = 8
 """Groups a per group loop's pieces are cut on a multiple of.
 
@@ -197,6 +220,10 @@ def _private_workers[dt: DType](rows: Int, groups: Int) -> Int:
         return 1
 
     var affordable = PRIVATE_BYTES // (groups * size_of[dt]())
+    # Every table is zeroed before the scatter and read again by the merge, so
+    # tables holding more entries between them than there are rows cost more
+    # than the scatter they split. `PRIVATE_TABLE_SHARE` has the measurement.
+    affordable = min(affordable, rows // (groups * PRIVATE_TABLE_SHARE))
     if affordable < 2:
         return 1
     return workers if workers < affordable else affordable
