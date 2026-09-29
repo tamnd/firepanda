@@ -1226,6 +1226,14 @@ def _string_members() -> tuple[Member, ...]:
             returns="DataFrame | Series",
         ),
         Member(
+            name="extractall",
+            kind="method",
+            signature="pat: Any, flags: Any = 0",
+            body="self._extracted_all(pat, flags)",
+            doc="What each group of every match held, one row per match.",
+            returns="DataFrame",
+        ),
+        Member(
             name="cat",
             kind="method",
             signature="others: Any = None, sep: Any = None, na_rep: Any = None, join: Any = \"left\"",

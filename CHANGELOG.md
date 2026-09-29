@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `str.extractall`
+
+`Series.str.extractall(pat, flags=0)` answers one row for each match of the pattern in each value, labelled by the row it came from and the number of the match on a level named `match`, with one column per group named as `extract` names them. It runs Python's `re` over the values, as pandas does, and a pattern with no groups is refused with pandas' message.
+
 ### Added: SQL unnest over a list written out
 
 `unnest([...])` in a select list writes each row once for every element of the list, so `SELECT x, unnest([x, x * 2]) FROM t` has two rows for each row of `t`. With several unnests the row is written as many times as the longest list is long and the shorter ones are padded with nulls, and an empty list or a `NULL` writes no rows, as in DuckDB. An unnest can be part of a larger expression, as in `unnest([1, 2]) + 1`, and its column is named `unnest(main.list_value(1, 2))`, the name DuckDB gives it. `FROM unnest([...])` is a table with one column called `unnest`. A plan node, `UNNEST`, and an operator of the same name do the work. firepanda has no column that holds lists yet, so the list has to be written out in the query, and an unnest in a query that aggregates is refused for now.
