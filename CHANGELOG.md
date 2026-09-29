@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: to_clipboard and read_clipboard
+
+`DataFrame.to_clipboard`, `Series.to_clipboard` and `firepanda.read_clipboard` work as pandas' do. They reach the clipboard through the same system commands pandas' copy of pyperclip finds, in the same order, and raise its error when there are none. `to_clipboard` writes what `to_csv` writes, tab separated, or the printed frame with `excel=False`, and warns where pandas warns. `read_clipboard` reads the text with `read_csv`, guessing tabs and row labels the way pandas guesses them.
+
 ### Added: read_xml
 
 `read_xml` reads the elements an `xpath` picks from an XML document into a frame, as pandas does, with each element's attributes, its own text and its children's text as the columns. The `etree` parser uses the standard library and the part of XPath it follows, and the default `lxml` parser, with its full XPath and stylesheets, works when lxml is installed and raises pandas' ImportError when it is not. `elems_only`, `attrs_only`, `names`, `namespaces`, `dtype`, `converters`, `parse_dates`, `iterparse`, compressed files and both `dtype_backend` choices work, and columns are typed the way `read_csv` types text.

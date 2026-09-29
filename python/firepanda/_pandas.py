@@ -12005,6 +12005,12 @@ class DataFrameMixin(_Carries):
             method=method,
         )
 
+    def to_clipboard(self, *, excel: bool = True, sep: str | None = None, **kwargs: Any) -> None:
+        """The frame put on the system clipboard, as `to_csv` writes it or as it prints."""
+        from ._clipboard import to_clipboard
+
+        to_clipboard(self, excel=excel, sep=sep, **kwargs)
+
     def to_markdown(
         self,
         buf: Any = None,
@@ -16206,6 +16212,12 @@ class SeriesMixin(_Carries):
             dtype=dtype,
             method=method,
         )
+
+    def to_clipboard(self, *, excel: bool = True, sep: str | None = None, **kwargs: Any) -> None:
+        """The column put on the system clipboard, as `to_csv` writes it or as it prints."""
+        from ._clipboard import to_clipboard
+
+        to_clipboard(self, excel=excel, sep=sep, **kwargs)
 
     def to_markdown(
         self,
