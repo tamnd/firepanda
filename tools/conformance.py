@@ -400,8 +400,12 @@ def _one_run(work, start, steps_path, outcomes, stall):
     Returns:
         The index of the first file not yet settled.
     """
+    environment = dict(os.environ)
+    environment["FIREPANDA_CONFORMANCE_STEPS"] = steps_path
+    environment["FIREPANDA_CONFORMANCE_SKIP"] = str(start)
     process = subprocess.Popen(
-        [RUNNER, steps_path, str(start)],
+        [RUNNER],
+        env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
@@ -465,8 +469,8 @@ def _records(stream, records):
             stream.read(1)
             records.put(("error", body.decode("utf-8", "replace")))
             continue
-        records.put(("dead", "the runner wrote " + head[:80]))
-        return
+        # The suite around the runner writes its own header and summary, which
+        # are not records and say nothing the exit status does not.
 
 
 def _settle(item, results, outcomes):

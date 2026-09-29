@@ -176,6 +176,12 @@ See https://github.com/tamnd/firepanda/issues/13
 
 <!-- end sql-support -->
 
+How much of DuckDB's own test corpus runs is counted per directory of `test/sql`, with the denominator, by `python tools/conformance.py --readme`, which ran every file below and wrote this table. A file passes when every statement in it answers what the file expects. "Not run" is a file that needs an extension, a database file or the corpus's `data/` directory. A failing file is put in the bucket of its first failure: a refusal by name, a function firepanda lacks, a divergence (an error where DuckDB answers, or the wrong error), a wrong answer, or a crash. Document 11 in the specification has the rules.
+
+<!-- sql-conformance -->
+
+<!-- end sql-conformance -->
+
 ## The argument
 
 Every fast dataframe library today is a fast engine in one language with a Python veneer on top. pandas is C and Cython. Polars is Rust. DuckDB is C++. The veneer is where user code lives, and it is why `df.apply(lambda ...)` falls off a cliff: the moment you write a function the library did not anticipate, you leave the fast language and enter the slow one.

@@ -242,6 +242,18 @@ differential = { cmd = "./build/differential/frames", default-environment = "dif
 corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
 differential-sql = { cmd = "./build/differential/sql", default-environment = "differential", depends-on = ["corpus", "differential-build"] }
 
+# The execution harness over the same corpus: every statement in the target
+# directories run through firepanda and its answer compared with the one the
+# file expects, a pass rate per directory, and a floor in
+# tests/conformance_floor.txt that a change may raise and may not lower.
+# `python tools/conformance.py --all` is every directory with the failures
+# classified, and `--readme` writes that table into README.md.
+conformance-build = { cmd = "mojo build -I . tests/differential/conformance.mojo -o build/differential/conformance", default-environment = "differential", inputs = [
+  "firepanda/**",
+  "tests/differential/conformance.mojo",
+], outputs = ["build/differential/conformance"] }
+conformance = { cmd = "python tools/conformance.py", default-environment = "differential", depends-on = ["corpus", "conformance-build"] }
+
 # The question after the parser's. Both harnesses above ask whether a statement
 # parses; this one asks what an expression's type comes out as, over columns of
 # known types, which is what the binder decides and what a wrong answer with no

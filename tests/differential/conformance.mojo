@@ -26,12 +26,16 @@ prints it rather than the way this program would.
 Every record is flushed as it is written. A statement that takes the process
 down leaves the driver the last file it started, which is how a crash is told
 apart from a failure, and the second argument says how many files to pass over
-so the driver can start again after it.
+so the driver can start again after it. Both arrive in the environment, as
+`FIREPANDA_CONFORMANCE_STEPS` and `FIREPANDA_CONFORMANCE_SKIP`, rather than on
+the command line, because the suite that runs the work reads the command line
+as its own.
 
 See docs/specs/sql/11-conformance.md.
 """
 
-from std.sys import argv
+from std.os import getenv
+from std.testing import TestSuite
 
 from firepanda.array.any import AnyArray
 from firepanda.dtype.logical import LogicalType
@@ -68,20 +72,23 @@ def _texts(dialect: Dialect, frame: DataFrame) raises -> List[AnyArray]:
     select += " FROM r"
     var scratch = Catalog()
     scratch.register("r", DataFrame(Schema(fields^), columns^))
-    var out = List[AnyArray]()
+    var cast = DataFrame()
+    var cast_ok = True
     try:
-        var cast = dialect.run(select, scratch)
-        for i in range(cast.width()):
-            out.append(_column(cast, i))
-        return out^
+        cast = dialect.run(select, scratch)
     except:
-        pass
-    # A type SQL cannot cast to text yet still has a rendering, and a row that
-    # prints is more use to the report than a statement that could not.
+        cast_ok = False
+    var out = List[AnyArray]()
     for i in range(frame.width()):
-        out.append(
-            cast_any(_column(frame, i), LogicalType.STRING, strict=False)
-        )
+        if cast_ok:
+            out.append(_column(cast, i))
+        else:
+            # A type SQL cannot cast to text yet still has a rendering, and a
+            # row that prints is more use to the report than one that could
+            # not.
+            out.append(
+                cast_any(_column(frame, i), LogicalType.STRING, strict=False)
+            )
     return out^
 
 
@@ -107,15 +114,16 @@ def _rendered(dialect: Dialect, frame: DataFrame) raises -> String:
     return out^
 
 
-def main() raises:
-    var args = argv()
-    if len(args) < 2:
-        raise Error("usage: conformance <steps file> [files to pass over]")
+def test_conformance() raises:
+    var steps = getenv("FIREPANDA_CONFORMANCE_STEPS")
+    if steps == "":
+        raise Error("FIREPANDA_CONFORMANCE_STEPS names no steps file")
     var skip = 0
-    if len(args) > 2:
-        skip = Int(String(args[2]))
+    var passed = getenv("FIREPANDA_CONFORMANCE_SKIP")
+    if passed != "":
+        skip = Int(passed)
     var data: String
-    with open(String(args[1]), "r") as handle:
+    with open(steps, "r") as handle:
         data = handle.read()
 
     var dialect = Dialect()
@@ -160,3 +168,11 @@ def main() raises:
             print(
                 "E ", message.byte_length(), "\n", message, sep="", flush=True
             )
+
+
+def main() raises:
+    # Through the suite's table of functions rather than called, for the reason
+    # written at the bottom of `answers.mojo`: a `main` that reaches
+    # `firepanda.sql.run` by a direct call hangs the compiler.
+    # See docs/specs/sql/13-open-questions.md question 13.
+    TestSuite.discover_tests[__functions_in_module()]().run()
