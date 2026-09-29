@@ -976,8 +976,9 @@ def test_a_mark_join_writes_what_its_column_is_called_and_reads_it_back() raises
 
 
 def test_an_asof_join_writes_its_comparison_and_reads_it_back() raises:
-    for code in range(8):
-        var keep = code >= 4
+    for code in range(16):
+        var keep = code % 8 >= 4
+        var keep_right = code >= 8
         var backward = code % 4 < 2
         var strict = code % 2 == 1
         var plan = Plan()
@@ -991,6 +992,7 @@ def test_an_asof_join_writes_its_comparison_and_reads_it_back() raises:
             keep,
             backward,
             strict,
+            keep_right,
         )
         var text = to_json(plan, at)
         assert_true(

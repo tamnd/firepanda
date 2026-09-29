@@ -466,8 +466,9 @@ it and what is to its left. One with a fold, a `DISTINCT`, an `ORDER BY` or a
 `LIMIT` inside it is refused by name. A left join to one is lowered when its
 `ON` is `true` and the subquery is correlated by equalities alone, and refused
 by name otherwise.
-An `ASOF` join is lowered when it is written with `ON` or `USING`, and refused
-by name as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
+An `ASOF` join is lowered when it is written with `ON` or `USING`, as an inner,
+a left, a right or a full join, except that a full one with `USING` is refused
+by name as any full `USING` join is. A `POSITIONAL` join is lowered, and it pairs the two sides by row
 number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
 refused as well, since the merged name is on both sides and a column a subquery
 computed carries no table to tell the two apart. Each is a refusal by
@@ -4925,11 +4926,10 @@ def _join_kind(text: StringSlice) raises -> JoinKind:
     """
     var said = String(text).upper()
     if said.find("ASOF") != -1:
-        if said.find("RIGHT") != -1 or said.find("FULL") != -1:
-            raise Error(
-                "firepanda lowers an ASOF join and an ASOF LEFT JOIN, and not"
-                " an ASOF RIGHT or FULL JOIN yet"
-            )
+        if said.find("FULL") != -1:
+            return JoinKind.ASOF_OUTER
+        if said.find("RIGHT") != -1:
+            return JoinKind.ASOF_RIGHT
         if said.find("LEFT") != -1:
             return JoinKind.ASOF_LEFT
         return JoinKind.ASOF
@@ -5204,7 +5204,7 @@ def _merged(
         If a named column is not on both sides exactly once, if it carries no
         relation to pin it to, or if the join is a FULL one.
     """
-    if kind == JoinKind.OUTER:
+    if kind == JoinKind.OUTER or kind == JoinKind.ASOF_OUTER:
         raise Error(
             String(
                 "firepanda does not lower a FULL ",
@@ -5243,7 +5243,7 @@ def _merged(
             plan.exprs.column_of(right.origin[there], String(name))
         )
         var whose = left.origin[here]
-        if kind == JoinKind.RIGHT:
+        if kind == JoinKind.RIGHT or kind == JoinKind.ASOF_RIGHT:
             whose = right.origin[there]
         scope.merge(String(name), whose)
 
@@ -5279,15 +5279,17 @@ def _merged(
         # The last column named is the one the nearest row is measured by, and
         # the rest are equalities, so `USING (k, t)` is `ON l.k = r.k AND
         # l.t >= r.t`. That is DuckDB's reading, and the merged `t` is the left
-        # one, since the right's is only ever at most it.
+        # one, since the right's is only ever at most it, except in a right
+        # join, where it is the right one as in any right join.
         at = plan.asof_join(
             left.at,
             right.at,
             left_keys^,
             right_keys^,
-            kind == JoinKind.ASOF_LEFT,
+            kind.keeps_unmatched_left(),
             True,
             False,
+            kind.keeps_unmatched_right(),
         )
     else:
         # No shared column at all is every pairing, which is what a NATURAL
@@ -6609,7 +6611,7 @@ def _asof(
         left: The left input.
         right: The right input.
         scope: What the FROM has put in reach.
-        kind: ASOF or ASOF_LEFT.
+        kind: ASOF, ASOF_LEFT, ASOF_RIGHT or ASOF_OUTER.
 
     Returns:
         The join, with the two schemas end to end.
@@ -6690,9 +6692,10 @@ def _asof(
         right.at,
         left_keys^,
         right_keys^,
-        kind == JoinKind.ASOF_LEFT,
+        kind.keeps_unmatched_left(),
         backward,
         strict,
+        kind.keeps_unmatched_right(),
     )
     var schema = Schema(copy=left.schema)
     var origin = left.origin.copy()

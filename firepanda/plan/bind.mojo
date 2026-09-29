@@ -1446,10 +1446,11 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
     return _widen(
         left,
         right,
-        kind == JoinKind.RIGHT or kind == JoinKind.OUTER or positional,
+        kind.keeps_unmatched_right() or positional,
         kind == JoinKind.LEFT
         or kind == JoinKind.OUTER
         or kind == JoinKind.ASOF_LEFT
+        or kind == JoinKind.ASOF_OUTER
         or positional,
     )
 

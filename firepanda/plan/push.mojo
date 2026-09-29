@@ -560,10 +560,13 @@ def _join(
     # either way too. An ASOF join matches each left row on its own, so a left
     # row dropped below it is the same row dropped above it, but a right row
     # dropped below it can move which row is nearest, so only the left side's
-    # predicates go. A right or an outer join keeps everything where it was.
+    # predicates go. A right or an outer join keeps everything where it was,
+    # the ASOF ones too, since a left row dropped below one of those can leave
+    # the right row it took unmatched.
     var leftwards = (
         inner
-        or kind.is_asof()
+        or kind == JoinKind.ASOF
+        or kind == JoinKind.ASOF_LEFT
         or kind == JoinKind.CROSS
         or kind == JoinKind.LEFT
         or kind == JoinKind.SEMI

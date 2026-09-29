@@ -505,7 +505,7 @@ def _join_of(word: String) raises -> JoinKind:
     Raises:
         Error: If nothing is called that.
     """
-    for code in range(Int(JoinKind.ASOF_LEFT.code) + 1):
+    for code in range(Int(JoinKind.ASOF_OUTER.code) + 1):
         var kind = JoinKind(UInt8(code))
         if String(kind) == word:
             return kind
@@ -1935,9 +1935,10 @@ def _join_node_of(
             right,
             left_keys^,
             right_keys^,
-            how == JoinKind.ASOF_LEFT,
+            how == JoinKind.ASOF_LEFT or how == JoinKind.ASOF_OUTER,
             backward,
             compare.byte_length() == 1,
+            how.keeps_unmatched_right(),
         )
     return plan.join(
         left, right, left_keys^, right_keys^, how, mark^, residual^

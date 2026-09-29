@@ -3711,7 +3711,8 @@ def _lower_asof(
                 right_on,
                 plan.nodes[at].flags[0],
                 plan.nodes[at].flags[1],
-                JoinKind(UInt8(plan.nodes[at].op)) == JoinKind.ASOF_LEFT,
+                JoinKind(UInt8(plan.nodes[at].op)).keeps_unmatched_left(),
+                JoinKind(UInt8(plan.nodes[at].op)).keeps_unmatched_right(),
             )
         )
     )
