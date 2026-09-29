@@ -19,9 +19,9 @@ what a frequency string means.
 An index holds the frequency `date_range` made it at, or the one its constructor
 was given, as `freq` and `freqstr`, and `inferred_freq` reads one off the labels.
 A slice, a copy, a new name, `as_unit` and `shift` keep it, as they do in pandas,
-and everything else answers an index without one. What is deliberately absent is
-`to_period`, which needs a period type. It is not spelled here, because document
-07's rule is that a name must not resolve and then refuse. `time`, `timetz` and
+and everything else answers an index without one. `to_period` reads each instant as
+the period it falls in, at the index's own frequency when none is given, and
+answers a `PeriodIndex`. `time`, `timetz` and
 `to_pydatetime` answer Python lists, the convention document 41 set for what an
 index answers label by label, and `shift` and `snap` count along calendar
 frequencies with the same steps `date_range` uses.
@@ -189,6 +189,28 @@ class DatetimeIndex(HeldFreq, Index):
         """The frequency the index holds, as text, or None."""
         held = self.freq
         return None if held is None else held.freqstr
+
+    def to_period(self, freq: Any = None) -> Any:
+        """Each instant as the period it falls in, as a `PeriodIndex`.
+
+        With no `freq` the index's own frequency is used, or one inferred from
+        the labels, read as the period frequency pandas reads it as, so month
+        starts become months.
+
+        Raises:
+            ValueError: With no frequency given, kept or to be inferred.
+        """
+        from ._period_index import PeriodIndex, _period_alias
+
+        if freq is None:
+            found = self.freqstr or self.inferred_freq
+            if found is None:
+                raise InvalidArgumentError(
+                    "You must pass a freq argument as current index has none."
+                )
+            freq = _period_alias(found)
+        values = [NaT if value is NaT else value.tz_localize(None) for value in self.tolist()]
+        return PeriodIndex(values, freq=freq, name=self.name)
 
     def _part(self, kind: str, arg: str = "") -> Index:
         """Reads one part of the labels, and hands back a plain index.

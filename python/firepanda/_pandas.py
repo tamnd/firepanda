@@ -7894,6 +7894,29 @@ def _asfreq(owner: Any, freq: Any, method: Any, normalize: Any, fill_value: Any)
     return moved
 
 
+def _period_labels(owner: Any, method: str, axis: Any, convert: Any) -> Any:
+    """`to_period` or `to_timestamp` on a frame's or a series' labels.
+
+    The labels along `axis` are converted by `convert`, which is the index's
+    own method, and the values are kept.
+
+    Raises:
+        TypeError: When the labels are not the kind the method reads, in
+            pandas' words.
+    """
+    from ._datetime import DatetimeIndex
+    from ._period_index import PeriodIndex
+
+    kind = "DataFrame" if hasattr(owner, "columns") else "Series"
+    number = _align_axis(axis, kind, (0, 1) if kind == "DataFrame" else (0,))
+    labels = owner.columns if number == 1 else owner.index
+    wanted = DatetimeIndex if method == "to_period" else PeriodIndex
+    if not isinstance(labels, wanted):
+        named = "RangeIndex" if labels._inner.is_range() else type(labels).__name__
+        raise TypeError(f"unsupported Type {named}")
+    return owner.set_axis(convert(labels), axis=number)
+
+
 def _zoned_axis(
     owner: Any, method: str, tz: Any, axis: Any, level: Any, copy: Any, extra: tuple[Any, ...]
 ) -> Any:
@@ -9699,6 +9722,26 @@ class DataFrameMixin(_Carries):
         clock, and `tz=None` takes them to UTC and off the clock.
         """
         return _zoned_axis(self, "tz_convert", tz, axis, level, copy, ())
+
+    def to_period(self, freq: Any = None, axis: Any = 0, copy: Any = NO_DEFAULT) -> Any:
+        """The same values with instant labels read as the periods they fall in.
+
+        Raises:
+            TypeError: When the labels along `axis` are not instants.
+        """
+        return _period_labels(self, "to_period", axis, lambda labels: labels.to_period(freq))
+
+    def to_timestamp(
+        self, freq: Any = None, how: str = "start", axis: Any = 0, copy: Any = NO_DEFAULT
+    ) -> Any:
+        """The same values with period labels read as instants, at their start or end.
+
+        Raises:
+            TypeError: When the labels along `axis` are not periods.
+        """
+        return _period_labels(
+            self, "to_timestamp", axis, lambda labels: labels.to_timestamp(freq=freq, how=how)
+        )
 
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> DataFrame:
         """The frame with new row or column labels. `copy` is accepted and unused."""
@@ -14649,6 +14692,26 @@ class SeriesMixin(_Carries):
         """
         return _zoned_axis(self, "tz_convert", tz, axis, level, copy, ())
 
+    def to_period(self, freq: Any = None, axis: Any = 0, copy: Any = NO_DEFAULT) -> Any:
+        """The same values with instant labels read as the periods they fall in.
+
+        Raises:
+            TypeError: When the labels along `axis` are not instants.
+        """
+        return _period_labels(self, "to_period", axis, lambda labels: labels.to_period(freq))
+
+    def to_timestamp(
+        self, freq: Any = None, how: str = "start", axis: Any = 0, copy: Any = NO_DEFAULT
+    ) -> Any:
+        """The same values with period labels read as instants, at their start or end.
+
+        Raises:
+            TypeError: When the labels along `axis` are not periods.
+        """
+        return _period_labels(
+            self, "to_timestamp", axis, lambda labels: labels.to_timestamp(freq=freq, how=how)
+        )
+
     def set_axis(self, labels: Any, *, axis: Any = 0, copy: Any = NO_DEFAULT) -> Series:
         """The column with new labels. `copy` is accepted and unused."""
         return _with_axis(self, labels, axis)
@@ -17422,6 +17485,14 @@ class DatetimeMixin:
 
     _series: Series
 
+    def __new__(cls, data: Series) -> Any:
+        """A `PeriodProperties` for a column of periods, as pandas answers one there."""
+        if _objects.period_name_of(data._inner):
+            from ._period_index import PeriodProperties
+
+            return PeriodProperties(data)
+        return object.__new__(cls)
+
     def __init__(self, data: Series) -> None:
         """Holds the series. Not a public entry point.
 
@@ -17447,6 +17518,22 @@ class DatetimeMixin:
             return infer_freq(self._series)
         except ValueError:
             return None
+
+    def to_period(self, freq: Any = None) -> Series:
+        """Each instant as the period it falls in, as a column of periods.
+
+        Raises:
+            AttributeError: For a column of spans, as pandas has no such name there.
+            ValueError: With no frequency given and none to be inferred.
+        """
+        from ._datetime import DatetimeIndex
+        from ._frame import Series
+
+        series = self._series
+        if not str(series.dtype).startswith("datetime64"):
+            raise AttributeError("'TimedeltaProperties' object has no attribute 'to_period'")
+        found = DatetimeIndex(series.tolist()).to_period(freq)
+        return Series(found, index=series.index, name=series.name)
 
     def _part(self, kind: str, arg: str) -> Series:
         """Reads one part of the column, and hands back a column.
