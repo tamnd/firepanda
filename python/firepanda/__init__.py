@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import sys
 
-from . import _attrs, _firepanda, api, arrays, errors, offsets, testing, tseries
+from . import _attrs, _firepanda, api, arrays, errors, offsets, testing, tseries, util
 from ._array import array
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
@@ -221,6 +221,7 @@ __all__ = [
     "to_timedelta",
     "tseries",
     "unique",
+    "util",
     "wide_to_long",
 ]
 
