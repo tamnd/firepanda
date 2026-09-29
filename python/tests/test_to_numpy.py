@@ -89,9 +89,9 @@ def test_instants_with_no_zone_stay_instants(firepanda: ModuleType) -> None:
 
 
 def test_text_values_hold_their_type(firepanda: ModuleType) -> None:
-    """pandas answers an extension array for text, and firepanda its own array."""
+    """pandas answers an extension array for text, and so does firepanda."""
     answer = firepanda.Series(["a", None]).values
-    assert type(answer).__name__ == "FirepandaArray"
+    assert type(answer).__name__ == "ArrowStringArray"
     assert answer.tolist() == ["a", nan]
 
 

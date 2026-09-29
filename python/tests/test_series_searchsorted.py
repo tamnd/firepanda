@@ -71,7 +71,7 @@ def test_a_numpy_array_is_several_values(firepanda: ModuleType) -> None:
 def test_several_values_answer_an_array(firepanda: ModuleType) -> None:
     """An array of positions with no labels, as pandas answers a numpy array."""
     answer = firepanda.Series(KEYS).searchsorted([0, 5])
-    assert type(answer).__name__ == "FirepandaArray"
+    assert type(answer).__name__ == "NumpyExtensionArray"
     assert answer.ndim == 1
     assert str(answer.dtype) == "int64"
 
