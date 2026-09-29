@@ -42,6 +42,12 @@ An interval column carries the letter `I`, then its type such as
 `interval[float64, right]` and U+0002, and then the two ends as a tuple. A cell
 reads back as an `Interval` closed on the side the type names, and a gap reads
 as NaN. Document 102 describes it.
+
+A period column carries the letter `P`, then its type such as `period[M]` and
+U+0002, and then the period's ordinal as a whole number. The number is written
+at a fixed width, so the text sorts as the periods do. A cell reads back as a
+`Period` of the type's frequency, and a gap reads as NaT. Document 103
+describes it.
 """
 
 from __future__ import annotations
@@ -60,6 +66,7 @@ _SPELLINGS = frozenset("NT")
 _ARROW = "A"
 _MASKED = "M"
 _INTERVAL = "I"
+_PERIOD = "P"
 _TYPE_END = "\x02"
 _ARROW_TYPES: dict[str, Any] = {}
 """Each Arrow type a cell was written with, by the text the cell carries."""
@@ -162,7 +169,7 @@ def _start(text: str) -> int:
         return 1
     if text[1] in _SPELLINGS:
         return 2 if len(text) >= 4 and text[2] in _KINDS else 0
-    if text[1] in (_ARROW, _MASKED, _INTERVAL):
+    if text[1] in (_ARROW, _MASKED, _INTERVAL, _PERIOD):
         at = text.find(_TYPE_END)
         return at + 1 if at > 1 and len(text) > at + 2 and text[at + 1] in _KINDS else 0
     return 0
@@ -178,6 +185,10 @@ def value(text: Any) -> Any:
 
         kind = text[2 : text.find(_TYPE_END)]
         return Interval(found[0], found[1], kind[kind.rfind(" ") + 1 : -1])
+    if text[1] == _PERIOD:
+        from ._period import period_at
+
+        return period_at(text[2 : text.find(_TYPE_END)], found)
     return found
 
 
@@ -237,6 +248,24 @@ def interval_name_of(inner: Any) -> str | None:
     return interval_name(_first(inner))
 
 
+def period_cells(ordinals: Any, name: str) -> list[Any]:
+    """Each ordinal as the cells of a column of one period type, a gap for None."""
+    head = MARK + _PERIOD + name + _TYPE_END
+    return [None if ordinal is None else head + _written(ordinal) for ordinal in ordinals]
+
+
+def period_name(text: Any) -> str | None:
+    """The period type a written cell carries, or None when it carries none."""
+    if not is_cell(text) or text[1] != _PERIOD:
+        return None
+    return text[2 : text.find(_TYPE_END)]
+
+
+def period_name_of(inner: Any) -> str | None:
+    """The period type of an extension column, or None for any other column."""
+    return period_name(_first(inner))
+
+
 def cell_like(value: Any, like: Any) -> Any:
     """A category label written the way a column's other categories are, `like` being one."""
     kind = interval_name(like)
@@ -292,7 +321,7 @@ def gap_of(inner: Any) -> Any:
     letter = spelling(first)
     if letter == "N" or interval_name(first) is not None:
         return math.nan
-    if letter == "T":
+    if letter == "T" or period_name(first) is not None:
         from ._scalars import NaT
 
         return NaT

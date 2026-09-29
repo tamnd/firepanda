@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Period columns
+
+A Series or DataFrame column of `Period` values of one frequency is now a period column with the dtype `period[M]`, as in pandas. It can be asked for with `dtype="period[M]"` or `astype`, prints each period in its short form with `NaT` for gaps, sorts, groups and compares by period, moves by integers, and gives offsets when a period is subtracted. Scaling a period column and ordering it against another frequency are refused with pandas' messages. Document 103 describes the cell design and what waits for `PeriodIndex`.
+
 ### Added: PeriodDtype
 
 `pd.PeriodDtype` is the real type now, made from a frequency's text, `period[...]` text or an offset, with pandas' errors for the rest. It gives its frequency back as an offset, compares with text the way pandas does, pickles, and answers `construct_from_string`, `is_dtype` and the numpy style attributes pandas gives it. `pandas_dtype` and `is_period_dtype` in `api.types` read period text through it, so a frequency that does not exist is refused there too.

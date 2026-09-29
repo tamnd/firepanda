@@ -847,8 +847,8 @@ def is_interval_dtype(arr_or_dtype: Any) -> bool:
 def is_period_dtype(arr_or_dtype: Any) -> bool:
     """Says whether this is a column of spans of time.
 
-    firepanda has no period column, so this is False for everything firepanda
-    produced.
+    It is True for a period dtype, its name, and a column of periods of one
+    frequency.
 
     Args:
         arr_or_dtype: A dtype, or something holding one.

@@ -1070,3 +1070,68 @@ class PeriodDtype(str):
 
     def __ne__(self, other: object) -> bool:
         return not self == other
+
+
+_TYPES: dict[str, PeriodDtype] = {}
+"""Each period type a column was read with, by its name, so a cell is not parsed each time."""
+
+
+def period_type(name: Any) -> PeriodDtype:
+    """The period type a name or a type stands for, made once for each name."""
+    found = _TYPES.get(name) if isinstance(name, str) else None
+    if found is None:
+        found = PeriodDtype(name)
+        _TYPES[found.name] = found
+    return found
+
+
+def period_at(name: str, ordinal: int) -> Period:
+    """The period of a column of type `name` with this ordinal."""
+    return Period._made(period_type(name)._freq, ordinal)
+
+
+def period_kind(values: Any) -> str | None:
+    """The period type of a list whose values are periods of one frequency and gaps.
+
+    Returns:
+        The type's name, or None when a value is anything else, the periods do
+        not share a frequency, or there is no period at all.
+    """
+    from ._objects import is_gap
+
+    found = None
+    for value in values:
+        if isinstance(value, Period):
+            if found is not None and value._freq != found:
+                return None
+            found = value._freq
+        elif not is_gap(value):
+            return None
+    return None if found is None else f"period[{found.text}]"
+
+
+def period_ordinals(values: Any, name: str) -> list[int | None]:
+    """Each value as the ordinal of its period in type `name`, None for a gap.
+
+    Raises:
+        ValueError: For a period of another frequency, as pandas refuses it,
+            or a value no period of that frequency can be read from.
+    """
+    from ._objects import is_gap
+
+    freq = period_type(name)._freq
+    ordinals: list[int | None] = []
+    for value in values:
+        if is_gap(value):
+            ordinals.append(None)
+            continue
+        if isinstance(value, Period):
+            if value._freq != freq:
+                raise IncompatibleFrequency(
+                    f"Input has different freq={value.freqstr} from PeriodIndex(freq={freq.text})"
+                )
+            ordinals.append(value._ordinal)
+            continue
+        made = Period(value, freq=freq)
+        ordinals.append(None if made is NaT else made._ordinal)
+    return ordinals
