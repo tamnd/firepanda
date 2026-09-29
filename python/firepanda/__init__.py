@@ -131,6 +131,7 @@ from ._scalars import NaT, Timedelta, Timestamp
 from ._sparse import SparseDtype
 from ._spss import read_spss
 from ._sql import read_sql, read_sql_query, read_sql_table
+from ._stata import read_stata
 from ._tester import test
 from ._textread import read_fwf, read_table
 from ._timedelta import TimedeltaIndex, timedelta_range
@@ -237,6 +238,7 @@ __all__ = [
     "read_sql",
     "read_sql_query",
     "read_sql_table",
+    "read_stata",
     "read_table",
     "read_xml",
     "reset_option",

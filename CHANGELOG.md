@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_stata and StataReader
+
+`read_stata` reads Stata dta files of versions 102 to 119, whole or in chunks through `StataReader`, which also lives at `firepanda.io.stata` with `StataMissingValue`. It is a port of pandas' reader that uses `struct` in place of numpy, and it follows pandas for missing values, the nine date formats, long strings, value labels as ordered categoricals, `preserve_dtypes`, `columns`, `index_col` and compressed files, with pandas' warnings and error sentences.
+
 ### Added: convert_dtypes with the pyarrow backend
 
 `convert_dtypes(dtype_backend="pyarrow")` now gives Arrow types as pandas does, such as `int64[pyarrow]`, `double[pyarrow]`, `string[pyarrow]` and `timestamp[us][pyarrow]`, keeping each column's width and following the four switches, while categories and columns of objects stay as they are. A column of flags becomes whole numbers when `convert_boolean` is off, as it does in pandas. A column backed by Arrow hands out `Timestamp` and `Timedelta` for moments and durations. A frame built from a dict with moments next to a column of mixed objects no longer refuses the moments. `read_spss(dtype_backend="pyarrow")` now matches pandas through this.
