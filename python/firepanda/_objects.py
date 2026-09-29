@@ -31,6 +31,7 @@ from ._levels import _END, _ESCAPES, _float, _read, _unfloat
 
 MARK = "\x1c"
 _CLOSE = {"[": "]", "(": ")"}
+_KINDS = frozenset("sibftdnp[(")
 
 
 def _written(value: Any) -> str:
@@ -91,9 +92,24 @@ def cells(values: Any) -> list[Any]:
     return [cell(value) for value in values]
 
 
+def is_cell(text: Any) -> bool:
+    """Whether a text is a written cell: the mark, a kind, and the end mark last.
+
+    Text that only starts with U+001C is not taken for one, since that character
+    is a separator somebody can have in their data.
+    """
+    return (
+        isinstance(text, str)
+        and len(text) >= 3
+        and text[0] == MARK
+        and text[1] in _KINDS
+        and text[-1] == _END
+    )
+
+
 def value(text: Any) -> Any:
     """The value a written cell holds, or the text itself when it was not written."""
-    if isinstance(text, str) and text.startswith(MARK):
+    if is_cell(text):
         return _parsed(text, 1)[0]
     return text
 
@@ -115,5 +131,5 @@ def is_object(inner: Any) -> bool:
     for at in range(rows):
         first = read(at)
         if first is not None:
-            return isinstance(first, str) and first.startswith(MARK)
+            return is_cell(first)
     return False

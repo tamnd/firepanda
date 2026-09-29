@@ -354,7 +354,7 @@ def _held_values(inner: Any) -> list[Any]:
     values = list(inner.to_list())
     if dtype == "string":
         first = next((value for value in values if value is not None), None)
-        if isinstance(first, str) and first.startswith(_objects.MARK):
+        if _objects.is_cell(first):
             return _objects.values(values)
     if dtype == "uint64":
         values = [value + (1 << 64) if value is not None and value < 0 else value
@@ -403,7 +403,7 @@ def _cell_of(inner: Any, row: int, column: int | None = None) -> Any:
     """One value out of a series, or out of a frame by row and column position."""
     held = inner if column is None else inner.column(inner.names()[column])
     raw = inner.cell(row) if column is None else inner.cell(row, column)
-    if isinstance(raw, str) and raw.startswith(_objects.MARK):
+    if _objects.is_cell(raw):
         return _objects.value(raw)
     if raw is None and _objects.is_object(held):
         return None
