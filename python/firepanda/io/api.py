@@ -12,6 +12,7 @@ from .._pandas import read_csv, read_json
 from .._pickle import read_pickle, to_pickle
 from .._spss import read_spss
 from .._sql import read_sql, read_sql_query, read_sql_table
+from .._stata import read_stata
 from .._textread import read_fwf, read_table
 from .._xml import read_xml
 
@@ -33,6 +34,7 @@ __all__ = [
     "read_sql",
     "read_sql_query",
     "read_sql_table",
+    "read_stata",
     "read_table",
     "read_xml",
     "to_pickle",
