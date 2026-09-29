@@ -62,6 +62,7 @@ from datetime import date, time, timedelta
 from decimal import Decimal
 from typing import Any
 
+from .._period import PeriodDtype
 from ..errors import DTypeError, UnsupportedError
 
 __all__ = [
@@ -261,7 +262,7 @@ def _sorted(name: str) -> str:
         return "timedelta"
     if core in {"date32", "date64"}:
         return "date"
-    if core == "period":
+    if core in ("period", "Period"):
         return "period"
     if core == "interval":
         return "interval"
@@ -476,61 +477,12 @@ class IntervalDtype:
         return hash(self._spelled())
 
 
-class PeriodDtype:
-    """A column of spans of time, described rather than held.
-
-    firepanda has no period column, and this is here for the reason
-    `IntervalDtype` is. `freq` hands back the string it was given rather than an
-    offset object, because the offsets are a namespace firepanda does not have
-    yet and inventing half of one to fill this in would be worse than saying so.
-
-    Args:
-        freq: The length of one period, as a frequency string.
-    """
-
-    __slots__ = ("_freq",)
-
-    def __init__(self, freq: Any) -> None:
-        self._freq = freq
-
-    @property
-    def freq(self) -> Any:
-        """The length of one period, as the string it was built from."""
-        return self._freq
-
-    @property
-    def name(self) -> str:
-        """The dtype name, which carries the frequency."""
-        return f"period[{self._freq}]"
-
-    @property
-    def kind(self) -> str:
-        """The numpy kind letter pandas reports for this, which is object."""
-        return "O"
-
-    def __str__(self) -> str:
-        return self.name
-
-    def __repr__(self) -> str:
-        return self.name
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, str):
-            return other == self.name
-        if not isinstance(other, PeriodDtype):
-            return NotImplemented
-        return str(self._freq) == str(other._freq)
-
-    def __hash__(self) -> int:
-        return hash(self.name)
-
-
 def pandas_dtype(dtype: Any) -> Any:
     """Turns anything that names a dtype into the dtype itself.
 
     The dtypes that carry no parameters come back as their name, which is what
     `Series.dtype` hands out and what the rest of firepanda compares against. The
-    four that carry parameters come back as the classes above, because the name
+    four that carry parameters come back as their dtype classes, because the name
     alone would lose the categories, the zone, the endpoints or the frequency.
 
     This is stricter than the predicates and pandas is stricter here too. The
@@ -573,7 +525,10 @@ def pandas_dtype(dtype: Any) -> Any:
         zone = name.split(",", 1)[1].rstrip("]").strip()
         return DatetimeTZDtype(_unit(name), zone)
     if family == "period":
-        return PeriodDtype(name.split("[", 1)[1].rstrip("]"))
+        try:
+            return PeriodDtype.construct_from_string(name)
+        except TypeError:
+            raise DTypeError(f"data type {dtype!r} not understood") from None
     if family == "interval":
         inside = name.split("[", 1)[1].rstrip("]") if "[" in name else ""
         if inside == "":
@@ -902,6 +857,8 @@ def is_period_dtype(arr_or_dtype: Any) -> bool:
         True for a period dtype.
     """
     _deprecated("is_period_dtype", "Use `isinstance(dtype, pd.PeriodDtype)` instead")
+    if isinstance(arr_or_dtype, str):
+        return PeriodDtype.is_dtype(arr_or_dtype)
     return _family(arr_or_dtype) == "period"
 
 

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: PeriodDtype
+
+`pd.PeriodDtype` is the real type now, made from a frequency's text, `period[...]` text or an offset, with pandas' errors for the rest. It gives its frequency back as an offset, compares with text the way pandas does, pickles, and answers `construct_from_string`, `is_dtype` and the numpy style attributes pandas gives it. `pandas_dtype` and `is_period_dtype` in `api.types` read period text through it, so a frequency that does not exist is refused there too.
+
 ### Added: Period
 
 `pd.Period` is here, a span of time at a frequency, as pandas has it: made from text, a number, a date, a timestamp or its fields, with the same errors for frequencies it does not take. It moves between frequencies with `asfreq`, gives its first and last moments with `to_timestamp`, `start_time` and `end_time`, answers every field pandas answers, writes itself out with `strftime` and its period codes, and adds and subtracts whole steps, offsets and time spans the way pandas does. `Timestamp.to_period` now gives one too.
