@@ -34,7 +34,7 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _attrs, _firepanda, api, errors, offsets
+from . import _attrs, _firepanda, api, errors, offsets, testing
 from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
@@ -185,6 +185,7 @@ __all__ = [
     "set_eng_float_format",
     "set_option",
     "show_versions",
+    "testing",
     "timedelta_range",
     "to_datetime",
     "to_numeric",
