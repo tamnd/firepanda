@@ -57,6 +57,7 @@ from . import (
     _row_dates,
     _row_formats,
     _sparse,
+    _xarray,
 )
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
@@ -32569,3 +32570,7 @@ def _series_group_hist(
 
 DataFrameGroupByMixin.hist = _frame_group_hist  # type: ignore[attr-defined]
 SeriesGroupByMixin.hist = _series_group_hist  # type: ignore[attr-defined]
+
+# `to_xarray` is pandas' method, which hands the object to xarray, and lives with
+# the conversion it needs in `_xarray`.
+SeriesMixin.to_xarray = DataFrameMixin.to_xarray = _xarray.to_xarray  # type: ignore[attr-defined]
