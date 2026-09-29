@@ -35,6 +35,7 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _attrs, _firepanda, api, errors, offsets
+from ._arrowtyped import ArrowDtype
 from ._attrs import Flags
 from ._categorical import Categorical, CategoricalDtype, CategoricalIndex
 from ._columnar import read_feather, read_orc, read_parquet
@@ -95,6 +96,7 @@ from .offsets import DateOffset
 
 __all__ = [
     "NA",
+    "ArrowDtype",
     "Categorical",
     "CategoricalDtype",
     "CategoricalIndex",

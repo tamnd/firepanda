@@ -28,6 +28,11 @@ more letter between the mark and the kind, `N` when the column's gaps read as
 NaN and `T` when they read as NaT, and every cell of a column carries the same
 one. Moving rows carries the letter with the cells, and the gaps stay gaps of
 the text column, so what counts as missing is still the extension's answer.
+
+A column pandas backs with Arrow, an `ArrowDtype` column, carries the letter
+`A` instead, then the Arrow type written as pyarrow writes it and U+0002, and
+then the value. The type moves with every cell, so a column keeps it through
+anything that moves rows, and its gaps read as `NA`. Document 98 describes it.
 """
 
 from __future__ import annotations
@@ -43,6 +48,10 @@ MARK = "\x1c"
 _CLOSE = {"[": "]", "(": ")"}
 _KINDS = frozenset("sibftdnp[(")
 _SPELLINGS = frozenset("NT")
+_ARROW = "A"
+_TYPE_END = "\x02"
+_ARROW_TYPES: dict[str, Any] = {}
+"""Each Arrow type a cell was written with, by the text the cell carries."""
 
 
 def _written(value: Any) -> str:
@@ -133,14 +142,46 @@ def is_cell(text: Any) -> bool:
     """
     if not isinstance(text, str) or len(text) < 3 or text[0] != MARK or text[-1] != _END:
         return False
-    return text[1] in _KINDS or (text[1] in _SPELLINGS and len(text) >= 4 and text[2] in _KINDS)
+    return _start(text) > 0
+
+
+def _start(text: str) -> int:
+    """Where the value of a written cell starts, past its letter or its type, or 0 for none."""
+    if text[1] in _KINDS:
+        return 1
+    if text[1] in _SPELLINGS:
+        return 2 if len(text) >= 4 and text[2] in _KINDS else 0
+    if text[1] == _ARROW:
+        at = text.find(_TYPE_END)
+        return at + 1 if at > 1 and len(text) > at + 2 and text[at + 1] in _KINDS else 0
+    return 0
 
 
 def value(text: Any) -> Any:
     """The value a written cell holds, or the text itself when it was not written."""
     if is_cell(text):
-        return _parsed(text, 2 if text[1] in _SPELLINGS else 1)[0]
+        return _parsed(text, _start(text))[0]
     return text
+
+
+def arrow_cells(values: Any, arrow_type: Any) -> list[Any]:
+    """Every value of a list as the cells of a column of one Arrow type, a gap for None."""
+    text = str(arrow_type)
+    _ARROW_TYPES[text] = arrow_type
+    head = MARK + _ARROW + text + _TYPE_END
+    return [None if value is None else head + _written(value) for value in values]
+
+
+def arrow_type(text: Any) -> Any:
+    """The Arrow type a written cell carries, or None when it carries none."""
+    if not is_cell(text) or text[1] != _ARROW:
+        return None
+    return _ARROW_TYPES.get(text[2 : text.find(_TYPE_END)])
+
+
+def arrow_type_of(inner: Any) -> Any:
+    """The Arrow type of an extension column pandas would back with Arrow, or None."""
+    return arrow_type(_first(inner))
 
 
 def values(texts: list[Any]) -> list[Any]:
@@ -181,7 +222,12 @@ def spelling_of(inner: Any) -> str | None:
 
 def gap_of(inner: Any) -> Any:
     """What a gap of an object column reads as: None, NaN or NaT."""
-    letter = spelling(_first(inner))
+    first = _first(inner)
+    if arrow_type(first) is not None:
+        from ._na import NA
+
+        return NA
+    letter = spelling(first)
     if letter == "N":
         return math.nan
     if letter == "T":

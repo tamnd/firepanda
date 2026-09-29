@@ -128,6 +128,18 @@ def _is_object_dtype(dtype: Any) -> bool:
     return type(dtype).__module__ == "numpy" and getattr(dtype, "kind", None) == "O"
 
 
+def _object_kind(inner: Any) -> Any:
+    """`object`, or the `ArrowDtype` of a column backed by Arrow, or None for plain text."""
+    if inner.dtype() != "string" or not _objects.is_object(inner):
+        return None
+    arrow = _objects.arrow_type_of(inner)
+    if arrow is None:
+        return "object"
+    from ._arrowtyped import ArrowDtype
+
+    return ArrowDtype(arrow)
+
+
 def _objectified(column: Any) -> Any:
     """A series as an object column holding its values, with its labels and its name."""
     from ._frame import Series
@@ -7888,10 +7900,24 @@ def _arrow_inner(frame: Any) -> Any:
 def _arrow_column(series: Any) -> Any:
     """The column to export to Arrow, an object column as its values rather than its cells."""
     if _objects.is_object(series._inner):
-        import pyarrow as pa
-
-        return _Exported(pa.array(_held_values(series._inner), from_pandas=True))
+        return _Exported(_object_array(series._inner))
     return series._inner
+
+
+def _object_array(column: Any) -> Any:
+    """An object column's values as a pyarrow array, of its own Arrow type when it has one.
+
+    A column backed by Arrow keeps a NaN inside it apart from a gap, as pandas'
+    does, and an object column reads NaN as missing, as pandas' does.
+    """
+    import pyarrow as pa
+
+    arrow = _objects.arrow_type_of(column)
+    if arrow is None:
+        return pa.array(_held_values(column), from_pandas=True)
+    from ._arrowtyped import arrow_values
+
+    return pa.array(arrow_values(column), type=arrow)
 
 
 def _object_batch(inner: Any) -> Any:
@@ -7909,7 +7935,7 @@ def _object_batch(inner: Any) -> Any:
     for position, name in enumerate(inner.names()):
         column = inner.column(name)
         if _objects.is_object(column):
-            arrays.append(pa.array(_held_values(column), from_pandas=True))
+            arrays.append(_object_array(column))
         else:
             arrays.append(table.column(position).combine_chunks())
     return _Exported(pa.RecordBatch.from_arrays(arrays, names=table.column_names))
@@ -9231,7 +9257,7 @@ class DataFrameMixin(_Carries):
 
         names = self._inner.names()
         kinds = [
-            "object" if kind == "string" and _objects.is_object(self._inner.column(name)) else kind
+            _object_kind(self._inner.column(name)) or kind
             for name, kind in zip(names, self._inner.dtypes(), strict=True)
         ]
         made = _labelled(names, kinds)
@@ -13824,6 +13850,13 @@ class DataFrameMixin(_Carries):
         return answer
 
 
+def _arrow_dtype(dtype: Any) -> Any:
+    """pandas' `ArrowDtype` as firepanda's, so either library's type can be asked for."""
+    from ._arrowtyped import ArrowDtype
+
+    return dtype if isinstance(dtype, ArrowDtype) else ArrowDtype(dtype.pyarrow_dtype)
+
+
 class SeriesMixin(_Carries):
     """The hand written half of `Series`."""
 
@@ -13926,10 +13959,13 @@ class SeriesMixin(_Carries):
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:
-            wanted = _named_dtype(dtype)
+            arrow = type(dtype).__name__ == "ArrowDtype"
+            wanted = None if arrow else _named_dtype(dtype)
             made = type(self)._wrap(self._inner)
             try:
-                if wanted == "category" and _written_categories(str(made.dtype)):
+                if arrow:
+                    self._inner = made.astype(dtype)._inner
+                elif wanted == "category" and _written_categories(str(made.dtype)):
                     self._inner = _number_categories(made)._inner
                 else:
                     self._inner = self._inner.cast(wanted, True)
@@ -14693,8 +14729,8 @@ class SeriesMixin(_Carries):
         from ._categorical import CategoricalDtype
 
         kind = self._inner.dtype()
-        if kind == "string" and _objects.is_object(self._inner):
-            return "object"
+        if kind == "string":
+            kind = _object_kind(self._inner) or kind
         return CategoricalDtype._of(self) if kind == "category" else kind
 
     def groupby(
@@ -16644,6 +16680,10 @@ class SeriesMixin(_Carries):
         from ._frame import Series
 
         strictly = _cast_keywords(copy, errors)
+        if type(dtype).__name__ == "ArrowDtype":
+            from ._arrowtyped import as_arrow
+
+            return as_arrow(self, _arrow_dtype(dtype))
         if _is_object_dtype(dtype):
             return _objectified(self)
         if _objects.is_object(self._inner):
@@ -29386,6 +29426,14 @@ def _text_values(
     pandas writes a gap in its nullable integer and boolean columns.
     """
     dtype = str(column.dtype)
+    if dtype.endswith("[pyarrow]") and _objects.arrow_type_of(column._inner) is not None:
+        from ._arrowtyped import arrow_text
+
+        space = " " if leading else ""
+        return [
+            space + ("<NA>" if _missing(value) else arrow_text(value))
+            for value in _held_values(column._inner)
+        ]
     if dtype == "category" and _written_category(column._inner):
         # Each row prints as its category does in a column of the categories' own type.
         shown = _text_values(
@@ -31117,3 +31165,22 @@ def _usecols(columns: Any, usecols: Any) -> list[str]:
         "'usecols' must either be list-like of all strings, all unicode, all integers or"
         " a callable."
     )
+
+
+def _list_accessor(self: Any) -> Any:
+    """pandas' `Series.list`, the methods of a column of Arrow lists."""
+    from ._arrowtyped import ListAccessor
+
+    return ListAccessor(self)
+
+
+def _struct_accessor(self: Any) -> Any:
+    """pandas' `Series.struct`, the methods of a column of Arrow structs."""
+    from ._arrowtyped import StructAccessor
+
+    return StructAccessor(self)
+
+
+# Set after the class, since a name `list` in its body would hide the builtin there.
+SeriesMixin.list = property(_list_accessor)  # type: ignore[attr-defined]
+SeriesMixin.struct = property(_struct_accessor)  # type: ignore[attr-defined]

@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: SQL UNPIVOT runs
 
 `UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
+### Added: ArrowDtype, and the list and struct accessors
+
+`ArrowDtype` names a column backed by Arrow, as pandas' does, and `astype(ArrowDtype(t))` or `Series(..., dtype=ArrowDtype(t))` makes one. The column is an object column whose cells carry the Arrow type, so it keeps the type through anything that moves rows, prints as pandas prints it with `<NA>` for a gap, and exports to Arrow with its own type. `Series.list` answers `len`, indexing, slicing and `flatten`, and `Series.struct` answers `dtypes`, `field` by name, position or path, and `explode`, each through the pyarrow compute function pandas uses.
 
 ### Added: Categories of numbers and flags
 
