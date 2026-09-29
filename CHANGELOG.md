@@ -8,11 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+SQL PIVOT runs when every column lists its values
+
+`PIVOT t ON a IN (1, 2) USING sum(x) GROUP BY g` and `FROM t PIVOT (sum(x) FOR a IN (1, 2) GROUP BY g)` now lower and run, where they used to be parsed and then refused. As in DuckDB, each cell is the `USING` aggregate over the rows holding that cell's values, one row per group, and a `PIVOT` with no `USING` counts the rows. Without a `GROUP BY` the groups are the columns that neither `ON` nor `USING` reads. Several `ON` columns make a cell for every combination of their values, and the cells are named the way DuckDB names them: the values joined with `_`, then the aggregate's alias, or the aggregate as printed when there is more than one. An `ON` column with no `IN` list, or with an `IN` over an enum or a subquery, is still refused, because its columns aren't known until the data is read.
+
 ### Added: the masked types Int64, Float64 and boolean
 
 pandas' capital letter types, `Int8` to `UInt64`, `Float32`, `Float64` and `boolean`, and their dtype classes, are taken by `astype`, the constructor and `convert_dtypes` where they were refused. A masked column keeps its type through a gap, prints a gap as `<NA>`, answers `boolean` with a gap from a comparison, follows Kleene's logic for `&`, `|` and `^`, and skips gaps in reductions, as pandas does. It is held as an object column whose cells carry the type's name, and arithmetic, comparisons and reductions run over the lower case column of the same width. Document 99 of the compat notes describes the design.
-
-### Added: SQL UNPIVOT runs
+### Added: ### Added: SQL UNPIVOT runs
 
 `UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
 ### Added: ArrowDtype, and the list and struct accessors
