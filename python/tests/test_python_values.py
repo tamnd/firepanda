@@ -34,6 +34,7 @@ def outcome(call: Callable[[ModuleType], Any], lib: ModuleType) -> Any:
 
 CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: moments(lib).dt.to_pydatetime(),
+    lambda lib: moments(lib).set_axis(["a", "b"]).dt.to_pydatetime(),
     lambda lib: moments(lib).dt.to_pydatetime().tolist(),
     lambda lib: (
         lib.Series(lib.to_datetime(["2020-01-01 10:00"]).tz_localize("UTC"))

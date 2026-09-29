@@ -16749,7 +16749,8 @@ class DatetimeMixin:
     def to_pydatetime(self) -> Series:
         """Every instant as a Python datetime, in an object column with NaT for a gap.
 
-        pandas 3 answers a series rather than the numpy array it used to.
+        pandas 3 answers a series rather than the numpy array it used to, built
+        from the values alone, so the answer has fresh row labels and no name.
         """
         from ._frame import Series
 
@@ -16760,8 +16761,7 @@ class DatetimeMixin:
             None if _objects.is_gap(value) else value.to_pydatetime()
             for value in _values_of(column._inner)
         ]
-        cells = _objects.cells(moments, "T")
-        return Series(cells, index=column.index, name=column.name, dtype="str")
+        return Series(_objects.cells(moments, "T"), dtype="str")
 
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
         """Moves every clock to a frequency, one of three ways.
