@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Styler.to_excel
+
+`Styler.to_excel` now writes a styled frame to a workbook as pandas does. Each cell's CSS goes through pandas' `CSSToExcelConverter`, ported without numpy along with its CSS reader, and the openpyxl, xlsxwriter and odf writers turn the result into the same fonts, fills, borders, alignments and number formats pandas writes, including across merged cells. `firepanda.io.formats.excel` and `firepanda.io.formats.css` hold the converter and the reader where pandas keeps them. A `loc` key on rows labelled by several levels that holds a slice or a list for fewer levels than there are, such as `loc[(slice(None),)]`, now keeps every level as pandas does, rather than dropping the ones it named.
+
 ### Added: DataFrame.style
 
 `DataFrame.style` now answers pandas' `Styler`, ported from pandas and run over firepanda frames, when jinja2 is installed. It writes a frame as HTML, LaTeX, text or Typst with the same formats, highlights, bars, gradients, tooltips, hidden rows and columns, sticky headers, table styles and concatenated footers as pandas, and the same text for each, down to the element ids. Without jinja2 the accessor raises pandas' own AttributeError. The gradients and colormapped bars need matplotlib, as they do in pandas. `firepanda.io.formats.style.Styler` is importable where pandas keeps it. `Styler.to_excel` is not ported yet. A column of a frame that was transposed twice now hands its labels back from `items` as the values they are, not as the text the extension holds them as.

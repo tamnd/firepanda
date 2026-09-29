@@ -9,8 +9,10 @@ number formats, and fail with pandas' sentences. The engines are the same
 packages pandas drives, so the file each one saves is the file pandas would
 have saved.
 
-The formatter is pandas' own for a frame. The styling half of it only runs for
-a `Styler`, which firepanda does not have, so every cell here has no style.
+The formatter is pandas' own. Given a frame every cell has no style, and given a
+`Styler` each cell carries the Excel style pandas' `CSSToExcelConverter` makes of
+the CSS the Styler computed for it, which each writer turns into its engine's own
+fonts, fills and borders.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from . import _optional
 
@@ -365,6 +367,333 @@ class OpenpyxlWriter(ExcelWriter):
         if "r+" in self._mode:
             self._handles.handle.truncate()
 
+    @classmethod
+    def _convert_to_style_kwargs(cls, style_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Convert a style_dict to a set of kwargs suitable for initializing
+        or updating-on-copy an openpyxl v2 style object.
+
+        Parameters
+        ----------
+        style_dict : dict
+            A dict with zero or more of the following keys (or their synonyms).
+                'font'
+                'fill'
+                'border' ('borders')
+                'alignment'
+                'number_format'
+                'protection'
+
+        Returns
+        -------
+        style_kwargs : dict
+            A dict with the same, normalized keys as ``style_dict`` but each
+            value has been replaced with a native openpyxl style object of the
+            appropriate class.
+        """
+        _style_key_map = {"borders": "border"}
+
+        style_kwargs: dict[str, Any] = {}
+        for k, v in style_dict.items():
+            k = _style_key_map.get(k, k)
+            _conv_to_x = getattr(cls, f"_convert_to_{k}", lambda x: None)
+            new_v = _conv_to_x(v)
+            if new_v:
+                style_kwargs[k] = new_v
+
+        return style_kwargs
+
+    @classmethod
+    def _convert_to_color(cls, color_spec):
+        """
+        Convert ``color_spec`` to an openpyxl v2 Color object.
+
+        Parameters
+        ----------
+        color_spec : str, dict
+            A 32-bit ARGB hex string, or a dict with zero or more of the
+            following keys.
+                'rgb'
+                'indexed'
+                'auto'
+                'theme'
+                'tint'
+                'index'
+                'type'
+
+        Returns
+        -------
+        color : openpyxl.styles.Color
+        """
+        from openpyxl.styles import Color
+
+        if isinstance(color_spec, str):
+            return Color(color_spec)
+        else:
+            return Color(**color_spec)
+
+    @classmethod
+    def _convert_to_font(cls, font_dict):
+        """
+        Convert ``font_dict`` to an openpyxl v2 Font object.
+
+        Parameters
+        ----------
+        font_dict : dict
+            A dict with zero or more of the following keys (or their synonyms).
+                'name'
+                'size' ('sz')
+                'bold' ('b')
+                'italic' ('i')
+                'underline' ('u')
+                'strikethrough' ('strike')
+                'color'
+                'vertAlign' ('vertalign')
+                'charset'
+                'scheme'
+                'family'
+                'outline'
+                'shadow'
+                'condense'
+
+        Returns
+        -------
+        font : openpyxl.styles.Font
+        """
+        from openpyxl.styles import Font
+
+        _font_key_map = {
+            "sz": "size",
+            "b": "bold",
+            "i": "italic",
+            "u": "underline",
+            "strike": "strikethrough",
+            "vertalign": "vertAlign",
+        }
+
+        font_kwargs = {}
+        for k, v in font_dict.items():
+            k = _font_key_map.get(k, k)
+            if k == "color":
+                v = cls._convert_to_color(v)
+            font_kwargs[k] = v
+
+        return Font(**font_kwargs)
+
+    @classmethod
+    def _convert_to_stop(cls, stop_seq):
+        """
+        Convert ``stop_seq`` to a list of openpyxl v2 Color objects,
+        suitable for initializing the ``GradientFill`` ``stop`` parameter.
+
+        Parameters
+        ----------
+        stop_seq : iterable
+            An iterable that yields objects suitable for consumption by
+            ``_convert_to_color``.
+
+        Returns
+        -------
+        stop : list of openpyxl.styles.Color
+        """
+        return map(cls._convert_to_color, stop_seq)
+
+    @classmethod
+    def _convert_to_fill(cls, fill_dict: dict[str, Any]) -> Any:
+        """
+        Convert ``fill_dict`` to an openpyxl v2 Fill object.
+
+        Parameters
+        ----------
+        fill_dict : dict
+            A dict with one or more of the following keys (or their synonyms),
+                'fill_type' ('patternType', 'patterntype')
+                'start_color' ('fgColor', 'fgcolor')
+                'end_color' ('bgColor', 'bgcolor')
+            or one or more of the following keys (or their synonyms).
+                'type' ('fill_type')
+                'degree'
+                'left'
+                'right'
+                'top'
+                'bottom'
+                'stop'
+
+        Returns
+        -------
+        fill : openpyxl.styles.Fill
+        """
+        from openpyxl.styles import (
+            GradientFill,
+            PatternFill,
+        )
+
+        _pattern_fill_key_map = {
+            "patternType": "fill_type",
+            "patterntype": "fill_type",
+            "fgColor": "start_color",
+            "fgcolor": "start_color",
+            "bgColor": "end_color",
+            "bgcolor": "end_color",
+        }
+
+        _gradient_fill_key_map = {"fill_type": "type"}
+
+        pfill_kwargs = {}
+        gfill_kwargs = {}
+        for k, v in fill_dict.items():
+            pk = _pattern_fill_key_map.get(k)
+            gk = _gradient_fill_key_map.get(k)
+            if pk in ["start_color", "end_color"]:
+                v = cls._convert_to_color(v)
+            if gk == "stop":
+                v = cls._convert_to_stop(v)
+            if pk:
+                pfill_kwargs[pk] = v
+            elif gk:
+                gfill_kwargs[gk] = v
+            else:
+                pfill_kwargs[k] = v
+                gfill_kwargs[k] = v
+
+        try:
+            return PatternFill(**pfill_kwargs)
+        except TypeError:
+            return GradientFill(**gfill_kwargs)
+
+    @classmethod
+    def _convert_to_side(cls, side_spec):
+        """
+        Convert ``side_spec`` to an openpyxl v2 Side object.
+
+        Parameters
+        ----------
+        side_spec : str, dict
+            A string specifying the border style, or a dict with zero or more
+            of the following keys (or their synonyms).
+                'style' ('border_style')
+                'color'
+
+        Returns
+        -------
+        side : openpyxl.styles.Side
+        """
+        from openpyxl.styles import Side
+
+        _side_key_map = {"border_style": "style"}
+
+        if isinstance(side_spec, str):
+            return Side(style=side_spec)
+
+        side_kwargs = {}
+        for k, v in side_spec.items():
+            k = _side_key_map.get(k, k)
+            if k == "color":
+                v = cls._convert_to_color(v)
+            side_kwargs[k] = v
+
+        return Side(**side_kwargs)
+
+    @classmethod
+    def _convert_to_border(cls, border_dict):
+        """
+        Convert ``border_dict`` to an openpyxl v2 Border object.
+
+        Parameters
+        ----------
+        border_dict : dict
+            A dict with zero or more of the following keys (or their synonyms).
+                'left'
+                'right'
+                'top'
+                'bottom'
+                'diagonal'
+                'diagonal_direction'
+                'vertical'
+                'horizontal'
+                'diagonalUp' ('diagonalup')
+                'diagonalDown' ('diagonaldown')
+                'outline'
+
+        Returns
+        -------
+        border : openpyxl.styles.Border
+        """
+        from openpyxl.styles import Border
+
+        _border_key_map = {"diagonalup": "diagonalUp", "diagonaldown": "diagonalDown"}
+
+        border_kwargs = {}
+        for k, v in border_dict.items():
+            k = _border_key_map.get(k, k)
+            if k == "color":
+                v = cls._convert_to_color(v)
+            if k in ["left", "right", "top", "bottom", "diagonal"]:
+                v = cls._convert_to_side(v)
+            border_kwargs[k] = v
+
+        return Border(**border_kwargs)
+
+    @classmethod
+    def _convert_to_alignment(cls, alignment_dict):
+        """
+        Convert ``alignment_dict`` to an openpyxl v2 Alignment object.
+
+        Parameters
+        ----------
+        alignment_dict : dict
+            A dict with zero or more of the following keys (or their synonyms).
+                'horizontal'
+                'vertical'
+                'text_rotation'
+                'wrap_text'
+                'shrink_to_fit'
+                'indent'
+        Returns
+        -------
+        alignment : openpyxl.styles.Alignment
+        """
+        from openpyxl.styles import Alignment
+
+        return Alignment(**alignment_dict)
+
+    @classmethod
+    def _convert_to_number_format(cls, number_format_dict):
+        """
+        Convert ``number_format_dict`` to an openpyxl v2.1.0 number format
+        initializer.
+
+        Parameters
+        ----------
+        number_format_dict : dict
+            A dict with zero or more of the following keys.
+                'format_code' : str
+
+        Returns
+        -------
+        number_format : str
+        """
+        return number_format_dict["format_code"]
+
+    @classmethod
+    def _convert_to_protection(cls, protection_dict):
+        """
+        Convert ``protection_dict`` to an openpyxl v2 Protection object.
+
+        Parameters
+        ----------
+        protection_dict : dict
+            A dict with zero or more of the following keys.
+                'locked'
+                'hidden'
+
+        Returns
+        -------
+        """
+        from openpyxl.styles import Protection
+
+        return Protection(**protection_dict)
+
     def _write_cells(
         self,
         cells: Any,
@@ -396,6 +725,7 @@ class OpenpyxlWriter(ExcelWriter):
         else:
             wks = self.book.create_sheet()
             wks.title = sheet_name
+        style_cache: dict[str, dict[str, Any]] = {}
         if _valid_freeze_panes(freeze_panes):
             assert freeze_panes is not None
             wks.freeze_panes = wks.cell(row=freeze_panes[0] + 1, column=freeze_panes[1] + 1)
@@ -404,6 +734,16 @@ class OpenpyxlWriter(ExcelWriter):
             xcell.value, fmt = self._value_with_fmt(cell.val)
             if fmt:
                 xcell.number_format = fmt
+            style_kwargs: dict[str, Any] | None = {}
+            if cell.style:
+                key = str(cell.style)
+                style_kwargs = style_cache.get(key)
+                if style_kwargs is None:
+                    style_kwargs = self._convert_to_style_kwargs(cell.style)
+                    style_cache[key] = style_kwargs
+            if style_kwargs:
+                for k, v in style_kwargs.items():
+                    setattr(xcell, k, v)
             if cell.mergestart is not None and cell.mergeend is not None:
                 wks.merge_cells(
                     start_row=startrow + cell.row + 1,
@@ -411,8 +751,176 @@ class OpenpyxlWriter(ExcelWriter):
                     end_column=startcol + cell.mergeend + 1,
                     end_row=startrow + cell.mergestart + 1,
                 )
+                # Only the top left cell of a merged range is kept, so each of the
+                # others is given the style too, as pandas does.
+                if style_kwargs:
+                    first_row = startrow + cell.row + 1
+                    first_col = startcol + cell.col + 1
+                    for row in range(first_row, startrow + cell.mergestart + 2):
+                        for col in range(first_col, startcol + cell.mergeend + 2):
+                            if row == first_row and col == first_col:
+                                continue
+                            other = wks.cell(column=col, row=row)
+                            for k, v in style_kwargs.items():
+                                setattr(other, k, v)
         if autofilter_range:
             wks.auto_filter.ref = autofilter_range
+
+
+class _XlsxStyler:
+    # Map from openpyxl-oriented styles to flatter xlsxwriter representation
+    # Ordering necessary for both determinism and because some are keyed by
+    # prefixes of others.
+    STYLE_MAPPING: ClassVar[dict[str, list[tuple[tuple[str, ...], str]]]] = {
+        "font": [
+            (("name",), "font_name"),
+            (("sz",), "font_size"),
+            (("size",), "font_size"),
+            (("color", "rgb"), "font_color"),
+            (("color",), "font_color"),
+            (("b",), "bold"),
+            (("bold",), "bold"),
+            (("i",), "italic"),
+            (("italic",), "italic"),
+            (("u",), "underline"),
+            (("underline",), "underline"),
+            (("strike",), "font_strikeout"),
+            (("vertAlign",), "font_script"),
+            (("vertalign",), "font_script"),
+        ],
+        "number_format": [(("format_code",), "num_format"), ((), "num_format")],
+        "protection": [(("locked",), "locked"), (("hidden",), "hidden")],
+        "alignment": [
+            (("horizontal",), "align"),
+            (("vertical",), "valign"),
+            (("text_rotation",), "rotation"),
+            (("wrap_text",), "text_wrap"),
+            (("indent",), "indent"),
+            (("shrink_to_fit",), "shrink"),
+        ],
+        "fill": [
+            (("patternType",), "pattern"),
+            (("patterntype",), "pattern"),
+            (("fill_type",), "pattern"),
+            (("start_color", "rgb"), "fg_color"),
+            (("fgColor", "rgb"), "fg_color"),
+            (("fgcolor", "rgb"), "fg_color"),
+            (("start_color",), "fg_color"),
+            (("fgColor",), "fg_color"),
+            (("fgcolor",), "fg_color"),
+            (("end_color", "rgb"), "bg_color"),
+            (("bgColor", "rgb"), "bg_color"),
+            (("bgcolor", "rgb"), "bg_color"),
+            (("end_color",), "bg_color"),
+            (("bgColor",), "bg_color"),
+            (("bgcolor",), "bg_color"),
+        ],
+        "border": [
+            (("color", "rgb"), "border_color"),
+            (("color",), "border_color"),
+            (("style",), "border"),
+            (("top", "color", "rgb"), "top_color"),
+            (("top", "color"), "top_color"),
+            (("top", "style"), "top"),
+            (("top",), "top"),
+            (("right", "color", "rgb"), "right_color"),
+            (("right", "color"), "right_color"),
+            (("right", "style"), "right"),
+            (("right",), "right"),
+            (("bottom", "color", "rgb"), "bottom_color"),
+            (("bottom", "color"), "bottom_color"),
+            (("bottom", "style"), "bottom"),
+            (("bottom",), "bottom"),
+            (("left", "color", "rgb"), "left_color"),
+            (("left", "color"), "left_color"),
+            (("left", "style"), "left"),
+            (("left",), "left"),
+        ],
+    }
+
+    @classmethod
+    def convert(cls, style_dict, num_format_str=None) -> dict[str, Any]:
+        """
+        converts a style_dict to an xlsxwriter format dict
+
+        Parameters
+        ----------
+        style_dict : style dictionary to convert
+        num_format_str : optional number format string
+        """
+        # Create an XlsxWriter format object.
+        props = {}
+
+        if num_format_str is not None:
+            props["num_format"] = num_format_str
+
+        if style_dict is None:
+            return props
+
+        if "borders" in style_dict:
+            style_dict = style_dict.copy()
+            style_dict["border"] = style_dict.pop("borders")
+
+        for style_group_key, style_group in style_dict.items():
+            for src, dst in cls.STYLE_MAPPING.get(style_group_key, []):
+                # src is a sequence of keys into a nested dict
+                # dst is a flat key
+                if dst in props:
+                    continue
+                v = style_group
+                for k in src:
+                    try:
+                        v = v[k]
+                    except (KeyError, TypeError):
+                        break
+                else:
+                    props[dst] = v
+
+        if isinstance(props.get("pattern"), str):
+            # TODO: support other fill patterns
+            props["pattern"] = 0 if props["pattern"] == "none" else 1
+
+        for k in ["border", "top", "right", "bottom", "left"]:
+            if isinstance(props.get(k), str):
+                try:
+                    props[k] = [
+                        "none",
+                        "thin",
+                        "medium",
+                        "dashed",
+                        "dotted",
+                        "thick",
+                        "double",
+                        "hair",
+                        "mediumDashed",
+                        "dashDot",
+                        "mediumDashDot",
+                        "dashDotDot",
+                        "mediumDashDotDot",
+                        "slantDashDot",
+                    ].index(props[k])
+                except ValueError:
+                    props[k] = 2
+
+        if isinstance(props.get("font_script"), str):
+            props["font_script"] = ["baseline", "superscript", "subscript"].index(
+                props["font_script"]
+            )
+
+        if isinstance(props.get("underline"), str):
+            props["underline"] = {
+                "none": 0,
+                "single": 1,
+                "double": 2,
+                "singleAccounting": 33,
+                "doubleAccounting": 34,
+            }[props["underline"]]
+
+        # GH 30107 - xlsxwriter uses different name
+        if props.get("valign") == "center":
+            props["valign"] = "vcenter"
+
+        return props
 
 
 class XlsxWriter(ExcelWriter):
@@ -492,7 +1000,7 @@ class XlsxWriter(ExcelWriter):
             if key in styles:
                 style = styles[key]
             else:
-                style = self.book.add_format({} if fmt is None else {"num_format": fmt})
+                style = self.book.add_format(_XlsxStyler.convert(cell.style, fmt))
                 styles[key] = style
             if cell.mergestart is not None and cell.mergeend is not None:
                 wks.merge_range(
@@ -533,6 +1041,7 @@ class ODSWriter(ExcelWriter):
             raise ValueError("Append mode is not supported with odf!")
         engine_kwargs = _combine_kwargs(engine_kwargs, kwargs)
         self._book = OpenDocumentSpreadsheet(**engine_kwargs)
+        self._style_dict: dict[str, str] = {}
         super().__init__(
             path,
             mode=mode,
@@ -604,6 +1113,9 @@ class ODSWriter(ExcelWriter):
         from odf.table import TableCell
 
         attributes: dict[str, int | str] = {}
+        style_name = self._process_style(cell.style)
+        if style_name is not None:
+            attributes["stylename"] = style_name
         if cell.mergestart is not None and cell.mergeend is not None:
             attributes["numberrowsspanned"] = max(1, cell.mergestart)
             attributes["numbercolumnsspanned"] = cell.mergeend
@@ -624,6 +1136,42 @@ class ODSWriter(ExcelWriter):
         if isinstance(val, str):
             return val, TableCell(valuetype="string", stringvalue=val, attributes=attributes)
         return val, TableCell(valuetype="float", value=val, attributes=attributes)
+
+    def _process_style(self, style: dict[str, Any] | None) -> str | None:
+        """pandas' OpenDocument style for a cell's style, named once for each distinct style."""
+        from odf.style import ParagraphProperties, Style, TableCellProperties, TextProperties
+
+        if style is None:
+            return None
+        style_key = json.dumps(style)
+        if style_key in self._style_dict:
+            return self._style_dict[style_key]
+        name = f"pd{len(self._style_dict) + 1}"
+        self._style_dict[style_key] = name
+        odf_style = Style(name=name, family="table-cell")
+        if "font" in style:
+            font = style["font"]
+            if font.get("bold", False):
+                odf_style.addElement(TextProperties(fontweight="bold"))
+        if "borders" in style:
+            borders = style["borders"]
+            for side, thickness in borders.items():
+                thickness_translation = {"thin": "0.75pt solid #000000"}
+                odf_style.addElement(
+                    TableCellProperties(
+                        attributes={f"border{side}": thickness_translation[thickness]}
+                    )
+                )
+        if "alignment" in style:
+            alignment = style["alignment"]
+            horizontal = alignment.get("horizontal")
+            if horizontal:
+                odf_style.addElement(ParagraphProperties(textalign=horizontal))
+            vertical = alignment.get("vertical")
+            if vertical:
+                odf_style.addElement(TableCellProperties(verticalalign=vertical))
+        self.book.styles.addElement(odf_style)
+        return name
 
     def _create_freeze_panes(self, sheet_name: str, freeze_panes: tuple[int, int]) -> None:
         from odf.config import (
@@ -669,11 +1217,12 @@ class _Cell:
         val: Any,
         mergestart: int | None = None,
         mergeend: int | None = None,
+        style: Any = None,
     ) -> None:
         self.row = row
         self.col = col
         self.val = val
-        self.style = None
+        self.style = style
         self.mergestart = mergestart
         self.mergeend = mergeend
 
@@ -756,10 +1305,22 @@ class _Formatter:
         index_label: Any = None,
         merge_cells: Any = False,
         inf_rep: str = "inf",
+        style_converter: Any = None,
         autofilter: bool = False,
     ) -> None:
+        from ._frame import DataFrame
+
         self.rowcounter = 0
         self.na_rep = na_rep
+        self.styler: Any = None
+        self.style_converter: Any = None
+        if not isinstance(df, DataFrame):
+            from ._css import CSSToExcelConverter
+
+            self.styler = df
+            self.styler._compute()
+            df = df.data
+            self.style_converter = style_converter or CSSToExcelConverter()
         self.df = df
         if cols is not None:
             if not _list_like(cols):
@@ -782,6 +1343,15 @@ class _Formatter:
         self.merge_cells = merge_cells
         self.inf_rep = inf_rep
         self.autofilter = autofilter
+
+    def _styled(self, table: str, at: tuple[int, int], *cell: Any) -> _Cell:
+        """pandas' `CssExcelCell`: a cell styled from the Styler's CSS for one position."""
+        styles = getattr(self.styler, table, None)
+        style = None
+        if styles and self.style_converter:
+            declarations = {prop.lower(): val for prop, val in styles[at]}
+            style = self.style_converter(frozenset(declarations.items()))
+        return _Cell(*cell, style=style)
 
     @staticmethod
     def _multi(index: Any) -> bool:
@@ -829,7 +1399,9 @@ class _Formatter:
                 start, end = None, None
                 if merge_columns and span > 1:
                     start, end = lnum, coloffset + i + span
-                yield _Cell(lnum, coloffset + i + 1, values[i], start, end)
+                yield self._styled(
+                    "ctx_columns", (lnum, i), lnum, coloffset + i + 1, values[i], start, end
+                )
         self.rowcounter = lnum
 
     def _format_header_regular(self) -> Iterator[_Cell]:
@@ -847,7 +1419,7 @@ class _Formatter:
                     )
                 names = self.header
             for at, name in enumerate(names):
-                yield _Cell(self.rowcounter, at + coloffset, name)
+                yield self._styled("ctx_columns", (0, at), self.rowcounter, at + coloffset, name)
 
     def _format_header(self) -> Iterator[_Cell]:
         if self._multi(self.columns):
@@ -888,7 +1460,7 @@ class _Formatter:
             if isinstance(values, PeriodIndex):
                 values = values.to_timestamp()
             for at, value in enumerate(values):
-                yield _Cell(self.rowcounter + at, 0, value)
+                yield self._styled("ctx_index", (at, 0), self.rowcounter + at, 0, value)
             coloffset = 1
         else:
             coloffset = 0
@@ -915,12 +1487,26 @@ class _Formatter:
                         if span > 1:
                             start = self.rowcounter + i + span - 1
                             end = gcolidx
-                        yield _Cell(self.rowcounter + i, gcolidx, _timestamp(values[i]), start, end)
+                        yield self._styled(
+                            "ctx_index",
+                            (i, gcolidx),
+                            self.rowcounter + i,
+                            gcolidx,
+                            _timestamp(values[i]),
+                            start,
+                            end,
+                        )
                     gcolidx += 1
             else:
                 for level in zip(*self.df.index, strict=True):
                     for at, value in enumerate(level):
-                        yield _Cell(self.rowcounter + at, gcolidx, _timestamp(value))
+                        yield self._styled(
+                            "ctx_index",
+                            (at, gcolidx),
+                            self.rowcounter + at,
+                            gcolidx,
+                            _timestamp(value),
+                        )
                     gcolidx += 1
         yield from self._generate_body(gcolidx)
 
@@ -931,7 +1517,7 @@ class _Formatter:
     def _generate_body(self, coloffset: int) -> Iterator[_Cell]:
         for at in range(len(self.columns)):
             for i, val in enumerate(self.df.iloc[:, at]):
-                yield _Cell(self.rowcounter + i, at + coloffset, val)
+                yield self._styled("ctx", (i, at), self.rowcounter + i, at + coloffset, val)
 
     def get_formatted_cells(self) -> Iterator[_Cell]:
         for cell in itertools.chain(self._format_header(), self._format_body()):
