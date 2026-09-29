@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: select_dtypes reads nullable and object columns
+
+`select_dtypes` now reads each column by the type `dtypes` shows rather than by how it is stored, so an `Int64`, `UInt8`, `Float64` or `boolean` column is picked up by `number`, `integer`, `floating` and `bool` the way pandas picks it up. A nullable name on either side means its numpy twin, so `include="Int64"` takes an `int64` column too. `object`, `O` and the `object` type select object columns and text columns, and `string` selects only text, which are pandas 3's rules.
+
 ### Added: plotting with matplotlib
 
 `Series.plot` and `DataFrame.plot` are pandas' `PlotAccessor`, with every kind pandas draws: line, bar, barh, box, hist, kde, area, pie, scatter and hexbin. `Series.hist`, `DataFrame.hist`, `DataFrame.boxplot`, the groupby `plot`, `hist` and `boxplot`, and the whole `firepanda.plotting` namespace are there too, including `scatter_matrix`, `parallel_coordinates`, `table` and `plot_params`. The matplotlib backend is a port of pandas' own, so a plot draws the same lines, bars, tick labels and legend, in the same colours, and a mistake raises the same error. matplotlib is imported only when a plot is drawn, and the `plotting.backend` option finds third party backends the way pandas does. An object column now hands back the object that was put in it, rather than a copy, for values of a class outside the standard library.

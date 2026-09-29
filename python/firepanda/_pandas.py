@@ -2899,21 +2899,40 @@ _DTYPE_GROUPS: dict[str, tuple[str, ...]] = {
     "datetime64tz": ("aware",),
     "timedelta": ("span",),
     "timedelta64": ("span",),
+    "object": ("object",),
 }
 """Each word, and the family names a column has to carry to answer to it."""
 
 _DTYPE_WIDENED: dict[str, tuple[str, ...]] = {
     "int": ("int32", "int64"),
     "float": ("float32", "float64"),
+    "O": ("object",),
 }
-"""The two words that become several types rather than a branch of the tree.
+"""The words that become several types rather than a branch of the tree.
 
 numpy resolves a bare `int` to one concrete type whose width depends on the
 platform, and pandas widens it back out to both signed widths by hand so that
 the same code selects the same columns everywhere. `float` is widened the same
 way. They are here rather than in the table above because they become concrete
 names, and that is visible: `include="int"` against `exclude="int64"` is an
-overlap and `include="integer"` against `exclude="int64"` is not."""
+overlap and `include="integer"` against `exclude="int64"` is not. `O` is numpy's
+letter for `object` and becomes that word, so the two overlap as well."""
+
+
+def _masked_twin(printed: str) -> str:
+    """The numpy type a nullable extension type stands in for, such as `int64` for `Int64`.
+
+    `select_dtypes` reads a nullable name as its numpy twin on both sides, so
+    `include="Int64"` takes an `int64` column and `include="int64"` takes an
+    `Int64` one, and `boolean` is `bool`.
+
+    Args:
+        printed: A name in `_NULLABLE_DTYPES`.
+
+    Returns:
+        The lower case name of the same width.
+    """
+    return "bool" if printed == "boolean" else printed.lower()
 
 _SIGNED: frozenset[str] = frozenset({"int8", "int16", "int32", "int64"})
 """The four signed widths, which are `signed` and everything above it."""
@@ -3155,6 +3174,12 @@ def _dtype_family(printed: str) -> frozenset[str]:
     Returns:
         The type's own name and the family names above it.
     """
+    if printed in _NULLABLE_DTYPES:
+        return _dtype_family(_masked_twin(printed)) | {printed}
+    if printed in ("str", "string"):
+        # pandas still answers `object` for its text columns, from the years
+        # when text was held in object columns, so a text column is both.
+        return frozenset({printed, "object"})
     if printed in _SIGNED:
         return frozenset({printed, "signed"})
     if printed in _UNSIGNED:
@@ -3207,6 +3232,8 @@ def _dtype_words(spec: Any) -> frozenset[str]:
             out.update(widened)
         elif word in _DTYPE_GROUPS:
             out.add(word)
+        elif word in _NULLABLE_DTYPES:
+            out.add(_masked_twin(word))
         else:
             out.add(_named_dtype(one))
     return frozenset(out)
@@ -13732,7 +13759,10 @@ class DataFrameMixin(_Carries):
         held_out = _dtype_branches(unwanted)
         names = self._inner.names()
         try:
-            families = [_dtype_family(one) for one in self._inner.dtypes()]
+            families = [
+                _dtype_family(_object_kind(self._inner.column(name)) or kind)
+                for name, kind in zip(names, self._inner.dtypes(), strict=True)
+            ]
         except Exception as error:
             raise translate(error) from None
         kept = [
