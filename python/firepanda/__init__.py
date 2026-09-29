@@ -124,6 +124,7 @@ from ._pickle import read_pickle, to_pickle
 from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
+from ._sparse import SparseDtype
 from ._sql import read_sql, read_sql_query, read_sql_table
 from ._tester import test
 from ._textread import read_fwf, read_table
@@ -164,6 +165,7 @@ __all__ = [
     "PeriodIndex",
     "RangeIndex",
     "Series",
+    "SparseDtype",
     "StringDtype",
     "Timedelta",
     "TimedeltaIndex",

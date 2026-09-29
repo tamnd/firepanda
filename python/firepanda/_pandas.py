@@ -55,6 +55,7 @@ from . import (
     _period,
     _row_dates,
     _row_formats,
+    _sparse,
 )
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
@@ -144,6 +145,9 @@ def _object_kind(inner: Any) -> Any:
     """`object`, the `ArrowDtype` or masked type the cells carry, or None for plain text."""
     if inner.dtype() != "string" or not _objects.is_object(inner):
         return None
+    sparse = _objects.sparse_type_of(inner)
+    if sparse is not None:
+        return sparse
     masked = _objects.masked_name_of(inner)
     if masked is not None:
         return _masked.masked_dtype(masked)
@@ -159,6 +163,13 @@ def _object_kind(inner: Any) -> Any:
     from ._arrowtyped import ArrowDtype
 
     return ArrowDtype(arrow)
+
+
+def _sparse_side(column: Any, other: Any) -> bool:
+    """Whether a series, or the series it meets, is sparse."""
+    if isinstance(column, SeriesMixin) and _sparse.sparse_of(column) is not None:
+        return True
+    return isinstance(other, SeriesMixin) and _sparse.sparse_of(other) is not None
 
 
 def _masked_side(column: Any, other: Any) -> bool:
@@ -9135,7 +9146,9 @@ class DataFrameMixin(_Carries):
         else:
             self._inner = self._shaped(data, index, columns)
         if dtype is not None and (
-            type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
+            type(dtype).__name__ == "ArrowDtype"
+            or _masked.masked_name(dtype) is not None
+            or _sparse.sparse_dtype(dtype) is not None
         ):
             from ._frame import DataFrame
 
@@ -11189,7 +11202,8 @@ class DataFrameMixin(_Carries):
                 names = []
             if name in names:
                 return self[name]
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        # As in pandas the ordinary lookup runs again, so an accessor that refused keeps its error.
+        return object.__getattribute__(self, name)
 
     def __dir__(self) -> list[str]:
         """The attributes, with the columns that can be read as one among them."""
@@ -14267,6 +14281,8 @@ class DataFrameMixin(_Carries):
             or _number_category_cast(self[name], wanted)
             or _masked.masked_name(wanted) is not None
             or _masked.masked_of(self[name]) is not None
+            or _sparse.sparse_dtype(wanted) is not None
+            or _sparse.sparse_of(self[name]) is not None
             or type(wanted).__name__ == "ArrowDtype"
             or _is_period_type(wanted)
         }
@@ -14426,7 +14442,11 @@ class SeriesMixin(_Carries):
         if _is_period_type(dtype):
             dtype = None
         if dtype is not None:
-            arrow = type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
+            arrow = (
+                type(dtype).__name__ == "ArrowDtype"
+                or _masked.masked_name(dtype) is not None
+                or _sparse.sparse_dtype(dtype) is not None
+            )
             wanted = None if arrow else _named_dtype(dtype)
             made = type(self)._wrap(self._inner)
             try:
@@ -16619,6 +16639,10 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _sparse_side(self, other):
+            return _sparse.operated(
+                self, other, op, flip, lambda left, right: left._operator(right, op, flip, strict)
+            )
         if _masked_side(self, other):
             return _masked.operated(
                 self, other, op, lambda left, right: left._operator(right, op, flip, strict)
@@ -16668,6 +16692,14 @@ class SeriesMixin(_Carries):
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        if _sparse_side(self, other):
+            return _sparse.operated(
+                self,
+                other,
+                op,
+                flip,
+                lambda left, right: left._named(right, op, axis, level, fill_value, flip),
+            )
         if _masked_side(self, other):
             return _masked.operated(
                 self,
@@ -16857,6 +16889,10 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _sparse_side(self, other):
+            return _sparse.operated(
+                self, other, op, flip, lambda left, right: left._logical(right, op, flip)
+            )
         if _masked_side(self, other):
             return _masked.logical(self, other, op)
         _logical_operand(self, op)
@@ -17325,6 +17361,11 @@ class SeriesMixin(_Carries):
             from ._arrowtyped import as_arrow
 
             return as_arrow(self, _arrow_dtype(dtype))
+        sparse = _sparse.sparse_dtype(dtype)
+        if sparse is not None:
+            return _sparse.as_sparse(self, sparse)
+        if _sparse.sparse_of(self) is not None:
+            return _sparse.plain(self)._astype(dtype, copy, errors)
         masked = _masked.masked_name(dtype)
         if masked is not None:
             return _masked.as_masked(self, masked)
@@ -30431,6 +30472,9 @@ def _text_values(
     pandas writes a gap in its nullable integer and boolean columns.
     """
     dtype = str(column.dtype)
+    if _sparse.sparse_of(column) is not None:
+        column = _sparse.plain(column)
+        dtype = str(column.dtype)
     if _masked.masked_of(column):
         # Each value prints as the lower case column prints it, and a gap as `<NA>`.
         lower = _masked.plain(column)
@@ -32271,3 +32315,92 @@ for _method, _how in (
     ("to_numpy", "raw"),
 ):
     setattr(SeriesMixin, _method, _masked_through(getattr(SeriesMixin, _method), _how))
+
+
+def _sparse_through(method: Any, how: str) -> Any:
+    """A method of a series that, on a sparse column, runs over the dense column.
+
+    `how` says what becomes of the answer, which is where the fill value pandas
+    answers is decided. `reduce`, `scan`, `unary` and `transform` go through the
+    function of `_sparse` with the same name, `keep` writes the answer back with
+    the column's fill value, `fill` does that unless the fill value was missing
+    and the value filled with replaces it, `describe` is refused as pandas refuses
+    it, and `raw` hands the answer back dense.
+    """
+
+    @functools.wraps(method)
+    def run(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _sparse.sparse_of(self) is None:
+            return method(self, *args, **kwargs)
+
+        kind = args[0] if args else kwargs.get("kind", kwargs.get("op"))
+        args = tuple(_sparse.plain(arg) if _sparse_side(arg, None) else arg for arg in args)
+
+        def dense(column: Any) -> Any:
+            return method(column, *args, **kwargs)
+
+        if how == "reduce":
+            return _sparse.reduced(self, kind, dense)
+        if how == "scan":
+            return _sparse.scanned(self, kind)
+        if how == "describe":
+            # pandas' description starts with the deviation, which it refuses on a sparse column.
+            return _sparse.reduced(self, "std", dense)
+        if how == "unary":
+            return _sparse.unary(self, kind, dense)
+        if how == "transform":
+            return _sparse.transformed(self, kind, dense)
+        if how == "fill":
+            value = args[0] if args else kwargs.get("value")
+            return _sparse.kept(self, dense, value)
+        if how == "keep":
+            return _sparse.kept(self, dense)
+        if how == "map":
+            return _sparse.mapped(self, dense, args[0] if args else kwargs.get("func"))
+        return dense(_sparse.plain(self))
+
+    return run
+
+
+for _method, _how in (
+    ("_reduce", "reduce"),
+    ("_truth", "raw"),
+    ("_scan", "scan"),
+    ("_unary", "unary"),
+    ("_shift", "keep"),
+    ("_transformed", "transform"),
+    ("_value_counts", "raw"),
+    ("sort_values", "keep"),
+    ("where", "keep"),
+    ("fillna", "fill"),
+    ("to_numpy", "raw"),
+    ("describe", "describe"),
+    ("clip", "keep"),
+    ("mask", "keep"),
+    ("_reindex", "keep"),
+    ("map", "map"),
+    ("apply", "map"),
+    ("groupby", "raw"),
+    ("_extreme_at", "raw"),
+):
+    setattr(SeriesMixin, _method, _sparse_through(getattr(SeriesMixin, _method), _how))
+
+
+def _dense_first(build: Any) -> Any:
+    """A window builder that reads a sparse column as its dense column, as pandas does."""
+
+    @functools.wraps(build)
+    def run(data: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(data, SeriesMixin) and _sparse.sparse_of(data) is not None:
+            data = _sparse.plain(data)
+        return build(data, *args, **kwargs)
+
+    return run
+
+
+_rolling = _dense_first(_rolling)
+_expanding = _dense_first(_expanding)
+_ewm = _dense_first(_ewm)
+
+SeriesMixin.sparse = Namespace(_sparse.SparseAccessor)  # type: ignore[attr-defined]
+DataFrameMixin.sparse = Namespace(_sparse.SparseFrameAccessor)  # type: ignore[attr-defined]

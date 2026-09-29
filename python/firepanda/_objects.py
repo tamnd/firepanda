@@ -48,6 +48,11 @@ U+0002, and then the period's ordinal as a whole number. The number is written
 at a fixed width, so the text sorts as the periods do. A cell reads back as a
 `Period` of the type's frequency, and a gap reads as NaT. Document 103
 describes it.
+
+A sparse column carries the letter `S`, then its `SparseDtype`'s name such as
+`Sparse[int64, 0]` and U+0002, and then the value. Every value is written,
+including the ones equal to the fill value, and a gap reads as NaN. Document
+114 describes it.
 """
 
 from __future__ import annotations
@@ -67,9 +72,12 @@ _ARROW = "A"
 _MASKED = "M"
 _INTERVAL = "I"
 _PERIOD = "P"
+_SPARSE = "S"
 _TYPE_END = "\x02"
 _ARROW_TYPES: dict[str, Any] = {}
 """Each Arrow type a cell was written with, by the text the cell carries."""
+_SPARSE_TYPES: dict[str, Any] = {}
+"""Each `SparseDtype` a cell was written with, by its name, which is the text the cell carries."""
 
 
 def _written(value: Any) -> str:
@@ -169,7 +177,7 @@ def _start(text: str) -> int:
         return 1
     if text[1] in _SPELLINGS:
         return 2 if len(text) >= 4 and text[2] in _KINDS else 0
-    if text[1] in (_ARROW, _MASKED, _INTERVAL, _PERIOD):
+    if text[1] in (_ARROW, _MASKED, _INTERVAL, _PERIOD, _SPARSE):
         at = text.find(_TYPE_END)
         return at + 1 if at > 1 and len(text) > at + 2 and text[at + 1] in _KINDS else 0
     return 0
@@ -228,6 +236,26 @@ def masked_name(text: Any) -> str | None:
 def masked_name_of(inner: Any) -> str | None:
     """The masked type of an extension column, or None for any other column."""
     return masked_name(_first(inner))
+
+
+def sparse_cells(values: Any, dtype: Any) -> list[Any]:
+    """Every value of a list as the cells of a column of one `SparseDtype`, a gap for None."""
+    text = dtype.name
+    _SPARSE_TYPES[text] = dtype
+    head = MARK + _SPARSE + text + _TYPE_END
+    return [None if value is None else head + _written(value) for value in values]
+
+
+def sparse_type(text: Any) -> Any:
+    """The `SparseDtype` a written cell carries, or None when it carries none."""
+    if not is_cell(text) or text[1] != _SPARSE:
+        return None
+    return _SPARSE_TYPES.get(text[2 : text.find(_TYPE_END)])
+
+
+def sparse_type_of(inner: Any) -> Any:
+    """The `SparseDtype` of an extension column, or None for any other column."""
+    return sparse_type(_first(inner))
 
 
 def interval_cells(pairs: Any, name: str) -> list[Any]:
@@ -322,7 +350,7 @@ def gap_of(inner: Any) -> Any:
 
         return NA
     letter = spelling(first)
-    if letter == "N" or interval_name(first) is not None:
+    if letter == "N" or interval_name(first) is not None or sparse_type(first) is not None:
         return math.nan
     if letter == "T" or period_name(first) is not None:
         from ._scalars import NaT
