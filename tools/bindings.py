@@ -2936,6 +2936,14 @@ FRAME = Exposed(
             returns="Any",
         ),
         Member(
+            name="explode",
+            kind="method",
+            signature="column: Any, ignore_index: bool = False",
+            body="self._exploded_rows(column, ignore_index)",
+            doc="Each list in one or more columns spread over rows of its own.",
+            returns="DataFrame",
+        ),
+        Member(
             name="take",
             kind="method",
             signature="indices: Any, axis: Any = 0, **kwargs: Any",
@@ -3923,6 +3931,14 @@ SERIES = Exposed(
             body="self._inner.null_count() > 0",
             doc="Whether any value is missing.",
             returns="bool",
+        ),
+        Member(
+            name="explode",
+            kind="method",
+            signature="ignore_index: bool = False",
+            body="self._exploded(ignore_index)",
+            doc="Each list in the column spread over rows of its own.",
+            returns="Series",
         ),
         Member(
             name="__arrow_c_schema__",

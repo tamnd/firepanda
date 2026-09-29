@@ -2362,6 +2362,13 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def explode(self, column: Any, ignore_index: bool = False) -> DataFrame:
+        """Each list in one or more columns spread over rows of its own."""
+        try:
+            return self._exploded_rows(column, ignore_index)
+        except Exception as error:
+            raise translate(error) from None
+
     def take(self, indices: Any, axis: Any = 0, **kwargs: Any) -> DataFrame:
         """The rows or the columns at a set of positions, in the order given."""
         try:
@@ -3683,6 +3690,13 @@ class Series(SeriesMixin):
         """Whether any value is missing."""
         try:
             return self._inner.null_count() > 0
+        except Exception as error:
+            raise translate(error) from None
+
+    def explode(self, ignore_index: bool = False) -> Series:
+        """Each list in the column spread over rows of its own."""
+        try:
+            return self._exploded(ignore_index)
         except Exception as error:
             raise translate(error) from None
 

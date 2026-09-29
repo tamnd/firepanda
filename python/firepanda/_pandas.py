@@ -8927,6 +8927,9 @@ class DataFrameMixin(_Carries):
         try:
             return DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
         except Exception as error:
+            nested = _nested_frame(data)
+            if nested is not None:
+                return nested
             raise translate(error) from None
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
@@ -9993,6 +9996,35 @@ class DataFrameMixin(_Carries):
         for at in range(self._inner.length()):
             row = tuple(([labels[at]] if index else []) + [column[at] for column in columns])
             yield row if made is None else made(*row)
+
+    def _exploded_rows(self, column: Any, ignore_index: bool) -> DataFrame:
+        """Each list in one or more object columns spread over rows of its own.
+
+        The other columns repeat with the rows. Several columns explode together,
+        so their lists must hold as many items row by row, and an empty list or a
+        value that is not a list counts as one, which is pandas' rule and its text.
+        """
+        names = list(column) if isinstance(column, list | tuple) else [column]
+        if not names:
+            raise InvalidArgumentError("column must be nonempty")
+        if len(set(names)) < len(names):
+            raise InvalidArgumentError("column must be unique")
+        exploding = [name for name in names if _objects.is_object(self[name]._inner)]
+        items = {
+            name: [_exploded_items(value) for value in _values_of(self[name]._inner)]
+            for name in exploding
+        }
+        positions: list[int] = []
+        for at in range(len(self)):
+            counts = {len(items[name][at]) for name in exploding}
+            if len(counts) > 1:
+                raise InvalidArgumentError("columns must have matching element counts")
+            positions.extend([at] * (counts.pop() if counts else 1))
+        out = self.take(positions)
+        for name in exploding:
+            values = [value for row in items[name] for value in row]
+            out = out._assigned(name, _objects.cells(values))
+        return out.reset_index(drop=True) if ignore_index else out
 
     def copy(self, deep: bool = True) -> DataFrame:
         """Another handle on the same rows, which costs nothing here.
@@ -14638,6 +14670,26 @@ class SeriesMixin(_Carries):
             return Series._wrap(answered._inner.column(_carried(label)).relabel(label))
         except Exception as error:
             raise translate(error) from None
+
+    def _exploded(self, ignore_index: bool) -> Series:
+        """Each list in an object column spread over rows of its own, as pandas' `explode`.
+
+        The row labels repeat with the rows. A column that is not object holds no
+        lists, so it comes back as it was, which is pandas' answer too.
+        """
+        from ._frame import Series
+
+        if not _objects.is_object(self._inner):
+            return self.reset_index(drop=True) if ignore_index else self.copy()
+        positions: list[int] = []
+        values: list[Any] = []
+        for at, value in enumerate(_values_of(self._inner)):
+            items = _exploded_items(value)
+            positions.extend([at] * len(items))
+            values.extend(items)
+        taken = self.take(positions)
+        out = Series(_objects.cells(values), index=taken.index, name=self.name)
+        return out.reset_index(drop=True) if ignore_index else out
 
     def copy(self, deep: bool = True) -> Series:
         """Another handle on the same values, for the frame method's reasons.
@@ -27323,6 +27375,51 @@ def pivot_table(
 def _list_like(value: Any) -> bool:
     """Whether pandas reads a value as several values rather than one."""
     return hasattr(value, "__iter__") and not isinstance(value, str | bytes | dict)
+
+
+def _exploded_items(value: Any) -> list[Any]:
+    """The rows one value of an exploded column becomes, as pandas' `explode` makes them.
+
+    A list, a tuple, a set or an array gives one row per item and NaN for none at
+    all, and anything else, a gap included, stays one row as it is.
+    """
+    if not _list_like(value):
+        return [value]
+    items = list(value)
+    return items if items else [math.nan]
+
+
+def _nested_frame(data: Any) -> Any:
+    """A frame read from an Arrow table with list or struct columns, or None without any.
+
+    The extension reads no nested Arrow type, and pandas reads one into an object
+    column of lists and dicts. So the nested columns are read by pyarrow as Python
+    values and held as object columns, and the rest go through the extension as
+    they would have. None means the table has no nested column, or pyarrow is not
+    there to read one, and the extension's own refusal stands.
+    """
+    try:
+        import pyarrow as pa
+
+        table = pa.table(data)
+    except Exception:
+        # No pyarrow, or nothing it reads as a table.
+        return None
+    nested = [pa.types.is_nested(field.type) for field in table.schema]
+    names = table.column_names
+    if not any(nested) or len(set(names)) < len(names):
+        return None
+    from ._frame import DataFrame, Series
+
+    flat = [at for at, deep in enumerate(nested) if not deep]
+    read = DataFrame.from_arrow(table.select(flat)) if flat else None
+    columns = {}
+    for at, name in enumerate(names):
+        if nested[at]:
+            columns[name] = Series(_objects.cells(table.column(at).to_pylist()), name=name)
+        else:
+            columns[name] = read[name]
+    return DataFrame(columns)
 
 
 def _crosstab_keys(keys: Any, what: str) -> Any:
