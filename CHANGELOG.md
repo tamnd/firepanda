@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_iceberg, to_iceberg and read_spss
+
+`read_iceberg` and `DataFrame.to_iceberg` read and write Apache Iceberg tables through pyiceberg, with pandas' arguments for the catalog, the columns, the row filter, the snapshot and appending, and labels other than the default are kept as a column the way pandas keeps them. `read_spss` reads an SPSS file through pyreadstat with `usecols`, `convert_categoricals` and `dtype_backend`, and puts the file's metadata in `attrs` as pandas does. A missing package raises pandas' sentence.
+
 ### Added: to_excel and ExcelWriter
 
 `DataFrame.to_excel`, `Series.to_excel` and `ExcelWriter` write workbooks with pandas' signatures through openpyxl, xlsxwriter or odfpy, picking the engine from the extension and the `io.excel.*.writer` options as pandas does. A port of pandas' `ExcelFormatter` lays out the cells, so the header rows, the index names, merged MultiIndex labels, `na_rep`, `inf_rep`, `float_format`, `startrow`, `startcol`, `freeze_panes` and `autofilter` land where pandas puts them, with pandas' number formats for moments and durations. A writer holds several sheets, appends to an existing book with every `if_sheet_exists` choice, and fails with pandas' sentences.

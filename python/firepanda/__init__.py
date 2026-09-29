@@ -75,6 +75,7 @@ from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
 from ._html_read import read_html
+from ._iceberg import read_iceberg
 from ._interval import Interval, IntervalDtype, IntervalIndex, interval_range
 from ._masked import (
     BooleanDtype,
@@ -128,6 +129,7 @@ from ._query import eval
 from ._range_index import RangeIndex
 from ._scalars import NaT, Timedelta, Timestamp
 from ._sparse import SparseDtype
+from ._spss import read_spss
 from ._sql import read_sql, read_sql_query, read_sql_table
 from ._tester import test
 from ._textread import read_fwf, read_table
@@ -226,10 +228,12 @@ __all__ = [
     "read_feather",
     "read_fwf",
     "read_html",
+    "read_iceberg",
     "read_json",
     "read_orc",
     "read_parquet",
     "read_pickle",
+    "read_spss",
     "read_sql",
     "read_sql_query",
     "read_sql_table",
