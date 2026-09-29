@@ -87,6 +87,9 @@ A reader or method that needs a package which is not installed now says so the w
 ### Added: read_html
 
 `read_html` reads the tables of an HTML document into frames the way pandas does, with `match`, `attrs`, `displayed_only`, header inference from `thead` and `th` rows, `colspan` and `rowspan` expansion, `extract_links`, and the `read_csv` options for typing the cells. It parses with the standard library, so it needs neither lxml nor BeautifulSoup.
+### Added: DuckDB's .test files run against firepanda, with a floor
+
+`pixi run conformance` runs DuckDB's own `.test` files from the vendored corpus through firepanda and checks each against what the file says DuckDB answers: every statement's success or error and every query's rows, whether sorted, hashed or labelled. The files are run unmodified. A file that needs an extension, a database file or the corpus's data directory is counted as not run, and every failing file is put in the bucket of its first failure: a refusal by name, a missing function, a divergence, a wrong answer or a crash. The per directory table over the target directories is in the README with its denominators, and `tests/conformance_floor.txt` holds the count that passes in each, which CI checks so a change that lowers it fails. `--all` runs every directory and writes the failures to `build/conformance/failures.txt`.
 
 ### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
 

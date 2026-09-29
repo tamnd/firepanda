@@ -702,7 +702,7 @@ def main(argv=None):
         return 2
 
     wanted = args.paths or (
-        ["test/sql"] if args.all or args.readme else ["test/sql/" + t for t in TARGETS]
+        ["test/sql"] if args.all else ["test/sql/" + t for t in TARGETS]
     )
     paths = []
     for want in wanted:

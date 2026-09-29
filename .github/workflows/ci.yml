@@ -645,7 +645,10 @@ jobs:
     # did. A wedge at exit holds the process open with nothing left to print, so
     # without these the log stops at the last line of a report that finished and
     # there is nothing to tell it apart from a genuinely slow run.
-    timeout-minutes: 20
+    #
+    # Forty rather than twenty since the conformance step joined it, which
+    # builds its own program and runs every statement of the target directories.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
@@ -736,6 +739,16 @@ jobs:
       - name: TPC-H answers, through both engines
         run: pixi run tpch
         timeout-minutes: 10
+
+      # DuckDB's own .test files over the target directories, compared with
+      # what each file says DuckDB answers. The count that agrees is checked
+      # against tests/conformance_floor.txt, so a change that makes fewer of them
+      # agree fails here and one that makes more of them agree raises the floor
+      # with `python tools/conformance.py --update`.
+      # docs/specs/sql/11-conformance.md section 3.
+      - name: DuckDB's .test files, against the conformance floor
+        run: pixi run conformance
+        timeout-minutes: 25
 
   # The five regular expression comparisons, which until now no workflow has
   # ever run. They were written alongside documents 76 and 79 through 81, they
