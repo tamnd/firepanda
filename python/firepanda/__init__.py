@@ -56,6 +56,7 @@ from ._dtypes import DatetimeTZDtype, StringDtype
 from ._expression import col
 from ._frame import DataFrame, Index, Series, from_arrow
 from ._frequency import infer_freq
+from ._html_read import read_html
 from ._interval import Interval, IntervalDtype, IntervalIndex, interval_range
 from ._masked import (
     BooleanDtype,
@@ -196,6 +197,7 @@ __all__ = [
     "read_csv",
     "read_feather",
     "read_fwf",
+    "read_html",
     "read_json",
     "read_orc",
     "read_parquet",
