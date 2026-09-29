@@ -268,6 +268,9 @@ def period_name_of(inner: Any) -> str | None:
 
 def cell_like(value: Any, like: Any) -> Any:
     """A category label written the way a column's other categories are, `like` being one."""
+    periods = period_name(like)
+    if periods is not None and hasattr(value, "ordinal") and not is_gap(value):
+        return period_cells([value.ordinal], periods)[0]
     kind = interval_name(like)
     if kind is None or is_gap(value) or not hasattr(value, "closed"):
         return cell(value, "N")

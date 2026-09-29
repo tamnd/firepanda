@@ -35,6 +35,10 @@ def frame(lib: ModuleType) -> Any:
 
 
 CASES: dict[str, Callable[[ModuleType], Any]] = {
+    "value-counts": lambda lib: lib.Series(four(lib)).value_counts(),
+    "index": lambda lib: lib.Index(four(lib)),
+    "group-count": lambda lib: frame(lib).groupby("p", dropna=False)["v"].count(),
+    "astype-category": lambda lib: series(lib).astype("category"),
     "frame-astype": lambda lib: lib.DataFrame({"a": ["2026-01", "2026-02"]}).astype("period[M]"),
     "frame-astype-dict": lambda lib: (
         lib.DataFrame({"a": ["2026-01", "2026-02"]}).astype({"a": "period[D]"}).a.tolist()

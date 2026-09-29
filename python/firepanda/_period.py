@@ -1004,6 +1004,13 @@ class PeriodDtype(str):
         return "O"
 
     @property
+    def index_class(self) -> Any:
+        """The index a type of periods labels rows with, `PeriodIndex`."""
+        from ._period_index import PeriodIndex
+
+        return PeriodIndex
+
+    @property
     def na_value(self) -> Any:
         """What a gap reads as, `NaT`."""
         return NaT

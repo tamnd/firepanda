@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: PeriodIndex and period_range
+
+`PeriodIndex` and `period_range` are now available, as in pandas. The index is built from periods, their text or instants with a frequency or a period dtype, or with `from_fields` and `from_ordinals`. It answers the period fields, `start_time`, `end_time`, `to_timestamp`, `asfreq`, `strftime`, `shift` and integer arithmetic, and finds labels by a period or its text, including label slices. Series and frames labelled by periods print `Freq:`, and grouping by a period column, `value_counts`, `pd.Index` of periods, `reindex` onto periods and a category of periods all give a `PeriodIndex`. Document 104 describes the design.
+
 ### Added: Period columns
 
 A Series or DataFrame column of `Period` values of one frequency is now a period column with the dtype `period[M]`, as in pandas. It can be asked for with `dtype="period[M]"` or `astype`, prints each period in its short form with `NaT` for gaps, sorts, groups and compares by period, moves by integers, and gives offsets when a period is subtracted. Scaling a period column and ordering it against another frequency are refused with pandas' messages. Document 103 describes the cell design and what waits for `PeriodIndex`.
