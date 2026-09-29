@@ -294,17 +294,13 @@ def _object_texts(column: Any) -> Any:
     """An object column as the text column the string accessor reads.
 
     pandas runs a string method on each value that is text and answers a gap for
-    each one that is not, so a value that is not text is a gap here. pandas also
-    runs `len`, indexing and `join` on a list in a cell, and those are not
-    written yet, so a column holding lists is refused rather than read as gaps.
+    each one that is not, so a value that is not text is a gap here. `len`,
+    indexing and `join` also work on a list in a cell, and those read the
+    values themselves through `StringMixin._items`.
     """
     from ._frame import Series
 
     values = _values_of(column._inner)
-    if any(isinstance(value, (list, tuple)) for value in values):
-        raise NotImplementedError(
-            "the string accessor on an object column of lists is not supported yet"
-        )
     texts = [value if isinstance(value, str) else None for value in values]
     return Series(texts, dtype="str", index=column.index, name=column.name)
 
@@ -19459,11 +19455,12 @@ class StringMixin:
     fold of the one prefix answer over the tuple.
     """
 
-    __slots__ = ("_series",)
+    __slots__ = ("_held", "_series")
     """The series the accessor was reached from, held for the reason
-    `DatetimeMixin` gives."""
+    `DatetimeMixin` gives, and the object column it was read from if it was one."""
 
     _series: Series
+    _held: Series | None
 
     def __init__(self, data: Series) -> None:
         """Holds the series, and refuses one that is not text.
@@ -19480,7 +19477,9 @@ class StringMixin:
         the last word is ours, because inventing a second vocabulary for types
         so that one message can read like pandas would be the wrong trade.
         """
+        self._held = None
         if _objects.is_object(data._inner):
+            self._held = data
             data = _object_texts(data)
         if not data._inner.string_is_text():
             raise AttributeError(f"Can only use .str accessor with string values, not {data.dtype}")
@@ -19550,6 +19549,47 @@ class StringMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _lengths(self) -> Series:
+        """How long each row is, and on an object column how many items each value holds."""
+        if self._held is not None:
+            return self._items(len)
+        return self._number("len")
+
+    def __getitem__(self, key: Any) -> Series:
+        """`s.str[i]` is `get(i)` and `s.str[a:b:c]` is `slice(a, b, c)`, as in pandas."""
+        if isinstance(key, slice):
+            return self._sliced(key.start, key.stop, key.step)
+        return self._at(key)
+
+    def _items(self, each: Callable[[Any], Any]) -> Series:
+        """One answer per value of an object column, computed in Python as pandas does.
+
+        This is how `len`, `get`, `slice` and `join` read a list, a tuple or a
+        dict in a cell as well as text. A gap stays the gap it was, and a value
+        the operation cannot take, such as a number, answers NaN, which is what
+        pandas' `_str_map` does when the call raises `TypeError`.
+        """
+        from ._frame import Series
+
+        held = self._held
+        answers = []
+        for value in _values_of(held._inner):
+            if _objects.is_gap(value):
+                answers.append(value)
+                continue
+            try:
+                answers.append(each(value))
+            except (TypeError, AttributeError):
+                answers.append(math.nan)
+        found = [answer for answer in answers if not _objects.is_gap(answer)]
+        if found and all(isinstance(answer, str) for answer in found):
+            # pandas keeps text read out of an object column as an object column.
+            return Series(answers, dtype=object, index=held.index, name=held.name)
+        if all(isinstance(answer, (int, float)) for answer in found):
+            # Numbers with a gap are floats in pandas, whatever the gap was written as.
+            answers = [math.nan if _objects.is_gap(answer) else answer for answer in answers]
+        return Series(answers, index=held.index, name=held.name)
+
     def _sliced(self, start: Any, stop: Any, step: Any) -> Series:
         """A range of characters out of every row.
 
@@ -19557,6 +19597,9 @@ class StringMixin:
         library chose, and it is the only one of the three that can be filled in
         without knowing how long the row is.
         """
+        if self._held is not None:
+            cut = slice(start, stop, step)
+            return self._items(lambda value: value[cut])
         return self._text("slice", "", start, stop, 1 if step is None else step)
 
     def _replaced_slice(self, start: Any, stop: Any, repl: Any) -> Series:
@@ -19568,7 +19611,19 @@ class StringMixin:
         return self._text("slice_replace", "" if repl is None else repl, start, stop)
 
     def _at(self, i: Any) -> Series:
-        """One character out of every row, by position."""
+        """One character out of every row, by position.
+
+        On an object column a dict answers its value at the key, as pandas'
+        `_str_get` does, and anything too short answers NaN.
+        """
+        if self._held is not None:
+
+            def got(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return value.get(i)
+                return value[i] if -len(value) <= i < len(value) else math.nan
+
+            return self._items(got)
         return self._text("get", "", i)
 
     def _trimmed(self, kind: str, to_strip: Any) -> Series:
@@ -20293,7 +20348,13 @@ class StringMixin:
         return Series(rows, index=self._series.index, name=self._series.name, dtype="string")
 
     def _characters_joined(self, sep: Any) -> Series:
-        """Every row with the separator between each pair of its characters."""
+        """Every row with the separator between each pair of its characters.
+
+        On an object column a list or a tuple of text is joined with the
+        separator, and one holding anything else answers NaN.
+        """
+        if self._held is not None:
+            return self._items(sep.join)
         return self._mapped_text(lambda row: sep.join(row))
 
     def _wrapped_lines(self, arguments: dict[str, Any]) -> Series:

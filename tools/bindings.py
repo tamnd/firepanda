@@ -1035,7 +1035,7 @@ def _string_members() -> tuple[Member, ...]:
             name="len",
             kind="method",
             signature="",
-            body='self._number("len")',
+body="self._lengths()",
             doc="How many characters each row holds.",
             returns="Series",
         ),

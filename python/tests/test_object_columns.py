@@ -137,6 +137,24 @@ CASES: list[Callable[[ModuleType], Any]] = [
     lambda lib: lib.Series([{"a"}, frozenset(["b"]), ("x",), ["y", ("z", "w")], {"k": ["v"]}]),
     lambda lib: lib.Series([1.5, "a", float("nan")]),
     lambda lib: lib.Series([1.5, "a", None]),
+    lambda lib: lists(lib).str.len(),
+    lambda lib: lists(lib).str.get(0),
+    lambda lib: lists(lib).str.get(-1),
+    lambda lib: lists(lib).str[:1],
+    lambda lib: lists(lib).str[0],
+    lambda lib: lib.Series([[1, 2], [3]]).str.len(),
+    lambda lib: lib.Series([["a", "b"], ["c"], ("d", "e")]).str.join(","),
+    lambda lib: lib.Series([["a", 1], ["c"], 5]).str.join(","),
+    lambda lib: lib.Series(["abc", [1, 2, 3], 5, ("x", "y")]).str.len(),
+    lambda lib: lib.Series(["abc", [1, 2, 3], 5, ("x", "y")]).str[::-1],
+    lambda lib: lib.Series([{"k": 1}, {"j": 2}]).str.get("k"),
+    lambda lib: lib.Series([[1, 2], [3]]).str.get(9),
+    lambda lib: lib.Series(["ab", "cd"], dtype=object).str.len(),
+    lambda lib: lib.Series(["ab", "cd"], dtype=object).str.get(0),
+    lambda lib: lib.Series([[1, 2]], index=["r"], name="n").str.len(),
+    lambda lib: lib.Series(["abc", "de"]).str[0],
+    lambda lib: lib.Series(["abc", None]).str[1:],
+    lambda lib: lib.Series(["abc", "de"]).str[-1],
 ]
 
 
@@ -166,9 +184,8 @@ def test_a_gap_reads_as_the_list_wrote_it() -> None:
     assert math.isnan(fp.Series([1, 2]).astype(object).reindex([0, 5]).tolist()[1])
 
 
-def test_the_string_accessor_refuses_lists_for_now() -> None:
-    with pytest.raises(NotImplementedError, match="lists"):
-        fp.Series([[1], [2]]).str.len()
+def test_text_methods_read_a_list_as_a_gap() -> None:
+    assert fp.Series([[1], ["a"]]).str.upper().isna().tolist() == [True, True]
 
 
 def test_text_that_starts_with_the_mark_is_still_text() -> None:

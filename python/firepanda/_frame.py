@@ -449,7 +449,7 @@ class StringAccessor(StringMixin):
     def len(self) -> Series:
         """How many characters each row holds."""
         try:
-            return self._number("len")
+            return self._lengths()
         except Exception as error:
             raise translate(error) from None
 
