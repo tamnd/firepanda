@@ -9346,7 +9346,11 @@ class DataFrameMixin(_Carries):
                     try:
                         out = DataFrame._wrap(_firepanda.DataFrame(plain))
                     except Exception:
-                        out = DataFrame._wrap(DataFrameMixin._columnwise(plain, error))
+                        try:
+                            return DataFrameMixin._columnwise(data, error)
+                        except Exception:
+                            # Moments held in an index rather than a list are put back after.
+                            out = DataFrame._wrap(DataFrameMixin._columnwise(plain, error))
                     for name, made in temporal.items():
                         out = out._assigned(name, Series._wrap(made))
                     return out._inner
