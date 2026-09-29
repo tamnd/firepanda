@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Columns with more than one level
+
+A frame whose column names are all tuples of one length of at least two now has `MultiIndex` columns, as in pandas. `df[("a", "x")]` selects one column, `df["a"]` selects every column under the first level `a` and drops that level, or answers a series when what is left of each name is empty text. The repr and `to_string` print one header line per level, sparsified the way pandas prints them, and `to_csv` writes one header row per level. Level names on the columns read as None for now.
+
 ### Added: dt.to_pydatetime, str.encode, str.decode and DataFrame.to_records
 
 `dt.to_pydatetime` answers an object column of Python datetimes with NaT for a gap, as pandas 3 does. `str.encode` answers an object column of bytes and `str.decode` reads bytes back as text, with anything that is not bytes as a gap. `DataFrame.to_records` answers a numpy record array with the row labels first, named and typed as pandas names and types them, including `column_dtypes` and `index_dtypes`.
