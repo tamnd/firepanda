@@ -616,6 +616,7 @@ from .ast import (
     REF_TABLE,
     SELECT_DISTINCT,
     SORT_DESCENDING,
+    STMT_PIVOT,
     STMT_QUERY,
     STMT_SELECT,
     STMT_SET_OPERATION,
@@ -627,6 +628,7 @@ from .generated.functions import KIND_AGGREGATE
 from .registry import Registry
 from .cte import NOT_A_CTE, aliased, read_ctes
 from .printer import print_expr, print_window
+from .transform import KEEPS_NULLS
 from .star import (
     NOT_REPLACED,
     Renaming,
@@ -2676,6 +2678,13 @@ struct _Walk(Movable):
     """Whether the expression being lowered is a select item an `unnest` may
     sit in. Nowhere else has a row for each element to be written into."""
 
+    var pivot: Int
+    """The condition every aggregate's argument is put under while a `PIVOT`
+    lowers one of its cells, and -1 the rest of the time. A cell is the fold
+    over the rows whose pivot columns hold that cell's values, which is
+    `sum(x) FILTER (WHERE a = 1)` in DuckDB and `sum(CASE WHEN a = 1 THEN x
+    END)` here."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -2702,6 +2711,7 @@ struct _Walk(Movable):
         self.unnests = List[Int]()
         self.unnest_names = List[String]()
         self.unnesting = False
+        self.pivot = -1
 
     def _scalar(self, at: UInt32) -> Int:
         """Where a subquery's answer landed, if a cross join was built for it.
@@ -3602,6 +3612,24 @@ def _lower_expr(
                         " over one argument, and this call has ",
                         len(args),
                     )
+                )
+            if walk.pivot >= 0:
+                if String(",", name, ",") in KEEPS_NULLS:
+                    raise Error(
+                        String(
+                            name,
+                            (
+                                " reads a null as a value, so a PIVOT cell"
+                                " cannot hand it the rows outside the cell as"
+                                " nulls, and firepanda has no other way to"
+                                " leave them out yet"
+                            ),
+                        )
+                    )
+                over = plan.exprs.conditional(
+                    plan.exprs.duplicate(walk.pivot),
+                    over,
+                    plan.exprs.literal(Value(null=LogicalType.NULL)),
                 )
             # A fold over no rows at all is null in SQL and zero in pandas,
             # and a count is the exception on both sides. Marked here rather
@@ -5535,6 +5563,223 @@ def _unnest_from(
     return _From(at, schema^, origin^)
 
 
+def _pivot(
+    ast: Ast,
+    statement: UInt32,
+    catalog: Catalog,
+    grammar: Grammar,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+) raises -> Int:
+    """Lowers a `PIVOT` whose every column lists its values, one group a row.
+
+    `PIVOT t ON a IN (1, 2) USING sum(x) GROUP BY g` is `SELECT g, sum(x)
+    FILTER (WHERE a = 1) AS "1", sum(x) FILTER (WHERE a = 2) AS "2" FROM t
+    GROUP BY g`, which is how DuckDB runs it too. Each cell is one pick of a
+    value for every pivot column, the first column's values outermost, and
+    each `USING` expression is lowered once per cell with its aggregates'
+    arguments put under that cell's condition. Without a `USING` a cell is a
+    `count(*)`. Without a `GROUP BY` the groups are every column neither the
+    pivot columns nor the `USING` read, in the order the source has them.
+
+    A cell is named by its values joined with `_`, an `IN` entry's alias
+    standing in for its value, and when there is more than one `USING` or the
+    one there is has an alias, by that too: `2020_total`, or `2020_sum(x)`
+    without the alias. Those are DuckDB's names.
+
+    A pivot column with no `IN`, or with an `IN` over an enum or a subquery,
+    needs the data read before the plan has a shape, and is refused.
+
+    Args:
+        ast: The arenas.
+        statement: The `STMT_PIVOT`.
+        catalog: What the table names are resolved against.
+        grammar: A loaded grammar, for the printer that names an aggregate
+            written without an alias.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to in scan order.
+        scope: Filled in with what the source put in reach.
+        ctes: The CTE names in reach.
+
+    Returns:
+        The projection over the aggregate.
+
+    Raises:
+        If a pivot column has no list of values, a value is not a constant, or
+        the source or an expression is one this does not lower.
+    """
+    var node = ast.stmts[Int(statement)]
+    var on = ast.items(node.b)
+    if len(on) == 0:
+        raise Error(
+            "firepanda lowers a PIVOT with an ON so far, and without one it is"
+            " a GROUP BY"
+        )
+    var source = _source(
+        ast, node.a, catalog, grammar, plan, sources, scope, ctes
+    )
+    var walk = _Walk()
+
+    # One header and one list of values per pivot column. The header is lowered
+    # once and copied into every cell's condition, since a node with two
+    # parents is not a thing the passes are written for.
+    var read = List[String]()
+    var headers = List[Int]()
+    var values = List[List[Int]]()
+    var labels = List[List[String]]()
+    for c in range(len(on)):
+        var column = ast.stmts[Int(on[c])]
+        var listed = ast.items(column.children)
+        if len(listed) == 0:
+            raise Error(
+                "firepanda lowers a PIVOT whose every ON column lists its"
+                " values with IN (...) so far, since without the list the"
+                " columns it makes are not known until the data is read"
+            )
+        var header = _lower_expr(ast, column.a, plan, walk, scope, False)
+        for name in plan.exprs.names(header):
+            read.append(fold(name))
+        headers.append(header)
+        var these = List[Int]()
+        var called = List[String]()
+        for i in range(len(listed)):
+            var item = ast.stmts[Int(listed[i])]
+            var value = _lower_operand(ast, item.a, plan, walk, scope, False)
+            if plan.exprs.nodes[value].kind != ExprKind.LITERAL:
+                raise Error(
+                    "a PIVOT's IN list holds constants, and entry "
+                    + String(i + 1)
+                    + " is not one"
+                )
+            if item.payload != 0:
+                called.append(String(ast.text(item.payload)))
+            else:
+                called.append(String(plan.exprs.nodes[value].value))
+            these.append(value)
+        values.append(these^)
+        labels.append(called^)
+
+    var using = ast.items(node.children)
+    var cells = List[Int]()
+    var cell_names = List[String]()
+    var picks = List[Int](length=len(on), fill=0)
+    while True:
+        var when = -1
+        var label = String()
+        for c in range(len(on)):
+            var value = values[c][picks[c]]
+            var test: Int
+            if plan.exprs.nodes[value].value.present:
+                test = plan.exprs.binary(
+                    BinaryOp.EQ,
+                    plan.exprs.duplicate(headers[c]),
+                    plan.exprs.duplicate(value),
+                )
+            else:
+                test = plan.exprs.call(
+                    "is_null", [plan.exprs.duplicate(headers[c])], True
+                )
+            if when < 0:
+                when = test
+            else:
+                when = plan.exprs.call("and", [when, test], True)
+            if c > 0:
+                label += "_"
+            label += labels[c][picks[c]]
+        walk.pivot = when
+        if len(using) == 0:
+            var counted = plan.exprs.aggregate(
+                AggKind.COUNT,
+                plan.exprs.conditional(
+                    plan.exprs.duplicate(when),
+                    plan.exprs.literal(Value(Int64(1))),
+                    plan.exprs.literal(Value(null=LogicalType.NULL)),
+                ),
+            )
+            var place = walk._record(
+                plan.exprs, counted, String("__agg_", len(walk.aggs))
+            )
+            cells.append(plan.exprs.column(String(walk.agg_names[place])))
+            cell_names.append(label.copy())
+        for u in range(len(using)):
+            var item = ast.stmts[Int(using[u])]
+            cells.append(_lower_expr(ast, item.a, plan, walk, scope, True))
+            if len(using) == 1 and item.payload == 0:
+                cell_names.append(label.copy())
+            elif item.payload != 0:
+                cell_names.append(String(label, "_", ast.text(item.payload)))
+            else:
+                cell_names.append(
+                    String(label, "_", _name_of(ast, grammar, item.a, u, scope))
+                )
+        walk.pivot = -1
+
+        # The next cell, the last column's values turning fastest.
+        var c = len(on) - 1
+        while c >= 0:
+            picks[c] += 1
+            if picks[c] < len(values[c]):
+                break
+            picks[c] = 0
+            c -= 1
+        if c < 0:
+            break
+
+    for a in range(len(walk.aggs)):
+        for name in plan.exprs.names(walk.aggs[a]):
+            read.append(fold(name))
+
+    var keys = List[Int]()
+    var key_names = List[String]()
+    var grouped = ast.length(node.payload)
+    for i in range(len(source.schema) if grouped == 0 else 0):
+        var kept = String(source.schema[i].name)
+        if fold(kept) in read:
+            continue
+        if source.origin[i] != UNBOUND:
+            keys.append(plan.exprs.column_of(source.origin[i], kept.copy()))
+        else:
+            keys.append(plan.exprs.column(kept.copy()))
+        key_names.append(kept^)
+    for g in range(grouped):
+        var named = String(ast.text(ast.at(node.payload, g)))
+        var place = -1
+        for i in range(len(source.schema)):
+            if fold(source.schema[i].name) == fold(named):
+                place = i
+                break
+        if place < 0:
+            raise Error(
+                String(
+                    "the PIVOT groups by ",
+                    named,
+                    ", and its source has no column of that name",
+                )
+            )
+        var kept = String(source.schema[place].name)
+        if source.origin[place] != UNBOUND:
+            keys.append(plan.exprs.column_of(source.origin[place], kept.copy()))
+        else:
+            keys.append(plan.exprs.column(kept.copy()))
+        key_names.append(kept^)
+
+    var outputs = List[Int]()
+    var output_names = List[String]()
+    for k in range(len(key_names)):
+        outputs.append(plan.exprs.column(key_names[k].copy()))
+        output_names.append(key_names[k].copy())
+    var names = key_names^
+    for name in walk.agg_names:
+        names.append(name.copy())
+    var folded = plan.aggregate(source.at, keys^, walk.aggs.copy(), names^)
+    for i in range(len(cells)):
+        outputs.append(cells[i])
+        output_names.append(cell_names[i].copy())
+    return plan.project(folded, outputs^, output_names^)
+
+
 def _unpivot(
     ast: Ast,
     statement: UInt32,
@@ -7271,8 +7516,8 @@ def _combine(
     orders: List[UInt32],
     mut ordered: List[Int],
 ) raises -> Int:
-    """Lowers one query body: a block, a `VALUES`, an `UNPIVOT`, or a set
-    operation over two.
+    """Lowers one query body: a block, a `VALUES`, a `PIVOT`, an `UNPIVOT`, or
+    a set operation over two.
 
     A set operation nests rather than flattening. `a EXCEPT b EXCEPT c` and
     `a EXCEPT (b EXCEPT c)` are different answers, so the left leaning shape the
@@ -7281,8 +7526,8 @@ def _combine(
 
     Args:
         ast: The arenas.
-        body: The `STMT_QUERY`, `STMT_VALUES`, `STMT_UNPIVOT` or
-            `STMT_SET_OPERATION`.
+        body: The `STMT_QUERY`, `STMT_VALUES`, `STMT_PIVOT`, `STMT_UNPIVOT`
+            or `STMT_SET_OPERATION`.
         catalog: What the table names are resolved against.
         grammar: A loaded grammar, for the printer that names an output
             column the query did not name.
@@ -7356,6 +7601,8 @@ def _combine(
         return _values(ast, body, plan)
     if node.kind == STMT_UNPIVOT:
         return _unpivot(ast, body, catalog, grammar, plan, sources, scope, ctes)
+    if node.kind == STMT_PIVOT:
+        return _pivot(ast, body, catalog, grammar, plan, sources, scope, ctes)
     return _block(
         ast,
         body,
