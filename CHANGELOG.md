@@ -36,6 +36,9 @@ A `WINDOW w AS (...)` clause now lowers. `OVER w` is the window as it is written
 ### Added: Column names that are not text
 
 A frame's columns and a series' name can be whole numbers, floats, bools, instants or spans, as in pandas. A frame built from a list of lists, a numpy array or a flat list names its columns 0, 1, 2 and so on, `columns` answers a `RangeIndex` or an int64 index for them, and `transpose` works for row labels of any of those kinds, dates included. Selecting, `loc`, `at`, `drop`, `rename`, `sort_values`, `groupby`, `set_index`, `astype`, `merge`, `concat`, `drop_duplicates`, `nlargest`, `reindex` and the repr all read such names, `concat(axis=1, ignore_index=True)` numbers the columns, and the Arrow export names each field with the text of its name. The extension still holds text, so a name that is not text is written into text on the way in and read back on the way out, as document 94 of the compat notes describes. Names that mix text with other kinds print and work, and only `columns` refuses them, because pandas answers an index of objects there.
+### Changed: a group by on two wide integer keys packs them without factorizing either
+
+A group by whose keys are integers of one dtype packs the raw values into one uint32 when their ranges multiply out to more than 64 times what a table is laid over, as long as the product fits. The per key factorizes and the pass that packed their codes are skipped, and the packed column is hashed as before. TPC-H q20 groups about 910,000 lines by part and supplier, whose ranges multiply out to two billion. On a busy 8 core VM, interleaved best of 25 runs, its group ordinals went from 109, 119 and 184 ms to 79, 55 and 117 ms. The ordinals are the same first appearance order either route gives.
 
 ### Added: The columns of a frame as an index
 
