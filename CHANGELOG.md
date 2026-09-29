@@ -23,6 +23,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: Period columns
 
 A Series or DataFrame column of `Period` values of one frequency is now a period column with the dtype `period[M]`, as in pandas. It can be asked for with `dtype="period[M]"` or `astype`, prints each period in its short form with `NaT` for gaps, sorts, groups and compares by period, moves by integers, and gives offsets when a period is subtracted. Scaling a period column and ordering it against another frequency are refused with pandas' messages. Document 103 describes the cell design and what waits for `PeriodIndex`.
+### Added: CREATE TABLE, CREATE VIEW, INSERT and DROP in SQL
+
+`firepanda.sql.execute` runs one statement against a catalog it may change. `CREATE TABLE` with columns and types, with `NOT NULL`, and `CREATE TABLE ... AS` a query make a frame under the name; `INSERT INTO` adds rows from `VALUES`, a query or `DEFAULT VALUES`, by position, by a column list or `BY NAME`, casts each to the column's type, and answers DuckDB's one-row `Count`; `CREATE VIEW` keeps the query's text, which is parsed again wherever the view is named, so a view sees rows inserted after it; and `DROP TABLE` and `DROP VIEW` take the name away. `OR REPLACE`, `IF NOT EXISTS` and `IF EXISTS` behave as in DuckDB, and every refusal a mismatch earns is DuckDB's message: a name made twice, a count of values that does not fit, a column the table lacks, a null in a `NOT NULL` column, a drop of the wrong kind, and a view that reaches itself. What a frame cannot hold (a key, a default, a check, a generated column, `ON CONFLICT`, `RETURNING`, `CASCADE`) is refused by name rather than read and dropped.
 
 ### Added: PeriodDtype
 
@@ -90,7 +93,7 @@ A frame with a column named with empty text, which `get_dummies` makes from an e
 ### Added: firepanda.testing, with assert_series_equal, assert_frame_equal and assert_index_equal
 
 A test suite written against pandas imports `pandas.testing` first, and firepanda had no such module, so every such suite failed on its import line. `firepanda.testing` has pandas' four assertions with pandas' keywords and defaults. Each check runs in pandas' order and raises pandas' message, so a failing test points at the same place under either library: the length, the index, the dtype, the values with the share that differ and the first position that does, the gaps of a text, masked or date column before its values, the name, and for a frame the shape, the columns and then each column by its position and label.
-A LATERAL subquery that folds runs
+
 ### Added: Series.list and Series.struct read off the class answer the accessor class
 
 pandas answers the accessor class for `Series.list` and `Series.struct`, the way it does for `Series.str`, so a program can read the accessor's members without a column. firepanda answered a property object there, which is not callable, so both names now go through the same descriptor as `str` and `dt`, and the accessors take `data=None` as pandas' do.
