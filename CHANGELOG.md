@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: Object columns cross to Arrow as their values
+
+An object column exported through the Arrow PyCapsule interface, on its own or in a frame, now crosses as the values it holds, the way pandas hands one to pyarrow, rather than as the text firepanda writes them in. pyarrow picks the type, so a column of lists is a list column, and a mix of values with no one Arrow type is refused as it is for pandas. This needs pyarrow installed, as pandas does, and only for a frame or column that holds an object column.
+
 ### Added: The string accessor on lists, and `s.str[...]`
 
 `s.str[i]` and `s.str[a:b:c]` now work, as `get(i)` and `slice(a, b, c)` do in pandas. On an object column, `len`, `get`, `slice`, indexing and `join` read each value in Python the way pandas does, so a list, a tuple or a dict in a cell answers its length, its item or its joined text, and a value the method cannot take, such as a number, answers NaN. Other string methods read a list as a gap rather than refusing the column. Text read out of an object column comes back as an object column, and numbers with a gap come back as floats, as in pandas.

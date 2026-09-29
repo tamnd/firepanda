@@ -7737,9 +7737,79 @@ def _arrow_inner(frame: Any) -> Any:
     """
     inner = frame._inner
     held = inner.names()
-    if not any(_names.is_held(name) for name in held):
-        return inner
-    return inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
+    if any(_names.is_held(name) for name in held):
+        inner = inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
+    if any(_objects.is_object(inner.column(name)) for name in inner.names()):
+        return _object_batch(inner)
+    return inner
+
+
+def _arrow_column(series: Any) -> Any:
+    """The column to export to Arrow, an object column as its values rather than its cells."""
+    if _objects.is_object(series._inner):
+        import pyarrow as pa
+
+        return _Exported(pa.array(_held_values(series._inner), from_pandas=True))
+    return series._inner
+
+
+def _object_batch(inner: Any) -> Any:
+    """A frame with object columns as the Arrow batch pandas would export.
+
+    The written cells are firepanda's own spelling and mean nothing to another
+    library, so each object column is handed to pyarrow as its values, which is
+    what pandas does with one. pyarrow picks the type, and refuses a mix of
+    values it has no one type for, as it does for pandas.
+    """
+    import pyarrow as pa
+
+    table = pa.table(_Exporting(inner))
+    arrays = []
+    for position, name in enumerate(inner.names()):
+        column = inner.column(name)
+        if _objects.is_object(column):
+            arrays.append(pa.array(_held_values(column), from_pandas=True))
+        else:
+            arrays.append(table.column(position).combine_chunks())
+    return _Exported(pa.RecordBatch.from_arrays(arrays, names=table.column_names))
+
+
+class _Exporting:
+    """An extension frame behind the Arrow stream dunder, so pyarrow can read it."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object:
+        return self._inner.arrow_c_stream(requested_schema)
+
+
+class _Exported:
+    """A pyarrow array or batch behind the extension's export methods.
+
+    The generated dunders call `arrow_c_schema`, `arrow_c_array` and
+    `arrow_c_stream` on what `_arrow_inner` and `_arrow_column` hand them, so a
+    column that pyarrow built answers to the same three names.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Any) -> None:
+        self._data = data
+
+    def arrow_c_schema(self) -> object:
+        shape = getattr(self._data, "schema", None) or self._data.type
+        return shape.__arrow_c_schema__()
+
+    def arrow_c_array(self, requested_schema: object | None = None) -> tuple[object, object]:
+        return self._data.__arrow_c_array__(requested_schema)
+
+    def arrow_c_stream(self, requested_schema: object | None = None) -> object:
+        import pyarrow as pa
+
+        return pa.Table.from_batches([self._data]).__arrow_c_stream__(requested_schema)
 
 
 def _held_names(frame: Any) -> list[str]:

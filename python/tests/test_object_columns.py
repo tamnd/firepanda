@@ -201,3 +201,12 @@ def test_a_number_with_a_zone_counts_from_the_epoch() -> None:
     assert repr(fp.Timestamp(1609524245, unit="s", tz="Asia/Tokyo")) == repr(
         pd.Timestamp(1609524245, unit="s", tz="Asia/Tokyo")
     )
+
+
+def test_an_object_column_exports_its_values_to_arrow() -> None:
+    pa = pytest.importorskip("pyarrow")
+    assert pa.array(fp.Series([[1, 2], None])).to_pylist() == [[1, 2], None]
+    frame = fp.DataFrame({"a": [1], "b": fp.Series([[1]])})
+    assert pa.table(frame).to_pydict() == {"a": [1], "b": [[1]]}
+    with pytest.raises(pa.ArrowInvalid):
+        pa.array(fp.Series([1, "two"]))
