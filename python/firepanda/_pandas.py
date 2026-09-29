@@ -7849,6 +7849,8 @@ def _converted(
     a NaN reads as a gap either way, because pandas' masked float reads NaN as
     missing. `whole`, `flags` and `floating` are pandas' three switches.
     """
+    if _arrowtyped.arrow_type_of(column) is not None:
+        return column
     masked = _masked.masked_of(column)
     if masked is not None:
         if not masked.startswith("Float"):
@@ -7858,7 +7860,10 @@ def _converted(
     if printed.startswith(("int", "uint")):
         return _masked.as_masked(column, _masked.masked_for(printed)) if whole else column
     if printed == "bool":
-        return _masked.as_masked(column, "boolean") if flags else column
+        if flags:
+            return _masked.as_masked(column, "boolean")
+        # pandas asks whether flags are whole numbers before it asks about flags.
+        return _masked.as_masked(column, "Int64") if whole else column
     if not printed.startswith("float"):
         return column
     values = [value for value in column.tolist() if not _missing(value)]
@@ -7867,6 +7872,49 @@ def _converted(
     if floating:
         return _masked.as_masked(column, _masked.masked_for(printed))
     return column
+
+
+def _arrow_converted(
+    column: Series, text: bool, whole: bool, flags: bool, floating: bool
+) -> Series:
+    """One column `_converted` left, backed by Arrow as pandas' pyarrow backend leaves it.
+
+    pandas moves the masked type it picked to Arrow when that type's switch is
+    on: whole numbers with `whole`, floats with `floating`, flags with `flags`
+    and text with `text`. Moments and durations always move, a column of
+    objects that are all gaps becomes Arrow's null type, and any other column
+    of objects or categories stays, since Arrow has no type pandas maps it to.
+    """
+    import pyarrow as pa
+
+    from ._arrowtyped import arrow_series
+
+    if _arrowtyped.arrow_type_of(column) is not None:
+        return column
+    printed = str(column.dtype)
+    if printed.lower().startswith(("int", "uint")):
+        moved = whole
+    elif printed.lower().startswith("float"):
+        moved = floating
+    elif printed in ("bool", "boolean"):
+        moved = flags
+    elif printed in ("str", "string"):
+        moved = text
+    elif printed == "object":
+        if len(column) and bool(column.isna().all()):
+            return arrow_series(pa.nulls(len(column)), column.index, column.name)
+        moved = False
+    else:
+        moved = printed.startswith(("datetime64", "timedelta64"))
+    if not moved:
+        return column
+    array = pa.table(column.reset_index(drop=True).to_frame("v")).column(0).combine_chunks()
+    if pa.types.is_large_string(array.type) or pa.types.is_string_view(array.type):
+        array = array.cast(pa.string())
+    elif printed.lower().startswith(("int", "uint", "float")):
+        # The width is the one the type names, which the crossing to Arrow may widen.
+        array = array.cast(getattr(pa, printed.lower())())
+    return arrow_series(array, column.index, column.name)
 
 
 def _combining_labels(mine: Index, theirs: Index) -> Index | None:
@@ -9298,7 +9346,7 @@ class DataFrameMixin(_Carries):
                     try:
                         out = DataFrame._wrap(_firepanda.DataFrame(plain))
                     except Exception:
-                        return DataFrameMixin._columnwise(data, error)
+                        out = DataFrame._wrap(DataFrameMixin._columnwise(plain, error))
                     for name, made in temporal.items():
                         out = out._assigned(name, Series._wrap(made))
                     return out._inner
@@ -13300,6 +13348,13 @@ class DataFrameMixin(_Carries):
             name: _converted(frame[name], convert_integer, convert_boolean, convert_floating)
             for name in _shown_names(frame)
         }
+        if dtype_backend == "pyarrow":
+            columns = {
+                name: _arrow_converted(
+                    column, convert_string, convert_integer, convert_boolean, convert_floating
+                )
+                for name, column in columns.items()
+            }
         if not columns:
             return frame.copy()
         return _with_row_labels(
@@ -15120,7 +15175,13 @@ class SeriesMixin(_Carries):
             ValueError: For a backend pandas does not know, in pandas' words.
         """
         _backend(dtype_backend)
-        return _converted(cast("Series", self), convert_integer, convert_boolean, convert_floating)
+        column = cast("Series", self)
+        column = _converted(column, convert_integer, convert_boolean, convert_floating)
+        if dtype_backend == "pyarrow":
+            return _arrow_converted(
+                column, convert_string, convert_integer, convert_boolean, convert_floating
+            )
+        return column
 
     def update(self, other: Any) -> None:
         """Puts in the values of `other` that are not missing, label by label.

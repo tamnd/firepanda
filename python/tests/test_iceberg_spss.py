@@ -176,6 +176,7 @@ SPSS: list[dict[str, Any]] = [
     {"usecols": ["s"]},
     {"usecols": "s"},
     {"dtype_backend": "numpy_nullable"},
+    {"dtype_backend": "pyarrow"},
     {"dtype_backend": "x"},
 ]
 
