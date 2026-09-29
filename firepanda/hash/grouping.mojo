@@ -788,8 +788,31 @@ def _follows(col: AnyArray, led: Grouping, begin: Int, stop: Int) raises -> Bool
     Raises:
         If the dtype has no physical layout.
     """
+    # A coded column is checked on its codes, which sit in a plain column. That
+    # is a second function rather than a call back into this one, because the
+    # compiler hangs building the bench driver when this one calls itself.
     if col.is_coded():
-        return _follows(col.code_column(), led, begin, stop)
+        return _follows_plain(col.code_column(), led, begin, stop)
+    return _follows_plain(col, led, begin, stop)
+
+
+def _follows_plain(
+    col: AnyArray, led: Grouping, begin: Int, stop: Int
+) raises -> Bool:
+    """Checks one key that is not coded over a range of rows for `_follows`.
+
+    Args:
+        col: The key.
+        led: The grouping it is checked against.
+        begin: The first row.
+        stop: One past the last row.
+
+    Returns:
+        True if every row in the range equals the first row of its group.
+
+    Raises:
+        If the dtype has no physical layout.
+    """
     var ordinal = led.codes.unsafe_ptr()
     var nulls = col.null_count() > 0
     if col.is_string():
