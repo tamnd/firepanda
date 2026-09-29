@@ -19,6 +19,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: Group by answers with two levels of column labels
 
 `DataFrameGroupBy.agg` takes a list of reductions, and a mapping whose values are lists, and names each column by the pair of the column and the reduction, as pandas does, with lambdas numbered `<lambda_0>` and on and a repeated name raising `SpecificationError`. `DataFrameGroupBy.describe` and `DataFrameGroupBy.ohlc` are new and answer the same shape. Under `as_index=False` the keys come out as columns with an empty lower level. A header cut by `max_columns` now prints the whole label of the first column past the dots, as pandas does.
+### Added: SQL UNPIVOT runs
+
+`UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
 
 ### Added: Columns with more than one level
 
@@ -38,10 +41,6 @@ A frame whose column names are all tuples of one length of at least two now has 
 ### Added: explode, and nested Arrow columns read as object columns
 
 `Series.explode` and `DataFrame.explode` spread each list, tuple or set over rows of its own and repeat the row labels, with `ignore_index` and several columns at once, and refuse an empty, repeated or mismatched list of columns as pandas does. `DataFrame.from_arrow` reads a table with list, map or struct columns by holding each nested column as an object column of lists and dicts, where it used to refuse the whole table.
-### Added: SQL UNPIVOT runs
-
-`UNPIVOT t ON a, b, c` and `FROM t UNPIVOT (v FOR n IN (a, b, c))` now lower and run, where they used to be parsed and then refused. Each row hands out one row per folded column, with the column's name in `name` and its value in `value` (or the names `INTO NAME ... VALUE ...` gives), and a null value drops its row, as in DuckDB. The columns not folded come along unchanged. A folded expression is named by its alias, or else by the one column it reads; an expression reading two columns is refused as DuckDB refuses it. More than one value column is refused by name.
-
 ### Added: SQL LEFT JOIN LATERAL
 
 `LEFT JOIN LATERAL (...) ON true` now lowers, where it used to be refused. A left row the subquery finds nothing for is kept once, with nulls where the subquery's columns would be, as in DuckDB. The subquery has to be correlated by equalities alone, its select list may not read the left side, and the `ON` has to be `true`; anything else is refused by name. A right or full join to a `LATERAL` is refused as before.
