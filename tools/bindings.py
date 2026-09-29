@@ -4365,9 +4365,9 @@ INDEX = Exposed(
         Member(
             name="name",
             kind="property",
-            body="self._inner.label()",
+            body="_shown_label(self._inner.label())",
             doc="The name of the level, or None when it does not have one.",
-            returns="str | None",
+            returns="Any",
         ),
         Member(
             name="dtype",
@@ -5159,6 +5159,8 @@ def wrapper() -> str:
         mixins.add("_column_labels")
     if any("_arrow_inner(" in m.body for m in every):
         mixins.add("_arrow_inner")
+    if any("_shown_label(" in m.body for m in every):
+        mixins.add("_shown_label")
     # An index prints its labels through the same port of pandas' summary.
     if any("_index_text(" in m.body for m in every):
         mixins.add("_index_text")

@@ -138,7 +138,7 @@ def test_an_argument_that_changes_the_answer_changes_it_as_in_pandas(
 
     ours = firepanda.read_csv(csv, **arguments)
     theirs = pd.read_csv(csv, **arguments)
-    assert list(ours.columns) == [str(name) for name in theirs.columns]
+    assert list(ours.columns) == list(theirs.columns)
     for mine, other in zip(ours.columns, theirs.columns, strict=True):
         assert gapped(ours[mine].tolist()) == gapped(theirs[other].tolist())
 

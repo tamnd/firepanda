@@ -289,5 +289,5 @@ def test_extract_takes_a_flag_without_taking_a_route_with_it(
     """
     mine = made(firepanda)
     assert mine.str.replace("a", "-", flags=re.IGNORECASE, regex=True).tolist()[0] is not None
-    assert mine.str.extract("(A)", flags=re.IGNORECASE)["0"].tolist()[0] == "a"
+    assert mine.str.extract("(A)", flags=re.IGNORECASE)[0].tolist()[0] == "a"
     assert theirs().str.extract("(A)", flags=re.IGNORECASE)[0].tolist()[0] == "a"

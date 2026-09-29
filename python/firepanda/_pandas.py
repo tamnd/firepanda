@@ -1102,6 +1102,16 @@ def _carried(label: str | None) -> str:
     return "" if label is None else label
 
 
+def _shown_label(label: str | None) -> Any:
+    """An index's level name as it was given, a number read back from the text that holds it."""
+    return _names.shown(label)
+
+
+def _held_label(name: Any) -> str | None:
+    """A level name as the extension holds it, a tuple written as its text as before."""
+    return str(name) if isinstance(name, tuple) else _names.held(name)
+
+
 def _one_name(value: Any) -> str | None:
     """The single level name a rename was given, out of the shapes it comes in.
 
@@ -1111,10 +1121,9 @@ def _one_name(value: Any) -> str | None:
     level, so a sequence of any other length is an error and the message says
     how many arrived.
 
-    Any hashable is a level name in pandas and only a string is one here, so a
-    name that is not a string is turned into one rather than refused. That is a
-    divergence and it is the same one `Series.name` already has, which is the
-    core holding a `String` where pandas holds an object.
+    Any hashable is a level name in pandas and only a string is one in the
+    extension, so a name that is not a string is written the way `_names` writes
+    a column name, and read back as the value it was.
 
     Args:
         value: A name, or a one element sequence of names, or `None`.
@@ -1136,11 +1145,11 @@ def _one_name(value: Any) -> str | None:
             " not one yet, so there is nothing for the keys to select"
         )
     if not hasattr(value, "__iter__"):
-        return str(value)
+        return _held_label(value)
     names = list(value)
     if len(names) != 1:
         raise InvalidArgumentError(f"Length of new names must be 1, got {len(names)}")
-    return None if names[0] is None else str(names[0])
+    return _held_label(names[0])
 
 
 def _axis_name(owner: Any, value: Any) -> str | None:
@@ -9326,7 +9335,7 @@ class DataFrameMixin(_Carries):
             if hasattr(other, "columns"):
                 return DataFrame(
                     {
-                        str(name): answer[:, place].tolist()
+                        name: answer[:, place].tolist()
                         for place, name in enumerate(_shown_names(other))
                     },
                     index=self.index,
@@ -9335,12 +9344,12 @@ class DataFrameMixin(_Carries):
         right = numpy.asarray(other)
         if left.shape[1] != right.shape[0]:
             raise ValueError(f"Dot product shape mismatch, {left.shape} vs {right.shape}")
+        product = numpy.dot(left, right)
         if right.ndim != 1:
-            raise NotImplementedError(
-                "dot: pandas labels the columns of a product with a two dimensional array"
-                " by number, and firepanda names columns with text"
-            )
-        return Series(numpy.dot(left, right).tolist(), index=self.index)
+            # pandas numbers the columns of a product with a two dimensional array.
+            columns = {place: product[:, place].tolist() for place in range(product.shape[1])}
+            return DataFrame(columns, index=self.index)
+        return Series(product.tolist(), index=self.index)
 
     def __matmul__(self, other: Any) -> Any:
         """`dot`, which is what `@` means."""
@@ -9506,8 +9515,6 @@ class DataFrameMixin(_Carries):
         Raises:
             ValueError: For an orient pandas does not know, or `columns` with
                 `orient="columns"`, with pandas' words.
-            NotImplementedError: For rows given as lists with no `columns`,
-                whose column names would be numbers.
         """
         if orient not in ("index", "columns", "tight"):
             raise InvalidArgumentError(
@@ -9529,12 +9536,8 @@ class DataFrameMixin(_Carries):
             wanted = names if columns is None else list(columns)
             pieces = {name: _readable([row.get(name, math.nan) for row in rows]) for name in wanted}
             return cls(pieces, index=labels, dtype=dtype)
-        if columns is None:
-            raise NotImplementedError(
-                "from_dict: rows given as lists take numbers as column names, and a firepanda"
-                " column is named by text, so pass columns="
-            )
-        return cls([list(row) for row in rows], index=labels, columns=list(columns), dtype=dtype)
+        wanted = None if columns is None else list(columns)
+        return cls([list(row) for row in rows], index=labels, columns=wanted, dtype=dtype)
 
     @classmethod
     def from_records(
@@ -9551,10 +9554,6 @@ class DataFrameMixin(_Carries):
         `index` names a column to take the row labels from, or gives them, and
         `exclude` names columns to leave out. `coerce_float` is accepted and
         unused, since a column here is read as floats when its values are.
-
-        Raises:
-            NotImplementedError: For tuples with no `columns`, whose column
-                names would be numbers.
         """
         rows = list(data)
         if nrows is not None and not isinstance(data, (list, tuple)):
@@ -9567,12 +9566,8 @@ class DataFrameMixin(_Carries):
                 names = list(columns)
             pieces = {name: _readable([row.get(name, math.nan) for row in rows]) for name in names}
         else:
-            if columns is None:
-                raise NotImplementedError(
-                    "from_records: tuples take numbers as column names, and a firepanda column"
-                    " is named by text, so pass columns="
-                )
-            names = list(columns)
+            width = max((len(row) for row in rows), default=0)
+            names = list(range(width)) if columns is None else list(columns)
             pieces = {name: [row[place] for row in rows] for place, name in enumerate(names)}
         labels, taken = None, None
         if isinstance(index, str) and index in pieces:
@@ -14080,7 +14075,7 @@ class SeriesMixin(_Carries):
             A frame of one column.
         """
         wanted = self._inner.label() if name is NO_DEFAULT else name
-        return self._framed("0" if wanted is None else str(wanted))
+        return self._framed(_names.held(0 if wanted is None else wanted))
 
     def isin(self, values: Any) -> Series:
         """Whether each row holds one of a set of values.
@@ -19825,7 +19820,7 @@ class StringMixin:
             raise translate(error) from None
         from ._frame import Series
 
-        return DataFrame({str(i): Series._wrap(part) for i, part in enumerate(parts)})
+        return DataFrame(dict(enumerate(Series._wrap(part) for part in parts)))
 
     def _pieces(self, pat: Any, n: Any, regex: Any, from_right: bool) -> list[Any]:
         """Every row cut into its pieces, with None for a gap, by pandas' rules.
@@ -19895,7 +19890,7 @@ class StringMixin:
         ]
         return DataFrame(
             {
-                str(at): Series([row[at] for row in padded], index=index, dtype="string")
+                at: Series([row[at] for row in padded], index=index, dtype="string")
                 for at in range(width)
             }
         )
@@ -20012,7 +20007,7 @@ class StringMixin:
             names, columns = self._series._inner.string_extract(pat, argued)
         except Exception as error:
             raise translate(error) from None
-        labels = [name if name else str(i) for i, name in enumerate(names)]
+        labels = [name if name else i for i, name in enumerate(names)]
         if len(labels) == 1 and not expand:
             only = Series._wrap(columns[0])
             return only.rename(names[0]) if names[0] else only
@@ -24567,9 +24562,9 @@ class IndexMixin:
                     f"Too many levels: Index has only 1 level, {level} is not a valid level number"
                 )
             raise IndexError(f"Too many levels: Index has only 1 level, not {level + 1}")
-        if level != self._inner.label():
+        if level != self.name:  # type: ignore[attr-defined]
             raise KeyError(
-                f"Requested level ({level}) does not match index name ({self._inner.label()})"
+                f"Requested level ({level}) does not match index name ({self.name})"  # type: ignore[attr-defined]
             )
 
     def rename(self, name: Any, *, inplace: bool = False) -> Index | None:
@@ -24587,7 +24582,7 @@ class IndexMixin:
         """
         made: Any = type(self)
         try:
-            renamed = self._inner.renamed(None if name is None else str(name))
+            renamed = self._inner.renamed(_held_label(name))
         except Exception as error:
             raise translate(error) from None
         if not inplace:
@@ -25390,7 +25385,9 @@ def get_dummies(
     if isinstance(data, Series):
         start = data.to_frame().iloc[:, :0]
         flags = _dummies(data, prefix, prefix_sep, dummy_na, drop_first, dtype)
-        return start.assign(**flags)
+        for label, flag in flags.items():
+            start = start._assigned(label, flag)
+        return start
     names = _shown_names(data)
     if columns is None:
         encoded = [
@@ -25409,7 +25406,8 @@ def get_dummies(
     for name in encoded:
         before = name if prefixes[name] is None else prefixes[name]
         flags = _dummies(data[name], before, separators[name], dummy_na, drop_first, dtype)
-        answer = answer.assign(**flags)
+        for label, flag in flags.items():
+            answer = answer._assigned(label, flag)
     return answer
 
 
@@ -25443,16 +25441,7 @@ def _dummies(
         flags.append(column.isna())
     if drop_first:
         levels, flags = levels[1:], flags[1:]
-    if prefix is None:
-        strange = [level for level in levels if not isinstance(level, str)]
-        if strange:
-            raise UnsupportedError(
-                f"firepanda:unsupported: get_dummies would label a column {strange[0]!r}, "
-                "and a firepanda column label is text, so give a prefix"
-            )
-        labels = levels
-    else:
-        labels = [f"{prefix}{sep}{level}" for level in levels]
+    labels = levels if prefix is None else [f"{prefix}{sep}{level}" for level in levels]
     return {
         label: flag if dtype == "bool" else flag.astype(dtype)
         for label, flag in zip(labels, flags, strict=True)
@@ -25811,23 +25800,17 @@ def _levelled_rows(joined: Any, keys: list[Any], lengths: list[int], names: Any)
     return joined.set_axis(MultiIndex.from_arrays(columns, names=labels))
 
 
-def _concat_framed(part: Any, axis: int) -> DataFrame:
+def _concat_framed(part: Any, unnamed: int) -> DataFrame:
     """A part as a frame, which is what a series is on the frame side of a concat.
 
-    Raises:
-        UnsupportedError: For a series with no name, which pandas calls by its
-            position and firepanda cannot, since a column name is a string.
+    A series with no name is named by how many unnamed ones came before it, as
+    pandas names it.
     """
     from ._frame import DataFrame
 
     if isinstance(part, DataFrame):
         return part
-    if part.name is None:
-        raise UnsupportedError(
-            "concat names a series with no name by its position, and a column name in"
-            " firepanda is a string"
-        )
-    return part.to_frame()
+    return part.to_frame(unnamed if part.name is None else part.name)
 
 
 def _concat_overlap(labels: list[Any], dtype: str) -> None:
@@ -26500,7 +26483,11 @@ def concat(
         out = _concat_rows(frames, "outer", ignore_index, verify, False)
         column = Series._wrap(out.column("values"))
         return column.rename(name)
-    frames = [_concat_framed(p, CONCAT_AXES[axis]) for p in parts]
+    frames: list[DataFrame] = []
+    unnamed = 0
+    for part in parts:
+        frames.append(_concat_framed(part, unnamed))
+        unnamed += isinstance(part, SeriesMixin) and part.name is None
     if CONCAT_AXES[axis] == 0:
         out = _concat_rows(frames, join, ignore_index, verify, ordered)
     else:
@@ -26648,18 +26635,16 @@ def _missing_key(key: Any) -> bool:
     return _missing(key)
 
 
-def _pivot_names(labels: list[Any], caller: str) -> list[str]:
-    """The column values `pivot` turns into column names, which must be text.
+def _pivot_names(labels: list[Any], caller: str) -> list[Any]:
+    """The column values `pivot` turns into column names, checked to be ones a name can be.
 
     Raises:
-        NotImplementedError: For values that are not text, which pandas keeps as
-            labels of their own type and firepanda names columns with text.
+        NotImplementedError: For a value of a kind `_names` does not write.
     """
-    if not all(isinstance(label, str) for label in labels):
-        raise NotImplementedError(
-            f"{caller}: the columns key holds values that are not text, and firepanda"
-            " names columns with text"
-        )
+    try:
+        _names.held_all(labels)
+    except NotImplementedError as error:
+        raise NotImplementedError(f"{caller}: {error}") from None
     return labels
 
 
@@ -28348,10 +28333,17 @@ def _text_heads(frame: Any, labels: list[Any]) -> list[str]:
     try:
         index = frame.columns
     except NotImplementedError:
-        return [_text_plain(label) for label in labels]
+        return [_text_head(label) for label in labels]
     if str(index.dtype).startswith(("datetime", "timedelta")):
         return [text.strip() for text in _text_labels(index, False, None)]
-    return [_text_plain(label) for label in labels]
+    return [_text_head(label) for label in labels]
+
+
+def _text_head(label: Any) -> str:
+    """One name as the header prints it, where a float gap prints as `NaN`."""
+    if isinstance(label, float) and label != label:
+        return "NaN"
+    return _text_plain(label)
 
 
 def _text_sequence(values: list[Any]) -> str:
@@ -29448,7 +29440,7 @@ def _json_frame_parts(decoded: Any, orient: str) -> tuple[list[str], list[list[A
             raise ValueError(f"JSON data had unexpected key(s): {', '.join(unexpected)}")
         rows = decoded.get("data", [])
         width = max((len(row) for row in rows), default=0)
-        names = [str(name) for name in decoded.get("columns", range(width))]
+        names = list(decoded.get("columns", range(width)))
         columns = [
             [row[place] if place < len(row) else None for row in rows]
             for place in range(len(names))
@@ -29461,7 +29453,7 @@ def _json_frame_parts(decoded: Any, orient: str) -> tuple[list[str], list[list[A
         columns = [
             [row[place] if place < len(row) else None for row in decoded] for place in range(width)
         ]
-        return [str(place) for place in range(width)], columns, None
+        return list(range(width)), columns, None
     if isinstance(decoded, list):
         names = list(dict.fromkeys(key for record in decoded for key in record))
         return names, [[record.get(name) for record in decoded] for name in names], None
@@ -29530,9 +29522,6 @@ def read_json(
     through the same inference unless `convert_axes=False`. Floats are read
     with pandas' own decoder, which is not always the nearest float, unless
     `precise_float` asks for that.
-
-    Column names stay text, where pandas turns names like `"0"` into integers,
-    because firepanda's column names are text.
 
     Returns:
         A frame, or a column when `typ="series"`.
@@ -29613,6 +29602,7 @@ def read_json(
             (not isinstance(convert_dates, bool) and name in set(convert_dates))
             or (
                 keep_default_dates
+                and isinstance(name, str)
                 and (
                     name.lower().endswith(("_at", "_time"))
                     or name.lower() in _JSON_DATE_NAMES
@@ -29622,7 +29612,18 @@ def read_json(
         )
         data, kind, _ = _json_inferred(values, name, options, dates=dated)
         built[name] = _json_series_of(data, kind, name)
-    return _json_labelled(DataFrame(built), labels, options)
+    return _json_labelled(_json_named(DataFrame(built), names, options), labels, options)
+
+
+def _json_named(frame: DataFrame, names: list[Any], options: dict[str, Any]) -> DataFrame:
+    """The frame with its text names read as numbers or instants, as pandas reads its axes."""
+    if not options["convert_axes"] or not names or not all(isinstance(n, str) for n in names):
+        return frame
+    data, kind, moved = _json_inferred(names, "columns", options, dates=True, axis=True)
+    if not moved:
+        return frame
+    read = list(data) if kind == "datetime" else data
+    return frame.rename(columns=dict(zip(names, read, strict=True)))
 
 
 _READ_CSV_ENGINES = ("c", "python", "pyarrow")

@@ -195,7 +195,6 @@ REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.crosstab([keys(m)[0], keys(m)[1]], keys(m)[1]),
     lambda m: m.crosstab(keys(m)[1], keys(m)[0], dropna=False),
     lambda m: m.crosstab(m.Series([1, 2]), m.Series(["p", "q"]), margins=True),
-    lambda m: m.crosstab(m.Series(["p", "q"]), m.Series([1, 2])),
 ]
 
 

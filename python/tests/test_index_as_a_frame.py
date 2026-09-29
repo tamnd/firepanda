@@ -40,10 +40,8 @@ def test_to_frame_takes_a_name_of_the_callers_choosing(firepanda):
 
 def test_an_unnamed_index_names_its_column_zero(firepanda):
     got = firepanda.Index([1, 2]).to_frame()
-    # The integer zero in pandas and the text of it here, which is the same
-    # difference `Series.to_frame` has and for the same reason.
-    assert list(got.columns) == ["0"]
-    assert [str(one) for one in pd.Index([1, 2]).to_frame().columns] == ["0"]
+    # The integer zero, as pandas names it.
+    assert list(got.columns) == list(pd.Index([1, 2]).to_frame().columns) == [0]
 
 
 def test_duplicated_answers_a_list_of_bools(firepanda):

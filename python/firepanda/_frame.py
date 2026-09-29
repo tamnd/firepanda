@@ -48,6 +48,7 @@ from ._pandas import (
     _printed,
     _resample,
     _rolling,
+    _shown_label,
     _values_of,
 )
 from ._resample import Resampler
@@ -4542,10 +4543,10 @@ class Index(IndexMixin):
             raise translate(error) from None
 
     @property
-    def name(self) -> str | None:
+    def name(self) -> Any:
         """The name of the level, or None when it does not have one."""
         try:
-            return self._inner.label()
+            return _shown_label(self._inner.label())
         except Exception as error:
             raise translate(error) from None
 

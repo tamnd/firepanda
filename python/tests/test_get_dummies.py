@@ -113,9 +113,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
 
 REFUSED: list[Callable[[Any], Any]] = [
     lambda m: m.get_dummies(m.Series(KEYS), sparse=True),
-    lambda m: m.get_dummies(m.Series([1.5, 2.0])),
-    lambda m: m.get_dummies(m.Series(KEYS), dummy_na=True),
-    lambda m: m.get_dummies(m.Series([True, False])),
 ]
 
 

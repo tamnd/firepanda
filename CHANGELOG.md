@@ -11,6 +11,9 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Added: SQL recursive CTEs
 
 `WITH RECURSIVE` now runs. The anchor is everything left of the last `UNION`, and it runs once. The recursive term then runs again and again over the rows the last round kept, until a round keeps nothing. `UNION ALL` keeps every row, and `UNION` keeps only rows no earlier round kept, so a walk over a graph with a cycle stops. The term's rows are cast to the anchor's types, rounding the way a SQL cast does, as in DuckDB. The term may read the CTE more than once, for example to join it to itself, and a later CTE or the query may read the recursive one as often as it likes. A filter written above a recursive CTE stays above it. A recursive CTE whose union lines up by name, or which holds a `WITH` of its own, is refused by name.
+### Added: The operations that make number names
+
+`pivot`, `pivot_table`, `unstack` and `crosstab` spread number and instant values across the columns, `get_dummies` encodes numbers, bools and `dummy_na` under their own values, and `dot` with a matrix, `from_dict` and `from_records` with rows, `concat` of unnamed series along the columns and `Series.to_frame()` name their columns 0, 1, 2 as pandas does. `str.partition`, `str.rpartition`, `str.extract`, `str.split(expand=True)` and `str.rsplit(expand=True)` name their columns by number rather than by text, `read_csv(header=None)` numbers the columns and names the index 0 with `index_col=0`, and `read_json` reads names like `"0"` as numbers under `convert_axes`. An index name can be a number too, through `rename_axis`, `Index.rename` and `set_names`. Each is compared with pandas in `python/tests/test_made_names.py`.
 
 ### Added: SQL named windows
 

@@ -108,7 +108,7 @@ def cell(value: Any) -> Any:
 
 def mine_rows(frame: Any) -> list[list[Any]]:
     """A firepanda frame read out row by row."""
-    labels = list(frame.columns)
+    labels = list(frame)
     return [[cell(frame[label][i]) for label in labels] for i in range(frame.shape[0])]
 
 
@@ -127,16 +127,10 @@ def test_the_columns_match_pandas_on_every_pattern(firepanda: ModuleType) -> Non
 
 
 @needs_pandas
-def test_the_labels_match_pandas_once_an_integer_is_written_out(firepanda: ModuleType) -> None:
-    """An unnamed group is labelled with its own position, which pandas writes as an integer.
-
-    This is the same divergence `partition` carries and not a new one, so the comparison goes
-    through `str` rather than being written out as an expected list.
-    """
+def test_the_labels_match_pandas(firepanda: ModuleType) -> None:
+    """An unnamed group is labelled with its own position, as an integer as pandas labels it."""
     for pattern in PATTERNS:
-        assert list(made(firepanda).str.extract(pattern).columns) == [
-            str(label) for label in theirs().str.extract(pattern).columns
-        ]
+        assert list(made(firepanda).str.extract(pattern)) == list(theirs().str.extract(pattern))
 
 
 @needs_pandas
@@ -155,7 +149,7 @@ def test_a_name_and_a_position_can_sit_side_by_side(firepanda: ModuleType) -> No
     position in the answer rather than a group number.
     """
     pattern = r"(?P<letter>[a-z])(\d)"
-    assert list(made(firepanda).str.extract(pattern).columns) == ["letter", "1"]
+    assert list(made(firepanda).str.extract(pattern)) == ["letter", 1]
     assert list(theirs().str.extract(pattern).columns) == ["letter", 1]
 
 

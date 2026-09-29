@@ -138,7 +138,6 @@ def test_a_mistake_is_pandas_mistake(firepanda: ModuleType, build: Callable[[Any
         lambda m: m.Series([1, 2]).case_when([(lambda s: s > 1, "x")]),
         lambda m: m.Series([True, False]).compare(m.Series([True, True])),
         lambda m: m.Series([1, 2]).compare(m.Series([1, 3]), align_axis=0),
-        lambda m: m.DataFrame({"a": [1, 2]}).dot([[1, 2]]),
     ],
 )
 def test_what_pandas_answers_with_objects_or_levels_is_refused(
