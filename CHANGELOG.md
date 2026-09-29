@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DataFrame.from_arrow reads a date as pandas does
+
+`DataFrame.from_arrow`, the pandas door, now reads a date32 column as an object column holding Python dates, which is what `pandas.DataFrame.from_arrow` hands back. `firepanda.from_arrow` still keeps Arrow's date type.
+
+### Added: a column named with empty text exports to Arrow
+
+A frame with a column named with empty text, which `get_dummies` makes from an empty text value, used to crash inside pyarrow with a SystemError. The column now goes out under a spare name and takes its own name back in the batch, so `pa.table` and `pa.record_batch` read the frame as pandas' would.
+
 ### Added: pandas.wide_to_long
 
 `wide_to_long` turns columns named by a stub and a suffix, such as `A1970` and `A1980`, into one column per stub under a new index level holding the suffix, read as numbers when every suffix is one. It follows pandas' recipe over firepanda's `melt`, keeps pandas' row and column order for one id column and for several, and refuses a stub that names a column and ids that do not tell the rows apart in pandas' words.

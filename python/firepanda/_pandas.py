@@ -7931,7 +7931,7 @@ def _arrow_inner(frame: Any) -> Any:
     held = inner.names()
     if any(_names.is_held(name) for name in held):
         inner = inner.renamed_columns(held, [str(_names.shown(name)) for name in held])
-    if any(_objects.is_object(inner.column(name)) for name in inner.names()):
+    if "" in inner.names() or any(_objects.is_object(inner.column(n)) for n in inner.names()):
         return _object_batch(inner)
     return inner
 
@@ -7962,14 +7962,23 @@ def _object_array(column: Any) -> Any:
 def _object_batch(inner: Any) -> Any:
     """A frame with object columns as the Arrow batch pandas would export.
 
-    The written cells are firepanda's own spelling and mean nothing to another
+    The extension cannot export a column named with empty text, so that column goes
+    out under a spare name and takes its own name back in the batch. The written
+    cells are firepanda's own spelling and mean nothing to another
     library, so each object column is handed to pyarrow as its values, which is
     what pandas does with one. pyarrow picks the type, and refuses a mix of
     values it has no one type for, as it does for pandas.
     """
     import pyarrow as pa
 
-    table = pa.table(_Exporting(inner))
+    names = inner.names()
+    exported = inner
+    if "" in names:
+        spare = "_"
+        while spare in names:
+            spare += "_"
+        exported = inner.renamed_columns([""], [spare])
+    table = pa.table(_Exporting(exported))
     arrays = []
     for position, name in enumerate(inner.names()):
         column = inner.column(name)
@@ -7977,7 +7986,7 @@ def _object_batch(inner: Any) -> Any:
             arrays.append(_object_array(column))
         else:
             arrays.append(table.column(position).combine_chunks())
-    return _Exported(pa.RecordBatch.from_arrays(arrays, names=table.column_names))
+    return _Exported(pa.RecordBatch.from_arrays(arrays, names=names))
 
 
 class _Exporting:
@@ -9127,8 +9136,9 @@ class DataFrameMixin(_Carries):
         and a float column's missing row is a NaN too. A column with nothing
         missing keeps its type. This does the same, because a caller who wrote
         `DataFrame.from_arrow` wrote the pandas name and should be handed the
-        frame pandas would have handed them. `firepanda.from_arrow` is the other
-        door, and it keeps Arrow's types.
+        frame pandas would have handed them, and a date column comes back as
+        objects holding Python dates for the same reason. `firepanda.from_arrow`
+        is the other door, and it keeps Arrow's types.
 
         Args:
             data: A pyarrow table, a Polars frame, or anything else with
@@ -9138,15 +9148,21 @@ class DataFrameMixin(_Carries):
         Returns:
             The frame.
         """
-        from ._frame import DataFrame, from_arrow
+        from ._frame import DataFrame, Series, from_arrow
 
         try:
-            return DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
+            out = DataFrame._wrap(from_arrow(data)._inner._widened_for_missing())
         except Exception as error:
             nested = _nested_frame(data)
             if nested is not None:
                 return nested
             raise translate(error) from None
+        # pandas reads an Arrow date as an object column holding Python dates.
+        for name in out._inner.names():
+            if out._inner.column(name).dtype().startswith("date32"):
+                dates = Series(out[_names.shown(name)].tolist(), dtype=object)
+                out = out._assigned(_names.shown(name), dates)
+        return out
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.

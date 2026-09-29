@@ -488,6 +488,24 @@ def test_the_pandas_door_reads_the_types_pandas_reads(firepanda: ModuleType) -> 
     assert ours.column("flag").to_pylist() == [True, None, False]
 
 
+@needs["pandas"]
+@needs["pyarrow"]
+def test_the_pandas_door_reads_a_date_as_objects(firepanda: ModuleType) -> None:
+    """A date32 column comes back as objects holding Python dates, as pandas' does."""
+    import datetime
+
+    import pandas as pd
+    import pyarrow as pa
+
+    days = [datetime.date(2020, 1, 1), None, datetime.date(1600, 3, 4)]
+    table = pa.table({"day": pa.array(days, type=pa.date32()), "n": [1, 2, 3]})
+    ours = firepanda.DataFrame.from_arrow(table)
+    theirs = pd.DataFrame.from_arrow(table)
+    assert [str(kind) for kind in ours.dtypes] == [str(kind) for kind in theirs.dtypes]
+    assert repr(ours) == repr(theirs)
+    assert str(firepanda.from_arrow(table)["day"].dtype) == "date32[day]"
+
+
 @needs["pyarrow"]
 def test_the_firepanda_door_keeps_arrow_types(firepanda: ModuleType) -> None:
     """`firepanda.from_arrow` is the other door, and nothing in it is widened."""
