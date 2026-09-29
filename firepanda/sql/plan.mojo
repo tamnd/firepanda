@@ -463,7 +463,9 @@ Named tables, the table functions above, the derived tables and the CTEs above,
 and the joins over them. So is a `LATERAL` derived table written after a comma
 or on the right of an inner or a cross join, which is lowered to a join between
 it and what is to its left. One with a fold, a `DISTINCT`, an `ORDER BY` or a
-`LIMIT` inside it is refused by name, as is a left join to one.
+`LIMIT` inside it is refused by name. A left join to one is lowered when its
+`ON` is `true` and the subquery is correlated by equalities alone, and refused
+by name otherwise.
 An `ASOF` join is lowered when it is written with `ON` or `USING`, and refused
 by name as a right or full join. A `POSITIONAL` join is lowered, and it pairs the two sides by row
 number and so reads no column at all. A `USING` or `NATURAL` join over a subquery is
@@ -5642,6 +5644,7 @@ def _lateral(
     mut scope: _Scope,
     ctes: _Bindings,
     left: _From,
+    outer: Bool = False,
 ) raises -> _From:
     """Lowers a `LATERAL` subquery against what is written to the left of it.
 
@@ -5668,6 +5671,14 @@ def _lateral(
     are an `ORDER BY` or a `LIMIT` on it, a `DISTINCT`, a `WITH` and anything
     that is not one `SELECT`.
 
+    An outer one, `LEFT JOIN LATERAL`, is the same join as a left one, which
+    pads a left row the subquery answers nothing for. The padding has to land
+    on the subquery's answer and not on what it read, since `SELECT 1 FROM ...`
+    answers null for such a row and not 1, so the select list is computed over
+    the subquery's own rows under the join rather than over the pairs above
+    it. That needs a select list that reads only the subquery, a `WHERE` that
+    compares the two sides with equalities alone, and at least one of those.
+
     Args:
         ast: The arenas.
         at: The `REF_SUBQUERY`.
@@ -5679,6 +5690,8 @@ def _lateral(
         scope: What the FROM has put in reach, added to.
         ctes: The CTE names in reach.
         left: What is written to the left of it, lowered.
+        outer: Whether a left row the subquery answers nothing for is kept,
+            padded with nulls.
 
     Returns:
         The projection, which produces the left side's columns and then the
@@ -5871,6 +5884,9 @@ def _lateral(
     var kind = JoinKind.INNER
     if len(left_keys) == 0:
         kind = JoinKind.CROSS
+    if outer:
+        kind = JoinKind.LEFT
+        _outer_lateral(plan, left, right, right_keys, rest, outputs)
     var joined = _pair(plan, left, right, left_keys^, right_keys^, kind)
     for i in range(len(rest)):
         joined.at = plan.filter(joined.at, rest[i])
@@ -5897,6 +5913,72 @@ def _lateral(
     if called.byte_length() != 0:
         scope.derive(called^, names^)
     return _From(at_out, schema^, origin^)
+
+
+def _outer_lateral(
+    mut plan: Plan,
+    left: _From,
+    mut right: _From,
+    mut right_keys: List[Int],
+    rest: List[Int],
+    mut outputs: List[Int],
+) raises:
+    """Computes a `LEFT JOIN LATERAL`'s select list under the join.
+
+    The subquery's answer and the right keys go into one projection over its
+    rows, under names of their own so none of them meets a left column of the
+    same name, and the keys and the answer are then read back from it by those
+    names. The left join above pads the answer itself, which is what makes a
+    left row with nothing to its right come out null in every column the
+    subquery hands back.
+
+    Args:
+        plan: Where the nodes go.
+        left: What is written to the left of it.
+        right: The subquery's `FROM`, filtered, replaced by the projection.
+        right_keys: The right keys, replaced by the columns they land in.
+        rest: The parts of the `WHERE` that read both sides and are not keys.
+        outputs: The select list, replaced by the columns it lands in.
+
+    Raises:
+        If the `WHERE` compares the two sides other than by equalities, has no
+        equality between them, or the select list reads the left side.
+    """
+    if len(rest) != 0:
+        raise Error(
+            "firepanda lowers a LEFT JOIN LATERAL whose subquery compares the"
+            " two sides with equalities alone so far, and this one compares"
+            " them some other way"
+        )
+    if len(right_keys) == 0:
+        raise Error(
+            "firepanda lowers a LEFT JOIN LATERAL whose subquery is correlated"
+            " by an equality so far, and this one has none"
+        )
+    var exprs = List[Int](capacity=len(outputs) + len(right_keys))
+    var names = List[String](capacity=len(outputs) + len(right_keys))
+    for i in range(len(outputs)):
+        var reads = _side(plan, outputs[i], left, right)
+        if reads != _RIGHT and reads != _NEITHER:
+            raise Error(
+                "firepanda lowers a LEFT JOIN LATERAL whose select list reads"
+                " the subquery alone so far, and this one reads the left side"
+            )
+        exprs.append(outputs[i])
+        names.append(String("__lateral_", i))
+    for i in range(len(right_keys)):
+        exprs.append(right_keys[i])
+        names.append(String("__lateral_key_", i))
+    var schema = Schema()
+    for i in range(len(names)):
+        schema.append(Field(names[i].copy(), LogicalType.NULL, True))
+    var origin = List[Int](length=len(names), fill=UNBOUND)
+    var at = plan.project(right.at, exprs^, names.copy())
+    right = _From(at, schema^, origin^)
+    for i in range(len(outputs)):
+        outputs[i] = plan.exprs.column(names[i].copy())
+    for i in range(len(right_keys)):
+        right_keys[i] = plan.exprs.column(names[len(outputs) + i].copy())
 
 
 def _cte(
@@ -6416,8 +6498,10 @@ def _joined_lateral(
 
     An inner or a cross one is the lateral subquery and then its condition as a
     filter over it, the same as a condition over an inner join. A left one pads
-    a left row the subquery answers nothing for, which the inner join `_lateral`
-    builds does not do, so it is refused along with every other kind.
+    a left row the subquery answers nothing for, which `_lateral` does when it
+    is asked to, and is taken when it is written `ON true`, which is how it is
+    usually written. A condition over a left one would decide which pairs are
+    padded rather than which are kept, and every other kind is refused.
 
     Args:
         ast: The arenas.
@@ -6440,12 +6524,16 @@ def _joined_lateral(
     """
     var node = ast.refs[Int(at)]
     var kind = _join_kind(ast.text(node.payload))
-    if kind != JoinKind.INNER and kind != JoinKind.CROSS:
+    if (
+        kind != JoinKind.INNER
+        and kind != JoinKind.CROSS
+        and kind != JoinKind.LEFT
+    ):
         raise Error(
             String(
                 (
-                    "firepanda lowers an inner or a cross join to a LATERAL"
-                    " subquery so far, and not a "
+                    "firepanda lowers an inner, a cross or a left join to a"
+                    " LATERAL subquery so far, and not a "
                 ),
                 kind,
                 " one",
@@ -6459,11 +6547,18 @@ def _joined_lateral(
             "firepanda does not lower a LATERAL subquery joined with USING or"
             " NATURAL yet"
         )
-    var out = _lateral(
-        ast, node.b, catalog, grammar, plan, sources, scope, ctes, left
-    )
     var written = ast.items(node.children)
-    if len(written) == 0:
+    var outer = kind == JoinKind.LEFT
+    if outer and (len(written) == 0 or not _is_true(ast, written[0])):
+        raise Error(
+            "firepanda lowers a LEFT JOIN LATERAL written ON true so far, with"
+            " the condition inside the subquery, and this one has a condition"
+            " of its own"
+        )
+    var out = _lateral(
+        ast, node.b, catalog, grammar, plan, sources, scope, ctes, left, outer
+    )
+    if len(written) == 0 or outer:
         return out^
     var conjuncts = List[UInt32]()
     _conjuncts(ast, written[0], conjuncts)
@@ -6472,6 +6567,22 @@ def _joined_lateral(
         var one = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
         out.at = plan.filter(out.at, one)
     return out^
+
+
+def _is_true(ast: Ast, at: UInt32) -> Bool:
+    """Whether an expression is the literal `TRUE`.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+
+    Returns:
+        True for `TRUE` written as a literal, whatever its case.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind != EXPR_LITERAL or node.b != LITERAL_BOOLEAN:
+        return False
+    return String(ast.text(node.payload)).upper() == "TRUE"
 
 
 def _asof(
