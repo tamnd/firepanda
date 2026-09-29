@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: arrays and categoricals in a frame mapping
+
+`DataFrame({"c": Categorical([...])})` now builds a category column with the categories and order it was given, where it used to build a text column, and an array from `array(..., dtype="Int64")`, `"Float64"` or `"boolean"` builds a column of that type with its missing values, where it used to be refused. Each array is read as a series of itself placed by position. Beside a series, it takes the labels the series make and has to be as long as they are, with pandas' error when it is not.
+
 ### Added: select_dtypes reads nullable and object columns
 
 `select_dtypes` now reads each column by the type `dtypes` shows rather than by how it is stored, so an `Int64`, `UInt8`, `Float64` or `boolean` column is picked up by `number`, `integer`, `floating` and `bool` the way pandas picks it up. A nullable name on either side means its numpy twin, so `include="Int64"` takes an `int64` column too. `object`, `O` and the `object` type select object columns and text columns, and `string` selects only text, which are pandas 3's rules.

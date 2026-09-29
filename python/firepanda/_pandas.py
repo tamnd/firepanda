@@ -9173,6 +9173,8 @@ class DataFrameMixin(_Carries):
         """
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         index = _written_index(index)
+        if isinstance(data, collections.abc.Mapping):
+            data = self._arrays_as_series(data, index)
         if isinstance(data, DataFrameMixin):
             self._inner = self._copied(data, index, columns)
         elif data is None and (index is not None or columns is not None):
@@ -9198,6 +9200,40 @@ class DataFrameMixin(_Carries):
                 self._inner = self._inner.cast(names, wanted, True)
             except Exception as error:
                 raise translate(error) from None
+
+    @staticmethod
+    def _arrays_as_series(data: Any, index: Any) -> Any:
+        """The mapping with each array `pd.array` or `Categorical` made a series of it.
+
+        A series built from one of these keeps its type, so a `Categorical`
+        stays a category column and an `Int64` array keeps its missing values,
+        where reading the array as a list of values would lose both. The series
+        is given the frame's labels, so the values are placed by position the
+        way pandas places them. With no labels given and a series among the
+        values, the labels are the ones the series make, and an array has to be
+        as long as they are.
+        """
+        from ._array import FirepandaArray
+        from ._frame import DataFrame, Series
+
+        if not any(isinstance(values, FirepandaArray) for values in data.values()):
+            return data
+        if index is None and any(isinstance(values, SeriesMixin) for values in data.values()):
+            rest = {
+                name: values
+                for name, values in data.items()
+                if not isinstance(values, FirepandaArray)
+            }
+            index = DataFrame(rest).index
+            for values in data.values():
+                if isinstance(values, FirepandaArray) and len(values) != len(index):
+                    raise InvalidArgumentError(
+                        f"array length {len(values)} does not match index length {len(index)}"
+                    )
+        return {
+            name: Series(values, index=index) if isinstance(values, FirepandaArray) else values
+            for name, values in data.items()
+        }
 
     @staticmethod
     def _empty(index: Any, columns: Any) -> Any:
