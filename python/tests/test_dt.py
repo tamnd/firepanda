@@ -13,20 +13,13 @@ The answers go back out through Arrow as well. They were written that way when
 but reading through `pyarrow.array` still gives the `datetime` a pandas program
 would compare against, so these tests were left as they are.
 
-Two differences from pandas are asserted rather than worked around, because both
-are decisions.
+One difference from pandas is asserted rather than worked around, because it is
+a decision.
 
-The first is a missing row on a boolean part. `is_month_end` on a NaT is False in
+It is a missing row on a boolean part. `is_month_end` on a NaT is False in
 pandas and missing here, and pandas is that way because its answer is a numpy
 bool array, which has nowhere to put a missing value. Arrow has somewhere, so
 this says missing.
-
-The second is the name that is not here at all, `to_period`.
-It needs a type firepanda does not have, and it is not declared and
-refused, which is the opposite of what the arguments do. An absent name is
-honest about being unimplemented and a declared one that always raises is not,
-and the line between the two is that a caller can see a name before they call it
-and cannot see an argument's fate until they pass it.
 """
 
 from __future__ import annotations
@@ -111,9 +104,6 @@ FLAGS = [
     "is_year_end",
 ]
 """The parts that answer a yes or a no."""
-
-ABSENT = ["to_period"]
-"""The two pandas has and this does not, for the reason the module docstring gives."""
 
 
 def stamps(firepanda: ModuleType, values: list[Any] = STAMPS, unit: str = "us") -> Any:
@@ -376,23 +366,6 @@ def test_a_duration_column_answers_its_own_two_parts(firepanda: ModuleType) -> N
     them = pd.Series(pd.array(SPANS, dtype="timedelta64[us]"))
     assert like(read(column.dt.days), list(them.dt.days))
     assert like(read(column.dt.total_seconds()), list(them.dt.total_seconds()))
-
-
-@both
-@pytest.mark.parametrize("name", ABSENT)
-def test_the_unwritten_names_are_absent_rather_than_refusing(
-    firepanda: ModuleType, name: str
-) -> None:
-    """pandas has them and this does not, and the difference is deliberate.
-
-    Every one needs something that does not exist yet: a period for
-    `to_period`, and frequency inference over an index for `freq`. A
-    name that is declared and always raises reads as a failure on a conformance
-    board and a name that is not there reads as unimplemented, and unimplemented
-    is what these are.
-    """
-    assert hasattr(theirs().dt, name)
-    assert not hasattr(stamps(firepanda).dt, name)
 
 
 @both
