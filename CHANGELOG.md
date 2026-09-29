@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: read_xml
+
+`read_xml` reads the elements an `xpath` picks from an XML document into a frame, as pandas does, with each element's attributes, its own text and its children's text as the columns. The `etree` parser uses the standard library and the part of XPath it follows, and the default `lxml` parser, with its full XPath and stylesheets, works when lxml is installed and raises pandas' ImportError when it is not. `elems_only`, `attrs_only`, `names`, `namespaces`, `dtype`, `converters`, `parse_dates`, `iterparse`, compressed files and both `dtype_backend` choices work, and columns are typed the way `read_csv` types text.
+
 ### Added: to_sql and read_sql over sqlite3
 
 `DataFrame.to_sql`, `Series.to_sql`, `read_sql`, `read_sql_query` and `read_sql_table` work over a sqlite3 connection the way pandas works without SQLAlchemy. Writing gives the same `CREATE TABLE` text and column types, the same index on the row labels, the same `if_exists`, `chunksize`, `dtype` and `method="multi"` handling, and the same row count. Reading types each column the way pandas reads the values sqlite3 hands back, and takes `params`, `index_col`, `parse_dates`, `dtype` and `chunksize`. `read_sql_table` finds the table and then refuses as pandas does without SQLAlchemy. A URI or another kind of connection is refused, and a result column of nothing but NULLs reads as NaN gaps where pandas holds None.
