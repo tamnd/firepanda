@@ -1,8 +1,9 @@
-"""`astype("category")` of a column that is not text is refused as not written yet.
+"""`astype("category")` of instants and spans is refused as not written yet.
 
-pandas keeps the categories in the values' own type. firepanda holds them as a
-text column, so a category of numbers, flags or instants is refused as a
-feature that is not there, rather than failing inside the core.
+pandas keeps the categories in the values' own type. firepanda writes numbers
+and flags into cells to hold them, which is document 97, and a category of
+instants or spans is still refused as a feature that is not there, rather than
+failing inside the core.
 """
 
 from __future__ import annotations
@@ -12,16 +13,13 @@ from types import ModuleType
 import pytest
 
 
-@pytest.mark.parametrize(
-    "values", [[1, 2], [True, False], [1.5, None]], ids=["int", "bool", "float"]
-)
-def test_a_category_of_numbers_is_not_supported_yet(firepanda: ModuleType, values: list) -> None:
+def test_a_category_of_instants_is_not_supported_yet(firepanda: ModuleType) -> None:
     """A series and a frame both refuse, naming the column's type."""
-    column = firepanda.Series(values)
-    with pytest.raises(NotImplementedError, match=str(column.dtype)):
+    column = firepanda.to_datetime(firepanda.Series(["2024-01-01", "2024-01-02"]))
+    with pytest.raises(NotImplementedError, match="datetime64"):
         column.astype("category")
     with pytest.raises(NotImplementedError):
-        firepanda.DataFrame({"a": values}).astype({"a": "category"})
+        firepanda.DataFrame({"a": column}).astype({"a": "category"})
 
 
 def test_a_category_of_text_still_works(firepanda: ModuleType) -> None:

@@ -191,12 +191,12 @@ def test_a_category_cast_back_gives_the_values_and_not_the_codes(
     assert made.astype("str").tolist() == ["20", "10", "20"]
 
 
-def test_a_column_that_is_not_text_cannot_be_encoded_yet(firepanda: ModuleType) -> None:
-    """Pandas does this, so it is a gap and says so rather than a type error."""
-    with pytest.raises(NotImplementedError, match="not supported"):
-        firepanda.Series(WHOLE).astype("category")
-    with pytest.raises(NotImplementedError, match="not supported"):
-        firepanda.DataFrame({"n": WHOLE}).astype({"n": "category"})
+def test_a_column_of_numbers_is_encoded_with_number_categories(firepanda: ModuleType) -> None:
+    """The categories keep the numbers' own type, which is document 97."""
+    column = firepanda.Series(WHOLE).astype("category")
+    assert str(column.cat.categories.dtype) == "int64"
+    framed = firepanda.DataFrame({"n": WHOLE}).astype({"n": "category"})
+    assert framed["n"].tolist() == column.tolist()
 
 
 def test_a_python_type_is_a_dtype_too(firepanda: ModuleType) -> None:
