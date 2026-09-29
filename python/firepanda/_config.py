@@ -19,8 +19,8 @@ against pandas 3.0.
 The printed form of a frame or a column reads the row, column and width
 limits, `display.precision` and `display.float_format`, which
 `set_eng_float_format` sets. `display.max_info_columns` is read by `info`.
-Most other options change nothing here, as there is no plotting, no Excel and
-no HDF5.
+`plotting.backend` names the module that draws plots. Most other options change
+nothing here, as there is no Excel and no HDF5.
 """
 
 from __future__ import annotations

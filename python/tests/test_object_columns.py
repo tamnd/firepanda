@@ -263,3 +263,37 @@ def test_a_nested_arrow_column_reads_the_numbers_pandas_reads() -> None:
     assert frame["items"].tolist()[0] == expected["items"][0].tolist()
     assert math.isnan(frame["items"].tolist()[1][0])
     assert frame["pair"].tolist() == expected["pair"].tolist()
+
+
+class Thing:
+    """A value of a class of the caller's, which a column hands back as itself."""
+
+
+def test_an_object_of_the_callers_comes_back_as_itself() -> None:
+    thing = Thing()
+    series = fp.Series([thing, thing], index=["a", "b"])
+    assert series["a"] is thing
+    assert series.iloc[1] is thing
+    assert str(series.dtype) == "object"
+
+
+def test_an_object_that_cannot_be_pickled_is_held_by_the_column() -> None:
+    held = fp.Series([lambda value: value + 1, None])
+    assert held[0](1) == 2
+
+
+def test_a_value_pandas_copies_is_still_written_as_a_value() -> None:
+    assert _objects._written(decimal.Decimal("1.5")).startswith("p")
+    assert _objects._written({"a": 1}).startswith("p")
+    assert _objects._written(Thing()).startswith("r")
+
+
+def test_a_column_of_arrays_builds_and_prints_as_pandas() -> None:
+    np = pytest.importorskip("numpy")
+
+    def build(lib: ModuleType) -> Any:
+        return lib.Series([np.array([1.5, 2]), np.array([[3]], dtype=object)], dtype="object")
+
+    ours, theirs = build(fp), build(pd)
+    assert repr(ours) == repr(theirs)
+    assert [a.tolist() for a in ours.tolist()] == [a.tolist() for a in theirs.tolist()]

@@ -18,6 +18,11 @@ A written cell starts with U+001C, then holds one value with its kind:
   them.
 - `p` is anything else, pickled and written in base64, so a dict, a set, a time
   or an instant comes back as the object it was.
+- `r` is an object pandas would hand back as itself, such as a matplotlib axes,
+  written as a key into a table of the live objects and then its pickle, if it
+  has one. A cell reads back as the object while it lives, and as a copy from
+  the pickle after. An object that neither pickles nor can be referred to
+  weakly is held for as long as the process runs.
 
 Each value ends with U+0001. A gap is a gap of the text column, not a cell.
 
@@ -58,15 +63,18 @@ including the ones equal to the fill value, and a gap reads as NaN. Document
 from __future__ import annotations
 
 import base64
+import contextlib
+import itertools
 import math
 import pickle
+import weakref
 from typing import Any
 
 from ._levels import _END, _ESCAPES, _float, _read, _unfloat, _value
 
 MARK = "\x1c"
 _CLOSE = {"[": "]", "(": ")"}
-_KINDS = frozenset("sibftdnp[(")
+_KINDS = frozenset("sibftdnpr[(")
 _SPELLINGS = frozenset("NT")
 _ARROW = "A"
 _MASKED = "M"
@@ -78,6 +86,42 @@ _ARROW_TYPES: dict[str, Any] = {}
 """Each Arrow type a cell was written with, by the text the cell carries."""
 _SPARSE_TYPES: dict[str, Any] = {}
 """Each `SparseDtype` a cell was written with, by its name, which is the text the cell carries."""
+
+
+_LIVE: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
+"""Each object an `r` cell refers to, by its key, for as long as something else holds it."""
+_HELD: dict[str, Any] = {}
+"""Each object an `r` cell refers to that has no pickle, held for as long as the process runs."""
+_KEY_OF: dict[int, str] = {}
+_KEYS = itertools.count()
+_VALUES = (dict, set, frozenset, bytes, bytearray, complex, range, slice)
+
+
+def _referred(value: Any) -> str:
+    """An `r` cell's text for `value`, keeping one key per live object so equal cells are equal."""
+    key = _KEY_OF.get(id(value))
+    if key is None or (_LIVE.get(key) is not value and _HELD.get(key) is not value):
+        key = str(next(_KEYS))
+        _KEY_OF[id(value)] = key
+    try:
+        payload = base64.b64encode(pickle.dumps(value, protocol=4)).decode("ascii")
+    except Exception:
+        payload = ""
+    if not payload:
+        _HELD[key] = value
+    else:
+        with contextlib.suppress(TypeError):
+            _LIVE[key] = value
+    return "r" + key + "." + payload + _END
+
+
+def _referent(part: str) -> Any:
+    """The object an `r` cell refers to, or its pickled copy once the object is gone."""
+    key, _, payload = part.partition(".")
+    found = _LIVE.get(key, _HELD.get(key))
+    if found is not None or not payload:
+        return found
+    return pickle.loads(base64.b64decode(payload))
 
 
 def _written(value: Any) -> str:
@@ -101,7 +145,13 @@ def _written(value: Any) -> str:
     if kind.__name__ in ("Timestamp", "Timedelta") and kind.__module__ == "firepanda._scalars":
         # Written as a row label writes one, since pickling one goes through datetime's.
         return _value(value)
-    return "p" + base64.b64encode(pickle.dumps(value, protocol=4)).decode("ascii") + _END
+    if type(value).__module__ in ("builtins", "datetime", "decimal", "fractions") or isinstance(
+        value, _VALUES
+    ):
+        # A function's type is a builtin too, and a local one has no pickle to write.
+        with contextlib.suppress(Exception):
+            return "p" + base64.b64encode(pickle.dumps(value, protocol=4)).decode("ascii") + _END
+    return _referred(value)
 
 
 def _parsed(text: str, at: int) -> tuple[Any, int]:
@@ -124,6 +174,8 @@ def _parsed(text: str, at: int) -> tuple[Any, int]:
         value = _unfloat(part)
     elif kind == "p":
         value = pickle.loads(base64.b64decode(part))
+    elif kind == "r":
+        value = _referent(part)
     else:
         value = _read(kind + part)
     return value, end + 1
