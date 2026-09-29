@@ -248,3 +248,18 @@ def test_explode_refuses_what_pandas_refuses(columns: list[str], message: str) -
         frame.explode(columns)
     with pytest.raises(ValueError, match=message):
         pd.DataFrame({"v": [[1, 2], [3]], "w": [[1], [2]]}).explode(columns)
+
+
+def test_a_nested_arrow_column_reads_the_numbers_pandas_reads() -> None:
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table(
+        {
+            "items": pa.array([[1, 2], [None]], type=pa.large_list(pa.int64())),
+            "pair": pa.array([{"a": 1}, {"a": None}], type=pa.struct([("a", pa.int64())])),
+        }
+    )
+    frame = fp.DataFrame.from_arrow(table)
+    expected = table.to_pandas()
+    assert frame["items"].tolist()[0] == expected["items"][0].tolist()
+    assert math.isnan(frame["items"].tolist()[1][0])
+    assert frame["pair"].tolist() == expected["pair"].tolist()

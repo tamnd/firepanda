@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: nested Arrow columns read with pandas' numbers
+
+`DataFrame.from_arrow` reads a nested column through pyarrow's `to_pandas`, so a list of integers beside a null reads as floats with NaN and a struct field does the same, which is what pandas holds. The arrays pandas keeps in each cell are held as lists.
+
 ### Added: explode, and nested Arrow columns read as object columns
 
 `Series.explode` and `DataFrame.explode` spread each list, tuple or set over rows of its own and repeat the row labels, with `ignore_index` and several columns at once, and refuse an empty, repeated or mismatched list of columns as pandas does. `DataFrame.from_arrow` reads a table with list, map or struct columns by holding each nested column as an object column of lists and dicts, where it used to refuse the whole table.
