@@ -31,6 +31,7 @@ import codecs
 import collections
 import contextlib
 import datetime
+import functools
 import itertools
 import math
 import numbers
@@ -43,7 +44,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from . import _config, _firepanda, _names, _objects, _row_dates, _row_formats
+from . import _config, _firepanda, _masked, _names, _objects, _row_dates, _row_formats
 from ._attrs import Flags, carried, flags_of, hold
 from ._expression import applied
 from ._na import NA
@@ -129,15 +130,49 @@ def _is_object_dtype(dtype: Any) -> bool:
 
 
 def _object_kind(inner: Any) -> Any:
-    """`object`, or the `ArrowDtype` of a column backed by Arrow, or None for plain text."""
+    """`object`, the `ArrowDtype` or masked type the cells carry, or None for plain text."""
     if inner.dtype() != "string" or not _objects.is_object(inner):
         return None
+    masked = _objects.masked_name_of(inner)
+    if masked is not None:
+        return _masked.masked_dtype(masked)
     arrow = _objects.arrow_type_of(inner)
     if arrow is None:
         return "object"
     from ._arrowtyped import ArrowDtype
 
     return ArrowDtype(arrow)
+
+
+def _masked_side(column: Any, other: Any) -> bool:
+    """Whether a series, or the series it meets, is one of pandas' masked types."""
+    if isinstance(column, SeriesMixin) and _masked.masked_of(column):
+        return True
+    return isinstance(other, SeriesMixin) and _masked.masked_of(other) is not None
+
+
+def _unmasked_cast(column: Any, dtype: Any, copy: Any, errors: Any) -> Any:
+    """A masked column cast out of its family, through the lower case column.
+
+    Raises:
+        InvalidArgumentError: For whole numbers or flags with a gap, in pandas' words.
+    """
+    lower = _masked.plain(column)
+    wanted = _named_dtype(dtype)
+    if wanted.startswith(("int", "uint", "bool")) and lower._inner.null_count():
+        kind = "bool" if wanted == "bool" else "integer"
+        raise InvalidArgumentError(f"cannot convert NA to {kind}")
+    return lower._astype(dtype, copy, errors)
+
+
+def _unmasked_frame(frame: Any) -> Any:
+    """A frame with each masked column read as its lower case column, for the group by kernels."""
+    masked = {
+        name: _masked.plain(frame[name])
+        for name in frame._inner.names()
+        if _masked.masked_of(frame[name])
+    }
+    return frame.assign(**masked) if masked else frame
 
 
 def _objectified(column: Any) -> Any:
@@ -7627,29 +7662,33 @@ def _backend(dtype_backend: Any) -> None:
         )
 
 
-def _converted(column: Series, whole: bool) -> Series:
-    """One column as `convert_dtypes` leaves it.
+def _converted(
+    column: Series, whole: bool = True, flags: bool = True, floating: bool = True
+) -> Series:
+    """One column as `convert_dtypes` leaves it, in pandas' masked types.
 
-    A NaN in a float column becomes a gap, because pandas' nullable float reads
-    NaN as missing, and floats that are then all whole become int64.
+    Whole numbers become `Int64` of their width and flags become `boolean`.
+    Floats become `Int64` when every value is whole and `Float64` otherwise, and
+    a NaN reads as a gap either way, because pandas' masked float reads NaN as
+    missing. `whole`, `flags` and `floating` are pandas' three switches.
     """
-    from ._frame import Series
-
-    if not str(column.dtype).startswith("float"):
+    masked = _masked.masked_of(column)
+    if masked is not None:
+        if not masked.startswith("Float"):
+            return column
+        column = _masked.plain(column)
+    printed = str(column.dtype)
+    if printed.startswith(("int", "uint")):
+        return _masked.as_masked(column, _masked.masked_for(printed)) if whole else column
+    if printed == "bool":
+        return _masked.as_masked(column, "boolean") if flags else column
+    if not printed.startswith("float"):
         return column
-    values = column.tolist()
-    if any(value is not None and value != value for value in values):
-        values = [None if _missing(value) else value for value in values]
-        column = Series(values, index=column.index, name=column.name, dtype=str(column.dtype))
-    if not whole:
-        return column
-    # A gap stays a float column: pandas' answer is its nullable `Int64`, and a
-    # whole number column here takes no gap through `astype`.
-    if all(
-        not _missing(value) and math.isfinite(value) and float(value).is_integer()
-        for value in values
-    ):
-        return column.astype("int64")
+    values = [value for value in column.tolist() if not _missing(value)]
+    if whole and all(math.isfinite(value) and float(value).is_integer() for value in values):
+        return _masked.as_masked(column, "Int64")
+    if floating:
+        return _masked.as_masked(column, _masked.masked_for(printed))
     return column
 
 
@@ -8893,7 +8932,13 @@ class DataFrameMixin(_Carries):
             self._inner = self._built(data)
         else:
             self._inner = self._shaped(data, index, columns)
-        if dtype is not None:
+        if dtype is not None and (
+            type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
+        ):
+            from ._frame import DataFrame
+
+            self._inner = DataFrame._wrap(self._inner).astype(dtype)._inner
+        elif dtype is not None:
             names = self._inner.names()
             wanted = [_named_dtype(dtype)] * len(names)
             try:
@@ -12753,7 +12798,10 @@ class DataFrameMixin(_Carries):
 
         _backend(dtype_backend)
         frame = cast("DataFrame", self)
-        columns = {name: _converted(frame[name], convert_integer) for name in _shown_names(frame)}
+        columns = {
+            name: _converted(frame[name], convert_integer, convert_boolean, convert_floating)
+            for name in _shown_names(frame)
+        }
         if not columns:
             return frame.copy()
         return _with_row_labels(
@@ -13810,6 +13858,9 @@ class DataFrameMixin(_Carries):
             if _decided_categories(wanted)
             or _counts_target(str(self[name].dtype), wanted)
             or _number_category_cast(self[name], wanted)
+            or _masked.masked_name(wanted) is not None
+            or _masked.masked_of(self[name]) is not None
+            or type(wanted).__name__ == "ArrowDtype"
         }
         if decided:
             rest = {name: wanted for name, wanted in asked.items() if name not in decided}
@@ -13959,7 +14010,7 @@ class SeriesMixin(_Carries):
         except Exception as error:
             raise translate(error) from None
         if dtype is not None:
-            arrow = type(dtype).__name__ == "ArrowDtype"
+            arrow = type(dtype).__name__ == "ArrowDtype" or _masked.masked_name(dtype) is not None
             wanted = None if arrow else _named_dtype(dtype)
             made = type(self)._wrap(self._inner)
             try:
@@ -14499,7 +14550,7 @@ class SeriesMixin(_Carries):
             ValueError: For a backend pandas does not know, in pandas' words.
         """
         _backend(dtype_backend)
-        return _converted(cast("Series", self), convert_integer)
+        return _converted(cast("Series", self), convert_integer, convert_boolean, convert_floating)
 
     def update(self, other: Any) -> None:
         """Puts in the values of `other` that are not missing, label by label.
@@ -15993,6 +16044,10 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _masked_side(self, other):
+            return _masked.operated(
+                self, other, op, lambda left, right: left._operator(right, op, flip, strict)
+            )
         if _written_category(self._inner) or (
             isinstance(other, SeriesMixin) and _written_category(other._inner)
         ):
@@ -16038,6 +16093,13 @@ class SeriesMixin(_Carries):
 
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
+        if _masked_side(self, other):
+            return _masked.operated(
+                self,
+                other,
+                op,
+                lambda left, right: left._named(right, op, axis, level, fill_value, flip),
+            )
         if fill_value is None and _holds_objects(self, other):
             return _object_operator(self, other, op, flip)
         _no_scaling_by_nat(self, other, op, flip)
@@ -16220,6 +16282,8 @@ class SeriesMixin(_Carries):
 
         if isinstance(other, DataFrameMixin):
             return NotImplemented
+        if _masked_side(self, other):
+            return _masked.logical(self, other, op)
         _logical_operand(self, op)
         _logical_operand(other, op)
         try:
@@ -16684,6 +16748,11 @@ class SeriesMixin(_Carries):
             from ._arrowtyped import as_arrow
 
             return as_arrow(self, _arrow_dtype(dtype))
+        masked = _masked.masked_name(dtype)
+        if masked is not None:
+            return _masked.as_masked(self, masked)
+        if _masked.masked_of(self) and not _is_object_dtype(dtype):
+            return _unmasked_cast(self, dtype, copy, errors)
         if _is_object_dtype(dtype):
             return _objectified(self)
         if _objects.is_object(self._inner):
@@ -17493,6 +17562,7 @@ def _grouped(
         by = [key._column(frame) if isinstance(key, Grouper) else key for key in by]
     single = not isinstance(by, list) or _values_key(frame, by)
     frame, names, shown = _outside_keys(frame, by, level)
+    frame = _unmasked_frame(frame)
     keys = GroupByMixin._keys(frame, names, None)
     frame, categories = _category_keys(frame, keys)
     if dropna:
@@ -29426,6 +29496,18 @@ def _text_values(
     pandas writes a gap in its nullable integer and boolean columns.
     """
     dtype = str(column.dtype)
+    if _masked.masked_of(column):
+        # Each value prints as the lower case column prints it, and a gap as `<NA>`.
+        lower = _masked.plain(column)
+        if dtype.startswith("Float") and formatter is None and float_format is None:
+            precision = _config.get_option("display.precision")
+            space = " " if leading else ""
+            return [space + ("<NA>" if value is None else _masked.float_text(value, precision))
+                    for value in _held_values(lower._inner)]
+        shown = _text_values(lower, formatter, float_format, na_rep, decimal, leading, justify)
+        gap = " <NA>" if leading else "<NA>"
+        return [gap if value is None else text
+                for value, text in zip(_held_values(lower._inner), shown, strict=True)]
     if dtype.endswith("[pyarrow]") and _objects.arrow_type_of(column._inner) is not None:
         from ._arrowtyped import arrow_text
 
@@ -31184,3 +31266,67 @@ def _struct_accessor(self: Any) -> Any:
 # Set after the class, since a name `list` in its body would hide the builtin there.
 SeriesMixin.list = property(_list_accessor)  # type: ignore[attr-defined]
 SeriesMixin.struct = property(_struct_accessor)  # type: ignore[attr-defined]
+
+
+def _masked_through(method: Any, how: str) -> Any:
+    """A method of a series that, on a masked column, runs over the lower case column.
+
+    `how` says what becomes of the answer. `family` writes a column back in the
+    masked type pandas answers for its values, `own` writes it back in the
+    column's own type, `whole` does that for a column of whole numbers only,
+    `reduce` reads a missing answer as `NA`, `truth` is `any` and `all` by Kleene's
+    logic, `raw` hands it back as it is, and
+    `transform` picks one of these by the transform asked for.
+    A masked series among the arguments is read the same way.
+    """
+
+    @functools.wraps(method)
+    def run(self: Any, *args: Any, **kwargs: Any) -> Any:
+        name = _masked.masked_of(self)
+        if name is None:
+            return method(self, *args, **kwargs)
+        chosen = how
+        if how == "transform":
+            # The flags of `isna` and `notna` are plain flags, and a difference keeps the type.
+            kind = args[0] if args else kwargs.get("kind")
+            chosen = "family"
+            if kind in ("isna", "notna"):
+                chosen = "raw"
+            elif kind in ("diff", "shift"):
+                chosen = "whole"
+        args = tuple(_masked.plain(arg) if _masked_side(arg, None) else arg for arg in args)
+        lower = _masked.plain(self)
+        if chosen == "truth":
+            kind, skipna = args[0], args[3] if len(args) > 3 else kwargs.get("skipna", True)
+            return _masked.truth(_held_values(lower._inner), kind, skipna)
+        if chosen == "reduce":
+            # The gaps are dropped first, since the kernels read a gap's slot in a column of flags.
+            if lower._inner.null_count():
+                if not (args[3] if len(args) > 3 else kwargs.get("skipna", True)):
+                    return NA
+                lower = lower.dropna()
+            return _masked.reduced(method(lower, *args, **kwargs))
+        answer = method(lower, *args, **kwargs)
+        if chosen == "raw":
+            return answer
+        keep = chosen == "own" or (chosen == "whole" and name[0] in "IU")
+        return _masked.rewrap(answer, name if keep else None)
+
+    return run
+
+
+for _method, _how in (
+    ("_reduce", "reduce"),
+    ("_truth", "truth"),
+    ("_scan", "family"),
+    ("_unary", "family"),
+    ("_shift", "own"),
+    ("_transformed", "transform"),
+    ("_value_counts", "family"),
+    ("sort_values", "own"),
+    ("where", "own"),
+    ("fillna", "own"),
+    ("describe", "family"),
+    ("to_numpy", "raw"),
+):
+    setattr(SeriesMixin, _method, _masked_through(getattr(SeriesMixin, _method), _how))
